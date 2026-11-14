@@ -8,6 +8,7 @@
  *   4. 只改 profile 的 cordis.patch.yml：以本地 patch 为底，仅替换勾选条目；先回填本地 secret，
  *      本地没有值 → 该条进 skipped（不写占位符覆盖）；
  *   5. 原子写（temp + rename），写后 SHA-256 校验，不一致 → 用快照回滚并抛 E_SHA_MISMATCH；
+ *      返回的每条 applied 带 `fileSha256`（写后整文件）与 `blockSha256`（该条目文本）两个 SHA；
  *   6. 插件清单只写 MERGE-only 计划到 <pendingFile>，不执行 pnpm、不改 profile package.json。
  */
 import { existsSync } from 'node:fs'
@@ -30,8 +31,24 @@ export interface RpcHooks {
   writeProfileFile?: (filePath: string, content: string) => Promise<void>
 }
 
+/**
+ * 一条已写入的 patch 条目。
+ *
+ * 两个 SHA 语义必须分清（审计 P1-2）：
+ *   - `fileSha256`：**写后 profile patch 整文件**的 SHA-256。同一次 apply 里同一文件的多条
+ *     applied 共享这个值，它就是"落盘文件的校验和"；
+ *   - `blockSha256`：该条目**合并后文本块**的 SHA-256（只覆盖这一条 entry 的字节）。
+ * 旧字段 `sha256` 只代表单条 block 却被当成文件校验和，语义误导，已删除。
+ */
+export interface AppliedEntry {
+  id: string
+  fileSha256: string
+  blockSha256: string
+  path: string
+}
+
 export interface ApplyResult {
-  applied: Array<{ id: string; sha256: string; path: string }>
+  applied: AppliedEntry[]
   skipped: Array<{ id: string; reason: string }>
   snapshotId: string
   verified: true
@@ -173,7 +190,8 @@ export async function applySelected(ctx: RestoreContext, options: ApplyOptions):
   // 第 4 层：逐条回填 secret 并组合。
   const remoteDoc = parsePatch(source.patchRemote)
   const blocks: PatchBlock[] = []
-  const applied: Array<{ id: string; sha256: string; path: string }> = []
+  // 先按 id 记下"该条目合并后文本"的 SHA-256；整文件 SHA 要等写入并校验后才确定。
+  const appliedBlocks: Array<{ id: string; blockSha256: string }> = []
 
   for (const id of chosen) {
     const remoteEntry = findEntryByKey(remoteDoc, id)
@@ -189,7 +207,7 @@ export async function applySelected(ctx: RestoreContext, options: ApplyOptions):
         continue
       }
       blocks.push({ key: id, raw: restored.text })
-      applied.push({ id, sha256: sha256Hex(restored.text), path: patchFile })
+      appliedBlocks.push({ id, blockSha256: sha256Hex(restored.text) })
       continue
     }
     // 远端新增条目：若含占位符，本地无从回填 → 跳过，不写占位符覆盖。
@@ -198,7 +216,7 @@ export async function applySelected(ctx: RestoreContext, options: ApplyOptions):
       continue
     }
     blocks.push({ key: id, raw: remoteEntry.raw, header: remoteEntry.header })
-    applied.push({ id, sha256: sha256Hex(remoteEntry.raw), path: patchFile })
+    appliedBlocks.push({ id, blockSha256: sha256Hex(remoteEntry.raw) })
   }
 
   if (blocks.length === 0) {
@@ -222,6 +240,13 @@ export async function applySelected(ctx: RestoreContext, options: ApplyOptions):
       file: patchFile,
     })
   }
+  // 校验通过 → 整文件 SHA-256 就是 expectedSha；每条 applied 带上它 + 自己的 block SHA。
+  const applied: AppliedEntry[] = appliedBlocks.map((item) => ({
+    id: item.id,
+    fileSha256: expectedSha,
+    blockSha256: item.blockSha256,
+    path: patchFile,
+  }))
 
   // 第 6 层：插件清单只落 MERGE-only 计划，不执行 pnpm、不改 package.json。
   const plan: PluginMergeResult = source.plugins

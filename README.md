@@ -22,24 +22,47 @@ pnpm build
 # 测试（Node 24 的 --test 需要 glob，目录形式会报 MODULE_NOT_FOUND）
 node --test "packages/dsh-git-config-sync/test/*.test.mjs"
 node --test "apps/arkui-schedule/tools/test/*.test.mjs"
-# 或一次跑全部（158 项）
+# 或一次跑全部（217 项）
 pnpm test
 
 # 应用静态校验
 node apps/arkui-schedule/tools/validate-app.mjs
 ```
 
-## 插件安装（本地目录安装，由用户/Lead 执行）
+## 插件安装（两条路径，由用户/Lead 执行）
+
+> 前置：`packages/dsh-git-config-sync/dist/` **必须已在仓库里**（本仓库已提交）。链接安装不会执行构建，
+> 若 `dist/` 缺失，设置页不会出现（`exports["./client"]` 指向空文件）。
+
+**① GUI「Plugins → Add plugin」选本地目录（推荐，链接安装）**
+
+在 DSH Web GUI 的插件管理里添加插件并选择目录：
+
+```
+C:\Users\GWL\Desktop\itwillclaude\dsh-sync-suite\packages\dsh-git-config-sync
+```
+
+等价 CLI（若你的环境允许）：
 
 ```powershell
-# 方式 1：本地目录（开发/试用）
 dsh plugin --profile web add link:C:\Users\GWL\Desktop\itwillclaude\dsh-sync-suite\packages\dsh-git-config-sync
-
-# 方式 2：打包后安装
-cd packages\dsh-git-config-sync
-npm pack
-dsh plugin --profile web add .\dsh-git-config-sync-1.0.0.tgz
 ```
+
+**② 发布到 GitHub 后走安全启动器（npm/GitHub 来源）**
+
+安全启动器只接受 npm 包名或 `github:owner/repo`，**不接受本地目录**：
+
+```powershell
+# 先把本仓库推到 GitHub（含 dist/），然后在 DSH 运行时执行：
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:3080/dsh-safe-launch/install-plugin `
+  -ContentType 'application/json' -Body '{"source":"github:<owner>/<repo>"}'
+# 返回 {ok:true,jobId} 后轮询：
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:3080/dsh-safe-launch/job `
+  -ContentType 'application/json' -Body '{"id":"<jobId>"}'
+```
+
+若 `127.0.0.1:3080` 不在线，请先启动 DSH，**不要**绕过安全启动器直接改
+`~\.dsh\profiles\**` 或用 pnpm 操作 profile（跳过金丝雀启动测试）。
 
 安装后在 Web GUI「设置 → 配置同步（Git）」中填写仓库地址、设备标识与 token（HTTPS）。
 安全说明：

@@ -322,6 +322,8 @@ test('M2 repoUrl：空串可保存（清空），但 push/testConnection/preview
   assert.equal(state.ok, true)
   assert.equal(state.data.settings.repoUrl, '')
   assert.equal(state.data.status.lastSyncAt, null, '从未同步 → lastSyncAt 为 null')
+  assert.equal(state.data.status.reachable, null, '未配置/未探测 → reachable 为 null')
+  assert.equal(state.data.status.error, undefined, '未配置仓库地址不是"本地读取错误"，不填 error')
 
   for (const action of ['push', 'testConnection', 'preview']) {
     const result = await service.handleRpc({ action })
@@ -465,8 +467,10 @@ test('M3/M4 + B2 端到端：apply 严格 entries、lastSyncAt 持久化、confl
   const stateB = await serviceB.handleRpc({ action: 'getState' })
   assert.equal(stateB.ok, true)
   assert.equal(stateB.data.status.conflict, false, '只落后远端（可快进/rebase）不是冲突')
-  assert.equal(stateB.data.status.localPending, 0)
-  assert.equal(stateB.data.status.remotePending, 0, '首次 getState 会 clone 到远端 HEAD，因此不落后')
+  assert.equal(stateB.data.status.reachable, null, '从未探测 → reachable 必须是 null（不是 false）')
+  assert.equal(stateB.data.status.localPending, null, '未 clone 时没有 origin/main 引用 → localPending 为 null（不联网）')
+  assert.equal(stateB.data.status.remotePending, null, '未 clone 时没有 origin/main 引用 → remotePending 为 null（不联网）')
+  assert.equal(stateB.data.status.error, undefined, '未探测/未 clone 不是错误')
   assert.equal(stateB.data.status.lastSyncAt, null, 'B 从未同步 → lastSyncAt 仍为 null')
 
   const preview = await serviceB.handleRpc({ action: 'preview' })
@@ -558,6 +562,14 @@ test('M3/M4 + B2 端到端：apply 严格 entries、lastSyncAt 持久化、confl
     'local only commit',
   ])
 
+  // getState 不联网：本地 origin/main 引用还停在 push 那一刻，看不到 B 刚推的提交。
+  const stale = await serviceA.handleRpc({ action: 'getState' })
+  assert.equal(stale.ok, true)
+  assert.equal(stale.data.status.remotePending, 0, 'getState 不得自己 fetch（否则会看到 B 的新提交）')
+  assert.equal(stale.data.status.conflict, false)
+
+  // 测试里显式 fetch（模拟"用户点测试连接/预览"之后的本地引用更新）→ 再 getState 才看到分叉。
+  await exec('git', ['-C', workA, 'fetch', '--quiet', 'origin', 'main'])
   const diverged = await serviceA.handleRpc({ action: 'getState' })
   assert.equal(diverged.ok, true)
   assert.equal(diverged.data.status.localPending, 1, JSON.stringify(diverged.data.status))

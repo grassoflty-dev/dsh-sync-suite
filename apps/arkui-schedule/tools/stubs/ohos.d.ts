@@ -173,3 +173,21 @@ declare module '@ohos.multimedia.image' {
     release(): Promise<void>;
   }
 }
+
+/**
+ * 设备信息（`entry/src/harmony/ets/common/devicePlatform.ets` 用它做运行时平台检测）。
+ *
+ * 只声明实际用到的两个字段：`osFullName`（主证据，如 `OpenHarmony 5.0.0`）与 `deviceType`
+ * （兜底证据）。真实 SDK 里这两个字段都是 `string`，这里保持一致，便于类型检查直接读字段
+ * （不用 `as Record<string, string>` 断言，以避免 ArkTS 严格模式的「类型不重叠」报错）。
+ */
+declare module '@ohos.deviceInfo' {
+  interface DeviceInfo {
+    osFullName: string;
+    deviceType: string;
+    [key: string]: string;
+  }
+
+  const deviceInfo: DeviceInfo;
+  export default deviceInfo;
+}

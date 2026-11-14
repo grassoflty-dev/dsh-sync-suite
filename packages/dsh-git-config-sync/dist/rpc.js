@@ -5,10 +5,11 @@
  * （只有鉴权失败由 connection 返回 401/403）。所有写操作串行队列；
  * 未知 action → E_UNKNOWN_ACTION；参数非法 → E_VALIDATION。
  */
+import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { collectLocal, isFileInScope, pluginsOf, serializeManifest, SYNC_FILE_NAMES } from './engine/collect.js';
-import { SyncError, errorMessage, toRpcError } from './engine/errors.js';
+import { SyncError, errorMessage, isSyncError, toRpcError } from './engine/errors.js';
 import { GitRepo } from './engine/git.js';
 import { detectDshVersion, repoHash, resolveProfileDir, statePaths } from './engine/paths.js';
 import { PreviewCache, buildPreview, settingsFingerprint } from './engine/preview.js';
@@ -52,18 +53,49 @@ export function createRpcService(options = {}) {
     async function withRepo(settings, task) {
         const token = store.readToken();
         const repo = new GitRepo({
-            dir: path.join(paths.workRoot, repoHash(settings.repoUrl)),
+            dir: workDirOf(settings),
             repoUrl: settings.repoUrl,
             branch: settings.branch,
             authMode: settings.authMode,
             token,
             allowLocalRepo: options.allowLocalRepo === true,
+            ...(options.networkTimeoutMs !== undefined ? { networkTimeoutMs: options.networkTimeoutMs } : {}),
         });
         try {
             return await task(repo, token);
         }
         finally {
             await repo.dispose();
+        }
+    }
+    function workDirOf(settings) {
+        return path.join(paths.workRoot, repoHash(settings.repoUrl));
+    }
+    /** 网络类失败（只有这类才把 reachable 记成 false；本地 git 错误不算"不可达"）。 */
+    function isNetworkFailure(error) {
+        if (!isSyncError(error))
+            return false;
+        if (error.code === 'E_AUTH')
+            return true;
+        if (error.code !== 'E_GIT')
+            return false;
+        const details = error.details;
+        if (details !== null && typeof details === 'object') {
+            const record = details;
+            if (record.network === true)
+                return true;
+            if (record.reason === 'git-missing')
+                return false;
+        }
+        return false;
+    }
+    /** 记录最近一次网络探测结果；状态文件只是 UI 事实，写失败不影响主流程。 */
+    function recordProbe(reachable) {
+        try {
+            stateStore.writeReachable(reachable);
+        }
+        catch {
+            /* state.json 写失败不应让已经成功的同步变成失败 */
         }
     }
     function assertNoTokenInPayload(collected, token) {
@@ -78,43 +110,55 @@ export function createRpcService(options = {}) {
             throw new SyncError('E_VALIDATION', 'manifest 里检测到 token 明文，已中止推送');
         }
     }
+    /**
+     * getState：**绝不联网**，只读本地工作副本 + 状态文件。
+     *
+     * - `branch`：本地工作副本当前分支；未 clone 时用 settings.branch；
+     * - `head*`：本地 HEAD（`git log -1`，纯本地命令）；
+     * - `localPending`/`remotePending`：相对本地 `origin/<branch>` 引用计算，无该引用 → null（不 fetch）；
+     * - `conflict`：ahead>0 && behind>0；
+     * - `reachable`：状态文件里最近一次 testConnection/push/preview 的探测结果（三态）；
+     * - `lastSyncAt`：状态文件里的最近一次成功同步时间；
+     * - `error`：只填本地读取错误（工作副本损坏等）。网络不可达**不是**错误。
+     */
     async function getState() {
         const settings = store.readSettings();
         const status = {
-            reachable: false,
+            reachable: stateStore.readReachable(),
             branch: settings.branch,
             headSha: '',
             headMessage: '',
             headTime: '',
-            localPending: 0,
-            remotePending: 0,
+            localPending: null,
+            remotePending: null,
             conflict: false,
-            // 最近一次成功 push/pull/apply 的时间（state.json 持久化），与 HEAD 提交时间无关。
             lastSyncAt: stateStore.readLastSyncAt(),
         };
         const snapshotList = snapshots.list();
         if (settings.repoUrl === '') {
-            status.error = '尚未配置仓库地址';
+            // 未配置仓库地址不是"读取失败"：UI 从 settings.repoUrl 就能看出来，error 只留给本地读取错误。
+            return { settings: { ...settings, hasToken: store.hasToken() }, status, snapshots: snapshotList };
+        }
+        // 没有工作副本 → 没有本地 HEAD，也没有 origin/<branch> 引用；直接返回本地事实，不 clone、不 fetch。
+        if (!existsSync(path.join(workDirOf(settings), '.git'))) {
             return { settings: { ...settings, hasToken: store.hasToken() }, status, snapshots: snapshotList };
         }
         try {
             await withRepo(settings, async (repo) => {
-                const remote = await repo.lsRemote();
-                status.reachable = remote.reachable;
-                await repo.ensureWorkTree();
-                await repo.fetch();
                 const head = await repo.head();
                 const local = await repo.status();
-                status.headSha = head.sha !== '' ? head.sha : remote.headSha;
-                status.headMessage = head.sha !== '' ? head.message : remote.message;
-                status.headTime = head.sha !== '' ? head.time : '';
+                status.branch = local.branch;
+                status.headSha = head.sha;
+                status.headMessage = head.message;
+                status.headTime = head.time;
                 status.localPending = local.ahead;
                 status.remotePending = local.behind;
                 // 只有"双方各有对方没有的提交"才算分叉冲突；单纯落后（可直接快进/自动 rebase）不是冲突。
-                status.conflict = local.ahead > 0 && local.behind > 0;
+                status.conflict = local.ahead !== null && local.behind !== null && local.ahead > 0 && local.behind > 0;
             });
         }
         catch (error) {
+            // 只有本地读取失败（工作副本损坏、git 不可用等）才进 error。
             status.error = errorMessage(error);
         }
         return { settings: { ...settings, hasToken: store.hasToken() }, status, snapshots: snapshotList };
@@ -135,86 +179,123 @@ export function createRpcService(options = {}) {
         // 先把两个值都校验完再落盘，避免 settings 已写、token 校验失败留下半套配置。
         store.writeSettings(next);
         store.writeToken(token);
+        if (next.repoUrl !== previous.repoUrl) {
+            // 换了仓库地址：上一次探测结果不再代表当前目标，回到"未探测"三态。
+            try {
+                stateStore.writeReachable(null);
+            }
+            catch {
+                /* 状态文件只是 UI 事实，写失败不影响保存设置 */
+            }
+        }
         return { settings: next, hasToken: store.hasToken() };
     }
+    /** testConnection 是"显式网络动作"：成功记 true，网络失败记 false（并继续向上抛错）。 */
     async function testConnection() {
         const settings = requireConfigured();
-        return await withRepo(settings, async (repo) => {
-            const remote = await repo.lsRemote();
-            return {
-                reachable: remote.reachable,
-                branch: remote.branch,
-                headSha: remote.headSha,
-                message: remote.message,
-            };
-        });
+        try {
+            const result = await withRepo(settings, async (repo) => {
+                const remote = await repo.lsRemote();
+                return {
+                    reachable: remote.reachable,
+                    branch: remote.branch,
+                    headSha: remote.headSha,
+                    message: remote.message,
+                };
+            });
+            recordProbe(true);
+            return result;
+        }
+        catch (error) {
+            if (isNetworkFailure(error))
+                recordProbe(false);
+            throw error;
+        }
     }
     async function push() {
         const settings = requireConfigured();
-        return await withRepo(settings, async (repo, token) => {
-            await repo.ensureWorkTree();
-            const collected = collectLocal({
-                profileDir,
-                homeDir: options.homeDir,
-                deviceId: settings.deviceId,
-                scopes: settings.scope,
-                dshVersion,
-                now: now(),
+        try {
+            const result = await withRepo(settings, async (repo, token) => {
+                await repo.ensureWorkTree();
+                const collected = collectLocal({
+                    profileDir,
+                    homeDir: options.homeDir,
+                    deviceId: settings.deviceId,
+                    scopes: settings.scope,
+                    dshVersion,
+                    now: now(),
+                });
+                assertNoTokenInPayload(collected, token);
+                const deviceDir = path.join(repo.dir, 'devices', settings.deviceId);
+                await mkdir(deviceDir, { recursive: true });
+                const written = [];
+                for (const name of SYNC_FILE_NAMES) {
+                    // 未勾选的范围写空内容：保持 devices/<id>/ 布局稳定，manifest 的 sha256 才始终可校验。
+                    await writeFile(path.join(deviceDir, name), collected.files[name], { encoding: 'utf8' });
+                    if (isFileInScope(name, settings.scope))
+                        written.push(name);
+                }
+                await writeFile(path.join(deviceDir, 'manifest.json'), serializeManifest(collected.manifest), {
+                    encoding: 'utf8',
+                });
+                written.push('manifest.json');
+                const message = `dsh-git-config-sync: snapshot ${settings.deviceId} ${now().toISOString()}`;
+                const commit = await repo.commitAll(message, { onlyPath: `devices/${settings.deviceId}` });
+                const pushResult = await repo.pushWithRebase();
+                const head = await repo.head();
+                // push 成功（含"远端已是最新"）即视为一次成功同步；内部若发生 pull --rebase 也已覆盖。
+                markSynced();
+                return {
+                    pushed: pushResult.pushed,
+                    commit: head.sha !== '' ? head.sha : commit.commit,
+                    branch: settings.branch,
+                    files: written,
+                    rebased: pushResult.rebased,
+                };
             });
-            assertNoTokenInPayload(collected, token);
-            const deviceDir = path.join(repo.dir, 'devices', settings.deviceId);
-            await mkdir(deviceDir, { recursive: true });
-            const written = [];
-            for (const name of SYNC_FILE_NAMES) {
-                // 未勾选的范围写空内容：保持 devices/<id>/ 布局稳定，manifest 的 sha256 才始终可校验。
-                await writeFile(path.join(deviceDir, name), collected.files[name], { encoding: 'utf8' });
-                if (isFileInScope(name, settings.scope))
-                    written.push(name);
-            }
-            await writeFile(path.join(deviceDir, 'manifest.json'), serializeManifest(collected.manifest), {
-                encoding: 'utf8',
-            });
-            written.push('manifest.json');
-            const message = `dsh-git-config-sync: snapshot ${settings.deviceId} ${now().toISOString()}`;
-            const commit = await repo.commitAll(message, { onlyPath: `devices/${settings.deviceId}` });
-            const pushResult = await repo.pushWithRebase();
-            const head = await repo.head();
-            // push 成功（含"远端已是最新"）即视为一次成功同步；内部若发生 pull --rebase 也已覆盖。
-            markSynced();
-            return {
-                pushed: pushResult.pushed,
-                commit: head.sha !== '' ? head.sha : commit.commit,
-                branch: settings.branch,
-                files: written,
-                rebased: pushResult.rebased,
-            };
-        });
+            recordProbe(true);
+            return result;
+        }
+        catch (error) {
+            if (isNetworkFailure(error))
+                recordProbe(false);
+            throw error;
+        }
     }
     async function preview() {
         const settings = requireConfigured();
-        return await withRepo(settings, async (repo) => {
-            const collected = collectLocal({
-                profileDir,
-                homeDir: options.homeDir,
-                deviceId: settings.deviceId,
-                scopes: settings.scope,
-                dshVersion,
-                now: now(),
+        try {
+            const result = await withRepo(settings, async (repo) => {
+                const collected = collectLocal({
+                    profileDir,
+                    homeDir: options.homeDir,
+                    deviceId: settings.deviceId,
+                    scopes: settings.scope,
+                    dshVersion,
+                    now: now(),
+                });
+                const localPlugins = pluginsOf(collected.files['plugins.json']);
+                const built = await buildPreview({
+                    git: repo,
+                    profileDir,
+                    deviceId: settings.deviceId,
+                    scopes: settings.scope,
+                    fingerprint: settingsFingerprint(settings),
+                    now: now(),
+                    localFiles: collected.files,
+                    localPlugins,
+                });
+                cache.set(built.internal);
+                recordProbe(built.reachable);
+                return { previewId: built.result.previewId, sources: built.result.sources };
             });
-            const localPlugins = pluginsOf(collected.files['plugins.json']);
-            const built = await buildPreview({
-                git: repo,
-                profileDir,
-                deviceId: settings.deviceId,
-                scopes: settings.scope,
-                fingerprint: settingsFingerprint(settings),
-                now: now(),
-                localFiles: collected.files,
-                localPlugins,
-            });
-            cache.set(built.internal);
-            return { previewId: built.result.previewId, sources: built.result.sources };
-        });
+            return result;
+        }
+        catch (error) {
+            if (isNetworkFailure(error))
+                recordProbe(false);
+            throw error;
+        }
     }
     function restoreContext() {
         return { profileDir, paths, snapshots, hooks, now };

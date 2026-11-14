@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * ArkUI-X 工程结构校验（`docs/CONTRACT.md` §3.5 的 7 条规则）。
+ * ArkUI-X 工程结构校验（`docs/CONTRACT.md` §3.5 的 7 条规则 + 平台装配规则 8）。
  *
  * 用法：
  *   node apps/arkui-schedule/tools/validate-app.mjs [--root <dir>] [--json]
@@ -17,7 +17,9 @@
  * 4. Android 可见路径（main + android）不得引用 OCR / 手写 / PixelMap / 图像识别模块；
  * 5. 任何含 `struct` 的 `.ets` 必须带 `@crossplatform`；
  * 6. rawfile/git 下的 isomorphic-git.js（≥100KB）与 git-bridge.js 存在且非空；
- * 7. `module.json5` 的 srcEntry、页面 profile 与 `$media/$string/$color/$profile` 资源引用都存在。
+ * 7. `module.json5` 的 srcEntry、页面 profile 与 `$media/$string/$color/$profile` 资源引用都存在；
+ * 8. main 树文件不得**静态** import harmony 树文件（构建配置 `sourceRoots` 用 target 区分输入，
+ *    静态 import 会把鸿蒙专属模块拖进 Android 编译；动态 `import()` 放行）。
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep, basename } from 'node:path';
@@ -54,7 +56,8 @@ const RULES = {
   4: 'Android 可见路径无 OCR/手写/PixelMap 引用',
   5: '含 struct 的 .ets 带 @crossplatform',
   6: 'rawfile/git 资源完整',
-  7: 'module.json5 的 srcEntry/页面 profile/资源引用存在'
+  7: 'module.json5 的 srcEntry/页面 profile/资源引用存在',
+  8: 'main 树不静态 import harmony 树文件'
 };
 
 const MIN_ISOMORPHIC_GIT_BYTES = 100 * 1024;
@@ -669,10 +672,84 @@ function ruleModuleReferences(root) {
   return { messages, refs: refCount };
 }
 
+// ---------------------------------------------------------------- 规则 8
+
+/**
+ * 抽取**静态** import 语句及其行号：`import ... from 'x'`、`import 'x'`、`import type ... from 'x'`。
+ *
+ * 动态 `import('x')` 不算静态 import —— 它是运行时求值，不会把模块拖进 Android 侧的编译图，
+ * 因此规则 8 放行（这也是按需加载鸿蒙专属能力的推荐写法）。
+ *
+ * 输入必须是 `stripComments()` 之后的代码；它保留换行数，故行号与源文件一致。
+ */
+function extractStaticImports(content) {
+  const result = [];
+  const pattern = /\bimport\b([^'"]*)['"]([^'"]+)['"]/g;
+  let matched;
+  while ((matched = pattern.exec(content)) !== null) {
+    const clause = matched[1];
+    if (clause.includes('(') || clause.includes(')')) {
+      continue; // import(...) / import (...) 动态导入
+    }
+    const trimmed = clause.trim();
+    if (trimmed.length > 0 && !/\bfrom$/.test(trimmed)) {
+      continue; // "import" 出现在字符串等场景时的假匹配
+    }
+    const line = content.slice(0, matched.index).split('\n').length;
+    result.push({ spec: matched[2], line });
+  }
+  return result;
+}
+
+/** child 是否位于 parent 目录内（不含 parent 自身）。 */
+function isInsideDir(parent, child) {
+  const rel = relative(parent, child);
+  return rel.length > 0 && !rel.startsWith('..') && !rel.includes(`..${sep}`);
+}
+
+/**
+ * 规则 8：`entry/src/main/ets/**` 是共享层（Android 构建的唯一输入），不得**静态** import
+ * `entry/src/harmony/ets/**`。静态 import 会被 ArkTS 编译器解析并打包，等于把鸿蒙专属模块
+ * 拖进 Android 产物（`@kit.CoreVisionKit` / `reminderAgentManager` 在 Android 侧不存在 → 编译失败）。
+ *
+ * 平台分层必须靠 `entry/build-profile.json5` 的 `targets[].source.sourceRoots`：
+ * 鸿蒙 target = `./src/main` + `./src/harmony`（同名相对路径覆盖），Android target 只有 `./src/main`。
+ * main 侧要延迟用到鸿蒙能力时，用动态 `import('...')` 或由平台覆盖文件提供钩子（如
+ * `platformFeatures.handwritingPageRoute()`）。
+ */
+function ruleMainNoHarmonyStaticImport(root) {
+  const messages = [];
+  const mainRoot = join(root, TREES.main);
+  const harmonyRoot = join(root, TREES.harmony);
+  const files = walkFiles(mainRoot, (file) => /\.(ets|ts)$/.test(file));
+  let scanned = 0;
+  for (const file of files) {
+    const content = readCode(file);
+    const shown = display(root, file);
+    for (const item of extractStaticImports(content)) {
+      scanned++;
+      const normalized = item.spec.replace(/\\/g, '/');
+      const specLooksHarmony = normalized.includes('harmony/');
+      const resolved = item.spec.startsWith('.') ? tryResolveFile(resolve(dirname(file), item.spec)) : null;
+      const resolvedInHarmony = resolved !== null && isInsideDir(harmonyRoot, resolved);
+      if (!specLooksHarmony && !resolvedInHarmony) {
+        continue;
+      }
+      const target = resolved === null ? item.spec : display(root, resolved);
+      messages.push(
+        `${shown}:${item.line} 静态 import 了 harmony 覆盖层：'${item.spec}'（${target}）；` +
+          '修复建议：改用动态 import()（Android 构建不该把鸿蒙模块拖进编译图），' +
+          '或把该实现移入 harmony 覆盖层由平台覆盖文件提供'
+      );
+    }
+  }
+  return { messages, scanned };
+}
+
 // ---------------------------------------------------------------- 汇总
 
 /**
- * 对给定工程根目录跑全部 7 条规则。
+ * 对给定工程根目录跑全部 8 条规则。
  * @param {string} [rootDir] 工程根目录（含 AppScope 与 entry）
  */
 export function validateApp(rootDir = DEFAULT_ROOT) {
@@ -689,7 +766,8 @@ export function validateApp(rootDir = DEFAULT_ROOT) {
     [4, () => ruleAndroidSafe(root, sourceFiles)],
     [5, () => ruleCrossplatform(root, sourceFiles)],
     [6, () => ruleRawfileGit(root)],
-    [7, () => ruleModuleReferences(root)]
+    [7, () => ruleModuleReferences(root)],
+    [8, () => ruleMainNoHarmonyStaticImport(root)]
   ];
 
   for (const [rule, runner] of runners) {
@@ -718,7 +796,8 @@ function formatSummary(result) {
   const jsonCount = result.stats[1] === undefined ? 0 : result.stats[1].count;
   const pageCount = result.stats[3] === undefined ? 0 : result.stats[3].onDisk;
   const rawCount = result.stats[6] === undefined ? 0 : result.stats[6].count;
-  return `JSON5/JSON ${jsonCount} 个、相对 import ${sourceCount} 条、页面 ${pageCount} 个、rawfile/git ${rawCount} 个文件`;
+  const mainImportCount = result.stats[8] === undefined ? 0 : result.stats[8].scanned;
+  return `JSON5/JSON ${jsonCount} 个、相对 import ${sourceCount} 条、main 静态 import ${mainImportCount} 条、页面 ${pageCount} 个、rawfile/git ${rawCount} 个文件`;
 }
 
 function printReport(result) {
@@ -731,13 +810,13 @@ function printReport(result) {
     }
   }
   if (result.ok) {
-    lines.push(`✅ 全部通过：7/7 条规则（${formatSummary(result)}）`);
+    lines.push(`✅ 全部通过：8/8 条规则（${formatSummary(result)}）`);
   } else {
     const problems = result.failures.reduce((sum, item) => sum + item.messages.length, 0);
-    const passed = 7 - result.failures.length;
+    const passed = 8 - result.failures.length;
     lines.push('');
     lines.push(
-      `❌ 共 ${result.failures.length} 条规则失败（${problems} 个问题），${passed}/7 条规则通过；明细见上方 ❌ 列表。`
+      `❌ 共 ${result.failures.length} 条规则失败（${problems} 个问题），${passed}/8 条规则通过；明细见上方 ❌ 列表。`
     );
   }
   console.log(lines.join('\n'));

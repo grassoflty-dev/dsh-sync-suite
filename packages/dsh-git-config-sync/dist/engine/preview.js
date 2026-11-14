@@ -226,7 +226,7 @@ export async function buildPreview(deps) {
         localPatch,
         sources: internalSources,
     };
-    return { result: { previewId, sources }, internal };
+    return { result: { previewId, sources }, internal, reachable: fetched.reachable };
 }
 /** 内存预览缓存：TTL 10 分钟，单实例只保留一个 previewId。 */
 export class PreviewCache {

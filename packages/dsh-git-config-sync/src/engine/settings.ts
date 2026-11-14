@@ -254,10 +254,22 @@ export class SettingsStore {
   }
 }
 
-/** 本地运行状态（state.json）：不含任何 secret，仅记录同步时间等运行事实。 */
+/** 本地运行状态（state.json）：不含任何 secret，仅记录同步时间与最近一次网络探测结果。 */
 export interface LocalState {
   /** 最近一次成功 push / pull / apply 的 ISO 时间；从未同步为 null。 */
   lastSyncAt?: string | null
+  /**
+   * 最近一次网络探测（testConnection / push / preview）的结果：
+   * true = 成功，false = 网络错误，null = 从未探测（或仓库地址变更后作废）。
+   * `getState` 只回读这个值，自己绝不联网。
+   */
+  reachable?: boolean | null
+}
+
+function normalizeReachable(value: unknown): boolean | null {
+  if (value === true) return true
+  if (value === false) return false
+  return null
 }
 
 function normalizeIsoTime(value: unknown): string | null {
@@ -280,18 +292,31 @@ export class LocalStateStore {
 
   read(): LocalState {
     const stored = asRecord(readJsonFile(this.paths.stateFile))
-    if (stored === null) return {}
-    return { lastSyncAt: normalizeIsoTime(stored.lastSyncAt) }
+    if (stored === null) return { lastSyncAt: null, reachable: null }
+    return {
+      lastSyncAt: normalizeIsoTime(stored.lastSyncAt),
+      reachable: normalizeReachable(stored.reachable),
+    }
   }
 
   readLastSyncAt(): string | null {
     return this.read().lastSyncAt ?? null
   }
 
+  readReachable(): boolean | null {
+    return this.read().reachable ?? null
+  }
+
   writeLastSyncAt(iso: string): void {
     const normalized = normalizeIsoTime(iso)
     if (normalized === null) return
     const state: LocalState = { ...this.read(), lastSyncAt: normalized }
+    writeFilePrivate(this.paths.stateFile, JSON.stringify(state, null, 2) + '\n')
+  }
+
+  /** 记录最近一次网络探测结果；null 表示"未探测"（例如刚换了仓库地址）。 */
+  writeReachable(value: boolean | null): void {
+    const state: LocalState = { ...this.read(), reachable: value }
     writeFilePrivate(this.paths.stateFile, JSON.stringify(state, null, 2) + '\n')
   }
 }

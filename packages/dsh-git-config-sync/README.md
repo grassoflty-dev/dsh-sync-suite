@@ -98,14 +98,16 @@ Body: { action, ...payload }
 | `testConnection` | `{}` | `{reachable, branch, headSha, message}` |
 | `push` | `{}` | `{pushed, commit, branch, files, rebased}` |
 | `preview` | `{}` | `{previewId, sources:[{deviceId, headSha, files, entries, plugins, providers, mcp}]}` |
-| `apply` | `{confirm:true, previewId, sourceDevice, entries:string[]}` | `{applied, skipped, snapshotId, verified:true}` |
+| `apply` | `{confirm:true, previewId, sourceDevice, entries:string[]}` | `{applied:[{id,fileSha256,blockSha256,path}], skipped, snapshotId, verified:true}` |
 | `listSnapshots` | `{}` | `{snapshots}` |
 | `rollback` | `{snapshotId, confirm:true}` | `{restored, verified:true}` |
 
 错误码：`E_VALIDATION`、`E_CONFIRM_REQUIRED`、`E_UNKNOWN_ACTION`、`E_NOT_FOUND`、`E_GIT`、
 `E_AUTH`、`E_CONFLICT`、`E_SHA_MISMATCH`、`E_IO`。
 
-`status` 字段：`{reachable, branch, headSha, headMessage, headTime, localPending, remotePending, conflict, lastSyncAt, error?}`。
+`status` 字段：`{reachable: true|false|null, branch, headSha, headMessage, headTime, localPending: number|null, remotePending: number|null, conflict, lastSyncAt, error?}`。
+`getState` 只读本地、不联网；`reachable` 三态（null=未探测，false=最近一次网络动作失败）。
+`applied[]` 的 `fileSha256` 是写后整文件 SHA-256，`blockSha256` 是单条 entry 文本 SHA-256。
 
 `settings` 字段：`{repoUrl, platform:'github'|'gitee'|'custom', authMode:'https'|'ssh', deviceId, branch, scope:{config,providers,plugins,mcp}, hasToken}`。
 

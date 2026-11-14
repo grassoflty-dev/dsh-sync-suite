@@ -150,11 +150,14 @@ test('integration：真实 git 全链路 push → pull → preview → apply →
 
   const stateB = await serviceB.handleRpc({ action: 'getState' })
   assert.equal(stateB.ok, true)
-  assert.equal(stateB.data.status.reachable, true)
+  // testConnection 刚成功 → 状态文件记住 reachable:true，getState 只回读、不联网。
+  assert.equal(stateB.data.status.reachable, true, 'testConnection 成功后 reachable 应为 true（持久化回读）')
   assert.equal(stateB.data.status.branch, 'main')
-  assert.equal(stateB.data.status.localPending, 0)
-  assert.equal(stateB.data.status.remotePending, 0)
+  // 还没有工作副本：无 origin/main 引用 → pending 为 null，且不报错（getState 绝不 clone）。
+  assert.equal(stateB.data.status.localPending, null)
+  assert.equal(stateB.data.status.remotePending, null)
   assert.equal(stateB.data.status.conflict, false)
+  assert.equal(stateB.data.status.error, undefined, '未 clone / 未探测不是错误')
   assert.equal(stateB.data.settings.hasToken, false)
   assert.deepEqual(stateB.data.snapshots, [])
 
@@ -164,6 +167,13 @@ test('integration：真实 git 全链路 push → pull → preview → apply →
   const sourceA = previewB.data.sources[0]
   assert.equal(sourceA.deviceId, 'pc-a')
   assert.equal(sourceA.headSha, pushA1.data.commit)
+
+  // preview 已把工作副本 clone 下来并 fetch：此时才有 upstream 引用，pending 是数字。
+  const stateBAfterPreview = await serviceB.handleRpc({ action: 'getState' })
+  assert.equal(stateBAfterPreview.ok, true)
+  assert.equal(stateBAfterPreview.data.status.localPending, 0)
+  assert.equal(stateBAfterPreview.data.status.remotePending, 0)
+  assert.match(stateBAfterPreview.data.status.headSha, /^[0-9a-f]{40}$/, 'clone+fetch 后应有本地 HEAD')
   const statusOf = Object.fromEntries(sourceA.entries.map((entry) => [entry.id, entry.status]))
   assert.equal(statusOf.webserver, 'changed')
   assert.equal(statusOf['llm-pi-ai'], 'same')
@@ -188,6 +198,10 @@ test('integration：真实 git 全链路 push → pull → preview → apply →
   assert.equal(applyB.data.verified, true)
   assert.deepEqual(applyB.data.applied.map((item) => item.id), ['webserver'])
   assert.equal(applyB.data.applied[0].path, pathFileResolved(patchFileB))
+  // P1-2：applied 区分"写后整文件 SHA"与"该条目块 SHA"，旧的误导字段 sha256 已删除。
+  assert.match(applyB.data.applied[0].fileSha256, /^[0-9a-f]{64}$/)
+  assert.match(applyB.data.applied[0].blockSha256, /^[0-9a-f]{64}$/)
+  assert.equal('sha256' in applyB.data.applied[0], false, 'applied[] 不得再有语义误导的 sha256 字段')
 
   const afterTextB = await readFile(patchFileB, 'utf8')
   const afterDoc = parsePatch(afterTextB)

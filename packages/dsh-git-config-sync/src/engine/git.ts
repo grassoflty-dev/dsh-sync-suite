@@ -25,6 +25,8 @@ export interface GitRepoOptions {
   token?: string | null
   allowLocalRepo?: boolean
   env?: NodeJS.ProcessEnv
+  /** 单次网络命令超时（毫秒），默认 8000（≤8s）。测试可注入更小值。 */
+  networkTimeoutMs?: number
 }
 
 interface RunResult {
@@ -37,7 +39,16 @@ interface RunOptions {
   allowFailure?: boolean
   network?: boolean
   cwd?: string
+  /** 超时（毫秒）：超时杀死子进程并映射成 E_GIT（消息说明超时）。 */
+  timeoutMs?: number
 }
+
+/**
+ * 网络命令（ls-remote / fetch / push）的单次超时上限。
+ *
+ * 离线或仓库无响应时不能把设置页/推送挂死：超时后 kill 子进程并报 E_GIT（含"超时"字样）。
+ */
+export const NETWORK_TIMEOUT_MS = 8000
 
 /** 临时提交身份，避免要求用户配置全局 user.name。 */
 const IDENTITY_ARGS = ['-c', 'user.name=dsh-git-config-sync', '-c', 'user.email=sync@localhost']
@@ -207,6 +218,7 @@ export class GitRepo {
   private readonly token: string | null
   private readonly allowLocalRepo: boolean
   private readonly extraEnv: NodeJS.ProcessEnv
+  private readonly networkTimeoutMs: number
   private askpassDir: string | null = null
   private askpassPath: string | null = null
   private askpassCounter: string | null = null
@@ -226,6 +238,11 @@ export class GitRepo {
     this.token = options.token !== undefined && options.token !== null && options.token !== '' ? options.token : null
     this.allowLocalRepo = options.allowLocalRepo === true
     this.extraEnv = options.env ?? {}
+    const configured = options.networkTimeoutMs
+    this.networkTimeoutMs =
+      typeof configured === 'number' && Number.isFinite(configured) && configured > 0
+        ? Math.min(configured, NETWORK_TIMEOUT_MS)
+        : NETWORK_TIMEOUT_MS
   }
 
   private usesAskpass(): boolean {
@@ -268,7 +285,7 @@ export class GitRepo {
     return env
   }
 
-  private failure(args: string[], result: RunResult): SyncError {
+  private failure(args: string[], result: RunResult, network = false): SyncError {
     const text = `${result.stderr}\n${result.stdout}`.trim()
     const summary =
       text
@@ -281,6 +298,8 @@ export class GitRepo {
     return new SyncError(code, `git ${args[0] ?? ''} 失败：${this.scrub(summary)}`, {
       command: args.map((arg) => this.scrub(arg)),
       exitCode: result.code,
+      // 调用方据此判断"是否网络类失败"（网络失败才写 reachable:false）。
+      network,
     })
   }
 
@@ -289,16 +308,40 @@ export class GitRepo {
     const env = await this.buildEnv()
     const networkFlags = options.network === true && this.usesAskpass() ? ['-c', 'credential.helper='] : []
     const fullArgs = [...IDENTITY_ARGS, ...networkFlags, ...args]
+    const timeoutMs = options.timeoutMs
 
     const result = await new Promise<RunResult>((resolve, reject) => {
       execFile(
         'git',
         fullArgs,
-        { cwd, env, windowsHide: true, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8' },
+        {
+          cwd,
+          env,
+          windowsHide: true,
+          maxBuffer: 32 * 1024 * 1024,
+          encoding: 'utf8',
+          ...(timeoutMs !== undefined ? { timeout: timeoutMs, killSignal: 'SIGTERM' as const } : {}),
+        },
         (error, stdout, stderr) => {
           const errno = error === null ? null : (error as NodeJS.ErrnoException).code
           if (errno === 'ENOENT') {
-            reject(new SyncError('E_GIT', '找不到 git 可执行文件，请先安装 git 并加入 PATH'))
+            reject(new SyncError('E_GIT', '找不到 git 可执行文件，请先安装 git 并加入 PATH', { reason: 'git-missing' }))
+            return
+          }
+          const killed = error !== null && (error as unknown as { killed?: unknown }).killed === true
+          if (killed && timeoutMs !== undefined) {
+            reject(
+              new SyncError(
+                'E_GIT',
+                `git ${args[0] ?? ''} 超时（>${timeoutMs} ms）：网络不可达或仓库响应过慢，可稍后重试`,
+                {
+                  command: args.map((arg) => this.scrub(arg)),
+                  timeoutMs,
+                  network: options.network === true,
+                  reason: 'timeout',
+                },
+              ),
+            )
             return
           }
           const numeric = error === null ? 0 : typeof (error as unknown as { code?: unknown }).code === 'number' ? (error as unknown as { code: number }).code : 1
@@ -307,7 +350,7 @@ export class GitRepo {
       )
     })
 
-    if (result.code !== 0 && options.allowFailure !== true) throw this.failure(args, result)
+    if (result.code !== 0 && options.allowFailure !== true) throw this.failure(args, result, options.network === true)
     return result
   }
 
@@ -351,7 +394,7 @@ export class GitRepo {
     const parent = path.dirname(this.dir)
     const cloneArgs = ['clone', '--quiet', this.repoUrl, this.dir]
     const cloned = await this.run(cloneArgs, { allowFailure: true, network: true, cwd: parent })
-    if (cloned.code !== 0) throw this.failure(cloneArgs, cloned)
+    if (cloned.code !== 0) throw this.failure(cloneArgs, cloned, true)
     await this.configureRepo()
     // clone 时的 checkout 受全局 core.autocrlf 影响，可能把 LF 改成 CRLF；
     // 关掉转换后按索引重写一遍，保证工作树字节 == blob 字节（否则会把别人的设备文件改脏）。
@@ -378,8 +421,12 @@ export class GitRepo {
   }
 
   async lsRemote(): Promise<{ reachable: boolean; branch: string; headSha: string; message: string }> {
-    const result = await this.run(['ls-remote', '--heads', this.repoUrl], { allowFailure: true, network: true })
-    if (result.code !== 0) throw this.failure(['ls-remote', this.repoUrl], result)
+    const result = await this.run(['ls-remote', '--heads', this.repoUrl], {
+      allowFailure: true,
+      network: true,
+      timeoutMs: this.networkTimeoutMs,
+    })
+    if (result.code !== 0) throw this.failure(['ls-remote', this.repoUrl], result, true)
     let headSha = ''
     for (const line of result.stdout.split('\n')) {
       const match = /^([0-9a-f]{40,64})\s+refs\/heads\/(.+)$/.exec(line.trim())
@@ -400,18 +447,44 @@ export class GitRepo {
     return { reachable: true, branch: this.branch, headSha, message }
   }
 
-  /** fetch 远端分支，返回远端分支 sha（远端还没有该分支时为空串）。 */
-  async fetch(): Promise<{ headSha: string }> {
+  /**
+   * fetch 远端分支，返回远端分支 sha（远端还没有该分支时为空串）。
+   *
+   * `reachable` 只用于"最近一次探测结果"：fetch 本身不抛错（远端分支不存在是正常情况），
+   * 只有到达远端但拿不到该 ref 时仍算可达。
+   */
+  async fetch(): Promise<{ headSha: string; reachable: boolean }> {
     await this.ensureRemote()
-    const fetched = await this.run(['fetch', '--quiet', 'origin', this.branch], { allowFailure: true, network: true })
-    if (fetched.code !== 0) return { headSha: '' }
+    const fetched = await this.run(['fetch', '--quiet', 'origin', this.branch], {
+      allowFailure: true,
+      network: true,
+      timeoutMs: this.networkTimeoutMs,
+    })
+    if (fetched.code !== 0) {
+      const text = `${fetched.stderr}\n${fetched.stdout}`
+      // 远端根本没有该分支（空仓库/新分支）→ 网络是通的。
+      const branchMissing = /couldn't find remote ref|no such remote ref|could not read from remote repository.*not found|remote branch .* not found/i.test(text)
+      return { headSha: '', reachable: branchMissing }
+    }
     const head = await this.run(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${this.branch}`], {
       allowFailure: true,
     })
-    return { headSha: head.code === 0 ? head.stdout.trim() : '' }
+    return { headSha: head.code === 0 ? head.stdout.trim() : '', reachable: true }
   }
 
-  async status(): Promise<{ branch: string; clean: boolean; changed: string[]; ahead: number; behind: number }> {
+  /**
+   * 本地状态（**不联网**）：分支、脏文件、相对 `origin/<branch>` 的领先/落后提交数。
+   *
+   * ahead/behind 只在本地存在 `refs/remotes/origin/<branch>` 时给出数字，否则为 null ——
+   * 不做 fetch，也不把"没有远端引用"当成 0。
+   */
+  async status(): Promise<{
+    branch: string
+    clean: boolean
+    changed: string[]
+    ahead: number | null
+    behind: number | null
+  }> {
     const branchResult = await this.run(['rev-parse', '--abbrev-ref', 'HEAD'], { allowFailure: true })
     const branch = branchResult.code === 0 && branchResult.stdout.trim() !== '' ? branchResult.stdout.trim() : this.branch
     const statusResult = await this.run(['status', '--porcelain'], { allowFailure: true })
@@ -422,18 +495,23 @@ export class GitRepo {
             .map((line) => line.slice(3).trim())
             .filter((line) => line !== '')
         : []
-    let ahead = 0
-    let behind = 0
-    const counts = await this.run(
-      ['rev-list', '--left-right', '--count', `HEAD...refs/remotes/origin/${this.branch}`],
-      { allowFailure: true },
-    )
-    if (counts.code === 0) {
-      const parts = counts.stdout.trim().split(/\s+/)
-      ahead = Number.parseInt(parts[0] ?? '0', 10)
-      behind = Number.parseInt(parts[1] ?? '0', 10)
-      if (!Number.isFinite(ahead)) ahead = 0
-      if (!Number.isFinite(behind)) behind = 0
+    let ahead: number | null = null
+    let behind: number | null = null
+    const upstream = `refs/remotes/origin/${this.branch}`
+    const upstreamRef = await this.run(['rev-parse', '--verify', '--quiet', upstream], { allowFailure: true })
+    if (upstreamRef.code === 0) {
+      const counts = await this.run(['rev-list', '--left-right', '--count', `HEAD...${upstream}`], {
+        allowFailure: true,
+      })
+      if (counts.code === 0) {
+        const parts = counts.stdout.trim().split(/\s+/)
+        const a = Number.parseInt(parts[0] ?? '', 10)
+        const b = Number.parseInt(parts[1] ?? '', 10)
+        if (Number.isFinite(a) && Number.isFinite(b)) {
+          ahead = a
+          behind = b
+        }
+      }
     }
     return { branch, clean: changed.length === 0, changed, ahead, behind }
   }
@@ -516,6 +594,7 @@ export class GitRepo {
     const result = await this.run(['push', '--porcelain', 'origin', `HEAD:${this.branch}`], {
       allowFailure: true,
       network: true,
+      timeoutMs: this.networkTimeoutMs,
     })
     const text = `${result.stdout}\n${result.stderr}`
     if (result.code === 0) {
@@ -523,7 +602,7 @@ export class GitRepo {
       return { pushed: !upToDate, upToDate, nonFastForward: false }
     }
     if (isNonFastForward(text)) return { pushed: false, upToDate: false, nonFastForward: true }
-    throw this.failure(['push'], result)
+    throw this.failure(['push'], result, true)
   }
 
   /** 单次推送（不做 rebase），供 pushWithRebase 内部使用。 */

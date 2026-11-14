@@ -252,7 +252,9 @@ async function readRemoteSnapshot(
   return { manifest, files, sizes }
 }
 
-export async function buildPreview(deps: PreviewDeps): Promise<{ result: PreviewResult; internal: InternalPreview }> {
+export async function buildPreview(
+  deps: PreviewDeps,
+): Promise<{ result: PreviewResult; internal: InternalPreview; reachable: boolean }> {
   const { git } = deps
   await git.ensureWorkTree()
   const fetched = await git.fetch()
@@ -309,7 +311,7 @@ export async function buildPreview(deps: PreviewDeps): Promise<{ result: Preview
     localPatch,
     sources: internalSources,
   }
-  return { result: { previewId, sources }, internal }
+  return { result: { previewId, sources }, internal, reachable: fetched.reachable }
 }
 
 /** 内存预览缓存：TTL 10 分钟，单实例只保留一个 previewId。 */

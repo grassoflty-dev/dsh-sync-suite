@@ -1,17 +1,15 @@
 /**
  * 手写页 OCR 批处理（**仅 HarmonyOS**）。
  *
- * 严格按 BRIEF §3.2 的顺序，逐页串行（`maxConcurrency = 1`）：
- * 1. `componentSnapshot.get(<pageId>)` 拿到该页 PixelMap；
- * 2. `image.createImagePacker().packing(pixelMap, {format:'image/png'})` → 写
- *    `attachments/<sha256>.png`（同步落盘：OCR 失败也能凭截图人工补录）；
- * 3. `textRecognition.recognizeText({ pixelMap })` → 写 `results[pageIndex]`（保持页码顺序）；
- * 4. **立刻** `pixelMap.release()`，不把上一页的内存带到下一页。
- *
- * 整批 `textRecognition.init()` / `release()` 包住；取消时释放所有未处理的 PixelMap。
- * 全部完成后 0→N 拼接：`concatPageTexts(raw)` 作为 `ocr_text` 原文，
- * `replaceComplexBlocks(...)` 作为写入正文的文本（表格/公式行降级为
- * `[公式/图表: 查看手迹]` 占位符，原图仍是兜底）。
+ * 本文件是薄适配层：真实 SDK 能力注入给纯逻辑 `model/pageCapture.ts` 的 `runPageCaptureBatch`，
+ * 顺序与内存语义全部由模型层保证（BRIEF §3.2）：
+ * 1. **阶段 A**：逐页 `componentSnapshot.get` → `image.ImagePacker.packing(PNG)` → 同步写
+ *    `attachments/<sha256>.png`（先全部落盘，OCR 失败也能凭截图人工补录）；
+ * 2. **阶段 B**：按 pageIndex 升序串行 `textRecognition.recognizeText`，每页完成立即释放 PixelMap；
+ * 3. 整批 `textRecognition.init()` / `release()` 包住；取消时释放所有未处理 PixelMap；
+ * 4. 全部完成后 0→N 拼接：`concatPageTexts(raw)` 作为 `ocr_text` 原文，
+ *    `replaceComplexBlocks(...)` 作为写入正文的文本（表格/公式行降级为
+ *    `[公式/图表: 查看手迹]` 占位符，原图仍是兜底）。
  *
  * ⚠ 本机无 HarmonyOS SDK，无法编译/真机验证；`textRecognition` 的 init/release
  * 与 `componentSnapshot.get` 的可用性需真机核对（不同 API 版本存在差异）。
@@ -19,7 +17,10 @@
 import { componentSnapshot } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { textRecognition } from '@kit.CoreVisionKit';
-import { buildAttachmentRefs, concatPageTexts, replaceComplexBlocks } from '../model/attachments';
+import type { PageCaptureDeps, PageCaptureOutcome } from '../model/pageCapture';
+import { runPageCaptureBatch } from '../model/pageCapture';
+import { concatPageTexts, replaceComplexBlocks } from '../model/attachments';
+import { sha256Hex } from '../model/sha256';
 import type { Attachment } from '../model/types';
 import type { AttachmentStore } from '../services/attachmentStore';
 
@@ -33,11 +34,11 @@ export interface OcrPageResult {
 
 /** 整批结果。 */
 export interface OcrBatchResult {
-  /** 逐页结果，按 pageIndex 升序。 */
+  /** 逐页结果，按 pageIndex 升序（未识别的页 text 为空串）。 */
   pageResults: OcrPageResult[];
   /** 已落盘的截图引用，可直接写入记录的 attachments 字段。 */
   attachments: Attachment[];
-  /** 每页原始识别文本（未做占位符替换）。 */
+  /** 每页识别文本（按 pageIndex 升序；未识别页不含在数组里）。 */
   pageTexts: string[];
   /** 0→N 拼接后的原始识别文本（写入 ocr_text）。 */
   rawText: string;
@@ -55,9 +56,17 @@ export interface OcrBatchOptions {
   /**
    * 截图前的切页钩子：把第 pageIndex 页切到「当前页」并等一帧。
    * 只有当前页是完全不透明参与绘制的，`componentSnapshot` 才能稳定截到内容，
-   * 因此整批识别时逐页切换（页面会看到翻页动画结束后的静态页）。
+   * 因此整批截图时逐页切换（页面会看到翻页动画结束后的静态页）。
    */
   preparePage?: (pageIndex: number) => Promise<void>;
+}
+
+/** 把异常转成可展示的中文文本。 */
+function describeError(error: object): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
 }
 
 export class OcrBatchManager {
@@ -67,8 +76,6 @@ export class OcrBatchManager {
   private options: OcrBatchOptions;
   private cancelled: boolean = false;
   private running: boolean = false;
-  /** 已截图但尚未完成 OCR 的 PixelMap（取消时全部释放）。 */
-  private pending: image.PixelMap[] = [];
 
   constructor(options: OcrBatchOptions) {
     this.options = options;
@@ -82,19 +89,21 @@ export class OcrBatchManager {
     return this.running;
   }
 
-  /** 取消整批：标记 + 释放所有未处理的 PixelMap。 */
+  /**
+   * 取消整批：只置取消标志（`runPageCaptureBatch` 在下一个检查点释放全部未处理 PixelMap，
+   * 已落盘的附件保留）。保留 `async` 以兼容页面 `await manager.cancel()` 的调用方式。
+   */
   async cancel(): Promise<void> {
     this.cancelled = true;
-    await this.releasePending();
   }
 
   /**
-   * 执行整批识别。
-   * @param onProgress 每页完成后回调（页面用它显示「第 n / N 页」）
+   * 执行整批识别（两阶段：先全部截图落盘，再串行 OCR）。
+   * @param onProgress 每页识别完成后回调（页面用它显示「第 n / N 页」）
    */
   async run(onProgress?: (done: number, total: number) => void): Promise<OcrBatchResult> {
-    const ids = this.options.snapshotIds;
-    const total = ids.length;
+    const ids: string[] = this.options.snapshotIds;
+    const total: number = ids.length;
     if (total === 0) {
       throw new Error('没有可识别的手写页：请先在画布上书写');
     }
@@ -104,14 +113,7 @@ export class OcrBatchManager {
     this.running = true;
     this.cancelled = false;
 
-    const pageTexts: string[] = [];
-    for (let i = 0; i < total; i++) {
-      pageTexts.push('');
-    }
-    const pages: Array<{ sha256: string; name: string; pageIndex: number }> = [];
-    const pageResults: OcrPageResult[] = [];
-
-    let ocrStarted = false;
+    let ocrStarted: boolean = false;
     let packer: image.ImagePacker | null = null;
     try {
       // OCR 引擎整批初始化（部分版本无需显式 init，失败不阻断逐页调用）
@@ -122,47 +124,28 @@ export class OcrBatchManager {
         ocrStarted = false;
       }
       packer = image.createImagePacker();
+      const activePacker: image.ImagePacker = packer;
 
-      for (let pageIndex = 0; pageIndex < total; pageIndex++) {
-        if (this.cancelled) {
-          break;
-        }
-        const pageId = ids[pageIndex];
-        let pixelMap: image.PixelMap | null = null;
-        try {
-          // 先把该页切到前台并等一帧，保证截图拿到的是完整内容
-          if (this.options.preparePage !== undefined) {
-            await this.options.preparePage(pageIndex);
-          }
-          pixelMap = await this.capture(pageId, pageIndex);
-          this.pending.push(pixelMap);
+      const deps: PageCaptureDeps = {
+        capturePage: (pageIndex: number): Promise<{ pixelMap: unknown; bytes: Uint8Array }> =>
+          this.capturePage(activePacker, ids[pageIndex], pageIndex),
+        savePageAttachment: (pageIndex: number, sha256: string, bytes: Uint8Array): Promise<void> => {
+          this.savePageAttachment(sha256, bytes, pageIndex);
+          return Promise.resolve();
+        },
+        recognize: (pixelMap: unknown): Promise<string> => this.recognize(pixelMap as image.PixelMap),
+        release: (pixelMap: unknown): void => {
+          this.releasePixelMap(pixelMap as image.PixelMap);
+        },
+        sha256: (bytes: Uint8Array): string => sha256Hex(bytes)
+      };
 
-          const png = await this.packToPng(packer, pixelMap, pageIndex);
-          // 先落盘再识别：OCR 失败也有截图兜底
-          const attachment = this.options.store.savePageAttachment(png, pageIndex);
-          pages.push({ sha256: attachment.sha256, name: attachment.name, pageIndex: pageIndex });
-
-          const text = await this.recognize(pixelMap, pageIndex);
-          pageTexts[pageIndex] = text;
-          pageResults.push({
-            pageIndex: pageIndex,
-            sha256: attachment.sha256,
-            name: attachment.name,
-            text: text
-          });
-          if (onProgress !== undefined) {
-            onProgress(pageIndex + 1, total);
-          }
-        } finally {
-          // 每页立即释放，避免多页 PixelMap 叠加占用内存
-          if (pixelMap !== null) {
-            await this.releasePixelMap(pixelMap);
-            this.removePending(pixelMap);
-          }
-        }
-      }
+      const outcome: PageCaptureOutcome = await runPageCaptureBatch(total, deps, {
+        cancelled: (): boolean => this.cancelled,
+        onProgress: onProgress
+      });
+      return this.toResult(outcome);
     } finally {
-      await this.releasePending();
       if (packer !== null) {
         try {
           await packer.release();
@@ -179,81 +162,98 @@ export class OcrBatchManager {
       }
       this.running = false;
     }
+  }
 
-    const rawText = concatPageTexts(pageTexts);
-    pageResults.sort((left: OcrPageResult, right: OcrPageResult) => left.pageIndex - right.pageIndex);
+  // ------------------------------------------------------------------ 内部实现
+
+  /** 截图 + PNG 编码：编码失败也要释放 PixelMap。 */
+  private async capturePage(
+    packer: image.ImagePacker,
+    pageId: string,
+    pageIndex: number
+  ): Promise<{ pixelMap: unknown; bytes: Uint8Array }> {
+    if (this.options.preparePage !== undefined) {
+      await this.options.preparePage(pageIndex);
+    }
+    let pixelMap: image.PixelMap;
+    try {
+      pixelMap = await componentSnapshot.get(pageId);
+    } catch (error) {
+      throw new Error(`截图失败（组件 ${pageId} 尚未渲染完成）：${describeError(error as object)}`);
+    }
+    try {
+      const packed: ArrayBuffer = await packer.packing(pixelMap, { format: 'image/png', quality: 100 });
+      return { pixelMap: pixelMap, bytes: new Uint8Array(packed) };
+    } catch (error) {
+      this.releasePixelMap(pixelMap);
+      throw new Error(`编码 PNG 失败：${describeError(error as object)}`);
+    }
+  }
+
+  /**
+   * 同步落盘一页截图（attachmentStore 内部按 sha256 去重命名，返回时文件已可读）。
+   * 顺带校验 store 计算出的 sha256 与阶段 A 计算值一致，避免附件名与内容错位。
+   */
+  private savePageAttachment(sha256: string, bytes: Uint8Array, pageIndex: number): void {
+    const attachment: Attachment = this.options.store.savePageAttachment(this.toArrayBuffer(bytes), pageIndex);
+    if (attachment.sha256 !== sha256) {
+      throw new Error(
+        `第 ${pageIndex + 1} 页附件 sha256 与截图内容不一致（落盘 ${attachment.sha256}，计算 ${sha256}）`
+      );
+    }
+  }
+
+  private async recognize(pixelMap: image.PixelMap): Promise<string> {
+    const visionInfo: textRecognition.VisionInfo = { pixelMap: pixelMap };
+    // 返回类型由 SDK 推断（不同 API 版本命名略有差异，避免写死不存在的类型名）
+    const result = await textRecognition.recognizeText(visionInfo);
+    const value: string = result.value;
+    return typeof value === 'string' ? value : '';
+  }
+
+  private releasePixelMap(pixelMap: image.PixelMap): void {
+    try {
+      const task: Promise<void> = pixelMap.release();
+      task.catch(() => {
+        // 已释放或已失效，忽略
+      });
+    } catch {
+      // 同步抛错同样忽略
+    }
+  }
+
+  /** `Uint8Array` → 独立 `ArrayBuffer`（attachmentStore 只接受 ArrayBuffer）。 */
+  private toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+    const copy: Uint8Array = new Uint8Array(bytes.length);
+    copy.set(bytes);
+    return copy.buffer as ArrayBuffer;
+  }
+
+  /** 模型层结果 → 页面 API 结果（保持 Handwriting 页现有调用方式）。 */
+  private toResult(outcome: PageCaptureOutcome): OcrBatchResult {
+    const pageTexts: string[] = outcome.results.slice();
+    const pageResults: OcrPageResult[] = [];
+    for (let index = 0; index < outcome.attachments.length; index++) {
+      const attachment: Attachment = outcome.attachments[index];
+      const text: string = attachment.pageIndex < pageTexts.length ? pageTexts[attachment.pageIndex] : '';
+      pageResults.push({
+        pageIndex: attachment.pageIndex,
+        sha256: attachment.sha256,
+        name: attachment.name,
+        text: text
+      });
+    }
+    const rawText: string = concatPageTexts(pageTexts);
     return {
       pageResults: pageResults,
-      attachments: buildAttachmentRefs(pages),
+      attachments: outcome.attachments,
       pageTexts: pageTexts,
       rawText: rawText,
       text: replaceComplexBlocks(rawText),
       cancelled: this.cancelled
     };
   }
-
-  // ------------------------------------------------------------------ 内部实现
-
-  private async capture(pageId: string, pageIndex: number): Promise<image.PixelMap> {
-    try {
-      return await componentSnapshot.get(pageId);
-    } catch (error) {
-      throw new Error(`第 ${pageIndex + 1} 页截图失败（组件 ${pageId} 尚未渲染完成）：${this.describe(error)}`);
-    }
-  }
-
-  private async packToPng(packer: image.ImagePacker, pixelMap: image.PixelMap, pageIndex: number): Promise<ArrayBuffer> {
-    try {
-      return await packer.packing(pixelMap, { format: 'image/png', quality: 100 });
-    } catch (error) {
-      throw new Error(`第 ${pageIndex + 1} 页编码 PNG 失败：${this.describe(error)}`);
-    }
-  }
-
-  private async recognize(pixelMap: image.PixelMap, pageIndex: number): Promise<string> {
-    try {
-      const visionInfo: textRecognition.VisionInfo = { pixelMap: pixelMap };
-      const result = await textRecognition.recognizeText(visionInfo);
-      const value = result.value;
-      return typeof value === 'string' ? value : '';
-    } catch (error) {
-      throw new Error(`第 ${pageIndex + 1} 页 OCR 识别失败：${this.describe(error)}`);
-    }
-  }
-
-  private async releasePixelMap(pixelMap: image.PixelMap): Promise<void> {
-    try {
-      await pixelMap.release();
-    } catch {
-      // 已释放或已失效，忽略
-    }
-  }
-
-  private async releasePending(): Promise<void> {
-    const list = this.pending;
-    this.pending = [];
-    for (const pixelMap of list) {
-      await this.releasePixelMap(pixelMap);
-    }
-  }
-
-  private removePending(pixelMap: image.PixelMap): void {
-    const kept: image.PixelMap[] = [];
-    for (const item of this.pending) {
-      if (item !== pixelMap) {
-        kept.push(item);
-      }
-    }
-    this.pending = kept;
-  }
-
-  private describe(error: object): string {
-    if (error instanceof Error) {
-      return error.message;
-    }
-    return String(error);
-  }
 }
 
-/** 默认单例构造参数（页面用当前单例 store + 页码 id 前缀拼出 snapshotIds）。 */
+/** 默认截图组件 id 前缀（页面按页号拼出 `hw-page-<index>`）。 */
 export const OCR_PAGE_ID_PREFIX: string = 'hw-page-';

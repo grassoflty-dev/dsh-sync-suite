@@ -53,6 +53,8 @@
 ```
 
 - entry key：顶层 `id` → `<id>`；`insert:` → `insert:<内部第一个 id>`；其它 → `entry:<序号>`。
+  **限制**：一个 `insert:` 块内的多行插件行被当作一个整体、按内部第一个 id 合并；多行块会整块替换。
+  用户 profile 建议“一条 entry 一行 `insert`”，以便逐插件勾选与回滚。
 - 合并：本地顺序为准；本地独有保留；远端独有追加；同 key 文本不同 → `changed`（整块采用远端）；
   相同 → `same`；远端含 `__SECRET__` 且不同 → `manual`（需本地填写，不自动覆盖）。
 - 输出保证：文件头/前置注释、条目内 `!!js`、缩进、键顺序不变；末尾恰好一个换行。
@@ -100,12 +102,12 @@
 
 | action | 请求体 | 响应 data |
 | --- | --- | --- |
-| `getState` | `{}` | `{settings, status, snapshots}` |
+| `getState` | `{}` | `{settings, status, snapshots}`（只读本地，不联网） |
 | `saveSettings` | `{settings, token?}` | `{settings, hasToken}` |
 | `testConnection` | `{}` | `{reachable, branch, headSha, message}` |
 | `push` | `{}` | `{pushed, commit, branch, files, rebased}` |
 | `preview` | `{}` | `{previewId, sources}` |
-| `apply` | `{confirm:true, previewId, sourceDevice, entries:string[]}` | `{applied, skipped, snapshotId, verified:true}` |
+| `apply` | `{confirm:true, previewId, sourceDevice, entries:string[]}` | `{applied:[{id,fileSha256,blockSha256,path}], skipped, snapshotId, verified:true}` |
 | `listSnapshots` | `{}` | `{snapshots}` |
 | `rollback` | `{snapshotId, confirm:true}` | `{restored, verified:true}` |
 
@@ -120,7 +122,10 @@
   scope: { config: boolean, providers: boolean, plugins: boolean, mcp: boolean } }
 ```
 
-`status`：`{reachable, branch, headSha, headMessage, headTime, localPending, remotePending, conflict, lastSyncAt, error?}`。
+`status`：`{reachable: true|false|null, branch, headSha, headMessage, headTime, localPending: number|null, remotePending: number|null, conflict, lastSyncAt, error?}`。
+`reachable` 三态：`null`=未探测，`false`=最近一次网络动作失败；`getState` 不联网，`localPending/remotePending`
+无 `origin/<branch>` 本地引用时为 `null`。`applied[]` 的 `fileSha256` 是写后整文件 SHA-256，
+`blockSha256` 是单条 entry 文本 SHA-256。
 `snapshots`：`[{id, time, reason, bytes}]`（写前恢复快照，保留最近 10 份）。
 `preview.sources[]`：`{deviceId, headSha, files:[{name,sha256,bytes}], entries:[{id,name,status:'added'|'changed'|'same'|'manual',localText,remoteText,secretStripped}], plugins:{install,keep,skip,noDowngrade}, providers:{added,changed,same}, mcp:{added,changed,same}}`。
 

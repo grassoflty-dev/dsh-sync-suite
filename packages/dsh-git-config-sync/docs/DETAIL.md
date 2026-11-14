@@ -110,6 +110,19 @@ entry 数组，含 `!!js` 表达式与注释）、插件依赖清单、MCP 定�
 ```
 
 - entry key：顶层 `id:` → 该 id；`insert:` → `insert:<内部第一个 id>`；否则 `entry:<序号>`。
+- **`insert:` 多行块限制（重要）**：一个 `insert:` 块内的多行插件行被视为**一个整体**，按内部第一个 `id`
+  作为 key，合并时整块替换。若一个 `insert:` 块里混了多个插件，跨设备合并会以“第一个 id”代表整块，
+  导致块内其他插件无法独立勾选/回滚。**规避方式：用户 profile 里一条 entry 只放一行 `insert`**，例如：
+  ```yaml
+  - insert:
+      - id: plugin-a
+        name: 'plugin-a'
+  - insert:
+      - id: plugin-b
+        name: 'plugin-b'
+  ```
+  插件本身不会自动改写用户的 profile 结构（只做块级文本替换）；`preview` 会显示该块的完整文本，
+  发现整块替换时请保留本地版本或手动拆分后再同步。
 - 合并：**本地顺序为准**；本地独有保留；远端独有追加到末尾（连同其前置注释）；
   同 key 文本不同 → `changed`（整块采用远端原文）；相同 → `same`；
   远端块含 `__SECRET__` 且与本地不同 → `manual`（不自动覆盖，需本地填写）。
@@ -118,10 +131,12 @@ entry 数组，含 `!!js` 表达式与注释）、插件依赖清单、MCP 定�
 
 ### 4.2 密钥脱敏与回填
 
-- 命中 key 正则 `token|secret|password|apiKey|api_key|authorization|bearer`（不区分大小写）的标量，
-  在进入同步载荷前替换为固定占位符 `__SECRET__`。
-- 恢复时：远端占位符处用**本地同 key 值**回填；本地没有 → 保留占位符、该条进 `skipped`，
-  界面标「需本地填写」，**不会**把占位符写进你的配置。
+- 命中 secret 的 key 判定按**词边界**（非子串）：`token`/`secret`/`password`/`authorization`/`bearer`
+  精确词，或相邻词 `api`+`key`（`apiKey`/`api_key`）；`maxTokens`（复数）与 `apiKeyEnv`（环境变量名）
+  属正常字段，**不会**被脱敏。
+- 标量在进入同步载荷前替换为固定占位符 `__SECRET__`。
+- 恢复时：远端占位符处用**同一条 entry 内、同 key 名**的本地值回填（不按出现顺序，避免多 provider 错配）；
+  本地没有 → 保留占位符、该条进 `skipped`，界面标「需本地填写」，**不会**把占位符写进你的配置。
 - 字符串里内嵌的 `Bearer xxx` 不处理（避免误伤普通文本）。
 
 ### 4.3 插件清单 MERGE-only
@@ -175,6 +190,11 @@ entry 数组，含 `!!js` 表达式与注释）、插件依赖清单、MCP 定�
 - `preview` 是内存态：DSH 重启或再次预览后，旧 `previewId` 失效（界面会提示重新预览）。
 - `plugins.to-install.json` 只是计划，实际安装需要你手动执行。
 - 只同步 `cordis.patch.yml`、provider、插件清单、MCP 四类；会话/工作区文件不在范围内。
+- `insert:` 多行块按“内部第一个 id”整体合并；建议用户 profile 一条 entry 只放一行 `insert`（见 §4.1）。
+- `getState` 只读本地状态、不联网；`reachable` 为 `true|false|null`（null=未探测），
+  网络探测只在「测试连接 / 推送 / 拉取预览」发生，且单次 git 网络操作 ≤8 秒超时。
+- `apply` 返回的 `fileSha256` 是写后整个 profile patch 的 SHA-256；`blockSha256` 是单条 entry 文本的
+  SHA-256，两者用途不同（前者校验落盘、后者追踪条目）。
 
 ---
 

@@ -173,12 +173,12 @@ function expectFailure(t, mutate, ruleNumber, extraPattern) {
   return result;
 }
 
-test('validate：最小合法工程树通过 7 条规则并以 0 退出', (t) => {
+test('validate：最小合法工程树通过 8 条规则并以 0 退出', (t) => {
   const root = writeTree(legalFiles());
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const result = runValidate(['--root', root]);
   assert.equal(result.status, 0, `合法树应通过，实际输出：\n${result.stdout}${result.stderr}`);
-  assert.match(result.stdout, /✅ 全部通过：7\/7 条规则/);
+  assert.match(result.stdout, /✅ 全部通过：8\/8 条规则/);
   assert.doesNotMatch(result.stdout, /❌/);
 });
 
@@ -232,6 +232,46 @@ export function makePanel(): OcrBatchManager {
     /不能只依赖 harmony 覆盖层/
   );
   assert.match(result.stdout, /❌ 规则 4 /, '同时应命中规则 4（Android 侧引用 OCR）');
+});
+
+test('validate：规则 8 —— main 树静态 import harmony 树文件（允许动态 import）', (t) => {
+  const result = expectFailure(
+    t,
+    (files) => {
+      files['entry/src/harmony/ets/common/harmonyOnly.ts'] = `export const harmonyOnly = 'harmony-only';
+export interface HarmonyOnlyType {
+  value: string;
+}
+`;
+      files['entry/src/main/ets/common/useHarmony.ts'] = `import type { HarmonyOnlyType } from '../../../harmony/ets/common/harmonyOnly';
+import { harmonyOnly } from '../../../harmony/ets/common/harmonyOnly';
+
+export const value: string = harmonyOnly;
+export type Alias = HarmonyOnlyType;
+`;
+    },
+    8,
+    /useHarmony\.ts:1/
+  );
+  assert.match(result.stdout, /静态 import 了 harmony 覆盖层/, '错误信息应说明规则 8 的原因');
+  assert.match(result.stdout, /:2 /, '`import type` 之后的值 import 同样要报（第 2 行）');
+  assert.match(result.stdout, /动态 import\(\)/, '错误信息应给出修复建议');
+});
+
+test('validate：规则 8 —— main 树用动态 import() 引 harmony 文件时通过', (t) => {
+  const files = legalFiles();
+  files['entry/src/harmony/ets/common/harmonyOnly.ts'] = `export const harmonyOnly = 'harmony-only';
+`;
+  files['entry/src/main/ets/common/lazyHarmony.ts'] = `export function loadHarmonyOnly(): Promise<unknown> {
+  return import('../../../harmony/ets/common/harmonyOnly');
+}
+`;
+  const root = writeTree(files);
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const result = runValidate(['--root', root]);
+  assert.equal(result.status, 0, `动态 import 应放行，实际输出：\n${result.stdout}${result.stderr}`);
+  assert.match(result.stdout, /✅ 全部通过：8\/8 条规则/);
+  assert.doesNotMatch(result.stdout, /❌ 规则 8 /);
 });
 
 test('validate：规则 3 —— main_pages 与 pages 目录不一致', (t) => {

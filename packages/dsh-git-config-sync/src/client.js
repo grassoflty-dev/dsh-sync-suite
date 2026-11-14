@@ -7,8 +7,9 @@
  * Contents:
  *   - repository form: platform / repoUrl / authMode / deviceId / branch / token
  *   - sync scope: config / providers / plugins / mcp (all enabled by default)
- *   - status badges: reachable, branch, local commits, remote commit, pending upload/download,
- *     conflict, latest commit (sha + message + time), last sync, status error
+ *   - status badges: reachable (tri-state: reachable / unreachable-after-last-probe / not probed),
+ *     branch, local commits, remote commit, pending upload/download (— when no upstream ref),
+ *     conflict, latest commit (sha + message + time), last sync, local-read error
  *   - actions: save / test / push / preview / apply / refresh (all disabled while one is pending)
  *   - preview: grouped per source device, per-entry diff (monospace, collapsible, max-height),
  *     adopt-remote vs keep-local toggle, `manual` entries default unchecked
@@ -83,7 +84,8 @@ window.__ModuleLoader__.load({
       "status.title": "同步状态",
       "status.refresh": "刷新状态",
       "status.reachable": "可达",
-      "status.unreachable": "不可达",
+      "status.unreachable": "不可达（最近探测）",
+      "status.unprobed": "未探测（点击测试连接）",
       "status.branch": "分支",
       "status.local": "本地提交",
       "status.remote": "仓库提交",
@@ -194,6 +196,8 @@ window.__ModuleLoader__.load({
       "apply.skipped": "已跳过",
       "apply.snapshot": "写前快照",
       "apply.verified": "SHA-256 校验通过",
+      "apply.fileSha": "文件 SHA-256",
+      "apply.blockSha": "条目 SHA-256",
       "apply.none": "无",
 
       "confirm.apply": "确认把 {device} 的 {n} 个条目覆盖到本机？写入前会自动快照，写后校验 SHA-256。",
@@ -251,7 +255,8 @@ window.__ModuleLoader__.load({
       "status.title": "Status",
       "status.refresh": "Refresh",
       "status.reachable": "Reachable",
-      "status.unreachable": "Unreachable",
+      "status.unreachable": "Unreachable (last probe)",
+      "status.unprobed": "Not probed (click Test connection)",
       "status.branch": "Branch",
       "status.local": "Local commits",
       "status.remote": "Remote commit",
@@ -362,6 +367,8 @@ window.__ModuleLoader__.load({
       "apply.skipped": "Skipped",
       "apply.snapshot": "Snapshot",
       "apply.verified": "SHA-256 verified",
+      "apply.fileSha": "File SHA-256",
+      "apply.blockSha": "Entry SHA-256",
       "apply.none": "none",
 
       "confirm.apply": "Overwrite this machine with {n} entries from {device}? A snapshot is taken first and SHA-256 is verified after writing.",
@@ -737,6 +744,14 @@ window.__ModuleLoader__.load({
       if (typeof v === 'number' && isFinite(v)) return String(v)
       if (typeof v === 'string' && v !== '') return v
       return '0'
+    }
+
+    /** 三态/未知数量：null 表示"本地没有 upstream 引用，未计算"，显示成 — 而不是 0。 */
+    function numOrDash(v) {
+      if (v === null || v === undefined) return '—'
+      if (typeof v === 'number' && isFinite(v)) return String(v)
+      if (typeof v === 'string' && v !== '') return v
+      return '—'
     }
 
     function shortSha(sha) {
@@ -1859,6 +1874,10 @@ window.__ModuleLoader__.load({
             ? status.error
             : JSON.stringify(status.error)
       const conflict = Boolean(status.conflict)
+      // reachable 是三态：true/false/null（null = 从未探测，不得显示成红色错误）。
+      const reachable = status.reachable === true ? true : status.reachable === false ? false : null
+      const reachableLabel =
+        reachable === true ? tr('status.reachable') : reachable === false ? tr('status.unreachable') : tr('status.unprobed')
       children.push(
         h(
           Card,
@@ -1878,20 +1897,29 @@ window.__ModuleLoader__.load({
             'div',
             { style: S.chipRow },
             h(Badge, {
-              text: status.reachable ? tr('status.reachable') : tr('status.unreachable'),
-              tone: status.reachable ? 'ok' : 'err'
+              text: reachableLabel,
+              tone: reachable === true ? 'ok' : reachable === false ? 'err' : 'mute'
             }),
             h(Badge, {
               text: tr('status.branch') + ': ' + (asText(status.branch) || form.branch || '—'),
               tone: 'info'
             }),
-            h(Badge, { text: tr('status.local') + ': ' + num(status.localPending), tone: Number(status.localPending) > 0 ? 'info' : 'mute' }),
+            h(Badge, {
+              text: tr('status.local') + ': ' + numOrDash(status.localPending),
+              tone: Number(status.localPending) > 0 ? 'info' : 'mute'
+            }),
             h(Badge, {
               text: tr('status.remote') + ': ' + (status.headSha ? shortSha(status.headSha) : '—'),
               tone: status.headSha ? 'info' : 'mute'
             }),
-            h(Badge, { text: tr('status.ahead') + ': ' + num(status.localPending), tone: Number(status.localPending) > 0 ? 'warn' : 'mute' }),
-            h(Badge, { text: tr('status.behind') + ': ' + num(status.remotePending), tone: Number(status.remotePending) > 0 ? 'warn' : 'mute' }),
+            h(Badge, {
+              text: tr('status.ahead') + ': ' + numOrDash(status.localPending),
+              tone: Number(status.localPending) > 0 ? 'warn' : 'mute'
+            }),
+            h(Badge, {
+              text: tr('status.behind') + ': ' + numOrDash(status.remotePending),
+              tone: Number(status.remotePending) > 0 ? 'warn' : 'mute'
+            }),
             h(Badge, {
               text: tr('status.conflict') + ': ' + (conflict ? tr('status.conflict.yes') : tr('status.conflict.no')),
               tone: conflict ? 'err' : 'mute'
@@ -2211,7 +2239,17 @@ window.__ModuleLoader__.load({
               { key: 'ar' + i, style: S.listRow },
               h(Badge, { text: tr('apply.applied'), tone: 'ok' }),
               h('span', { style: S.listText }, asText(o.id) || '—'),
-              h('span', { style: S.listMeta }, asText(o.path))
+              h('span', { style: S.listMeta }, asText(o.path)),
+              h(
+                'span',
+                { style: S.listMeta, title: asText(o.fileSha256) },
+                tr('apply.fileSha') + ': ' + (asText(o.fileSha256) ? shortSha(o.fileSha256) : '—')
+              ),
+              h(
+                'span',
+                { style: S.listMeta, title: asText(o.blockSha256) },
+                tr('apply.blockSha') + ': ' + (asText(o.blockSha256) ? shortSha(o.blockSha256) : '—')
+              )
             )
           )
         })

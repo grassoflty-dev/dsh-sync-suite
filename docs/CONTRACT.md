@@ -190,7 +190,7 @@ export function collectLocal(input: CollectInput): { files: Record<SyncFileName,
 export interface PreviewEntry { id: string; name: string; status: 'added' | 'changed' | 'same' | 'manual'; localText: string; remoteText: string; secretStripped: boolean }
 export interface PreviewSource { deviceId: string; headSha: string; files: Array<{ name: string; sha256: string; bytes: number }>; entries: PreviewEntry[]; plugins: PluginMergeResult; providers: { added: string[]; changed: string[]; same: string[] }; mcp: { added: string[]; changed: string[]; same: string[] } }
 export interface PreviewResult { previewId: string; sources: PreviewSource[] }
-export interface ApplyResult { applied: Array<{ id: string; sha256: string; path: string }>; skipped: Array<{ id: string; reason: string }>; snapshotId: string; verified: true; pluginPlan?: PluginMergeResult }
+export interface ApplyResult { applied: Array<{ id: string; fileSha256: string; blockSha256: string; path: string }>; skipped: Array<{ id: string; reason: string }>; snapshotId: string; verified: true; pluginPlan?: PluginMergeResult }
 ```
 
 - preview 读取远端仓库 `devices/<deviceId>/` 快照，与本地 collect 结果比对；预览缓存内存保存（TTL 10 分钟，
@@ -237,17 +237,22 @@ export function createHttpHandler(service: RpcService, connection?: { requestRej
 
 | action | 请求 | data |
 | --- | --- | --- |
-| `getState` | `{}` | `{settings, status, snapshots}` |
+| `getState` | `{}` | `{settings, status, snapshots}`（**只读本地，不联网**） |
 | `saveSettings` | `{settings, token?}` | `{settings, hasToken}` |
 | `testConnection` | `{}` | `{reachable, branch, headSha, message}` |
 | `push` | `{}` | `{pushed, commit, branch, files, rebased}` |
 | `preview` | `{}` | `{previewId, sources}` |
-| `apply` | `{confirm:true, previewId, sourceDevice, entries:string[]}` | `{applied, skipped, snapshotId, verified:true}` |
+| `apply` | `{confirm:true, previewId, sourceDevice, entries:string[]}` | `{applied:[{id,fileSha256,blockSha256,path}], skipped, snapshotId, verified:true}` |
 | `listSnapshots` | `{}` | `{snapshots}` |
 | `rollback` | `{snapshotId, confirm:true}` | `{restored, verified:true}` |
 
-`getState.status`：`{reachable, branch, headSha, headMessage, headTime, localPending, remotePending, conflict, lastSyncAt, error?}`；
-`localPending`/`remotePending` 为本地/远端领先提交数；`conflict` 为远端分叉且非可 rebase 时的布尔。
+`getState.status`：`{reachable: true|false|null, branch, headSha, headMessage, headTime, localPending: number|null, remotePending: number|null, conflict, lastSyncAt, error?}`；
+`reachable` 三态中 `null` = 本机尚未探测过（网络失败的最近结果才记 `false`）；`localPending`/`remotePending`
+基于本地 `origin/<branch>` 引用计算，无 upstream 引用时为 `null`；`getState` 不发起任何 git 网络操作，
+`error` 只表示本地读取失败。`conflict` 为远端分叉（ahead>0 且 behind>0）。
+`apply.applied[]`：`fileSha256` 是写后整个 profile patch 的 SHA-256（落盘校验），`blockSha256` 是该 entry 合并后文本的
+SHA-256（条目追踪），两者语义不同、不得混用。
+网络操作只在 `testConnection`/`push`/`preview` 发生，单次 git 网络调用 ≤8s 超时。
 `saveSettings` 校验：repoUrl（仅 https/ssh/git@，`custom` 平台同样受限）、deviceId `^[a-z0-9][a-z0-9-]{0,31}$`、
 branch 非空；token 空字符串表示保留现有 token，`null` 表示清除。
 所有错误 code 至少包含：`E_VALIDATION`、`E_CONFIRM_REQUIRED`、`E_UNKNOWN_ACTION`、`E_NOT_FOUND`、
@@ -285,7 +290,7 @@ branch 非空；token 空字符串表示保留现有 token，`null` 表示清除
   push → 另一设备 pull → preview → apply → rollback；断言 profile 只有被勾选条目变化、注释保留。
 - `test/locale.test.mjs`：en/zh key 集合一致且含 `meta.*`。
 
-测试只 import `../dist/**`（构建后运行）。CI 命令：`pnpm build && node --test packages/dsh-git-config-sync/test`。
+测试只 import `../dist/**`（构建后运行）。CI 命令：`pnpm build && node --test "packages/dsh-git-config-sync/test/*.test.mjs"`（Node 24 的 `--test` 目录参数会报 MODULE_NOT_FOUND，必须用 glob）。
 
 ### 2.6 交付资源
 
@@ -460,8 +465,8 @@ export function isHarmonyOS(): boolean
 
 ```powershell
 pnpm build
-node --test packages/dsh-git-config-sync/test
-node --test apps/arkui-schedule/tools/test
+node --test "packages/dsh-git-config-sync/test/*.test.mjs"
+node --test "apps/arkui-schedule/tools/test/*.test.mjs"
 node apps/arkui-schedule/tools/validate-app.mjs
 node --check packages/dsh-git-config-sync/dist/index.js
 node --check packages/dsh-git-config-sync/dist/client.js

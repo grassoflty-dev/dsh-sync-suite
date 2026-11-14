@@ -3,10 +3,15 @@
  *
  * 平台覆盖语义（`docs/CONTRACT.md` §3.1）：构建某平台时源码 = `main` + 该平台目录，
  * 同名相对路径以后者为准。`entry/src/harmony/ets/common/platformFeatures.ts` 会整体替换本文件，
- * 在鸿蒙侧打开手写/OCR 并显式 `setPlatform('harmony')`。
+ * 在鸿蒙侧无条件打开手写/OCR 并显式 `setPlatform('harmony')`（不依赖运行时检测结果）。
  *
- * 因此本文件必须做到 **fail-closed**：默认关闭手写与 OCR，且把平台标记为 Android，
- * 保证 Android 产物里 UI 静态隐藏手写入口（BRIEF §3.3）。
+ * 本文件是**第二道防线**：不再写死 `'android'`，而是按 `getPlatform()` 装配 ——
+ * `EntryAbility.onCreate` 先用 `setPlatform('android')` 把初值钉成 fail-closed，再被
+ * `devicePlatform.detectPlatform()` 的结果覆盖（鸿蒙覆盖层读 `deviceInfo`，共享实现恒为 `'android'`）。
+ * 因此 Android 产物里这里只会走关闭分支；只有「平台=harmony」时才打开能力（BRIEF §3.3）。
+ *
+ * 前提：调用方必须先 `setPlatform(...)` 再调本函数（`getPlatform()` 未设置时默认 `'harmony'`，
+ * 这是契约 §3.2 的历史语义，EntryAbility 已按此顺序调用）。
  *
  * 契约：`docs/CONTRACT.md` §3.1 / §3.2、BRIEF §3.1。
  *
@@ -17,15 +22,19 @@
  *   `entry/src/harmony/ets/reminder/ReminderService.ets` 不在共享层，故同样由平台覆盖文件实现。
  */
 import { setFeatures } from './features';
-import { setPlatform } from './platform';
+import { getPlatform } from './platform';
 import type { ScheduleRecord } from '../model/types';
 
 /**
  * 安装当前平台的能力开关。
- * 共享默认实现：按 Android 处理 —— 平台标记 Android、关闭手写与 OCR。
+ * 共享默认实现：按 `getPlatform()` 装配 —— harmony → 手写/OCR 可用，其余（含 Android）关闭。
  */
 export function installPlatformFeatures(): void {
-  setPlatform('android');
+  const platform = getPlatform();
+  if (platform === 'harmony') {
+    setFeatures({ handwriting: true, ocr: true });
+    return;
+  }
   setFeatures({ handwriting: false, ocr: false });
 }
 

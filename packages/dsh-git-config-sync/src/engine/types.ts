@@ -72,17 +72,26 @@ export interface RpcErrorBody {
 
 export type RpcResponse<T = unknown> = { ok: true; data: T } | { ok: false; error: RpcErrorBody }
 
-/** getState.status（CONTRACT §2.3）。 */
+/**
+ * getState.status（CONTRACT §2.3）。
+ *
+ * `reachable` 是三态：true = 最近一次探测（testConnection/push/preview）成功，
+ * false = 最近一次探测是网络错误，null = 从未探测（或换了仓库地址，旧结果作废）。
+ * `getState` 本身**绝不联网**，所以不会把"没探测"当成错误。
+ */
 export interface SyncStatus {
-  reachable: boolean
+  reachable: boolean | null
   branch: string
   headSha: string
   headMessage: string
   headTime: string
-  localPending: number
-  remotePending: number
+  /** 本地相对 origin/<branch> 领先的提交数；没有 upstream 引用时为 null（不 fetch）。 */
+  localPending: number | null
+  /** 本地相对 origin/<branch> 落后的提交数；没有 upstream 引用时为 null（不 fetch）。 */
+  remotePending: number | null
   conflict: boolean
   lastSyncAt: string | null
+  /** 只填本地读取错误（工作副本损坏等）；网络不可达不算错误。 */
   error?: string
 }
 

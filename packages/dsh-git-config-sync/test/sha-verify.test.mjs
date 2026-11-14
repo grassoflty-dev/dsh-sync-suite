@@ -1,14 +1,20 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { createRpcService } from '../dist/rpc.js'
+import { parsePatch } from '../dist/engine/patch.js'
 
 const exec = promisify(execFile)
+
+function sha256(text) {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
 
 const PATCH_A = `# 设备 A profile patch
 - id: webserver
@@ -174,10 +180,24 @@ test('apply：校验通过时正常写入，且写前快照可用于 rollback �
     ['alpha', 'webserver'],
   )
   for (const item of okApply.data.applied) {
-    assert.match(item.sha256, /^[0-9a-f]{64}$/)
+    assert.match(item.fileSha256, /^[0-9a-f]{64}$/, 'fileSha256 必须是 64 位十六进制')
+    assert.match(item.blockSha256, /^[0-9a-f]{64}$/, 'blockSha256 必须是 64 位十六进制')
     assert.equal(item.path, patchFileB)
+    assert.equal('sha256' in item, false, '不得保留语义误导的 sha256 字段')
   }
   const changedText = await readFile(patchFileB, 'utf8')
+  // 同一文件的多条 applied：fileSha256 相同（就是落盘文件校验和），blockSha256 不同。
+  const fileShas = new Set(okApply.data.applied.map((item) => item.fileSha256))
+  assert.equal(fileShas.size, 1, '同一文件的 applied 必须共享同一个 fileSha256')
+  assert.equal([...fileShas][0], sha256(changedText), 'fileSha256 必须等于写后 profile patch 整文件 SHA-256')
+  const blockShas = new Set(okApply.data.applied.map((item) => item.blockSha256))
+  assert.equal(blockShas.size, 2, '不同条目的 blockSha256 必须不同')
+  const appliedDoc = parsePatch(changedText)
+  for (const item of okApply.data.applied) {
+    const entry = appliedDoc.entries.find((candidate) => candidate.key === item.id)
+    assert.ok(entry !== undefined, `写后文件里应有条目 ${item.id}`)
+    assert.equal(item.blockSha256, sha256(entry.raw), `blockSha256 必须等于条目 ${item.id} 合并后文本的 SHA-256`)
+  }
   assert.ok(changedText.includes("    host: '0.0.0.0'"), 'webserver 采纳远端')
   assert.ok(changedText.includes('value: from-a'), 'alpha 采纳远端')
   assert.ok(changedText.includes('- id: b-only'), '本地独有保留')
@@ -200,7 +220,7 @@ test('apply：校验通过时正常写入，且写前快照可用于 rollback �
   assert.deepEqual(await readFile(patchFileB), afterRollbackBytes)
 })
 
-test('testConnection：不可达仓库 → E_GIT / reachable 语义（不依赖网络）', async (t) => {
+test('testConnection：不可达仓库 → E_GIT / reachable 三态（不依赖网络）', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'gcs-unreachable-'))
   const homeDir = path.join(root, 'home')
   const profileDir = path.join(root, 'profile')
@@ -226,6 +246,7 @@ test('testConnection：不可达仓库 → E_GIT / reachable 语义（不依赖�
 
   const state = await service.handleRpc({ action: 'getState' })
   assert.equal(state.ok, true, 'getState 不因仓库不可达而整体失败')
-  assert.equal(state.data.status.reachable, false)
-  assert.ok(typeof state.data.status.error === 'string' && state.data.status.error.length > 0)
+  assert.equal(state.data.status.reachable, false, 'testConnection 网络失败后 reachable 持久化为 false')
+  assert.equal(state.data.status.error, undefined, '不可达只是"最近探测失败"，不是 getState 的本地错误')
+  assert.equal(state.data.status.headSha, '', '没有工作副本就没有本地 HEAD')
 })

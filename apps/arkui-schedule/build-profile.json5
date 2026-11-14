@@ -1,3 +1,9 @@
+// 平台装配（方案 b）：module → product 的映射必须按 target 分开，否则 `entry/build-profile.json5`
+// 里 `android` target 的 `source.sourceRoots`（只含 ./src/main）不会被任何 product 用到，
+// 鸿蒙构建就会解析到共享层默认的 `platformFeatures.ts` → `setPlatform('android')`、手写/OCR 全关。
+//
+// ⚠️ 未验证项：本机没有 DevEco Studio / hvigor，该装配是否被 DevEco 5 / ArkUI-X 采纳**未实测**；
+// 验证步骤见 `reports/platformfix.md`。
 {
   "app": {
     "signingConfigs": [],
@@ -38,7 +44,12 @@
         {
           "name": "default",
           "applyToProducts": [
-            "default",
+            "default"
+          ]
+        },
+        {
+          "name": "android",
+          "applyToProducts": [
             "android"
           ]
         }

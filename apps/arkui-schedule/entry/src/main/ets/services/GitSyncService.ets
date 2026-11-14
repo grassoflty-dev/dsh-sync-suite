@@ -30,6 +30,12 @@ import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import {
+  assertWithinDevice,
+  devicePathPrefix,
+  filterPathsForDevice,
+  normalizeDeviceId
+} from '../model/syncScope';
 
 // ---------------------------------------------------------------- 对外接口
 
@@ -416,6 +422,12 @@ export class GitSyncService {
     const problem: string = this.validateForSync();
     if (problem.length > 0) {
       const rejected: GitSyncResult = { ok: false, message: '推送失败：' + problem };
+      return rejected;
+    }
+    // 提交范围不变量（docs/DATA-CONTRACT.md §1/§6）：待提交路径越界一律拒绝，且不触碰网络
+    const scopeProblem: string = this.verifyPushScope();
+    if (scopeProblem.length > 0) {
+      const rejected: GitSyncResult = { ok: false, message: '推送失败：' + scopeProblem };
       return rejected;
     }
     try {
@@ -847,6 +859,80 @@ export class GitSyncService {
       return '同步页面尚未就绪：请等待 Web 组件加载完成（onPageEnd 会自动注册代理）';
     }
     return '';
+  }
+
+  // -------------------------------------------------------------- 内部：提交范围不变量
+
+  /**
+   * push 前的提交范围校验（fail-closed）：本设备目录下的**全部待提交路径**必须落在
+   * `devices/<deviceId>/` 内。返回空串表示通过，否则返回中文原因。
+   *
+   * 步骤：设备标识严格规范化（非法直接失败）→ 枚举 `<repoRoot>/devices/<deviceId>/` 下文件
+   * → 逐条 `assertWithinDevice` → `filterPathsForDevice` 与原始条数比对。
+   * 任一断言失败都转成 `{ok:false, message}`（见 push 的调用点），不会发起网络请求。
+   */
+  private verifyPushScope(): string {
+    let deviceId: string;
+    let prefix: string;
+    let paths: string[];
+    try {
+      deviceId = normalizeDeviceId(this.config.deviceId);
+      prefix = devicePathPrefix(deviceId);
+      paths = this.listDeviceRelativePaths(prefix);
+    } catch (error) {
+      return '提交路径校验失败：' + messageOf(error as Object);
+    }
+    if (paths.length === 0) {
+      return '';
+    }
+    try {
+      for (let index = 0; index < paths.length; index++) {
+        assertWithinDevice(paths[index], deviceId);
+      }
+    } catch (error) {
+      return '提交路径越界（只允许 ' + prefix + '）：' + messageOf(error as Object);
+    }
+    const scoped: string[] = filterPathsForDevice(paths, deviceId);
+    if (scoped.length !== paths.length) {
+      const outOfScope: number = paths.length - scoped.length;
+      return '提交路径越界（只允许 ' + prefix + '）：' + outOfScope.toString() + ' 个待提交路径不在本设备目录内';
+    }
+    return '';
+  }
+
+  /** 递归列出本设备目录下所有文件（仓库相对路径、`/` 分隔、按名称升序）。 */
+  private listDeviceRelativePaths(prefix: string): string[] {
+    const root: string = this.getRepoRoot();
+    const dir: string = normalizePath(root + '/' + prefix.replace(/\/$/, ''));
+    const paths: string[] = [];
+    this.walkDeviceFiles(dir, prefix, paths);
+    return paths;
+  }
+
+  private walkDeviceFiles(dir: string, prefix: string, out: string[]): void {
+    if (!this.fileExists(dir)) {
+      return;
+    }
+    let names: string[] = [];
+    try {
+      names = fs.listFileSync(dir);
+    } catch (error) {
+      return;
+    }
+    names.sort();
+    for (let index = 0; index < names.length; index++) {
+      const name: string = names[index];
+      // 文件名不允许带分隔符（理论上不会出现），出现即跳过，避免拼出越界路径
+      if (name === '.' || name === '..' || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) {
+        continue;
+      }
+      const child: string = dir + '/' + name;
+      if (this.isDirectory(child)) {
+        this.walkDeviceFiles(child, prefix + name + '/', out);
+        continue;
+      }
+      out.push(prefix + name);
+    }
   }
 
   // -------------------------------------------------------------- 内部：远端连通性探测
