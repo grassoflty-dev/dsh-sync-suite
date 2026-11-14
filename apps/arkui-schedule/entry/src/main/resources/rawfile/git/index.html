@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="dsh-bridge-protocol" content="1" />
+  <title>DSH Git 同步桥</title>
+  <style>
+    /* 本页面只作为 Git 同步的隐藏运行环境，不呈现任何 UI */
+    html, body { margin: 0; padding: 0; background: transparent; }
+  </style>
+</head>
+<body>
+  <!--
+    加载顺序固定：先 isomorphic-git（暴露全局 `git`），再 git-bridge（暴露 window.DshGitBridge）。
+    git-bridge.js 依赖全局 `git`，顺序颠倒会在宿主代理检查阶段报 E_GIT。
+  -->
+  <script src="isomorphic-git.js"></script>
+  <script src="git-bridge.js"></script>
+  <script>
+    (function () {
+      'use strict';
+      // 页面自检标志：ArkTS 侧可在 onPageEnd 后读 window.__dshGitBridgeReady 判断是否可注册代理
+      window.__dshGitBridgeReady =
+        typeof window.git === 'object' &&
+        window.git !== null &&
+        typeof window.git.clone === 'function' &&
+        typeof window.DshGitBridge === 'object' &&
+        window.DshGitBridge !== null &&
+        typeof window.DshGitBridge.call === 'function';
+      window.__dshGitVersion = window.__dshGitBridgeReady ? window.git.version() : null;
+      window.__dshBridgeVersion = window.__dshGitBridgeReady ? window.DshGitBridge.version : null;
+    })();
+  </script>
+</body>
+</html>

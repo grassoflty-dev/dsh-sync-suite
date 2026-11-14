@@ -1,0 +1,18 @@
+{
+  "name": "dsh-sync-suite",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH 跨设备配置同步插件 + ArkUI-X 日程助手",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "test": "node --test \"packages/dsh-git-config-sync/test/*.test.mjs\" \"apps/arkui-schedule/tools/test/*.test.mjs\"",
+    "validate": "node apps/arkui-schedule/tools/validate-app.mjs",
+    "typecheck": "node tools/build.mjs --check",
+    "verify": "pnpm build && pnpm test && pnpm validate"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^5.9.3"
+  }
+}

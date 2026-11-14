@@ -1,0 +1,2285 @@
+/**
+ * dsh-git-config-sync — client half (hand-written `__ModuleLoader__` bundle, no build step).
+ *
+ * Registers one settings section (Settings → 配置同步 / Config Sync):
+ *   slot `settings.section`, id `git-config-sync`, order 70, locale NS `git-config-sync`.
+ *
+ * Contents:
+ *   - repository form: platform / repoUrl / authMode / deviceId / branch / token
+ *   - sync scope: config / providers / plugins / mcp (all enabled by default)
+ *   - status badges: reachable, branch, local commits, remote commit, pending upload/download,
+ *     conflict, latest commit (sha + message + time), last sync, status error
+ *   - actions: save / test / push / preview / apply / refresh (all disabled while one is pending)
+ *   - preview: grouped per source device, per-entry diff (monospace, collapsible, max-height),
+ *     adopt-remote vs keep-local toggle, `manual` entries default unchecked
+ *   - plugin manifest MERGE-only plan (install / keep / skip / noDowngrade)
+ *   - pre-write snapshots with two-step rollback confirmation
+ *   - inline errors (code + message), including "preview expired, re-preview" hints
+ *
+ * Transport: same-origin POST /dsh-git-config-sync/rpc
+ *   request  `{ action, ...payload }`
+ *   response `{ ok: true, data }` | `{ ok: false, error: { code, message, details? } }`
+ *   (HTTP 200; only auth failures use 401/403)
+ *
+ * Styling: inline styles only, colours exclusively from `--dsw-alias-*` theme variables.
+ */
+window.__ModuleLoader__.load({
+  id: 'dsh-git-config-sync',
+  factory(require) {
+    const React = require('react')
+    const h = React.createElement
+
+    const NS = 'git-config-sync'
+    const RPC_PATH = '/dsh-git-config-sync/rpc'
+
+    // ------------------------------------------------------------------
+    // Locale dictionaries — kept byte-identical to locale/zh.json / locale/en.json
+    // (the JSON files are generated from these literals; key sets must match).
+    // ------------------------------------------------------------------
+    const zh = {
+      "meta.title": "配置同步",
+      "meta.description": "通过 Git 在设备间同步 DSH 配置（patch 条目、provider、插件清单、MCP），密钥永不进入仓库。",
+      "meta.detail": "把本机 DSH profile 的配置以脱敏快照推到自有 Git 仓库，并在需要时拉取预览、逐条覆盖回本机。每台设备只写自己的目录，密钥永不进入仓库，每次写入前自动快照。\n\n主要能力：\n- 仓库与认证：GitHub / Gitee / 自建仓库，HTTPS Token 或系统 ssh-agent\n- 同步范围：cordis.patch.yml 条目、provider 定义、插件清单（MERGE-only）、MCP\n- 预览与覆盖：按源设备分组、逐条差异勾选、采纳远端 / 保留本地\n- 安全边界：confirm:true 门禁、写后 SHA-256 校验、快照回滚、永不 force push\n\n详见插件内 docs/DETAIL.md。",
+      "nav": "配置同步",
+      "title": "Git 配置同步",
+      "subtitle": "在设备间同步 DSH 配置：本机只写自己的目录，冲突按条目人工确认。",
+
+      "repo.title": "仓库配置",
+      "repo.platform": "平台",
+      "repo.platform.hint": "仅影响仓库地址提示与默认取值，不影响同步逻辑。",
+      "repo.url": "仓库地址",
+      "repo.url.hint.github": "示例：https://github.com/<owner>/<repo>.git",
+      "repo.url.hint.gitee": "示例：https://gitee.com/<owner>/<repo>.git",
+      "repo.url.hint.custom": "支持 https://、ssh://、git@host:path",
+      "repo.auth": "认证方式",
+      "repo.device": "设备标识",
+      "repo.device.hint": "只能用小写字母、数字与连字符，最长 32 位，例如 pc-a。",
+      "repo.branch": "分支",
+      "repo.branch.hint": "默认 main；非快进时先 pull --rebase，永不 force push。",
+      "repo.token": "访问令牌（Token）",
+      "repo.token.hint": "留空表示不修改已保存的 Token",
+      "repo.token.set": "已保存 Token（仅存本机，不入仓库）",
+      "repo.token.unset": "尚未保存 Token",
+      "repo.save": "保存设置",
+
+      "platform.github": "GitHub",
+      "platform.gitee": "Gitee",
+      "platform.custom": "自定义 / 自建",
+
+      "auth.https": "HTTPS（Token）",
+      "auth.ssh": "SSH（系统 ssh-agent）",
+
+      "scope.title": "同步范围",
+      "scope.hint": "默认全部勾选；未勾选的文件不会写入远端快照。",
+      "scope.config": "profile 配置（cordis.patch.yml）",
+      "scope.providers": "模型 provider 定义",
+      "scope.plugins": "插件清单（MERGE-only）",
+      "scope.mcp": "MCP 定义",
+      "scope.config.desc": "按 entry id 逐条合并，保留注释与 !!js",
+      "scope.providers.desc": "provider 定义脱敏后随快照同步",
+      "scope.plugins.desc": "只同步清单，不下载代码；远端有本地无仅给安装计划",
+      "scope.mcp.desc": "含 mcp 的 patch 条目，脱敏后同步",
+
+      "status.title": "同步状态",
+      "status.refresh": "刷新状态",
+      "status.reachable": "可达",
+      "status.unreachable": "不可达",
+      "status.branch": "分支",
+      "status.local": "本地提交",
+      "status.remote": "仓库提交",
+      "status.ahead": "待上传",
+      "status.behind": "待下载",
+      "status.conflict": "冲突",
+      "status.conflict.yes": "有冲突",
+      "status.conflict.no": "无冲突",
+      "status.head": "最近提交",
+      "status.headNone": "（暂无提交）",
+      "status.lastSync": "最近同步",
+      "status.never": "从未同步",
+      "status.error": "状态错误",
+
+      "actions.title": "操作",
+      "actions.test": "测试连接",
+      "actions.push": "推送",
+      "actions.preview": "拉取预览",
+      "actions.apply": "执行覆盖",
+      "actions.apply.hint": "需先拉取预览并勾选至少一个条目",
+      "actions.refresh": "刷新状态",
+
+      "busy.loading": "加载中…",
+      "busy.saving": "保存中…",
+      "busy.testing": "测试中…",
+      "busy.pushing": "推送中…",
+      "busy.previewing": "预览中…",
+      "busy.applying": "覆盖中…",
+      "busy.rollingBack": "回滚中…",
+
+      "error.title": "操作失败",
+      "error.network": "网络异常，无法连接 DSH 服务，请确认服务仍在运行。",
+      "error.http": "服务返回 HTTP {status}，请查看 DSH 日志。",
+      "error.badResponse": "服务返回了无法解析的响应。",
+      "error.unauthorized": "未通过 DSH 鉴权（401/403）。",
+      "error.unknown": "未知错误。",
+      "error.retry": "重试",
+      "error.dismiss": "关闭提示",
+
+      "notice.saved": "设置已保存。",
+      "notice.testOk": "连接正常：{branch} @ {sha} {message}",
+      "notice.pushed": "已推送：{branch} @ {commit}（{files} 个文件）",
+      "notice.previewReady": "预览已生成，共 {count} 个条目。",
+      "notice.applied": "覆盖完成，已写入 {n} 个条目，并生成写前快照。",
+      "notice.rolledBack": "已回滚到快照 {id}。",
+
+      "preview.title": "拉取预览",
+      "preview.empty": "尚未预览。点击「拉取预览」查看其他设备的快照与逐条差异。",
+      "preview.expired": "预览已过期或本次预览已失效，请重新点击「拉取预览」。",
+      "preview.hint": "勾选需要采纳的条目；标记「需本地填写」的条目含脱敏密钥，采纳后仍需在本机补全。",
+      "preview.source": "源设备",
+      "preview.sourceActive": "应用来源",
+      "preview.head": "快照提交",
+      "preview.entries": "条目",
+      "preview.files": "快照文件",
+      "preview.selectAll": "全选可采纳",
+      "preview.clearAll": "清空选择",
+      "preview.selected": "已选 {n} 项",
+      "preview.noneSelected": "未勾选任何条目",
+      "preview.localText": "本地（当前）",
+      "preview.remoteText": "远端（将写入）",
+      "preview.expand": "展开差异",
+      "preview.collapse": "收起差异",
+      "preview.manual": "需本地填写",
+      "preview.secret": "含脱敏密钥",
+      "preview.none": "（空）",
+
+      "entry.status.added": "新增",
+      "entry.status.changed": "变更",
+      "entry.status.same": "相同",
+      "entry.status.manual": "需本地填写",
+      "entry.adoptRemote": "采纳远端",
+      "entry.keepLocal": "保留本地",
+
+      "plugins.title": "插件清单（仅合并）",
+      "plugins.hint": "只同步清单，不下载代码；远端有而本地没有仅给出安装计划，本地独有永不删除。",
+      "plugins.install": "可安装/升级",
+      "plugins.keep": "保持",
+      "plugins.skip": "跳过",
+      "plugins.noDowngrade": "不降级",
+      "plugins.empty": "无插件清单数据。",
+      "plugins.installItem": "{name} @ {version}",
+      "plugins.keepItem": "{name} @ {version}",
+      "plugins.skipItem": "{name} · {reason}",
+      "plugins.noDowngradeItem": "{name}：本地 {localVersion} > 远端 {remoteVersion}",
+      "plugins.manualNote": "install 项只写入 plugins.to-install.json，需你手动安装；本插件不会调用 pnpm，也不会修改 profile。",
+
+      "providers.title": "Provider 差异",
+      "providers.added": "新增",
+      "providers.changed": "变更",
+      "providers.same": "相同",
+      "mcp.title": "MCP 差异",
+
+      "snapshots.title": "写前快照",
+      "snapshots.refresh": "刷新快照",
+      "snapshots.empty": "暂无快照（每次执行覆盖/回滚前会自动生成，最多保留最近 10 份）。",
+      "snapshots.id": "快照",
+      "snapshots.time": "时间",
+      "snapshots.reason": "原因",
+      "snapshots.bytes": "大小",
+      "snapshots.rollback": "回滚",
+      "snapshots.confirm": "确认把配置回滚到快照 {id}？当前文件会被覆盖。",
+      "snapshots.confirmYes": "确认回滚",
+      "snapshots.cancel": "取消",
+
+      "apply.title": "上次覆盖结果",
+      "apply.applied": "已写入",
+      "apply.skipped": "已跳过",
+      "apply.snapshot": "写前快照",
+      "apply.verified": "SHA-256 校验通过",
+      "apply.none": "无",
+
+      "confirm.apply": "确认把 {device} 的 {n} 个条目覆盖到本机？写入前会自动快照，写后校验 SHA-256。",
+      "confirm.yes": "确认覆盖",
+      "confirm.cancel": "取消",
+
+      "common.close": "关闭",
+      "common.none": "—"
+    }
+
+    const en = {
+      "meta.title": "Config Sync",
+      "meta.description": "Sync DSH configuration across devices over Git (patch entries, providers, plugin manifest, MCP). Secrets never enter the repository.",
+      "meta.detail": "Push this machine's DSH profile configuration to your own Git repository as a redacted snapshot, then pull a per-entry preview and apply selected entries back on demand. Each device writes only its own directory, secrets never enter the repository, and every write is snapshotted first.\n\nWhat it does:\n- Repository & auth: GitHub / Gitee / self-hosted over HTTPS token or system ssh-agent\n- Scope: cordis.patch.yml entries, provider definitions, plugin manifest (MERGE-only), MCP\n- Preview & apply: grouped per source device, per-entry selection, adopt remote / keep local\n- Safety: confirm gate, post-write SHA-256 verification, snapshot rollback, never force-push\n\nSee docs/DETAIL.md inside the plugin.",
+      "nav": "Config Sync",
+      "title": "Git config sync",
+      "subtitle": "Sync DSH configuration across devices. Each device writes only its own directory; conflicts are resolved entry by entry.",
+
+      "repo.title": "Repository",
+      "repo.platform": "Platform",
+      "repo.platform.hint": "Only affects the URL hint and placeholder, not the sync logic.",
+      "repo.url": "Repository URL",
+      "repo.url.hint.github": "e.g. https://github.com/<owner>/<repo>.git",
+      "repo.url.hint.gitee": "e.g. https://gitee.com/<owner>/<repo>.git",
+      "repo.url.hint.custom": "Accepts https://, ssh:// and git@host:path",
+      "repo.auth": "Authentication",
+      "repo.device": "Device ID",
+      "repo.device.hint": "Lowercase letters, digits and hyphens only, up to 32 chars, e.g. pc-a.",
+      "repo.branch": "Branch",
+      "repo.branch.hint": "Defaults to main. Non-fast-forward pulls use pull --rebase; never force-push.",
+      "repo.token": "Access token",
+      "repo.token.hint": "Leave empty to keep the saved token",
+      "repo.token.set": "Token saved (local only, never in the repo)",
+      "repo.token.unset": "No token saved yet",
+      "repo.save": "Save settings",
+
+      "platform.github": "GitHub",
+      "platform.gitee": "Gitee",
+      "platform.custom": "Custom / self-hosted",
+
+      "auth.https": "HTTPS (token)",
+      "auth.ssh": "SSH (system ssh-agent)",
+
+      "scope.title": "Sync scope",
+      "scope.hint": "All enabled by default; unchecked files are not written to the remote snapshot.",
+      "scope.config": "Profile config (cordis.patch.yml)",
+      "scope.providers": "Provider definitions",
+      "scope.plugins": "Plugin manifest (MERGE-only)",
+      "scope.mcp": "MCP definitions",
+      "scope.config.desc": "Merged per entry id; comments and !!js preserved",
+      "scope.providers.desc": "Provider definitions are redacted before sync",
+      "scope.plugins.desc": "Manifest only, no code; remote-only plugins get an install plan",
+      "scope.mcp.desc": "Patch entries containing mcp, redacted",
+
+      "status.title": "Status",
+      "status.refresh": "Refresh",
+      "status.reachable": "Reachable",
+      "status.unreachable": "Unreachable",
+      "status.branch": "Branch",
+      "status.local": "Local commits",
+      "status.remote": "Remote commit",
+      "status.ahead": "Pending upload",
+      "status.behind": "Pending download",
+      "status.conflict": "Conflict",
+      "status.conflict.yes": "conflict",
+      "status.conflict.no": "no conflict",
+      "status.head": "Latest commit",
+      "status.headNone": "(no commit yet)",
+      "status.lastSync": "Last sync",
+      "status.never": "never",
+      "status.error": "Status error",
+
+      "actions.title": "Actions",
+      "actions.test": "Test connection",
+      "actions.push": "Push",
+      "actions.preview": "Preview remote",
+      "actions.apply": "Apply overwrite",
+      "actions.apply.hint": "Requires a preview with at least one selected entry",
+      "actions.refresh": "Refresh status",
+
+      "busy.loading": "Loading…",
+      "busy.saving": "Saving…",
+      "busy.testing": "Testing…",
+      "busy.pushing": "Pushing…",
+      "busy.previewing": "Previewing…",
+      "busy.applying": "Applying…",
+      "busy.rollingBack": "Rolling back…",
+
+      "error.title": "Operation failed",
+      "error.network": "Network error: cannot reach the DSH server. Check that it is still running.",
+      "error.http": "Server returned HTTP {status}; check the DSH logs.",
+      "error.badResponse": "Server returned an unparsable response.",
+      "error.unauthorized": "DSH authorization rejected (401/403).",
+      "error.unknown": "Unknown error.",
+      "error.retry": "Retry",
+      "error.dismiss": "Dismiss",
+
+      "notice.saved": "Settings saved.",
+      "notice.testOk": "Connected: {branch} @ {sha} {message}",
+      "notice.pushed": "Pushed: {branch} @ {commit} ({files} files)",
+      "notice.previewReady": "Preview ready: {count} entries.",
+      "notice.applied": "Applied {n} entries; a pre-write snapshot was created.",
+      "notice.rolledBack": "Rolled back to snapshot {id}.",
+
+      "preview.title": "Preview",
+      "preview.empty": "No preview yet. Click \"Preview remote\" to fetch other devices' snapshots and per-entry diffs.",
+      "preview.expired": "This preview is stale or already consumed. Please run \"Preview remote\" again.",
+      "preview.hint": "Check the entries to adopt. Entries marked \"needs local value\" contain redacted secrets and still require a local value.",
+      "preview.source": "Source device",
+      "preview.sourceActive": "Apply from",
+      "preview.head": "Snapshot commit",
+      "preview.entries": "Entries",
+      "preview.files": "Snapshot files",
+      "preview.selectAll": "Select all adoptable",
+      "preview.clearAll": "Clear selection",
+      "preview.selected": "{n} selected",
+      "preview.noneSelected": "No entry selected",
+      "preview.localText": "Local (current)",
+      "preview.remoteText": "Remote (will be written)",
+      "preview.expand": "Show diff",
+      "preview.collapse": "Hide diff",
+      "preview.manual": "Needs local value",
+      "preview.secret": "Contains redacted secret",
+      "preview.none": "(empty)",
+
+      "entry.status.added": "added",
+      "entry.status.changed": "changed",
+      "entry.status.same": "same",
+      "entry.status.manual": "needs local value",
+      "entry.adoptRemote": "Adopt remote",
+      "entry.keepLocal": "Keep local",
+
+      "plugins.title": "Plugin manifest (merge only)",
+      "plugins.hint": "Manifest only, no code. Remote-only plugins get an install plan; local-only plugins are never removed.",
+      "plugins.install": "Install / upgrade",
+      "plugins.keep": "Keep",
+      "plugins.skip": "Skip",
+      "plugins.noDowngrade": "No downgrade",
+      "plugins.empty": "No plugin manifest data.",
+      "plugins.installItem": "{name} @ {version}",
+      "plugins.keepItem": "{name} @ {version}",
+      "plugins.skipItem": "{name} · {reason}",
+      "plugins.noDowngradeItem": "{name}: local {localVersion} > remote {remoteVersion}",
+      "plugins.manualNote": "Install items are only written to plugins.to-install.json for you to install manually; this plugin never runs pnpm and never edits the profile.",
+
+      "providers.title": "Provider diff",
+      "providers.added": "added",
+      "providers.changed": "changed",
+      "providers.same": "same",
+      "mcp.title": "MCP diff",
+
+      "snapshots.title": "Pre-write snapshots",
+      "snapshots.refresh": "Refresh snapshots",
+      "snapshots.empty": "No snapshots yet (one is created before every apply/rollback, latest 10 kept).",
+      "snapshots.id": "Snapshot",
+      "snapshots.time": "Time",
+      "snapshots.reason": "Reason",
+      "snapshots.bytes": "Size",
+      "snapshots.rollback": "Roll back",
+      "snapshots.confirm": "Roll the configuration back to snapshot {id}? Current files will be overwritten.",
+      "snapshots.confirmYes": "Roll back now",
+      "snapshots.cancel": "Cancel",
+
+      "apply.title": "Last apply result",
+      "apply.applied": "Written",
+      "apply.skipped": "Skipped",
+      "apply.snapshot": "Snapshot",
+      "apply.verified": "SHA-256 verified",
+      "apply.none": "none",
+
+      "confirm.apply": "Overwrite this machine with {n} entries from {device}? A snapshot is taken first and SHA-256 is verified after writing.",
+      "confirm.yes": "Apply now",
+      "confirm.cancel": "Cancel",
+
+      "common.close": "Close",
+      "common.none": "—"
+    }
+
+    const DICTS = { zh: zh, en: en }
+
+    // ------------------------------------------------------------------
+    // Translation
+    // ------------------------------------------------------------------
+    let serviceT = null // bound to ctx.locale.t in apply(), when available
+
+    function detectLang() {
+      try {
+        const doc = typeof document === 'undefined' ? null : document
+        let raw = ''
+        if (doc && doc.documentElement) {
+          raw = doc.documentElement.getAttribute('lang') || doc.documentElement.lang || ''
+        }
+        if (!raw && typeof navigator !== 'undefined' && navigator) raw = navigator.language || ''
+        raw = String(raw).toLowerCase()
+        if (raw.indexOf('zh') === 0) return 'zh'
+        if (raw.indexOf('en') === 0) return 'en'
+      } catch (e) {
+        /* ignore */
+      }
+      return 'zh'
+    }
+
+    const lang = detectLang()
+
+    function interpolate(text, vars) {
+      if (!vars || typeof text !== 'string') return text
+      return text.replace(/\{([a-zA-Z0-9_]+)\}/g, function (all, name) {
+        if (Object.prototype.hasOwnProperty.call(vars, name)) {
+          const v = vars[name]
+          return v === undefined || v === null ? '' : String(v)
+        }
+        return all
+      })
+    }
+
+    function t(key, vars) {
+      if (serviceT) {
+        try {
+          const out = serviceT(key)
+          if (typeof out === 'string' && out !== '' && out !== key) return interpolate(out, vars)
+        } catch (e) {
+          /* fall through to the bundled dictionary */
+        }
+      }
+      const dict = DICTS[lang] || DICTS.zh
+      let text = dict[key]
+      if (typeof text !== 'string') text = DICTS.zh[key]
+      if (typeof text !== 'string') text = key
+      return interpolate(text, vars)
+    }
+
+    /** Component-level translator: prefers the `t` prop handed over by the slot host. */
+    function makeT(props) {
+      const fn = props && typeof props.t === 'function' ? props.t : null
+      return function translate(key, vars) {
+        if (fn) {
+          try {
+            const out = fn(key)
+            if (typeof out === 'string' && out !== '' && out !== key) return interpolate(out, vars)
+          } catch (e) {
+            /* fall through */
+          }
+        }
+        return t(key, vars)
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Theme + inline styles (only --dsw-alias-* variables, with neutral fallbacks)
+    // ------------------------------------------------------------------
+    const C = {
+      borderL1: 'var(--dsw-alias-border-l1, rgba(127,127,127,.14))',
+      borderL2: 'var(--dsw-alias-border-l2, rgba(127,127,127,.22))',
+      bgBase: 'var(--dsw-alias-bg-base, #ffffff)',
+      bgFloat: 'var(--dsw-alias-bg-float, rgba(127,127,127,.05))',
+      labelPrimary: 'var(--dsw-alias-label-primary, #1f1f1f)',
+      labelSecondary: 'var(--dsw-alias-label-secondary, #4a4a4a)',
+      labelTertiary: 'var(--dsw-alias-label-tertiary, #767676)',
+      hover: 'var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.10))',
+      btnFill: 'var(--dsw-alias-button-tool-bar-fill, rgba(127,127,127,.08))',
+      accent: 'var(--dsw-alias-state-business-primary, #2a7de1)',
+      mono: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace'
+    }
+
+    const TONE = {
+      ok: {
+        background: 'var(--dsw-alias-state-success-soft, rgba(18,150,78,.14))',
+        color: 'var(--dsw-alias-state-success-primary, #0d7a3f)'
+      },
+      info: {
+        background: 'var(--dsw-alias-state-info-soft, rgba(40,120,255,.12))',
+        color: 'var(--dsw-alias-state-info-primary, #2a7de1)'
+      },
+      warn: {
+        background: 'var(--dsw-alias-state-warning-soft, rgba(220,140,0,.14))',
+        color: 'var(--dsw-alias-state-warning-primary, #a76500)'
+      },
+      err: {
+        background: 'var(--dsw-alias-state-error-soft, rgba(220,60,60,.12))',
+        color: 'var(--dsw-alias-state-error-primary, #c62828)'
+      },
+      mute: {
+        background: 'var(--dsw-alias-bg-base, rgba(127,127,127,.10))',
+        color: 'var(--dsw-alias-label-tertiary, #767676)'
+      }
+    }
+
+    const S = {
+      root: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 14,
+        padding: '4px 2px 18px',
+        fontSize: 13,
+        lineHeight: 1.55,
+        color: C.labelPrimary,
+        minWidth: 0,
+        maxWidth: '100%',
+        boxSizing: 'border-box'
+      },
+      head: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' },
+      headText: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 },
+      title: { fontSize: 16, fontWeight: 600, margin: 0, color: C.labelPrimary },
+      desc: { fontSize: 12, margin: 0, color: C.labelTertiary, lineHeight: 1.5 },
+      card: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+        padding: '12px 14px',
+        border: '1px solid ' + C.borderL2,
+        borderRadius: 10,
+        background: C.bgFloat,
+        minWidth: 0,
+        boxSizing: 'border-box'
+      },
+      cardHead: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' },
+      cardTitle: { fontSize: 13, fontWeight: 600, margin: 0, color: C.labelPrimary },
+      hint: { fontSize: 11.5, margin: 0, color: C.labelTertiary, lineHeight: 1.5 },
+      grid2: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 10, minWidth: 0 },
+      field: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 },
+      label: { fontSize: 12, color: C.labelSecondary },
+      input: {
+        width: '100%',
+        boxSizing: 'border-box',
+        fontSize: 12.5,
+        color: C.labelPrimary,
+        background: C.bgBase,
+        border: '1px solid ' + C.borderL2,
+        borderRadius: 6,
+        padding: '5px 8px',
+        outline: 'none',
+        minWidth: 0
+      },
+      select: {
+        width: '100%',
+        boxSizing: 'border-box',
+        fontSize: 12.5,
+        color: C.labelPrimary,
+        background: C.bgBase,
+        border: '1px solid ' + C.borderL2,
+        borderRadius: 6,
+        padding: '5px 6px',
+        outline: 'none',
+        minWidth: 0
+      },
+      inputDisabled: { opacity: 0.6, cursor: 'not-allowed' },
+      row: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0 },
+      grow: { flex: '1 1 auto' },
+      btn: {
+        fontSize: 12,
+        fontWeight: 500,
+        color: C.labelPrimary,
+        background: C.btnFill,
+        border: '1px solid ' + C.borderL2,
+        borderRadius: 6,
+        padding: '4px 11px',
+        cursor: 'pointer',
+        whiteSpace: 'nowrap',
+        boxSizing: 'border-box'
+      },
+      btnPrimary: { color: C.accent, borderColor: C.accent, fontWeight: 600 },
+      btnDanger: {
+        color: 'var(--dsw-alias-state-error-primary, #c62828)',
+        borderColor: 'var(--dsw-alias-state-error-primary, #c62828)'
+      },
+      btnDisabled: { opacity: 0.45, cursor: 'not-allowed' },
+      linkBtn: {
+        fontSize: 11.5,
+        color: C.accent,
+        background: 'transparent',
+        border: 'none',
+        padding: '1px 4px',
+        cursor: 'pointer',
+        whiteSpace: 'nowrap'
+      },
+      segBtn: {
+        fontSize: 11.5,
+        padding: '2px 8px',
+        borderRadius: 5,
+        border: '1px solid ' + C.borderL2,
+        background: 'transparent',
+        color: C.labelSecondary,
+        cursor: 'pointer',
+        whiteSpace: 'nowrap'
+      },
+      segBtnActive: { background: C.accent, borderColor: C.accent, color: '#ffffff' },
+      seg: { display: 'inline-flex', gap: 4, flexWrap: 'wrap' },
+      badge: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        fontSize: 11,
+        fontWeight: 500,
+        padding: '1px 8px',
+        borderRadius: 999,
+        whiteSpace: 'nowrap',
+        flex: 'none'
+      },
+      checkbox: { accentColor: C.accent, margin: 0, flex: 'none' },
+      checkRow: { display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', minWidth: 0 },
+      checkText: { display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 },
+      checkLabel: { fontSize: 12.5, color: C.labelPrimary },
+      checkDesc: { fontSize: 11, color: C.labelTertiary, lineHeight: 1.45 },
+      errorBox: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        padding: '10px 12px',
+        borderRadius: 8,
+        border: '1px solid var(--dsw-alias-state-error-primary, #c62828)',
+        background: 'var(--dsw-alias-state-error-soft, rgba(220,60,60,.10))',
+        color: C.labelPrimary,
+        minWidth: 0
+      },
+      errorHead: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+      errorTitle: { fontSize: 12.5, fontWeight: 600, color: 'var(--dsw-alias-state-error-primary, #c62828)' },
+      errorCode: { fontFamily: C.mono, fontSize: 11.5, color: C.labelSecondary },
+      errorMsg: { fontSize: 12, color: C.labelPrimary, wordBreak: 'break-word' },
+      errorHint: { fontSize: 11.5, color: C.labelSecondary, wordBreak: 'break-word' },
+      notice: {
+        fontSize: 12,
+        padding: '8px 10px',
+        borderRadius: 8,
+        border: '1px solid var(--dsw-alias-state-success-primary, #0d7a3f)',
+        background: 'var(--dsw-alias-state-success-soft, rgba(18,150,78,.10))',
+        color: C.labelPrimary,
+        wordBreak: 'break-word'
+      },
+      metaRow: { display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0, flexWrap: 'wrap' },
+      metaLabel: { fontSize: 11.5, color: C.labelTertiary, flex: 'none' },
+      metaValue: { fontSize: 12, color: C.labelPrimary, minWidth: 0, wordBreak: 'break-word' },
+      mono: { fontFamily: C.mono, fontSize: 11.5 },
+      source: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        padding: '10px 12px',
+        borderRadius: 8,
+        border: '1px solid ' + C.borderL2,
+        background: C.bgBase,
+        minWidth: 0
+      },
+      sourceActive: { borderColor: C.accent, boxShadow: '0 0 0 1px ' + C.accent + ' inset' },
+      sourceHead: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0 },
+      sourceName: { fontFamily: C.mono, fontSize: 12.5, fontWeight: 600, color: C.labelPrimary, wordBreak: 'break-all' },
+      radio: { accentColor: C.accent, margin: 0, flex: 'none' },
+      radioWrap: { display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' },
+      chipRow: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', minWidth: 0 },
+      chip: {
+        fontSize: 11,
+        maxWidth: '100%',
+        padding: '1px 7px',
+        borderRadius: 5,
+        border: '1px solid ' + C.borderL1,
+        color: C.labelSecondary,
+        background: C.bgFloat,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      },
+      entries: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 },
+      entry: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        padding: '7px 9px',
+        borderRadius: 7,
+        border: '1px solid ' + C.borderL1,
+        background: C.bgFloat,
+        minWidth: 0
+      },
+      entryHead: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0 },
+      entryName: { fontFamily: C.mono, fontSize: 12, color: C.labelPrimary, minWidth: 0, wordBreak: 'break-all' },
+      manualNote: { fontSize: 11, color: 'var(--dsw-alias-state-warning-primary, #a76500)' },
+      diffGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 8, minWidth: 0 },
+      diffCol: { display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 },
+      diffColHead: { fontSize: 11, color: C.labelTertiary },
+      pre: {
+        margin: 0,
+        padding: '6px 8px',
+        fontFamily: C.mono,
+        fontSize: 11.5,
+        lineHeight: 1.5,
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+        maxHeight: 220,
+        overflow: 'auto',
+        background: C.bgBase,
+        border: '1px solid ' + C.borderL1,
+        borderRadius: 6,
+        color: C.labelPrimary,
+        minWidth: 0
+      },
+      block: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        padding: '8px 10px',
+        borderRadius: 7,
+        border: '1px dashed ' + C.borderL2,
+        minWidth: 0
+      },
+      blockHead: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+      blockTitle: { fontSize: 12, fontWeight: 600, color: C.labelPrimary },
+      list: { display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 },
+      listRow: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', minWidth: 0 },
+      listText: { fontFamily: C.mono, fontSize: 11.5, color: C.labelPrimary, wordBreak: 'break-all' },
+      listMeta: { fontSize: 11, color: C.labelTertiary, wordBreak: 'break-all' },
+      snapRow: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        padding: '7px 9px',
+        borderRadius: 7,
+        border: '1px solid ' + C.borderL1,
+        background: C.bgBase,
+        minWidth: 0
+      },
+      snapMain: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', minWidth: 0 },
+      snapId: { fontFamily: C.mono, fontSize: 11.5, color: C.labelPrimary, wordBreak: 'break-all' },
+      snapMeta: { fontSize: 11, color: C.labelTertiary },
+      confirmBar: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        flexWrap: 'wrap',
+        padding: '8px 10px',
+        borderRadius: 7,
+        border: '1px solid ' + C.accent,
+        background: C.bgBase,
+        minWidth: 0
+      },
+      confirmInline: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0 },
+      confirmText: { fontSize: 11.5, color: C.labelPrimary, flex: '1 1 220px', minWidth: 0, wordBreak: 'break-word' }
+    }
+
+    // ------------------------------------------------------------------
+    // Formatting helpers
+    // ------------------------------------------------------------------
+    function num(v) {
+      if (typeof v === 'number' && isFinite(v)) return String(v)
+      if (typeof v === 'string' && v !== '') return v
+      return '0'
+    }
+
+    function shortSha(sha) {
+      if (typeof sha !== 'string' || !sha) return '—'
+      return sha.length > 7 ? sha.slice(0, 7) : sha
+    }
+
+    function fmtTime(value) {
+      if (!value) return '—'
+      try {
+        const d = new Date(value)
+        if (isNaN(d.getTime())) return String(value)
+        return d.toLocaleString()
+      } catch (e) {
+        return String(value)
+      }
+    }
+
+    function fmtBytes(n) {
+      if (typeof n !== 'number' || !isFinite(n) || n < 0) return '—'
+      if (n < 1024) return n + ' B'
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+      return (n / (1024 * 1024)).toFixed(1) + ' MB'
+    }
+
+    function asText(v) {
+      return typeof v === 'string' ? v : ''
+    }
+
+    // ------------------------------------------------------------------
+    // RPC (same-origin fetch; never throws)
+    // ------------------------------------------------------------------
+    async function rpcCall(action, payload) {
+      const body = Object.assign({ action: action }, payload && typeof payload === 'object' ? payload : {})
+      let response
+      try {
+        response = await fetch(RPC_PATH, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body)
+        })
+      } catch (e) {
+        return { ok: false, error: { code: 'E_NETWORK', message: (e && e.message) || '' } }
+      }
+      const status = response && typeof response.status === 'number' ? response.status : 0
+      let text = ''
+      try {
+        text = await response.text()
+      } catch (e) {
+        text = ''
+      }
+      let json = null
+      if (text) {
+        try {
+          json = JSON.parse(text)
+        } catch (e) {
+          json = null
+        }
+      }
+      if (json && typeof json === 'object') {
+        if (json.ok === true) return { ok: true, data: json.data }
+        if (json.ok === false) {
+          const raw = json.error && typeof json.error === 'object' ? json.error : {}
+          return {
+            ok: false,
+            error: {
+              code: String(raw.code || (status === 401 || status === 403 ? 'E_AUTH' : 'E_UNKNOWN')),
+              message: String(raw.message || ''),
+              details: raw.details
+            }
+          }
+        }
+      }
+      if (status === 401 || status === 403) return { ok: false, error: { code: 'E_AUTH', message: 'HTTP ' + status } }
+      if (status >= 400) return { ok: false, error: { code: 'E_HTTP', message: 'HTTP ' + status } }
+      return { ok: false, error: { code: 'E_BAD_RESPONSE', message: text ? text.slice(0, 300) : 'HTTP ' + status } }
+    }
+
+    /** Normalise an error envelope into `{code, message, hint?}` with localized text. */
+    function localizeError(translate, error) {
+      const e = error && typeof error === 'object' ? error : {}
+      const code = String(e.code || 'E_UNKNOWN')
+      const raw = asText(e.message)
+      let message = ''
+      if (code === 'E_NETWORK') message = translate('error.network')
+      else if (code === 'E_HTTP') {
+        const digits = raw.replace(/[^0-9]/g, '')
+        message = translate('error.http', { status: digits || '?' })
+      } else if (code === 'E_BAD_RESPONSE') {
+        message = translate('error.badResponse') + (raw ? ' · ' + raw : '')
+      } else if (code === 'E_AUTH') {
+        message = translate('error.unauthorized') + (raw ? ' · ' + raw : '')
+      } else {
+        message = raw || translate('error.unknown')
+      }
+      return { code: code, message: message }
+    }
+
+    // ------------------------------------------------------------------
+    // Settings / preview helpers
+    // ------------------------------------------------------------------
+    function emptyForm() {
+      return {
+        platform: 'github',
+        repoUrl: '',
+        authMode: 'https',
+        deviceId: '',
+        branch: 'main',
+        scope: { config: true, providers: true, plugins: true, mcp: true }
+      }
+    }
+
+    function normalizeSettings(settings) {
+      const src = settings && typeof settings === 'object' ? settings : {}
+      const scope = src.scope && typeof src.scope === 'object' ? src.scope : {}
+      return {
+        platform: src.platform === 'gitee' || src.platform === 'custom' ? src.platform : 'github',
+        repoUrl: asText(src.repoUrl),
+        authMode: src.authMode === 'ssh' ? 'ssh' : 'https',
+        deviceId: asText(src.deviceId),
+        branch: asText(src.branch) || 'main',
+        scope: {
+          config: scope.config !== false,
+          providers: scope.providers !== false,
+          plugins: scope.plugins !== false,
+          mcp: scope.mcp !== false
+        }
+      }
+    }
+
+    function urlPlaceholder(platform) {
+      if (platform === 'gitee') return 'https://gitee.com/owner/repo.git'
+      if (platform === 'custom') return 'git@example.com:owner/repo.git'
+      return 'https://github.com/owner/repo.git'
+    }
+
+    function urlHint(translate, platform) {
+      if (platform === 'gitee') return translate('repo.url.hint.gitee')
+      if (platform === 'custom') return translate('repo.url.hint.custom')
+      return translate('repo.url.hint.github')
+    }
+
+    function entryKey(deviceId, id) {
+      return String(deviceId) + '::' + String(id)
+    }
+
+    function entryStatus(entry) {
+      const status = entry && typeof entry === 'object' ? String(entry.status || '') : ''
+      if (status === 'added' || status === 'changed' || status === 'same' || status === 'manual') return status
+      return 'same'
+    }
+
+    function buildSelection(sources) {
+      const out = {}
+      const list = Array.isArray(sources) ? sources : []
+      for (let si = 0; si < list.length; si++) {
+        const src = list[si] || {}
+        const entries = Array.isArray(src.entries) ? src.entries : []
+        for (let ei = 0; ei < entries.length; ei++) {
+          const entry = entries[ei] || {}
+          const status = entryStatus(entry)
+          out[entryKey(src.deviceId, entry.id)] = status === 'added' || status === 'changed'
+        }
+      }
+      return out
+    }
+
+    function findSource(sources, deviceId) {
+      const list = Array.isArray(sources) ? sources : []
+      for (let i = 0; i < list.length; i++) {
+        const src = list[i] || {}
+        if (String(src.deviceId || '') === String(deviceId || '')) return src
+      }
+      return null
+    }
+
+    function collectSelected(source, selection) {
+      const out = []
+      if (!source || typeof source !== 'object') return out
+      const entries = Array.isArray(source.entries) ? source.entries : []
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i] || {}
+        if (entryStatus(entry) === 'same') continue
+        if (selection[entryKey(source.deviceId, entry.id)]) out.push(String(entry.id))
+      }
+      return out
+    }
+
+    function countEntries(sources) {
+      let total = 0
+      const list = Array.isArray(sources) ? sources : []
+      for (let i = 0; i < list.length; i++) {
+        total += Array.isArray(list[i] && list[i].entries) ? list[i].entries.length : 0
+      }
+      return total
+    }
+
+    // ------------------------------------------------------------------
+    // Presentational components (stateless, inline styles only)
+    // ------------------------------------------------------------------
+    function Badge(props) {
+      const tone = TONE[props.tone] || TONE.mute
+      return h(
+        'span',
+        { style: Object.assign({}, S.badge, tone), title: asText(props.title) },
+        asText(props.text)
+      )
+    }
+
+    function Btn(props) {
+      const disabled = Boolean(props.disabled)
+      return h(
+        'button',
+        {
+          type: 'button',
+          disabled: disabled,
+          title: asText(props.title),
+          onClick: disabled ? undefined : props.onClick,
+          style: Object.assign(
+            {},
+            S.btn,
+            props.primary ? S.btnPrimary : null,
+            props.danger ? S.btnDanger : null,
+            disabled ? S.btnDisabled : null,
+            props.style || null
+          )
+        },
+        asText(props.label)
+      )
+    }
+
+    function SegBtn(props) {
+      const disabled = Boolean(props.disabled)
+      return h(
+        'button',
+        {
+          type: 'button',
+          disabled: disabled,
+          onClick: disabled ? undefined : props.onClick,
+          style: Object.assign(
+            {},
+            S.segBtn,
+            props.active ? S.segBtnActive : null,
+            disabled ? S.btnDisabled : null
+          )
+        },
+        asText(props.label)
+      )
+    }
+
+    function Input(props) {
+      return h('input', {
+        type: props.type === 'password' ? 'password' : 'text',
+        value: props.value === undefined || props.value === null ? '' : String(props.value),
+        placeholder: asText(props.placeholder),
+        disabled: Boolean(props.disabled),
+        autoComplete: props.autoComplete === 'new-password' ? 'new-password' : 'off',
+        spellCheck: props.spellCheck === true,
+        onChange: function (event) {
+          if (typeof props.onChange === 'function') props.onChange(event.target.value)
+        },
+        style: Object.assign({}, S.input, props.disabled ? S.inputDisabled : null)
+      })
+    }
+
+    function Select(props) {
+      const options = Array.isArray(props.options) ? props.options : []
+      return h(
+        'select',
+        {
+          value: props.value === undefined || props.value === null ? '' : String(props.value),
+          disabled: Boolean(props.disabled),
+          onChange: function (event) {
+            if (typeof props.onChange === 'function') props.onChange(event.target.value)
+          },
+          style: Object.assign({}, S.select, props.disabled ? S.inputDisabled : null)
+        },
+        options.map(function (opt) {
+          const o = opt || {}
+          return h('option', { key: String(o.value), value: String(o.value) }, asText(o.label))
+        })
+      )
+    }
+
+    function CheckRow(props) {
+      return h(
+        'label',
+        { style: S.checkRow },
+        h('input', {
+          type: 'checkbox',
+          checked: Boolean(props.checked),
+          disabled: Boolean(props.disabled),
+          onChange: function (event) {
+            if (typeof props.onChange === 'function') props.onChange(Boolean(event.target.checked))
+          },
+          style: S.checkbox
+        }),
+        h(
+          'span',
+          { style: S.checkText },
+          h('span', { style: S.checkLabel }, asText(props.label)),
+          props.desc ? h('span', { style: S.checkDesc }, asText(props.desc)) : null
+        )
+      )
+    }
+
+    /** Wrap rest-argument children in keyed fragments so React never warns about lists. */
+    function keyedKids(kids, prefix) {
+      return kids.map(function (kid, i) {
+        return h(React.Fragment, { key: prefix + i }, kid)
+      })
+    }
+
+    function Card(props) {
+      const kids = Array.prototype.slice.call(arguments, 1)
+      return h(
+        'section',
+        { style: Object.assign({}, S.card, props.style || null) },
+        props.title
+          ? h(
+              'div',
+              { style: S.cardHead },
+              h('h3', { style: S.cardTitle }, asText(props.title)),
+              props.right || null
+            )
+          : null,
+        keyedKids(kids, 'card-')
+      )
+    }
+
+    function Field(props) {
+      const kids = Array.prototype.slice.call(arguments, 1)
+      return h(
+        'div',
+        { style: S.field },
+        h('label', { style: S.label }, asText(props.label)),
+        keyedKids(kids, 'field-'),
+        props.hint ? h('p', { style: S.hint }, asText(props.hint)) : null
+      )
+    }
+
+    function ErrorBox(props) {
+      const err = props.error && typeof props.error === 'object' ? props.error : {}
+      return h(
+        'div',
+        { style: S.errorBox, role: 'alert' },
+        h(
+          'div',
+          { style: S.errorHead },
+          h('span', { style: S.errorTitle }, asText(props.title)),
+          typeof props.onDismiss === 'function'
+            ? h('button', { type: 'button', style: S.linkBtn, onClick: props.onDismiss }, asText(props.dismissLabel))
+            : null
+        ),
+        h('div', { style: S.errorCode }, asText(err.code) || 'E_UNKNOWN'),
+        h('div', { style: S.errorMsg }, asText(err.message)),
+        err.hint ? h('div', { style: S.errorHint }, asText(err.hint)) : null,
+        typeof props.onRetry === 'function'
+          ? h(Btn, { label: asText(props.retryLabel), onClick: props.onRetry, style: { alignSelf: 'flex-start' } })
+          : null
+      )
+    }
+
+    function DiffList(props) {
+      const translate = props.t
+      const data = props.data && typeof props.data === 'object' ? props.data : {}
+      const added = Array.isArray(data.added) ? data.added : []
+      const changed = Array.isArray(data.changed) ? data.changed : []
+      const same = Array.isArray(data.same) ? data.same : []
+      const groups = []
+      function group(label, arr, tone) {
+        if (!arr.length) return null
+        return h(
+          'div',
+          { style: S.chipRow, key: 'g-' + label },
+          h(Badge, { text: label + ' ' + arr.length, tone: tone }),
+          arr.map(function (name, i) {
+            return h('span', { key: 'c' + i, style: S.chip, title: String(name) }, String(name))
+          })
+        )
+      }
+      groups.push(group(translate('providers.added'), added, 'ok'))
+      groups.push(group(translate('providers.changed'), changed, 'info'))
+      groups.push(group(translate('providers.same'), same, 'mute'))
+      return h(
+        'div',
+        { style: S.block },
+        h('div', { style: S.blockHead }, h('span', { style: S.blockTitle }, asText(props.title))),
+        added.length + changed.length + same.length
+          ? groups
+          : h('div', { style: S.hint }, translate('common.none'))
+      )
+    }
+
+    function PluginBlock(props) {
+      const translate = props.t
+      const plan = props.plugins && typeof props.plugins === 'object' ? props.plugins : {}
+      const install = Array.isArray(plan.install) ? plan.install : []
+      const keep = Array.isArray(plan.keep) ? plan.keep : []
+      const skip = Array.isArray(plan.skip) ? plan.skip : []
+      const noDowngrade = Array.isArray(plan.noDowngrade) ? plan.noDowngrade : []
+      const total = install.length + keep.length + skip.length + noDowngrade.length
+      const rows = []
+      install.forEach(function (item, i) {
+        const o = item && typeof item === 'object' ? item : { name: String(item), version: '' }
+        rows.push(
+          h(
+            'div',
+            { key: 'pi' + i, style: S.listRow },
+            h(Badge, { text: translate('plugins.install'), tone: 'ok' }),
+            h('span', { style: S.listText }, translate('plugins.installItem', { name: asText(o.name), version: asText(o.version) || '?' })),
+            h('span', { style: S.listMeta }, asText(o.source))
+          )
+        )
+      })
+      keep.forEach(function (item, i) {
+        const o = item && typeof item === 'object' ? item : { name: String(item), version: '' }
+        rows.push(
+          h(
+            'div',
+            { key: 'pk' + i, style: S.listRow },
+            h(Badge, { text: translate('plugins.keep'), tone: 'mute' }),
+            h('span', { style: S.listText }, translate('plugins.keepItem', { name: asText(o.name), version: asText(o.version) || '?' }))
+          )
+        )
+      })
+      skip.forEach(function (item, i) {
+        const o = item && typeof item === 'object' ? item : { name: String(item), reason: '' }
+        rows.push(
+          h(
+            'div',
+            { key: 'ps' + i, style: S.listRow },
+            h(Badge, { text: translate('plugins.skip'), tone: 'warn' }),
+            h('span', { style: S.listText }, translate('plugins.skipItem', { name: asText(o.name), reason: asText(o.reason) }))
+          )
+        )
+      })
+      noDowngrade.forEach(function (item, i) {
+        const o = item && typeof item === 'object' ? item : {}
+        rows.push(
+          h(
+            'div',
+            { key: 'pn' + i, style: S.listRow },
+            h(Badge, { text: translate('plugins.noDowngrade'), tone: 'err' }),
+            h(
+              'span',
+              { style: S.listText },
+              translate('plugins.noDowngradeItem', {
+                name: asText(o.name),
+                localVersion: asText(o.localVersion) || '?',
+                remoteVersion: asText(o.remoteVersion) || '?'
+              })
+            )
+          )
+        )
+      })
+      return h(
+        'div',
+        { style: S.block },
+        h(
+          'div',
+          { style: S.blockHead },
+          h('span', { style: S.blockTitle }, translate('plugins.title')),
+          h(Badge, { text: translate('plugins.install') + ' ' + install.length, tone: install.length ? 'ok' : 'mute' }),
+          h(Badge, { text: translate('plugins.keep') + ' ' + keep.length, tone: 'mute' }),
+          h(Badge, { text: translate('plugins.skip') + ' ' + skip.length, tone: skip.length ? 'warn' : 'mute' }),
+          h(Badge, {
+            text: translate('plugins.noDowngrade') + ' ' + noDowngrade.length,
+            tone: noDowngrade.length ? 'err' : 'mute'
+          })
+        ),
+        h('div', { style: S.hint }, translate('plugins.hint')),
+        total ? h('div', { style: S.list }, rows) : h('div', { style: S.hint }, translate('plugins.empty')),
+        h('div', { style: S.hint }, translate('plugins.manualNote'))
+      )
+    }
+
+    function EntryRow(props) {
+      const translate = props.t
+      const entry = props.entry && typeof props.entry === 'object' ? props.entry : {}
+      const status = entryStatus(entry)
+      const isSame = status === 'same'
+      const isManual = status === 'manual'
+      const keepingLocal = props.mode === 'local'
+      const tone = status === 'added' ? 'ok' : status === 'changed' ? 'info' : isManual ? 'warn' : 'mute'
+      const label =
+        status === 'added'
+          ? translate('entry.status.added')
+          : status === 'changed'
+            ? translate('entry.status.changed')
+            : isManual
+              ? translate('entry.status.manual')
+              : translate('entry.status.same')
+      const identity = asText(entry.name) || asText(entry.id) || '—'
+      return h(
+        'div',
+        { style: S.entry },
+        h(
+          'div',
+          { style: S.entryHead },
+          isSame
+            ? null
+            : h('input', {
+                type: 'checkbox',
+                checked: Boolean(props.checked),
+                disabled: Boolean(props.disabled) || keepingLocal,
+                onChange: function (event) {
+                  if (typeof props.onToggle === 'function') props.onToggle(Boolean(event.target.checked))
+                },
+                style: S.checkbox,
+                'aria-label': identity
+              }),
+          h(Badge, { text: label, tone: tone }),
+          h('span', { style: S.entryName, title: asText(entry.id) }, identity),
+          entry.secretStripped ? h(Badge, { text: translate('preview.secret'), tone: 'warn' }) : null,
+          h('span', { style: S.grow }),
+          h(
+            'span',
+            { style: S.seg },
+            h(SegBtn, {
+              active: !keepingLocal,
+              disabled: isSame || Boolean(props.disabled),
+              label: translate('entry.adoptRemote'),
+              onClick: function () {
+                if (typeof props.onMode === 'function') props.onMode('remote')
+              }
+            }),
+            h(SegBtn, {
+              active: keepingLocal,
+              disabled: isSame || Boolean(props.disabled),
+              label: translate('entry.keepLocal'),
+              onClick: function () {
+                if (typeof props.onMode === 'function') props.onMode('local')
+              }
+            })
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              style: S.linkBtn,
+              onClick: function () {
+                if (typeof props.onExpand === 'function') props.onExpand()
+              }
+            },
+            props.open ? translate('preview.collapse') : translate('preview.expand')
+          )
+        ),
+        isManual ? h('div', { style: S.manualNote }, translate('preview.manual')) : null,
+        props.open
+          ? h(
+              'div',
+              { style: S.diffGrid },
+              h(
+                'div',
+                { style: S.diffCol },
+                h('div', { style: S.diffColHead }, translate('preview.localText')),
+                h('pre', { style: S.pre }, asText(entry.localText) || translate('preview.none'))
+              ),
+              h(
+                'div',
+                { style: S.diffCol },
+                h('div', { style: S.diffColHead }, translate('preview.remoteText')),
+                h('pre', { style: S.pre }, asText(entry.remoteText) || translate('preview.none'))
+              )
+            )
+          : null
+      )
+    }
+
+    // ------------------------------------------------------------------
+    // Settings section
+    // ------------------------------------------------------------------
+    function SettingsPanel(props) {
+      const tr = makeT(props)
+      const alive = React.useRef(true)
+      React.useEffect(function () {
+        alive.current = true
+        return function () {
+          alive.current = false
+        }
+      }, [])
+
+      const [state, setState] = React.useState(null)
+      const [loading, setLoading] = React.useState(true)
+      const [error, setError] = React.useState(null)
+      const [notice, setNotice] = React.useState('')
+      const [busy, setBusy] = React.useState('')
+      const [form, setForm] = React.useState(emptyForm)
+      const [token, setToken] = React.useState('')
+      const [hasToken, setHasToken] = React.useState(false)
+      const [preview, setPreview] = React.useState(null)
+      const [selection, setSelection] = React.useState({})
+      const [modes, setModes] = React.useState({})
+      const [openMap, setOpenMap] = React.useState({})
+      const [activeDevice, setActiveDevice] = React.useState('')
+      const [confirmApply, setConfirmApply] = React.useState(false)
+      const [confirmSnap, setConfirmSnap] = React.useState('')
+      const [applyResult, setApplyResult] = React.useState(null)
+      const initialized = React.useRef(false)
+
+      React.useEffect(function () {
+        let stopped = false
+        function done(result) {
+          if (stopped || !alive.current) return
+          setLoading(false)
+          if (!result || !result.ok) {
+            setError(localizeError(tr, result ? result.error : { code: 'E_NETWORK' }))
+            return
+          }
+          adoptState(result.data)
+        }
+        Promise.resolve(rpcCall('getState', {})).then(done, function () {
+          done({ ok: false, error: { code: 'E_NETWORK' } })
+        })
+        return function () {
+          stopped = true
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [])
+
+      function adoptState(data) {
+        const next = data && typeof data === 'object' ? data : {}
+        setState(next)
+        if (!initialized.current) {
+          initialized.current = true
+          const settings = next.settings && typeof next.settings === 'object' ? next.settings : {}
+          setForm(normalizeSettings(settings))
+          setHasToken(Boolean(settings.hasToken))
+        }
+      }
+
+      async function reloadState(options) {
+        const silent = Boolean(options && options.silent)
+        if (!silent) setLoading(true)
+        const result = await rpcCall('getState', {})
+        if (!alive.current) return
+        if (!silent) setLoading(false)
+        if (!result.ok) {
+          setError(localizeError(tr, result.error))
+          return
+        }
+        adoptState(result.data)
+      }
+
+      /** Dedicated snapshot listing (`listSnapshots`), used by the snapshot card refresh. */
+      async function refreshSnapshots() {
+        const result = await rpcCall('listSnapshots', {})
+        if (!alive.current) return false
+        if (!result.ok) {
+          setError(localizeError(tr, result.error))
+          return false
+        }
+        const data = result.data && typeof result.data === 'object' ? result.data : {}
+        const list = Array.isArray(data.snapshots) ? data.snapshots : []
+        setState(function (prev) {
+          return Object.assign({}, prev || {}, { snapshots: list })
+        })
+        return true
+      }
+
+      async function runTask(key, task) {
+        if (busy) return
+        setBusy(key)
+        setError(null)
+        try {
+          await task()
+        } catch (e) {
+          if (alive.current) setError({ code: 'E_UNKNOWN', message: (e && e.message) || tr('error.unknown') })
+        } finally {
+          if (alive.current) setBusy('')
+        }
+      }
+
+      function setField(key, value) {
+        setForm(function (prev) {
+          const next = Object.assign({}, prev)
+          next[key] = value
+          return next
+        })
+      }
+
+      function setScopeField(key, value) {
+        setForm(function (prev) {
+          const scope = Object.assign({}, prev.scope)
+          scope[key] = Boolean(value)
+          return Object.assign({}, prev, { scope: scope })
+        })
+      }
+
+      function doSave() {
+        runTask('save', async function () {
+          const result = await rpcCall('saveSettings', { settings: normalizeSettings(form), token: token })
+          if (!alive.current) return
+          if (!result.ok) {
+            setError(localizeError(tr, result.error))
+            return
+          }
+          const data = result.data && typeof result.data === 'object' ? result.data : {}
+          if (data.settings) setForm(normalizeSettings(data.settings))
+          setHasToken(data.hasToken === undefined ? Boolean(data.settings && data.settings.hasToken) : Boolean(data.hasToken))
+          setToken('')
+          setNotice(tr('notice.saved'))
+          await reloadState({ silent: true })
+        })
+      }
+
+      function doTest() {
+        runTask('test', async function () {
+          const result = await rpcCall('testConnection', {})
+          if (!alive.current) return
+          if (!result.ok) {
+            setError(localizeError(tr, result.error))
+            return
+          }
+          const data = result.data && typeof result.data === 'object' ? result.data : {}
+          setNotice(
+            tr('notice.testOk', {
+              branch: asText(data.branch) || '—',
+              sha: shortSha(data.headSha),
+              message: asText(data.message)
+            })
+          )
+          await reloadState({ silent: true })
+        })
+      }
+
+      function doPush() {
+        runTask('push', async function () {
+          const result = await rpcCall('push', {})
+          if (!alive.current) return
+          if (!result.ok) {
+            setError(localizeError(tr, result.error))
+            return
+          }
+          const data = result.data && typeof result.data === 'object' ? result.data : {}
+          setNotice(
+            tr('notice.pushed', {
+              branch: asText(data.branch) || '—',
+              commit: shortSha(data.commit),
+              files: Array.isArray(data.files) ? data.files.length : 0
+            })
+          )
+          // Remote head may have moved: any previous preview is stale now.
+          clearPreview()
+          await reloadState({ silent: true })
+        })
+      }
+
+      function doPreview() {
+        runTask('preview', async function () {
+          const result = await rpcCall('preview', {})
+          if (!alive.current) return
+          if (!result.ok) {
+            setError(localizeError(tr, result.error))
+            return
+          }
+          const data = result.data && typeof result.data === 'object' ? result.data : {}
+          const sources = Array.isArray(data.sources) ? data.sources : []
+          setPreview({ previewId: data.previewId, sources: sources })
+          setSelection(buildSelection(sources))
+          setModes({})
+          setOpenMap({})
+          setApplyResult(null)
+          setConfirmApply(false)
+          setActiveDevice(sources.length ? String(sources[0].deviceId || '') : '')
+          setNotice(sources.length ? tr('notice.previewReady', { count: countEntries(sources) }) : tr('preview.empty'))
+        })
+      }
+
+      function clearPreview() {
+        setPreview(null)
+        setSelection({})
+        setModes({})
+        setOpenMap({})
+        setActiveDevice('')
+        setConfirmApply(false)
+      }
+
+      function doApply() {
+        if (!preview || !preview.previewId || !activeSource) return
+        const ids = activeIds.slice()
+        if (!ids.length) return
+        setConfirmApply(false)
+        runTask('apply', async function () {
+          const result = await rpcCall('apply', {
+            confirm: true,
+            previewId: preview.previewId,
+            sourceDevice: String(activeSource.deviceId || ''),
+            entries: ids
+          })
+          if (!alive.current) return
+          if (!result.ok) {
+            const localized = localizeError(tr, result.error)
+            const code = String((result.error && result.error.code) || '')
+            if (code === 'E_NOT_FOUND' || code === 'E_VALIDATION' || code === 'E_CONFIRM_REQUIRED') {
+              localized.hint = tr('preview.expired')
+            }
+            setError(localized)
+            return
+          }
+          const data = result.data && typeof result.data === 'object' ? result.data : {}
+          setApplyResult(data)
+          setNotice(tr('notice.applied', { n: Array.isArray(data.applied) ? data.applied.length : 0 }))
+          // A preview can only be applied once; force a fresh preview afterwards.
+          clearPreview()
+          await refreshSnapshots()
+          await reloadState({ silent: true })
+        })
+      }
+
+      function doRollback(snapshotId) {
+        const id = String(snapshotId || '')
+        if (!id) return
+        setConfirmSnap('')
+        runTask('rollback', async function () {
+          const result = await rpcCall('rollback', { snapshotId: id, confirm: true })
+          if (!alive.current) return
+          if (!result.ok) {
+            setError(localizeError(tr, result.error))
+            return
+          }
+          setApplyResult(null)
+          setNotice(tr('notice.rolledBack', { id: id }))
+          clearPreview()
+          await refreshSnapshots()
+          await reloadState({ silent: true })
+        })
+      }
+
+      function toggleEntry(deviceId, id, checked) {
+        const key = entryKey(deviceId, id)
+        setSelection(function (prev) {
+          const next = Object.assign({}, prev)
+          next[key] = Boolean(checked)
+          return next
+        })
+      }
+
+      function setEntryMode(deviceId, id, mode) {
+        const key = entryKey(deviceId, id)
+        const keep = mode === 'local'
+        setModes(function (prev) {
+          const next = Object.assign({}, prev)
+          next[key] = keep ? 'local' : 'remote'
+          return next
+        })
+        setSelection(function (prev) {
+          const next = Object.assign({}, prev)
+          next[key] = keep ? false : true
+          return next
+        })
+      }
+
+      function toggleOpen(key) {
+        setOpenMap(function (prev) {
+          const next = Object.assign({}, prev)
+          next[key] = !prev[key]
+          return next
+        })
+      }
+
+      function selectAllForActiveSource() {
+        if (!activeSource) return
+        const entries = Array.isArray(activeSource.entries) ? activeSource.entries : []
+        const next = Object.assign({}, selection)
+        const nextModes = Object.assign({}, modes)
+        for (let i = 0; i < entries.length; i++) {
+          const entry = entries[i] || {}
+          if (entryStatus(entry) === 'same') continue
+          const key = entryKey(activeSource.deviceId, entry.id)
+          next[key] = true
+          nextModes[key] = 'remote'
+        }
+        setSelection(next)
+        setModes(nextModes)
+      }
+
+      function clearAllForActiveSource() {
+        if (!activeSource) return
+        const entries = Array.isArray(activeSource.entries) ? activeSource.entries : []
+        const next = Object.assign({}, selection)
+        for (let i = 0; i < entries.length; i++) {
+          const entry = entries[i] || {}
+          next[entryKey(activeSource.deviceId, entry.id)] = false
+        }
+        setSelection(next)
+      }
+
+      // Derived values -------------------------------------------------
+      const status = (state && state.status) || {}
+      const settings = (state && state.settings) || {}
+      const snapshots = Array.isArray(state && state.snapshots) ? state.snapshots : []
+      const sources = preview && Array.isArray(preview.sources) ? preview.sources : []
+      const activeSource = findSource(sources, activeDevice)
+      const activeIds = activeSource ? collectSelected(activeSource, selection) : []
+      const canApply = Boolean(preview && preview.previewId && activeSource && activeIds.length > 0 && !busy)
+      const applyHint = !preview || !preview.previewId ? tr('actions.apply.hint') : activeIds.length ? '' : tr('preview.noneSelected')
+      const anyBusy = Boolean(busy)
+
+      const children = []
+
+      children.push(
+        h(
+          'div',
+          { key: 'head', style: S.head },
+          h(
+            'div',
+            { style: S.headText },
+            h('h2', { style: S.title }, tr('title')),
+            h('p', { style: S.desc }, tr('subtitle'))
+          ),
+          typeof props.close === 'function'
+            ? h(Btn, { key: 'close', label: tr('common.close'), onClick: props.close })
+            : null
+        )
+      )
+
+      if (error) {
+        children.push(
+          h(ErrorBox, {
+            key: 'error',
+            error: error,
+            title: tr('error.title'),
+            retryLabel: tr('error.retry'),
+            dismissLabel: tr('error.dismiss'),
+            onRetry: function () {
+              setError(null)
+              reloadState({})
+            },
+            onDismiss: function () {
+              setError(null)
+            }
+          })
+        )
+      }
+
+      if (notice) {
+        children.push(
+          h(
+            'div',
+            { key: 'notice', style: S.row },
+            h('div', { style: Object.assign({}, S.notice, { flex: '1 1 auto' }) }, notice),
+            h(
+              'button',
+              {
+                type: 'button',
+                style: S.linkBtn,
+                onClick: function () {
+                  setNotice('')
+                }
+              },
+              tr('error.dismiss')
+            )
+          )
+        )
+      }
+
+      if (loading && !state) {
+        children.push(h('div', { key: 'loading', style: S.hint }, tr('busy.loading')))
+      }
+
+      // 1) Repository form --------------------------------------------
+      children.push(
+        h(
+          Card,
+          { key: 'repo', title: tr('repo.title') },
+          h(
+            'div',
+            { style: S.grid2 },
+            h(
+              Field,
+              { label: tr('repo.platform'), hint: tr('repo.platform.hint') },
+              h(Select, {
+                value: form.platform,
+                disabled: anyBusy,
+                options: [
+                  { value: 'github', label: tr('platform.github') },
+                  { value: 'gitee', label: tr('platform.gitee') },
+                  { value: 'custom', label: tr('platform.custom') }
+                ],
+                onChange: function (value) {
+                  setField('platform', value)
+                }
+              })
+            ),
+            h(
+              Field,
+              { label: tr('repo.auth') },
+              h(Select, {
+                value: form.authMode,
+                disabled: anyBusy,
+                options: [
+                  { value: 'https', label: tr('auth.https') },
+                  { value: 'ssh', label: tr('auth.ssh') }
+                ],
+                onChange: function (value) {
+                  setField('authMode', value)
+                }
+              })
+            ),
+            h(
+              Field,
+              { label: tr('repo.url'), hint: urlHint(tr, form.platform) },
+              h(Input, {
+                value: form.repoUrl,
+                placeholder: urlPlaceholder(form.platform),
+                disabled: anyBusy,
+                onChange: function (value) {
+                  setField('repoUrl', value)
+                }
+              })
+            ),
+            h(
+              Field,
+              { label: tr('repo.device'), hint: tr('repo.device.hint') },
+              h(Input, {
+                value: form.deviceId,
+                placeholder: 'pc-a',
+                disabled: anyBusy,
+                onChange: function (value) {
+                  setField('deviceId', value)
+                }
+              })
+            ),
+            h(
+              Field,
+              { label: tr('repo.branch'), hint: tr('repo.branch.hint') },
+              h(Input, {
+                value: form.branch,
+                placeholder: 'main',
+                disabled: anyBusy,
+                onChange: function (value) {
+                  setField('branch', value)
+                }
+              })
+            ),
+            h(
+              Field,
+              { label: tr('repo.token'), hint: hasToken ? tr('repo.token.set') : tr('repo.token.unset') },
+              h(Input, {
+                type: 'password',
+                value: token,
+                placeholder: tr('repo.token.hint'),
+                autoComplete: 'new-password',
+                disabled: anyBusy,
+                onChange: function (value) {
+                  setToken(value)
+                }
+              })
+            )
+          ),
+          h(
+            'div',
+            { style: S.row },
+            h(Btn, {
+              label: busy === 'save' ? tr('busy.saving') : tr('repo.save'),
+              primary: true,
+              disabled: anyBusy,
+              onClick: doSave
+            })
+          )
+        )
+      )
+
+      // 2) Sync scope --------------------------------------------------
+      children.push(
+        h(
+          Card,
+          { key: 'scope', title: tr('scope.title') },
+          h('p', { style: S.hint }, tr('scope.hint')),
+          h(
+            'div',
+            { style: S.grid2 },
+            h(CheckRow, {
+              label: tr('scope.config'),
+              desc: tr('scope.config.desc'),
+              checked: Boolean(form.scope.config),
+              disabled: anyBusy,
+              onChange: function (checked) {
+                setScopeField('config', checked)
+              }
+            }),
+            h(CheckRow, {
+              label: tr('scope.providers'),
+              desc: tr('scope.providers.desc'),
+              checked: Boolean(form.scope.providers),
+              disabled: anyBusy,
+              onChange: function (checked) {
+                setScopeField('providers', checked)
+              }
+            }),
+            h(CheckRow, {
+              label: tr('scope.plugins'),
+              desc: tr('scope.plugins.desc'),
+              checked: Boolean(form.scope.plugins),
+              disabled: anyBusy,
+              onChange: function (checked) {
+                setScopeField('plugins', checked)
+              }
+            }),
+            h(CheckRow, {
+              label: tr('scope.mcp'),
+              desc: tr('scope.mcp.desc'),
+              checked: Boolean(form.scope.mcp),
+              disabled: anyBusy,
+              onChange: function (checked) {
+                setScopeField('mcp', checked)
+              }
+            })
+          )
+        )
+      )
+
+      // 3) Status ------------------------------------------------------
+      const statusErrorText =
+        status.error === undefined || status.error === null || status.error === ''
+          ? ''
+          : typeof status.error === 'string'
+            ? status.error
+            : JSON.stringify(status.error)
+      const conflict = Boolean(status.conflict)
+      children.push(
+        h(
+          Card,
+          {
+            key: 'status',
+            title: tr('status.title'),
+            right: h(Btn, {
+              label: anyBusy ? tr('busy.loading') : tr('status.refresh'),
+              disabled: anyBusy,
+              onClick: function () {
+                setNotice('')
+                reloadState({})
+              }
+            })
+          },
+          h(
+            'div',
+            { style: S.chipRow },
+            h(Badge, {
+              text: status.reachable ? tr('status.reachable') : tr('status.unreachable'),
+              tone: status.reachable ? 'ok' : 'err'
+            }),
+            h(Badge, {
+              text: tr('status.branch') + ': ' + (asText(status.branch) || form.branch || '—'),
+              tone: 'info'
+            }),
+            h(Badge, { text: tr('status.local') + ': ' + num(status.localPending), tone: Number(status.localPending) > 0 ? 'info' : 'mute' }),
+            h(Badge, {
+              text: tr('status.remote') + ': ' + (status.headSha ? shortSha(status.headSha) : '—'),
+              tone: status.headSha ? 'info' : 'mute'
+            }),
+            h(Badge, { text: tr('status.ahead') + ': ' + num(status.localPending), tone: Number(status.localPending) > 0 ? 'warn' : 'mute' }),
+            h(Badge, { text: tr('status.behind') + ': ' + num(status.remotePending), tone: Number(status.remotePending) > 0 ? 'warn' : 'mute' }),
+            h(Badge, {
+              text: tr('status.conflict') + ': ' + (conflict ? tr('status.conflict.yes') : tr('status.conflict.no')),
+              tone: conflict ? 'err' : 'mute'
+            })
+          ),
+          h(
+            'div',
+            { style: S.metaRow },
+            h('span', { style: S.metaLabel }, tr('status.head')),
+            h(
+              'span',
+              { style: S.metaValue, title: asText(status.headSha) },
+              status.headSha
+                ? shortSha(status.headSha) + ' · ' + asText(status.headMessage) + ' · ' + fmtTime(status.headTime)
+                : tr('status.headNone')
+            )
+          ),
+          h(
+            'div',
+            { style: S.metaRow },
+            h('span', { style: S.metaLabel }, tr('status.lastSync')),
+            h('span', { style: S.metaValue }, status.lastSyncAt ? fmtTime(status.lastSyncAt) : tr('status.never'))
+          ),
+          statusErrorText
+            ? h(
+                'div',
+                { style: Object.assign({}, S.metaRow, { color: 'var(--dsw-alias-state-error-primary, #c62828)' }) },
+                h('span', { style: S.metaLabel }, tr('status.error')),
+                h('span', { style: S.metaValue }, statusErrorText)
+              )
+            : null
+        )
+      )
+
+      // 4) Actions -----------------------------------------------------
+      children.push(
+        h(
+          Card,
+          { key: 'actions', title: tr('actions.title'), right: h(Badge, { text: asText(settings.deviceId) || form.deviceId || '—', tone: 'mute' }) },
+          h(
+            'div',
+            { style: S.row },
+            h(Btn, {
+              label: busy === 'test' ? tr('busy.testing') : tr('actions.test'),
+              disabled: anyBusy,
+              onClick: doTest
+            }),
+            h(Btn, {
+              label: busy === 'push' ? tr('busy.pushing') : tr('actions.push'),
+              disabled: anyBusy,
+              onClick: doPush
+            }),
+            h(Btn, {
+              label: busy === 'preview' ? tr('busy.previewing') : tr('actions.preview'),
+              disabled: anyBusy,
+              onClick: doPreview
+            }),
+            h(Btn, {
+              label: busy === 'apply' ? tr('busy.applying') : tr('actions.apply'),
+              primary: true,
+              disabled: anyBusy || !canApply,
+              title: applyHint || tr('actions.apply'),
+              onClick: function () {
+                setConfirmApply(true)
+              }
+            }),
+            h(Btn, {
+              label: tr('actions.refresh'),
+              disabled: anyBusy,
+              onClick: function () {
+                setNotice('')
+                reloadState({})
+              }
+            })
+          ),
+          h('p', { style: S.hint }, applyHint || tr('preview.selected', { n: activeIds.length })),
+          confirmApply && activeSource
+            ? h(
+                'div',
+                { style: S.confirmBar },
+                h(
+                  'div',
+                  { style: S.confirmText },
+                  tr('confirm.apply', { device: asText(activeSource.deviceId) || '—', n: activeIds.length })
+                ),
+                h(Btn, {
+                  label: tr('confirm.yes'),
+                  primary: true,
+                  danger: true,
+                  disabled: anyBusy,
+                  onClick: doApply
+                }),
+                h(Btn, {
+                  label: tr('confirm.cancel'),
+                  disabled: anyBusy,
+                  onClick: function () {
+                    setConfirmApply(false)
+                  }
+                })
+              )
+            : null
+        )
+      )
+
+      // 5) Preview -----------------------------------------------------
+      const previewBody = []
+      if (!preview || !sources.length) {
+        previewBody.push(h('p', { key: 'p-empty', style: S.hint }, tr('preview.empty')))
+      } else {
+        previewBody.push(h('p', { key: 'p-hint', style: S.hint }, tr('preview.hint')))
+        previewBody.push(
+          h(
+            'div',
+            { key: 'p-actions', style: S.row },
+            h(Btn, {
+              label: tr('preview.selectAll'),
+              disabled: anyBusy || !activeSource,
+              onClick: selectAllForActiveSource
+            }),
+            h(Btn, {
+              label: tr('preview.clearAll'),
+              disabled: anyBusy || !activeSource,
+              onClick: clearAllForActiveSource
+            }),
+            h(Badge, { text: tr('preview.selected', { n: activeIds.length }), tone: activeIds.length ? 'ok' : 'mute' }),
+            h(Badge, { text: tr('preview.source') + ': ' + (activeDevice || '—'), tone: 'info' })
+          )
+        )
+        sources.forEach(function (src, si) {
+          const source = src && typeof src === 'object' ? src : {}
+          const deviceId = asText(source.deviceId)
+          const entries = Array.isArray(source.entries) ? source.entries : []
+          const files = Array.isArray(source.files) ? source.files : []
+          const isActive = deviceId === activeDevice
+          const header = h(
+            'div',
+            { style: S.sourceHead },
+            h(
+              'label',
+              { style: S.radioWrap },
+              h('input', {
+                type: 'radio',
+                name: 'dsh-git-config-sync-source',
+                checked: isActive,
+                disabled: anyBusy,
+                onChange: function () {
+                  setActiveDevice(deviceId)
+                  setConfirmApply(false)
+                },
+                style: S.radio
+              }),
+              h('span', { style: S.sourceName }, deviceId || '—')
+            ),
+            h(Badge, { text: tr('preview.head') + ' ' + shortSha(source.headSha), tone: 'info' }),
+            h(Badge, { text: tr('preview.entries') + ' ' + entries.length, tone: 'mute' }),
+            h(Badge, { text: tr('preview.files') + ' ' + files.length, tone: 'mute' }),
+            h('span', { style: S.grow }),
+            isActive ? h(Badge, { text: tr('preview.sourceActive'), tone: 'ok' }) : null
+          )
+          const entryRows = entries.map(function (entry, ei) {
+            const e = entry && typeof entry === 'object' ? entry : {}
+            const key = entryKey(deviceId, e.id)
+            return h(EntryRow, {
+              key: key + ':' + ei,
+              t: tr,
+              entry: e,
+              checked: Boolean(selection[key]),
+              mode: modes[key] === 'local' ? 'local' : 'remote',
+              open: Boolean(openMap[key]),
+              disabled: anyBusy,
+              onToggle: function (checked) {
+                toggleEntry(deviceId, e.id, checked)
+              },
+              onMode: function (mode) {
+                setEntryMode(deviceId, e.id, mode)
+              },
+              onExpand: function () {
+                toggleOpen(key)
+              }
+            })
+          })
+          previewBody.push(
+            h(
+              'div',
+              { key: 'src-' + si, style: Object.assign({}, S.source, isActive ? S.sourceActive : null) },
+              header,
+              files.length
+                ? h(
+                    'div',
+                    { style: S.chipRow },
+                    files.map(function (file, fi) {
+                      const f = file && typeof file === 'object' ? file : {}
+                      return h(
+                        'span',
+                        { key: 'f' + fi, style: S.chip, title: asText(f.sha256) },
+                        asText(f.name) + ' · ' + fmtBytes(f.bytes)
+                      )
+                    })
+                  )
+                : null,
+              entries.length ? h('div', { style: S.entries }, entryRows) : h('div', { style: S.hint }, tr('common.none')),
+              h(PluginBlock, { key: 'plugins', plugins: source.plugins, t: tr }),
+              h(DiffList, { key: 'providers', title: tr('providers.title'), data: source.providers, t: tr }),
+              h(DiffList, { key: 'mcp', title: tr('mcp.title'), data: source.mcp, t: tr })
+            )
+          )
+        })
+      }
+      children.push(
+        h(
+          Card,
+          {
+            key: 'preview',
+            title: tr('preview.title'),
+            right: h(Btn, {
+              label: busy === 'preview' ? tr('busy.previewing') : tr('actions.preview'),
+              disabled: anyBusy,
+              onClick: doPreview
+            })
+          },
+          previewBody
+        )
+      )
+
+      // 6) Snapshots ---------------------------------------------------
+      const snapshotRows = snapshots.map(function (snapshot, si) {
+        const sn = snapshot && typeof snapshot === 'object' ? snapshot : {}
+        const id = asText(sn.id)
+        const confirming = confirmSnap === id && id !== ''
+        return h(
+          'div',
+          { key: 'snap-' + si, style: S.snapRow },
+          h(
+            'div',
+            { style: S.snapMain },
+            h('span', { style: S.snapId, title: id }, id || '—'),
+            h('span', { style: S.snapMeta }, asText(sn.reason) || '—'),
+            h('span', { style: S.snapMeta }, fmtTime(sn.time)),
+            h('span', { style: S.snapMeta }, fmtBytes(sn.bytes))
+          ),
+          confirming
+            ? h(
+                'div',
+                { style: S.confirmInline },
+                h('div', { style: S.confirmText }, tr('snapshots.confirm', { id: id })),
+                h(Btn, {
+                  label: busy === 'rollback' ? tr('busy.rollingBack') : tr('snapshots.confirmYes'),
+                  primary: true,
+                  danger: true,
+                  disabled: anyBusy,
+                  onClick: function () {
+                    doRollback(id)
+                  }
+                }),
+                h(Btn, {
+                  label: tr('snapshots.cancel'),
+                  disabled: anyBusy,
+                  onClick: function () {
+                    setConfirmSnap('')
+                  }
+                })
+              )
+            : h(Btn, {
+                label: tr('snapshots.rollback'),
+                disabled: anyBusy || !id,
+                onClick: function () {
+                  setConfirmSnap(id)
+                }
+              })
+        )
+      })
+      children.push(
+        h(
+          Card,
+          {
+            key: 'snapshots',
+            title: tr('snapshots.title'),
+            right: h(Btn, {
+              label: busy === 'snapshots' ? tr('busy.loading') : tr('snapshots.refresh'),
+              disabled: anyBusy,
+              onClick: function () {
+                setNotice('')
+                runTask('snapshots', async function () {
+                  await refreshSnapshots()
+                })
+              }
+            })
+          },
+          snapshotRows.length
+            ? h(
+                'div',
+                { style: S.list },
+                h(
+                  'div',
+                  { style: S.chipRow },
+                  h(Badge, { text: tr('snapshots.id'), tone: 'mute' }),
+                  h(Badge, { text: tr('snapshots.time'), tone: 'mute' }),
+                  h(Badge, { text: tr('snapshots.reason'), tone: 'mute' }),
+                  h(Badge, { text: tr('snapshots.bytes'), tone: 'mute' })
+                ),
+                snapshotRows
+              )
+            : h('p', { style: S.hint }, tr('snapshots.empty'))
+        )
+      )
+
+      // 7) Last apply result -------------------------------------------
+      if (applyResult && typeof applyResult === 'object') {
+        const applied = Array.isArray(applyResult.applied) ? applyResult.applied : []
+        const skipped = Array.isArray(applyResult.skipped) ? applyResult.skipped : []
+        const rows = []
+        applied.forEach(function (item, i) {
+          const o = item && typeof item === 'object' ? item : {}
+          rows.push(
+            h(
+              'div',
+              { key: 'ar' + i, style: S.listRow },
+              h(Badge, { text: tr('apply.applied'), tone: 'ok' }),
+              h('span', { style: S.listText }, asText(o.id) || '—'),
+              h('span', { style: S.listMeta }, asText(o.path))
+            )
+          )
+        })
+        skipped.forEach(function (item, i) {
+          const o = item && typeof item === 'object' ? item : {}
+          rows.push(
+            h(
+              'div',
+              { key: 'as' + i, style: S.listRow },
+              h(Badge, { text: tr('apply.skipped'), tone: 'warn' }),
+              h('span', { style: S.listText }, asText(o.id) || '—'),
+              h('span', { style: S.listMeta }, asText(o.reason))
+            )
+          )
+        })
+        children.push(
+          h(
+            Card,
+            { key: 'apply-result', title: tr('apply.title') },
+            h(
+              'div',
+              { style: S.chipRow },
+              h(Badge, { text: tr('apply.snapshot') + ': ' + (asText(applyResult.snapshotId) || '—'), tone: 'info' }),
+              applyResult.verified ? h(Badge, { text: tr('apply.verified'), tone: 'ok' }) : null
+            ),
+            rows.length ? h('div', { style: S.list }, rows) : h('p', { style: S.hint }, tr('apply.none'))
+          )
+        )
+      }
+
+      return h('div', { style: S.root }, children)
+    }
+
+    // ------------------------------------------------------------------
+    // Plugin body
+    // ------------------------------------------------------------------
+    const inject = ['slots', 'locale']
+
+    function apply(ctx) {
+      ctx.effect(function () {
+        return ctx.locale.register(NS, { en: en, zh: zh })
+      })
+      try {
+        if (ctx.locale && typeof ctx.locale.t === 'function') {
+          const service = ctx.locale
+          serviceT = function (key) {
+            return service.t(NS, key)
+          }
+        }
+      } catch (e) {
+        serviceT = null
+      }
+      ctx.slots.inject('settings.section', function () {
+        return ctx.slots.register(
+          {
+            name: 'settings.section',
+            id: 'git-config-sync',
+            order: 70,
+            label: function () {
+              return t('nav')
+            },
+            locale: NS
+          },
+          SettingsPanel
+        )
+      })
+    }
+
+    return { inject: inject, apply: apply }
+  }
+})

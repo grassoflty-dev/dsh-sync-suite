@@ -1,0 +1,9 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "日程助手主模块（共享 4 页 + 平台覆盖层）",
+  "main": "",
+  "author": "itwill",
+  "license": "Apache-2.0",
+  "dependencies": {}
+}

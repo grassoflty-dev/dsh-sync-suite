@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "target": "ES2021",
+    "lib": [
+      "ES2021"
+    ],
+    "strict": true,
+    "types": [],
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "useUnknownInCatchVariables": true,
+    "noEmitOnError": true,
+    "declaration": false,
+    "sourceMap": false,
+    "rootDir": "../entry/src/main/ets",
+    "outDir": ".build"
+  },
+  "include": [
+    "../entry/src/main/ets/model/**/*.ts",
+    "../entry/src/main/ets/common/**/*.ts"
+  ],
+  "exclude": [
+    ".build",
+    "../entry/src/main/ets/pages",
+    "../entry/src/main/ets/components",
+    "../entry/src/main/ets/services",
+    "../entry/src/main/ets/entryability"
+  ]
+}

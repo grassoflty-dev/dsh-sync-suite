@@ -1,0 +1,7 @@
+node_modules/
+.pnpm-store/
+reports/
+apps/arkui-schedule/tools/.build/
+*.log
+.DS_Store
+Thumbs.db

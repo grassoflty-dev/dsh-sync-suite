@@ -1,0 +1,9 @@
+{
+  "src": [
+    "pages/Index",
+    "pages/Edit",
+    "pages/Detail",
+    "pages/Settings",
+    "pages/Handwriting"
+  ]
+}

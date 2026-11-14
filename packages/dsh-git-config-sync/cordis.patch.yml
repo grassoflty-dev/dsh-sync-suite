@@ -1,0 +1,6 @@
+# dsh-git-config-sync bundle patch：把插件行插入 profile 的插件 roster。
+# host 半侧（exports "."）注册 /dsh-git-config-sync/rpc；package.json 里的
+# dsh.client 声明会让浏览器半侧（exports "./client"）在 Web GUI 中加载。
+- insert:
+    - id: git-config-sync
+      name: 'dsh-git-config-sync'
