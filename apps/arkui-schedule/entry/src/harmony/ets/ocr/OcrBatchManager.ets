@@ -22,7 +22,7 @@ import { image } from '@kit.ImageKit';
 import { textRecognition } from '@kit.CoreVisionKit';
 import type { PageCaptureDeps, PageCaptureOptions, PageCaptureOutcome } from '../model/pageCapture';
 import { runPageCaptureBatch } from '../model/pageCapture';
-import { composePageBody, concatPageTexts } from '../model/attachments';
+import { composePageBody, concatPageTexts, ATTACHMENT_JPEG_QUALITY, ATTACHMENT_MAX_SIDE } from '../model/attachments';
 import { sha256Hex } from '../model/sha256';
 import type { Attachment, RegionBox } from '../model/types';
 import type { AttachmentStore } from '../services/attachmentStore';
@@ -221,7 +221,13 @@ export class OcrBatchManager {
     }
   }
 
-  /** 截图 + PNG 编码：编码失败也要释放 PixelMap。 */
+  /**
+   * 截图 + **JPEG 编码**（q=60，最长边 ≤1440px）：编码失败也要释放 PixelMap。
+   *
+   * 为什么要压缩：附件要进 git，PNG 一页 1–3MB，JPEG q60 + 1440 上限下一页 ≈80–150KB，
+   * 一天 10 页 ≤1.5MB（用户定版：「手写内容对画质要求也不高」）。
+   * 缩放是**就地**的（`PixelMap.scale`），缩放后的图同时用于 OCR —— 1440 对手写识别足够。
+   */
   private async capturePage(
     packer: image.ImagePacker,
     pageId: string,
@@ -237,12 +243,32 @@ export class OcrBatchManager {
       throw new Error(`截图失败（组件 ${pageId} 尚未渲染完成）：${describeError(error as object)}`);
     }
     try {
-      const packed: ArrayBuffer = await packer.packing(pixelMap, { format: 'image/png', quality: 100 });
+      await this.shrinkToMaxSide(pixelMap);
+      const packed: ArrayBuffer = await packer.packing(pixelMap, {
+        format: 'image/jpeg',
+        quality: ATTACHMENT_JPEG_QUALITY
+      });
       return { pixelMap: pixelMap, bytes: new Uint8Array(packed) };
     } catch (error) {
       this.releasePixelMap(pixelMap);
-      throw new Error(`编码 PNG 失败：${describeError(error as object)}`);
+      throw new Error(`编码 JPEG 失败：${describeError(error as object)}`);
     }
+  }
+
+  /** 最长边超过 `ATTACHMENT_MAX_SIDE` 时等比缩小（小于则不放大，避免糊字）。 */
+  private async shrinkToMaxSide(pixelMap: image.PixelMap): Promise<void> {
+    const info: image.ImageInfo = await pixelMap.getImageInfo();
+    const width: number = info.size.width;
+    const height: number = info.size.height;
+    const longest: number = Math.max(width, height);
+    if (!Number.isFinite(longest) || longest <= ATTACHMENT_MAX_SIDE) {
+      return;
+    }
+    const ratio: number = ATTACHMENT_MAX_SIDE / longest;
+    await pixelMap.scale(ratio, ratio);
+    console.info(
+      `[hw] jpeg shrink ${width}x${height} -> ${Math.round(width * ratio)}x${Math.round(height * ratio)}`
+    );
   }
 
   /**
@@ -250,7 +276,8 @@ export class OcrBatchManager {
    * 顺带校验 store 计算出的 sha256 与阶段 A 计算值一致，避免附件名与内容错位。
    */
   private savePageAttachment(sha256: string, bytes: Uint8Array, pageIndex: number): void {
-    const attachment: Attachment = this.options.store.savePageAttachment(this.toArrayBuffer(bytes), pageIndex);
+    // 落 **JPEG 源图**（`attachments-src/<sha>.jpg`）；仓库里只放按天 zip（见 attachmentStore.archiveDay）
+    const attachment: Attachment = this.options.store.savePageJpeg(this.toArrayBuffer(bytes), pageIndex);
     if (attachment.sha256 !== sha256) {
       throw new Error(
         `第 ${pageIndex + 1} 页附件 sha256 与截图内容不一致（落盘 ${attachment.sha256}，计算 ${sha256}）`

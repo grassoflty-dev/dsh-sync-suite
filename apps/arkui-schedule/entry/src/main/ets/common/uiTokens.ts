@@ -211,6 +211,23 @@ export function masterPaneWidth(contentWidthVp: number): number {
   return third;
 }
 
+/**
+ * 主从布局的最小**内容宽**（vp）。
+ *
+ * ≥ 该值才渲染左右主从（列表 + 详情/编辑）；以下一律单列（竖屏平板 673vp、手机 360–430vp 都走单列）。
+ * 与 `BREAKPOINTS` 的关系：`expanded` 从 841vp 起，主从门槛定 840 与它同一数量级但语义独立
+ * （主从是「能不能同时放下列表和详情」，不是通用断点档）。
+ */
+export const MASTER_DETAIL_MIN_WIDTH: number = 840;
+
+/** 是否够宽走左右主从（`false` → 单列，点行进二级页）。 */
+export function isMasterDetailWidth(contentWidthVp: number): boolean {
+  if (!Number.isFinite(contentWidthVp)) {
+    return false;
+  }
+  return contentWidthVp >= MASTER_DETAIL_MIN_WIDTH;
+}
+
 /** 可点击元素的实际高度是否需要补足到 `TOUCH_MIN`，返回需要补的 padding（vp，0 表示不用补）。 */
 export function touchPadding(heightVp: number): number {
   const diff = TOUCH_MIN - heightVp;

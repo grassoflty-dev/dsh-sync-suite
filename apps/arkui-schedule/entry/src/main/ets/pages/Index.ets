@@ -25,10 +25,15 @@ import { cloneRecord } from '../model/types';
 import { SUMMARY_MAX_POINTS, truncateSummaryForDisplay } from '../model/dailySummary';
 import type { DailySummary, SummaryDisplay } from '../model/dailySummary';
 import { describeError, scheduleStore } from '../services/scheduleStore';
+import { openIndexStore } from '../services/openIndexStore';
 import { summaryStore } from '../services/summaryStore';
 import { settingsStore } from '../services/settingsStore';
 import { deviceTimeZone, summarize } from '../services/deepseek';
 import { PageLayout } from '../components/PageLayout';
+import { GitBridgeHost } from '../components/GitBridgeHost';
+import { syncController } from '../services/syncController';
+import type { SyncOutcome } from '../services/syncController';
+import { webview } from '@kit.ArkWeb';
 import { RecordDetailView } from '../components/RecordDetailView';
 import { RecordEditorView } from '../components/RecordEditorView';
 import { RecordRow } from '../components/RecordRow';
@@ -40,6 +45,7 @@ import {
   RADIUS,
   SPACING,
   TOUCH_MIN,
+  isMasterDetailWidth,
   masterPaneWidth
 } from '../common/uiTokens';
 
@@ -86,12 +92,16 @@ struct Index {
   /** 列表数据（每次操作后重读存储，保证跨设备/追加语义一致）。 */
   @State records: ScheduleRecord[] = [];
   @State statusText: string = '';
+  /** 下拉刷新中的转圈状态（`Refresh` 组件用 `$$` 双向绑定）。 */
+  @State refreshing: boolean = false;
   @State ready: boolean = false;
 
   /** 断点（由 `PageLayout` 回调同步，页面只按 compact / 非 compact 分支）。 */
   @State breakpoint: string = 'compact';
   /** 内容区宽度（vp），宽屏下算侧栏宽度。 */
   @State contentWidth: number = 0;
+  /** 是否走左右主从（内容宽 ≥ 840vp）；`false` = 单列，点行进详情页/编辑页。 */
+  @State masterDetail: boolean = false;
 
   // 主从布局（横屏/宽屏）右栏状态
   /** 右栏当前模式：`empty`（未选）/ `detail`（选中记录）/ `editor`（新建或编辑）。 */
@@ -133,11 +143,36 @@ struct Index {
     this.bootstrap();
   }
 
+  /** 隐藏桥就绪：启动自动 pull（节流；失败只提示，不阻塞任何 UI）。 */
+  private onBridgeReady(controller: webview.WebviewController): void {
+    syncController.ensureStarted(controller).then(() => {
+      syncController.pullOnStartup().then((outcome: SyncOutcome) => {
+        console.info(`[sync] startup pull ok=${outcome.ok} elapsed=${outcome.elapsedMs}ms skipped=${outcome.skipped}`);
+        if (!outcome.ok && !outcome.skipped) {
+          promptAction.showToast({ message: `同步失败：${outcome.message}`, duration: 3000 });
+        }
+      });
+    });
+  }
+
+  /** 下拉刷新：立即 pull 一次，然后重读列表。 */
+  private async onPullRefresh(): Promise<void> {
+    const outcome: SyncOutcome = await syncController.pullNow();
+    console.info(`[sync] refresh pull ok=${outcome.ok} elapsed=${outcome.elapsedMs}ms`);
+    this.reload();
+    this.loadSummary();
+    if (!outcome.ok) {
+      promptAction.showToast({ message: `同步失败：${outcome.message}`, duration: 3000 });
+    }
+  }
+
   /** 从编辑页/设置页返回时重新加载（追加写语义下必须重读）。 */
   onPageShow(): void {
     // 「含其他设备」开关归设置页管，回来时同步一次
     this.syncHomeFilter();
     if (this.ready) {
+      // 从设置页 pull 回来也走这里：顺手做一次带节流的索引自愈，保证「全部未完成」数据是新的
+      openIndexStore.reconcileIfDue();
       this.reload();
       this.loadSummary();
       this.paneTick = this.paneTick + 1;
@@ -147,6 +182,7 @@ struct Index {
       .ensureReady(getContext(this) as common.UIAbilityContext)
       .then(() => {
         this.ready = true;
+        openIndexStore.reconcileIfDue();
         this.reload();
         this.loadSummary();
         this.paneTick = this.paneTick + 1;
@@ -161,6 +197,9 @@ struct Index {
       // summaryStore.ensureReady 内部会先 ensureReady(scheduleStore)，这里两处都调以保持幂等与顺序清晰
       await scheduleStore.ensureReady(getContext(this) as common.UIAbilityContext);
       await summaryStore.ensureReady(getContext(this) as common.UIAbilityContext);
+      await openIndexStore.ensureReady(getContext(this) as common.UIAbilityContext);
+      // 启动自愈：「全部未完成」读索引，这里先把索引与最近 30 天分片对齐（无漂移则不写盘）
+      openIndexStore.reconcile();
       this.ready = true;
       this.reload();
       this.loadSummary();
@@ -177,12 +216,18 @@ struct Index {
     }
     try {
       if (this.showAllPending) {
-        const all = this.includeOtherDevices ? scheduleStore.readAllDevices() : scheduleStore.readAll();
-        const pending: ScheduleRecord[] = [];
-        for (const record of all) {
-          if (record.done !== true) {
-            pending.push(record);
+        // 数据源：单设备走「未完成索引」（devices/<id>/open.jsonl），不再每次扫全部分片；
+        // 「含其他设备」时跨设备折叠没有索引可用，仍按老路读全部设备分片（只读）。
+        let pending: ScheduleRecord[] = [];
+        if (this.includeOtherDevices) {
+          const all = scheduleStore.readAllDevices();
+          for (const record of all) {
+            if (record.done !== true) {
+              pending.push(record);
+            }
           }
+        } else {
+          pending = openIndexStore.pendingRecords();
         }
         this.records = pending;
         this.statusText = pending.length === 0 ? '所有日程都已完成' : `共 ${pending.length} 条未完成（跨全部日期${this.includeOtherDevices ? '与全部设备' : ''}）`;
@@ -305,9 +350,9 @@ struct Index {
       });
   }
 
-  /** 点列表行：紧凑屏跳详情页；宽屏切右栏。 */
+  /** 点列表行：单列（内容宽 <840vp）跳详情页；主从布局切右栏。 */
   private onRowTap(id: string): void {
-    if (this.breakpoint === 'compact') {
+    if (!this.masterDetail) {
       this.openDetail(id);
       return;
     }
@@ -318,9 +363,9 @@ struct Index {
     });
   }
 
-  /** 点「新建」：紧凑屏跳编辑页；宽屏右栏直接变编辑表单。 */
+  /** 点「新建」：单列跳编辑页；主从布局右栏直接变编辑表单。 */
   private onNewTap(): void {
-    if (this.breakpoint === 'compact') {
+    if (!this.masterDetail) {
       this.openNew();
       return;
     }
@@ -1019,7 +1064,16 @@ struct Index {
         if (!this.showAllPending) {
           this.SummaryCard()
         }
-        this.RecordList()
+        // 下拉刷新：只包列表，不改主从/单列结构
+        Refresh({ refreshing: $$this.refreshing }) {
+          this.RecordList()
+        }
+        .onRefreshing(() => {
+          this.refreshing = true;
+          this.onPullRefresh().then(() => {
+            this.refreshing = false;
+          });
+        })
       }
       .width('100%')
       .layoutWeight(1)
@@ -1070,6 +1124,7 @@ struct Index {
       }
       .layoutWeight(1)
       .height('100%')
+      .constraintSize({ minWidth: 360 })
       .alignItems(HorizontalAlign.Center)
     }
     .width('100%')
@@ -1266,12 +1321,14 @@ struct Index {
         onBreakpointChange: (breakpoint: string, widthVp: number) => {
           this.breakpoint = breakpoint;
           this.contentWidth = widthVp;
+          // 主从门槛按内容宽算（≥840vp）；竖屏平板/手机一律单列
+          this.masterDetail = isMasterDetailWidth(widthVp);
         }
       }) {
-        if (this.breakpoint === 'compact') {
-          this.CompactBody()
-        } else {
+        if (this.masterDetail) {
           this.WideBody()
+        } else {
+          this.CompactBody()
         }
       }
 
@@ -1293,6 +1350,17 @@ struct Index {
       if (this.aiResultVisible) {
         this.AiResultPanel()
       }
+      // 同步/附件 zip 的隐藏桥（1×1、全透明、不参与交互）；就绪后做一次启动 pull
+      GitBridgeHost({
+        onReady: (controller: webview.WebviewController) => {
+          this.onBridgeReady(controller);
+        }
+      })
+        .width(1)
+        .height(1)
+        .opacity(0)
+        .position({ x: 0, y: 0 })
+        .hitTestBehavior(HitTestMode.None)
     }
     .width('100%')
     .height('100%')

@@ -42,6 +42,7 @@ import {
 import { OcrBatchManager } from '../ocr/OcrBatchManager';
 import { attachmentStore } from '../services/attachmentStore';
 import { draftStore } from '../services/draftStore';
+import { localDateKey } from '../common/date';
 import { describeError, scheduleStore } from '../services/scheduleStore';
 import { BRUSHES, brushSpec } from '../model/brush';
 import type { BrushKind, BrushSpec } from '../model/brush';
@@ -65,6 +66,13 @@ import {
 import type { DraftDoc, DraftPage } from '../model/draft';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN, isLandscapeSize } from '../common/uiTokens';
 import type { RegionBox } from '../model/types';
+import type { Attachment } from '../model/types';
+
+/** `archiveDay` 的入参形状（显式接口：ArkTS 禁止内联对象类型）。 */
+interface ArchivePage {
+  sha256: string;
+  pageIndex: number;
+}
 
 /** 竖屏顶部工具条高度（vp）——定版要求 ≤48vp。 */
 const TOP_BAR_HEIGHT: number = 48;
@@ -413,9 +421,52 @@ struct Handwriting {
     }
   }
 
+  /**
+   * 把本次的附件打包成「当天 zip」并返回带 `archive/entry` 的引用。
+   *
+   * - 日期取路由参数 `date`（Edit 侧传记录日期），读不到就退回今天；
+   * - 打不进 zip（桥未就绪 / 写失败）→ **不影响完成**：返回原散图引用 + toast 提示，
+   *   原图已经在 `attachments-src/`，下次完成或同步时会再次尝试打包（幂等、同名覆盖）。
+   */
+  private async archiveAttachments(items: Attachment[]): Promise<Attachment[]> {
+    if (items.length === 0) {
+      return items;
+    }
+    const dateKey: string = this.resolveRecordDateKey();
+    try {
+      const packed: Attachment[] = await attachmentStore.archiveDay(
+        dateKey,
+        items.map((item: Attachment) => {
+          const page: ArchivePage = { sha256: item.sha256, pageIndex: item.pageIndex };
+          return page;
+        })
+      );
+      return packed.length > 0 ? packed : items;
+    } catch (error) {
+      console.error(`[hw] archive day failed: ${describeError(error)}`);
+      promptAction.showToast({ message: '手迹已保存，打包当天压缩包失败（下次同步会重试）', duration: 3000 });
+      return items;
+    }
+  }
+
+  /** 记录日期（`YYYY-MM-DD`）：优先路由参数 `date`，否则今天。 */
+  private resolveRecordDateKey(): string {
+    try {
+      const params: Record<string, string> = router.getParams() as Record<string, string>;
+      if (params !== undefined && params !== null) {
+        const value: string = params['date'];
+        if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+          return value;
+        }
+      }
+    } catch {
+      // 读不到路由参数就用今天
+    }
+    return localDateKey(new Date());
+  }
+
   /** 「‹」退出：存草稿 → 返回上一页（不二次确认）。 */
-  private exitWritingBoard(): void {
-    this.clearDraftTimer();
+  private exitWritingBoard(): void {    this.clearDraftTimer();
     this.saveDraftNow(false);
     console.info(`[hw] exit key=${this.draftKey}`);
     router.back();
@@ -649,7 +700,9 @@ struct Handwriting {
       }
       AppStorage.setOrCreate<string>('handwriting.result', result.text);
       AppStorage.setOrCreate<string>('handwriting.ocrText', result.rawText);
-      AppStorage.setOrCreate<string>('handwriting.attachments', JSON.stringify(result.attachments));
+      // 附件：优先打成「当天 zip」引用（仓库里只放 zip）；失败回退散图引用，不阻塞完成
+      const packed: Attachment[] = await this.archiveAttachments(result.attachments);
+      AppStorage.setOrCreate<string>('handwriting.attachments', JSON.stringify(packed));
       promptAction.showToast({
         message:
           `识别完成：${result.attachments.length} 页、${result.regionCount} 个框` +

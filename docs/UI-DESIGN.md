@@ -80,8 +80,8 @@
 | 断点 | 宽度(vp) | 列 | Index | Edit | Detail | Settings |
 | --- | --- | --- | --- | --- | --- | --- |
 | `compact` | <600 | 1 | 日期条→模式→列表→新建 | 表单自上而下 | 正文→附件 | 单列 3 组 |
-| `medium` | 600–840 | 2 | 左右主从（左列表 / 右详情·编辑） | 单列表单 | 单列详情 | 两列分组 |
-| `expanded` | >840 | 2 | 同上（主栏 360–420vp） | 同上 | 同上 | 同上 |
+| `medium` | 600–840 | 2 | **单列列表**（点行进详情页 / 新建进编辑页） | 单列表单 | 单列详情 | 两列分组 |
+| `expanded` | >840 | 2 | 左右主从（主栏 360–420vp、右栏 ≥360vp） | 同上 | 同上 | 同上 |
 
 - **横屏特例**：`resolveBreakpoint(w, landscape)` 横屏下**至少 `medium`**（横屏拿宽度换高度，单列纵向会挤爆），
   因此页面只需 `breakpoint === 'compact'` 一个判断，不必各写方向判断。
@@ -101,7 +101,7 @@ Index 紧凑(竖屏)                        Index 宽屏/横屏
 └───────────────────────────┘        └─────────────┴─────────────┘
 页头动作 = ✨ AI 汇总（有汇总→打开面板；无→生成；生成中显示「✨ 生成中…」）/ ⚙ 设置；首页无「更多」与 ActionSheet。**列表第一项 = 今日汇总块**（数据源 = `summaryStore.read(date)` 持久化，`devices/<id>/summaries/<date>.json`）：标题 1 行 + 要点 ≤3（`truncateSummaryForDisplay`）+ 「更新于 HH:MM · 重新生成」；无汇总→「✨ 生成今日汇总」；今日无日程→灰字（无按钮）；失败→一行错误 + 重试（`summaryStore.generate` 保证不覆盖旧文件，失败后重新 `read()` 继续显示旧汇总）；`aboutToAppear`/换日期/回今天/回前台都重新 `read()`
 ```
-- **宽屏 = 左右主从**：左栏（`masterPaneWidth` **360–420vp**）= 日期条 + 模式 + 今日汇总块 + 列表 + 「新建」（240vp 左对齐）；右栏 = **三态**（空 / 详情 / 编辑），内容限宽 **720vp 居中**便于阅读。点行切右栏、点「新建」右栏直接变编辑表单（不跳二级页）；选中行 = `brand_soft` 底 + **2vp 品牌竖条**；编辑有未保存内容时切行先弹「放弃当前编辑？」。详情/编辑复用 `components/RecordDetailView.ets` / `RecordEditorView.ets`（`Detail.ets`/`Edit.ets` 已退化为薄壳），避免两套 UI 漂移。
+- **主从门槛 = 内容宽 ≥ 840vp**（`isMasterDetailWidth`）：竖屏平板 673vp、手机 360–430vp 一律**单列**、不渲染右栏；左右主从时左栏（`masterPaneWidth` **360–420vp**）= 日期条 + 模式 + 今日汇总块 + 列表 + 「新建」（240vp 左对齐）；右栏 = **三态**（空 / 详情 / 编辑），内容限宽 **720vp 居中**便于阅读。点行切右栏、点「新建」右栏直接变编辑表单（不跳二级页）；选中行 = `brand_soft` 底 + **2vp 品牌竖条**；编辑有未保存内容时切行先弹「放弃当前编辑？」。详情/编辑复用 `components/RecordDetailView.ets` / `RecordEditorView.ets`（`Detail.ets`/`Edit.ets` 已退化为薄壳），避免两套 UI 漂移。
 
 | 页 | 区块 | compact（竖屏） | medium / expanded（横屏·宽屏） | 主操作 |
 | --- | --- | --- | --- | --- |

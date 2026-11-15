@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 /**
  * `git-bridge.js` 的真实行为测试（Node，无需网络、不写真实 profile）。
  *
@@ -729,12 +729,16 @@ describe('fetch / pull 的远端错误处理', () => {
 // ------------------------------------------------------------------ 5. index.html / node --check
 
 describe('rawfile 静态契约', () => {
-  test('index.html 按顺序加载两个脚本并暴露 DshGitBridge', () => {
+  test('index.html 按顺序加载三个脚本（isomorphic-git → jszip → git-bridge）并暴露 DshGitBridge', () => {
     const html = readFileSync(HTML_PATH, 'utf8');
     const matches = [...html.matchAll(/<script[^>]*\ssrc=["']([^"']+)["']/g)];
     const scripts = matches.map((match) => match[1]);
-    assert.deepEqual(scripts, ['isomorphic-git.js', 'git-bridge.js'], '脚本顺序固定：先 isomorphic-git 再 git-bridge');
-    assert.ok(matches[0].index < matches[1].index, 'git-bridge.js 的 <script> 必须排在 isomorphic-git.js 之后');
+    assert.deepEqual(
+      scripts,
+      ['isomorphic-git.js', 'jszip.min.js', 'git-bridge.js'],
+      '脚本顺序固定：isomorphic-git → jszip（附件按天 zip）→ git-bridge'
+    );
+    assert.ok(matches[0].index < matches[1].index && matches[1].index < matches[2].index, '三个脚本必须先 git 后 jszip 再 bridge');
     assert.match(html, /DshGitBridge\.call/, 'index.html 必须引用 window.DshGitBridge');
     assert.match(html, /__dshGitBridgeReady/, 'index.html 应提供就绪自检标志');
     for (const script of scripts) {

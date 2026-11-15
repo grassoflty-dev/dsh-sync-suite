@@ -66,7 +66,10 @@
     'status',
     'log',
     'currentBranch',
-    'resolveRef'
+    'resolveRef',
+    'zipUpsert',
+    'zipList',
+    'zipRead'
   ];
 
   var DEVICE_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -1514,6 +1517,177 @@
     return { ref: ref, oid: oid === undefined || oid === null ? null : String(oid) };
   }
 
+  // ---------------------------------------------------------------- zip（按天附件包）
+  //
+  // 附件打包走 WebView 里的 JSZip：`@ohos.zlib` 是 OHOS 专有 API，**Android 侧没有**，
+  // 而安卓不产生手迹但必须能读鸿蒙同步上来的手迹（详情页展示）→ 解压必须两端都能跑。
+  // JSZip 在 WebView 里，两端环境一致，写一次两端通用。
+  //
+  // 跨桥数据一律**分块 base64**（每块 ≤256KB 的 base64 文本），避免超长字符串：
+  // - 写入：`entries[i].chunks = [base64, ...]`，桥内拼成 Uint8Array 再交给 JSZip；
+  // - 读出：返回 `chunks` 数组，ArkTS 侧按序拼接。
+
+  /** 每块原始字节数：192KB 原始 → base64 ≈256KB 文本。 */
+  var ZIP_CHUNK_BYTES = 192 * 1024;
+
+  /** 取 JSZip 全局（index.html 必须已加载 jszip.min.js）。 */
+  function jszipApi() {
+    var api = global.JSZip;
+    if (typeof api !== 'function') {
+      throw bridgeError('E_FS', 'JSZip 未加载：index.html 必须先加载 jszip.min.js 再加载 git-bridge.js');
+    }
+    return api;
+  }
+
+  /** 把 base64 分块数组还原成 Uint8Array（校验总大小上限，防误传超大文件）。 */
+  function joinChunks(chunks, maxBytes) {
+    if (!Array.isArray(chunks) || chunks.length === 0) {
+      return new Uint8Array(0);
+    }
+    var parts = [];
+    var total = 0;
+    for (var i = 0; i < chunks.length; i++) {
+      var bytes = base64ToBytes(String(chunks[i]));
+      total += bytes.length;
+      if (maxBytes && total > maxBytes) {
+        throw bridgeError('E_FS', 'zip 条目超过 ' + Math.round(maxBytes / 1024 / 1024) + 'MB 上限');
+      }
+      parts.push(bytes);
+    }
+    return concatBytes(parts, total);
+  }
+
+  /** 把 Uint8Array 切成 base64 分块（每块 ≤ ZIP_CHUNK_BYTES 原始字节）。 */
+  function splitChunks(bytes) {
+    var chunks = [];
+    for (var offset = 0; offset < bytes.length; offset += ZIP_CHUNK_BYTES) {
+      var end = Math.min(offset + ZIP_CHUNK_BYTES, bytes.length);
+      chunks.push(bytesToBase64(bytes.subarray(offset, end)));
+    }
+    return chunks;
+  }
+
+  /** 读一个文件路径的字节（不存在返回 null）。 */
+  async function readFileBytes(path) {
+    if (hostCall('fileExists', [path]) !== true) {
+      return null;
+    }
+    var encoded = hostCall('readFileBase64', [path]);
+    return base64ToBytes(String(encoded === undefined || encoded === null ? '' : encoded));
+  }
+
+  /** 写一个文件路径的字节（必要时建目录）。 */
+  function writeFileBytes(path, bytes) {
+    hostCall('mkdirp', [pathDirname(path)]);
+    var ok = hostCall('writeFileBase64', [path, bytesToBase64(bytes)]);
+    if (ok === false) {
+      throw bridgeError('E_FS', '写入失败：' + path);
+    }
+  }
+
+  /** 打开（或新建）一个 zip：损坏时按「空包」重建，避免一条坏包卡死整天附件。 */
+  async function loadZip(archivePath) {
+    var JSZip = jszipApi();
+    var existing = await readFileBytes(archivePath);
+    if (existing === null || existing.length === 0) {
+      return new JSZip();
+    }
+    try {
+      return await JSZip.loadAsync(existing);
+    } catch (error) {
+      return new JSZip();
+    }
+  }
+
+  /**
+   * `zipUpsert(archivePath, entries)`：不存在则新建，存在则合并/覆盖同名条目。
+   * `entries = [{ name: 'page-1-1a2b3c4d.jpg', chunks: [base64, ...] }]`
+   * 返回 `{ archivePath, bytes, entries: [{name, size}] }`。
+   */
+  async function opZipUpsert(args) {
+    var archivePath = normalizePath(String(args.archivePath || ''));
+    if (archivePath.length === 0) {
+      throw bridgeError('E_FS', 'zipUpsert 需要 archivePath');
+    }
+    var entries = Array.isArray(args.entries) ? args.entries : [];
+    if (entries.length === 0) {
+      throw bridgeError('E_FS', 'zipUpsert 需要至少一个条目');
+    }
+    var zip = await loadZip(archivePath);
+    for (var i = 0; i < entries.length; i++) {
+      var item = entries[i] || {};
+      var name = String(item.name || '');
+      if (name.length === 0 || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) {
+        throw bridgeError('E_FS', 'zip 条目名不合法：' + name);
+      }
+      var bytes = joinChunks(item.chunks, 8 * 1024 * 1024);
+      zip.file(name, bytes, { binary: true, date: new Date(item.mtime || Date.now()) });
+    }
+    var out = await zip.generateAsync({
+      type: 'uint8array',
+      compression: 'STORE', // JPEG 已压缩，再 deflate 收益极小、耗时明显
+      platform: 'UNIX'
+    });
+    writeFileBytes(archivePath, out);
+    var listed = [];
+    zip.forEach(function (relativePath, file) {
+      if (!file.dir) {
+        listed.push({ name: relativePath, size: file._data ? file._data.uncompressedSize : 0 });
+      }
+    });
+    listed.sort(function (left, right) {
+      return left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
+    });
+    return { archivePath: archivePath, bytes: out.length, entries: listed };
+  }
+
+  /**
+   * `zipList(archivePath)` → `{ archivePath, entries: [{name, size}] }`。
+   * 包不存在返回空数组（不报错，调用方当「还没有附件」）。
+   */
+  async function opZipList(args) {
+    var archivePath = normalizePath(String(args.archivePath || ''));
+    if (archivePath.length === 0) {
+      throw bridgeError('E_FS', 'zipList 需要 archivePath');
+    }
+    if (hostCall('fileExists', [archivePath]) !== true) {
+      return { archivePath: archivePath, entries: [] };
+    }
+    var zip = await loadZip(archivePath);
+    var entries = [];
+    zip.forEach(function (relativePath, file) {
+      if (!file.dir) {
+        entries.push({ name: relativePath, size: file._data ? file._data.uncompressedSize : 0 });
+      }
+    });
+    entries.sort(function (left, right) {
+      return left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
+    });
+    return { archivePath: archivePath, entries: entries };
+  }
+
+  /**
+   * `zipRead(archivePath, entryName)` → `{ name, size, chunks: [base64, ...] }`。
+   * 条目不存在返回 `{ name, size: 0, chunks: [] }`（调用方据此回退/提示）。
+   */
+  async function opZipRead(args) {
+    var archivePath = normalizePath(String(args.archivePath || ''));
+    var entryName = String(args.entryName || '');
+    if (archivePath.length === 0 || entryName.length === 0) {
+      throw bridgeError('E_FS', 'zipRead 需要 archivePath 与 entryName');
+    }
+    if (hostCall('fileExists', [archivePath]) !== true) {
+      return { name: entryName, size: 0, chunks: [] };
+    }
+    var zip = await loadZip(archivePath);
+    var file = zip.file(entryName);
+    if (file === null || file === undefined) {
+      return { name: entryName, size: 0, chunks: [] };
+    }
+    var bytes = await file.async('uint8array');
+    return { name: entryName, size: bytes.length, chunks: splitChunks(bytes) };
+  }
+
   var OP_HANDLERS = {
     init: opInit,
     clone: opClone,
@@ -1523,7 +1697,10 @@
     status: opStatus,
     log: opLog,
     currentBranch: opCurrentBranch,
-    resolveRef: opResolveRef
+    resolveRef: opResolveRef,
+    zipUpsert: opZipUpsert,
+    zipList: opZipList,
+    zipRead: opZipRead
   };
 
   // ---------------------------------------------------------------- 入口
@@ -1583,7 +1760,12 @@
     byteStream: byteStream,
     snapshotDeviceFiles: snapshotDeviceFiles,
     restoreDeviceFiles: restoreDeviceFiles,
-    listDeviceFiles: listDeviceFiles
+    listDeviceFiles: listDeviceFiles,
+    // 附件 zip（Node 单测直接调，不需要 WebView）：写/列/读 三个 op 的实现
+    zipUpsert: opZipUpsert,
+    zipList: opZipList,
+    zipRead: opZipRead,
+    zipChunkBytes: ZIP_CHUNK_BYTES
   };
 
   var DshGitBridge = {

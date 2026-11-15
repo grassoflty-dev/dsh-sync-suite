@@ -10,10 +10,20 @@
  * 因此详情页预览用沙箱文件 URI（`file://<绝对路径>`）交给 `Image()`，不在这里解码像素。
  */
 import { fileIo as fs } from '@kit.CoreFileKit';
-import { attachmentFileName } from '../model/attachments';
+import type { PageShotRef } from '../model/attachments';
+import {
+  attachmentFileName,
+  buildArchivedAttachmentRefs,
+  dayArchiveName,
+  isLegacyAttachment,
+  jpegFileName,
+  parseZipEntryName
+} from '../model/attachments';
 import { sha256Hex } from '../model/sha256';
 import type { Attachment } from '../model/types';
 import { describeError, scheduleStore } from './scheduleStore';
+import { GitSyncService } from './GitSyncService';
+import type { ZipEntryInput } from './GitSyncService';
 
 /** 校验 sha256 形状（64 位十六进制），防止用非法文件名拼出目录穿越路径。 */
 export function isValidSha256(value: string): boolean {
@@ -150,7 +160,154 @@ export class AttachmentStore {
     }
   }
 
+  // ------------------------------------------------------------------ 附件：JPEG + 按天 zip（2026-11）
+
+  /** 本地源图目录（**不进仓库**）：`<filesDir>/attachments-src`。 */
+  sourceDir(): string {
+    return `${scheduleStore.getFilesDir()}/attachments-src`;
+  }
+
+  /** 本地源图路径：`<filesDir>/attachments-src/<sha>.jpg`。 */
+  sourcePath(sha256: string): string {
+    return `${this.sourceDir()}/${jpegFileName(sha256)}`;
+  }
+
+  /** 解压缓存目录（详情页取图用）：`<filesDir>/cache/attachments`。 */
+  cacheDir(): string {
+    return `${scheduleStore.getFilesDir()}/cache/attachments`;
+  }
+
+  /**
+   * 保存一页 **JPEG** 到本地源图目录（按 sha256 去重）。
+   *
+   * 只落本地：仓库里只允许出现按天的 zip（见 `archiveDay`），散图不进 git。
+   * 返回的引用还没有 `archive/entry`，由 `archiveDay()` 补齐后再写进 JSONL。
+   */
+  savePageJpeg(bytes: ArrayBuffer, pageIndex: number): Attachment {
+    if (!scheduleStore.isReady()) {
+      throw new Error('附件存储尚未初始化：请先调用 attachmentStore.ensureReady(context)');
+    }
+    if (bytes === undefined || bytes === null || bytes.byteLength === 0) {
+      throw new Error('截图内容为空，无法保存附件');
+    }
+    const sha256 = sha256Hex(new Uint8Array(bytes));
+    const path = this.sourcePath(sha256);
+    if (!this.fileExists(path)) {
+      this.ensureDir(this.sourceDir(), '创建源图目录失败');
+      this.writeFileSync(path, bytes);
+    }
+    return { sha256: sha256, name: jpegFileName(sha256), pageIndex: pageIndex };
+  }
+
+  /**
+   * 把某一天的附件打包进 `devices/<deviceId>/attachments/<YYYY-MM-DD>.zip`（合并写，同名覆盖）。
+   *
+   * 桥（JSZip）不可用或写入失败时抛错 —— 调用方据此回退到「散图引用」，不丢手迹。
+   */
+  async archiveDay(dateKey: string, pages: PageShotRef[]): Promise<Attachment[]> {
+    const refs: Attachment[] = buildArchivedAttachmentRefs(pages, dateKey);
+    if (refs.length === 0) {
+      return refs;
+    }
+    const sync: GitSyncService | null = GitSyncService.active();
+    if (sync === null) {
+      throw new Error('同步桥未就绪：无法打包当日 zip');
+    }
+    const archivePath: string = `${this.attachmentsDir()}/${dayArchiveName(dateKey)}`;
+    const entries: ZipEntryInput[] = [];
+    for (let index = 0; index < refs.length; index++) {
+      const ref = refs[index];
+      const source: string = this.sourcePath(ref.sha256);
+      if (!this.fileExists(source)) {
+        continue; // 源图缺失（被清理过）：跳过该页，不阻塞其它页打包
+      }
+      const bytes: ArrayBuffer = this.readSourceBytes(ref.sha256);
+      entries.push({ name: ref.entry === undefined ? ref.name : ref.entry, chunks: this.toChunks(bytes) });
+    }
+    if (entries.length === 0) {
+      return refs;
+    }
+    await sync.zipUpsert(archivePath, entries);
+    console.info(`[hw] archive ${dayArchiveName(dateKey)} entries=${entries.length}`);
+    return refs;
+  }
+
+  /**
+   * 详情页取图：返回可直接给 `Image()` 的文件 URI。
+   *
+   * - 新格式（有 `archive` + `entry`）：从 zip 解到 `cache/attachments/<sha>.jpg`，**命中不重复解压**；
+   * - 旧格式（无 `archive`）：直接读散图 `attachments/<name>`（PNG），不迁移、不报错。
+   */
+  async resolveImageUri(item: Attachment): Promise<string> {
+    if (isLegacyAttachment(item) || item.archive === undefined || item.entry === undefined) {
+      return this.attachmentUri(item.sha256);
+    }
+    const cached: string = `${this.cacheDir()}/${jpegFileName(item.sha256)}`;
+    if (this.fileExists(cached)) {
+      return `file://${cached}`;
+    }
+    const sync: GitSyncService | null = GitSyncService.active();
+    if (sync === null) {
+      throw new Error('同步桥未就绪：无法解压附件');
+    }
+    const archivePath: string = `${this.attachmentsDir()}/${item.archive}`;
+    const bytes: Uint8Array | null = await sync.zipRead(archivePath, item.entry);
+    if (bytes === null) {
+      throw new Error(`附件条目不存在：${item.archive}/${item.entry}`);
+    }
+    this.ensureDir(this.cacheDir(), '创建解压缓存目录失败');
+    this.writeFileSync(cached, this.toArrayBuffer(bytes));
+    return `file://${cached}`;
+  }
+
   // ------------------------------------------------------------------ 内部实现
+
+  /** 读本地源图字节（`attachments-src/<sha>.jpg`；不存在抛中文错误）。 */
+  readSourceBytes(sha256: string): ArrayBuffer {
+    const path: string = this.sourcePath(sha256);
+    if (!this.fileExists(path)) {
+      throw new Error(`源图不存在：${path}`);
+    }
+    const stat = fs.statSync(path);
+    const buffer = new ArrayBuffer(stat.size);
+    const file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+    try {
+      if (stat.size > 0) {
+        fs.readSync(file.fd, buffer, { offset: 0, length: stat.size });
+      }
+    } finally {
+      fs.closeSync(file);
+    }
+    return buffer;
+  }
+
+  /** 把字节切成 ≤192KB 原始 / 块的 base64 分块（与桥的 ZIP_CHUNK_BYTES 一致）。 */
+  private toChunks(bytes: ArrayBuffer): string[] {
+    const raw: Uint8Array = new Uint8Array(bytes);
+    const chunkBytes: number = 192 * 1024;
+    const chunks: string[] = [];
+    for (let offset = 0; offset < raw.length; offset += chunkBytes) {
+      const end: number = Math.min(offset + chunkBytes, raw.length);
+      chunks.push(GitSyncService.encodeBase64(raw.subarray(offset, end)));
+    }
+    return chunks;
+  }
+
+  private toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+    const copy: Uint8Array = new Uint8Array(bytes.length);
+    copy.set(bytes);
+    return copy.buffer;
+  }
+
+  private ensureDir(dir: string, message: string): void {
+    try {
+      fs.mkdirSync(dir, true);
+    } catch (error) {
+      if (!this.fileExists(dir)) {
+        throw new Error(`${message}：${describeError(error)}`);
+      }
+    }
+  }
 
   private fileExists(path: string): boolean {
     try {

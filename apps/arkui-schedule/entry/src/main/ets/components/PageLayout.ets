@@ -67,7 +67,12 @@ export struct PageLayout {
     return 0;
   }
 
-  /** 面积变化 → 重算断点（只在断点真的变了时才 setState，避免布局回路）。 */
+  /**
+   * 面积变化 → 重算断点。
+   *
+   * `breakpoint` 只在真的变了时才 setState（避免布局回路），但回调**每次都会带最新宽度**：
+   * 页面除了断点档，还要按内容宽判断「能不能走主从布局」（840vp 门槛），宽度必须实时。
+   */
   private applyArea(area: Area): void {
     const width: number = this.toVp(area.width);
     const height: number = this.toVp(area.height);
@@ -78,12 +83,11 @@ export struct PageLayout {
       this.contentWidth = width;
     }
     const next: string = resolveBreakpoint(width, isLandscapeSize(width, height));
-    if (next === this.breakpoint) {
-      return;
+    if (next !== this.breakpoint) {
+      this.breakpoint = next;
     }
-    this.breakpoint = next;
     if (this.onBreakpointChange !== null) {
-      this.onBreakpointChange(next, width);
+      this.onBreakpointChange(this.breakpoint, width);
     }
   }
 

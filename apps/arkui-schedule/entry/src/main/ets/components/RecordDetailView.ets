@@ -48,6 +48,10 @@ export struct RecordDetailView {
   @State aiText: string = '';
   @State attachments: Attachment[] = [];
   @State previewSha: string = '';
+  /** 与 `attachments` 等长的图片 URI：新数据从按天 zip 解出、旧数据走散图（见 `resolveImages`）。 */
+  @State imageUris: string[] = [];
+  /** 大图预览用的 URI（解压后可能不是散图路径）。 */
+  @State previewUri: string = '';
   @State statusText: string = '';
   @State loaded: boolean = false;
   @State aiBusy: boolean = false;
@@ -116,6 +120,39 @@ export struct RecordDetailView {
     this.attachments = record.attachments === undefined ? [] : record.attachments;
     this.loaded = true;
     this.statusText = '';
+    this.resolveImages();
+  }
+
+  /**
+   * 解析每页附件 URI（新数据 → zip 解压到 cache；旧数据 → 散图）。
+   *
+   * 失败的那一页回退到散图 URI（`attachments/<sha>.png`），保证旧数据与异常情况都能显示。
+   */
+  private async resolveImages(): Promise<void> {
+    const uris: string[] = [];
+    for (let index = 0; index < this.attachments.length; index++) {
+      const item: Attachment = this.attachments[index];
+      let uri: string = attachmentStore.attachmentUri(item.sha256);
+      try {
+        uri = await attachmentStore.resolveImageUri(item);
+      } catch (error) {
+        console.info(`[hw] resolve attachment failed (page ${item.pageIndex + 1}): ${describeError(error as object)}`);
+      }
+      uris.push(uri);
+    }
+    this.imageUris = uris;
+    this.previewUri = '';
+  }
+
+  /** 第 index 页的图片 URI：已解析的优先，否则回退到散图（`attachments/<sha>.png`）。 */
+  private uriAt(index: number): string {
+    if (index >= 0 && index < this.imageUris.length && this.imageUris[index].length > 0) {
+      return this.imageUris[index];
+    }
+    if (index >= 0 && index < this.attachments.length) {
+      return attachmentStore.attachmentUri(this.attachments[index].sha256);
+    }
+    return '';
   }
 
   /** 保存可编辑的 AI 结构化文本（不触碰 ocr_text）。 */
@@ -319,10 +356,10 @@ export struct RecordDetailView {
       List({ space: SPACING.sm }) {
         ForEach(
           this.attachments,
-          (item: Attachment) => {
+          (item: Attachment, index: number) => {
             ListItem() {
               Column({ space: SPACING.xs }) {
-                Image(attachmentStore.attachmentUri(item.sha256))
+                Image(this.uriAt(index))
                   .width(THUMB)
                   .height(THUMB)
                   .borderRadius(RADIUS.none)
@@ -330,6 +367,7 @@ export struct RecordDetailView {
                   .backgroundColor($r('app.color.page_background'))
                   .onClick(() => {
                     this.previewSha = item.sha256;
+                    this.previewUri = this.uriAt(index);
                   })
                 Text(`第 ${item.pageIndex + 1} 页`)
                   .fontSize(FONT.caption)
@@ -472,7 +510,7 @@ export struct RecordDetailView {
 
       if (this.previewSha.length > 0) {
         Column() {
-          Image(attachmentStore.attachmentUri(this.previewSha))
+          Image(this.previewUri.length > 0 ? this.previewUri : attachmentStore.attachmentUri(this.previewSha))
             .width('100%')
             .height('82%')
             .objectFit(ImageFit.Contain)
