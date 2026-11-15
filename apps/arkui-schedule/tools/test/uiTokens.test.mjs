@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   BREAKPOINTS,
   DIVIDER,
@@ -18,6 +19,9 @@ import {
   sidebarWidth,
   touchPadding
 } from '../.build/common/uiTokens.js'
+
+const INDEX = readFileSync(new URL('../../entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8')
+const PAGE_LAYOUT = readFileSync(new URL('../../entry/src/main/ets/components/PageLayout.ets', import.meta.url), 'utf8')
 
 // ---------------------------------------------------------------- 断点边界
 
@@ -87,6 +91,66 @@ test('isLandscapeSize 只按宽高比判定（方屏不算横屏）', () => {
   assert.ok(LANDSCAPE_ASPECT > 0)
 })
 
+// ---------------------------------------------------------------- 真实设备尺寸 → 两栏
+
+test('真机横向 1280×800vp（2560×1600@2x）判为 expanded ⇒ 两栏', () => {
+  assert.equal(isLandscapeSize(1280, 800), true)
+  const breakpoint = resolveBreakpoint(1280, true)
+  assert.equal(breakpoint, 'expanded')
+  assert.equal(isWide(breakpoint), true)
+  assert.ok(sidebarWidth(1280 - 48) > 280, '侧栏要够宽放日期条')
+})
+
+test('真机纵向 800×1280vp（1600×2560@2x）判为 medium ⇒ 也是两栏', () => {
+  const breakpoint = resolveBreakpoint(800, isLandscapeSize(800, 1280))
+  assert.equal(breakpoint, 'medium')
+  assert.equal(isWide(breakpoint), true)
+})
+
+// ---------------------------------------------------------------- Index / PageLayout 结构守卫
+
+test('Index 只按 breakpoint === compact 分支，且单列/双栏两套骨架都存在', () => {
+  assert.match(INDEX, /if \(this\.breakpoint === 'compact'\) \{/, 'Index 必须只做一处粗粒度分支')
+  assert.match(INDEX, /this\.CompactBody\(\)/)
+  assert.match(INDEX, /this\.WideBody\(\)/)
+  assert.match(INDEX, /sidebarWidth\(this\.contentWidth\)/, '双栏侧栏宽度必须走令牌函数')
+  assert.match(INDEX, /onBreakpointChange:/, 'Index 必须接 PageLayout 的断点回调')
+})
+
+test('Index 双栏骨架：左日期列（DateBlock/ModeTabs/新建）+ 右列表', () => {
+  const start = INDEX.indexOf('WideBody() {')
+  assert.notEqual(start, -1)
+  const body = INDEX.slice(start, INDEX.indexOf('\n  }', start))
+  for (const piece of ['this.DateBlock()', 'this.ModeTabs()', 'this.SidebarAction()', 'this.WideList()']) {
+    assert.ok(body.includes(piece), `WideBody 缺少 ${piece}`)
+  }
+  assert.match(body, /\.vertical\(true\)/, '两栏之间必须有竖分割线')
+  assert.match(body, /records\.length > 0/, '空态时左栏不再放第二个主操作')
+})
+
+test('宽屏视觉四条：页头不重复日期 / 空态居中 CTA / 列表最大 900vp / 左栏按钮 240vp', () => {
+  assert.match(INDEX, /const LIST_MAX_WIDTH: number = 900;/, '列表最大宽必须被常量约束')
+  assert.match(INDEX, /const SIDEBAR_ACTION_WIDTH: number = 240;/, '左栏主操作固定 240vp')
+  assert.match(INDEX, /\.constraintSize\(\{ maxWidth: LIST_MAX_WIDTH \}\)/, '列表要居中限宽')
+  assert.match(INDEX, /this\.EmptyCta\(\)/, '空态右栏要有居中主操作')
+  assert.match(INDEX, /subtitle: this\.subtitleText\(\)/, '页头副标题走 subtitleText()（空态不重复）')
+  assert.equal(/return this\.showAllPending \? '全部未完成' : this\.selectedDate;/.test(INDEX), false, '页头不能直接显示日期')
+  assert.match(INDEX, /return this\.selectedDate === localDateKey\(new Date\(\)\) \? '今天' : '日程';/)
+})
+
+test('PageLayout：onAreaChange + resolveBreakpoint + isLandscapeSize，且不把 Length 直接当 number', () => {
+  assert.match(PAGE_LAYOUT, /\.onAreaChange\(/)
+  assert.match(PAGE_LAYOUT, /resolveBreakpoint\(/)
+  assert.match(PAGE_LAYOUT, /isLandscapeSize\(/)
+  assert.match(PAGE_LAYOUT, /@State breakpoint: string/, '断点必须对外暴露为 @State')
+  assert.equal(
+    /area\.width as number/.test(PAGE_LAYOUT),
+    false,
+    'Area.width 是 Length（可能是字符串），直接 as number 会得到 0 → 横屏永远不出两栏'
+  )
+  assert.match(PAGE_LAYOUT, /typeof value === 'number'/, '必须有 Length → vp 的显式转换')
+})
+
 // ---------------------------------------------------------------- 断点表
 
 test('BREAKPOINTS：minWidth 严格单调递增、列数合法、名称符合约定', () => {
@@ -114,7 +178,6 @@ test('BREAKPOINTS 与 resolveBreakpoint 的阈值一致（600 / 841）', () => {
   assert.equal(minWidthFor('compact'), 0)
   assert.equal(minWidthFor('medium'), 600)
   assert.equal(minWidthFor('expanded'), 841)
-  // 表里的 minWidth 恰好就是该断点的起点
   for (const item of BREAKPOINTS) {
     assert.equal(resolveBreakpoint(item.minWidth, false), item.name, `${item.name} 的起点应解析回自身`)
   }

@@ -50,6 +50,12 @@ function dateFromKey(key: string): Date {
 /** 主操作按钮高度（> `TOUCH_MIN`，唯一强调色块）。 */
 const PRIMARY_HEIGHT: number = 48;
 
+/** 宽屏左栏「新建」按钮宽度（vp）：固定 240 左对齐，占满整列会显得笨重。 */
+const SIDEBAR_ACTION_WIDTH: number = 240;
+
+/** 宽屏列表最大宽度（vp）：超过后居中留白，避免单条记录横跨整个宽屏。 */
+const LIST_MAX_WIDTH: number = 900;
+
 @Entry
 @Component
 struct Index {
@@ -151,9 +157,20 @@ struct Index {
     }
   }
 
-  /** 标题：今日待办显示日期，全部未完成显示模式名。 */
+  /** 页头标题：只给相对标签（今天 / 全部未完成 / 日程），具体日期归左栏或日期条，避免同一信息出现两次。 */
   private pageTitle(): string {
-    return this.showAllPending ? '全部未完成' : this.selectedDate;
+    if (this.showAllPending) {
+      return '全部未完成';
+    }
+    return this.selectedDate === localDateKey(new Date()) ? '今天' : '日程';
+  }
+
+  /** 页头副标题：只在有统计意义（或有错误）时显示；空态文案归列表，避免两处重复。 */
+  private subtitleText(): string {
+    if (this.records.length > 0 || this.statusText.indexOf('失败') >= 0) {
+      return this.statusText;
+    }
+    return '';
   }
 
   /** 星期几（辅助信息，跟着日期走）。 */
@@ -457,6 +474,7 @@ struct Index {
   }
 
   /** 唯一主操作：新建（强调色实底，全宽 48vp）。 */
+  /** 紧凑屏底部主操作：全宽。 */
   @Builder
   PrimaryAction() {
     Button('新建')
@@ -469,38 +487,103 @@ struct Index {
       .onClick(() => this.openNew())
   }
 
-  /** 列表（行自带 1vp 分割线，因此 List space 为 0）。 */
+  /** 宽屏左栏的工具按钮：固定 240vp 左对齐，不占满整列（占满会显得笨重）。 */
+  @Builder
+  SidebarAction() {
+    Button('新建')
+      .width(SIDEBAR_ACTION_WIDTH)
+      .height(PRIMARY_HEIGHT)
+      .fontSize(FONT.body)
+      .backgroundColor($r('app.color.brand'))
+      .fontColor($r('app.color.text_inverse'))
+      .borderRadius(RADIUS.sm)
+      .onClick(() => this.openNew())
+  }
+
+  /** 宽屏空态里的主操作：右栏垂直居中，用户不必回左栏点。 */
+  @Builder
+  EmptyCta() {
+    Button('新建日程')
+      .width(SIDEBAR_ACTION_WIDTH)
+      .height(PRIMARY_HEIGHT)
+      .fontSize(FONT.body)
+      .backgroundColor($r('app.color.brand'))
+      .fontColor($r('app.color.text_inverse'))
+      .borderRadius(RADIUS.sm)
+      .onClick(() => this.openNew())
+  }
+
+  /** 列表行（两条断点共用；行自带 1vp 分割线，所以 List space 为 0）。 */
+  @Builder
+  ListRows() {
+    List() {
+      ForEach(
+        this.records,
+        (item: ScheduleRecord) => {
+          ListItem() {
+            RecordRow({
+              record: item,
+              onToggle: (id: string, done: boolean) => {
+                this.toggleDone(id, done);
+              },
+              onOpen: (id: string) => {
+                this.openDetail(id);
+              }
+            })
+          }
+        },
+        (item: ScheduleRecord) => `${item.id}|${item.ts}|${item.done ? '1' : '0'}`
+      )
+    }
+    .width('100%')
+    .layoutWeight(1)
+    .scrollBar(BarState.Off)
+  }
+
+  /** 紧凑屏/宽屏共用的空态文案。 */
+  @Builder
+  EmptyHint() {
+    EmptyState({
+      title: this.showAllPending ? '没有未完成的日程' : '这一天还没有日程',
+      hint: this.showAllPending ? '切换回「今日待办」看看当天安排' : '点「新建」记录一条，或切换日期'
+    })
+  }
+
+  /** 紧凑屏列表：空态只有文案（底部还有全宽「新建」）。 */
   @Builder
   RecordList() {
     if (this.records.length === 0) {
-      EmptyState({
-        title: this.showAllPending ? '没有未完成的日程' : '这一天还没有日程',
-        hint: this.showAllPending ? '切换回「今日待办」看看当天安排' : '点「新建」记录一条，或切换日期'
-      })
+      this.EmptyHint()
     } else {
-      List() {
-        ForEach(
-          this.records,
-          (item: ScheduleRecord) => {
-            ListItem() {
-              RecordRow({
-                record: item,
-                onToggle: (id: string, done: boolean) => {
-                  this.toggleDone(id, done);
-                },
-                onOpen: (id: string) => {
-                  this.openDetail(id);
-                }
-              })
-            }
-          },
-          (item: ScheduleRecord) => `${item.id}|${item.ts}|${item.done ? '1' : '0'}`
-        )
-      }
-      .width('100%')
-      .layoutWeight(1)
-      .scrollBar(BarState.Off)
+      this.ListRows()
     }
+  }
+
+  /** 宽屏右栏：空态居中给主操作；有数据时列表最大 900vp 居中，避免单行横跨整个宽屏。 */
+  @Builder
+  WideList() {
+    Column() {
+      if (this.records.length === 0) {
+        Column({ space: SPACING.xl }) {
+          this.EmptyHint()
+          this.EmptyCta()
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+      } else {
+        Column() {
+          this.ListRows()
+        }
+        .width('100%')
+        .height('100%')
+        .constraintSize({ maxWidth: LIST_MAX_WIDTH })
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .alignItems(HorizontalAlign.Center)
   }
 
   /** 紧凑屏：日期条 → 模式 → 列表 → 新建（单列自上而下）。 */
@@ -519,7 +602,7 @@ struct Index {
     .height('100%')
   }
 
-  /** 宽屏/横屏：左日期列（日期条 + 模式 + 新建）+ 右列表。 */
+  /** 宽屏/横屏：左日期列（日期条 + 模式 + 新建）+ 右列表；空态时主操作落在右栏居中。 */
   @Builder
   WideBody() {
     Row({ space: SPACING.lg }) {
@@ -529,7 +612,10 @@ struct Index {
         Divider()
           .strokeWidth(DIVIDER)
           .color($r('app.color.divider'))
-        this.PrimaryAction()
+        // 空态时右栏已有居中主操作，左栏不再放第二个「新建」（同屏只留 1 个主操作）
+        if (this.records.length > 0) {
+          this.SidebarAction()
+        }
       }
       .width(sidebarWidth(this.contentWidth))
       .height('100%')
@@ -542,7 +628,7 @@ struct Index {
         .height('100%')
 
       Column() {
-        this.RecordList()
+        this.WideList()
       }
       .layoutWeight(1)
       .height('100%')
@@ -810,7 +896,7 @@ struct Index {
     Stack({ alignContent: Alignment.Center }) {
       PageLayout({
         title: this.pageTitle(),
-        subtitle: this.statusText,
+        subtitle: this.subtitleText(),
         onMore: () => {
           this.showMore = true;
         },

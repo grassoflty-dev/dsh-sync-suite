@@ -628,29 +628,79 @@ struct Handwriting {
   }
 
   /**
-   * 横屏：页码步进器**纵向三行** `−` / `n/m` / `+`（真机缺陷：横向排被 56vp 的 rail 挤出去，
-   * `−` 和 `+` 直接看不见）。每行 40vp 高、宽撑满 rail。
+   * 横屏：页码步进器**纵向三行、三个独立按钮** `−` / `n/m` / `+`。
+   *
+   * 真机两轮反馈：① 横向排被 56vp 的 rail 挤出去（`−`/`+` 看不见）→ 改纵向；
+   * ② 整块灰底与「橡皮/手动框」风格不一致 → **拆成三个独立按钮**：同底色 `#F1F3F5`、
+   * 同圆角 `RADIUS.sm`、同字号 `FONT.caption`、各 40vp 高、宽撑满 rail、彼此 4vp 间距。
+   * 中间 `n/m` 是纯展示（无 onClick）。
    */
   @Builder
   pageStepperVertical() {
-    Column() {
-      this.stepperMinus(STEPPER_BTN)
-      Text(`${this.currentPage + 1}/${this.pageCount}`)
-        .width('100%')
-        .height(TOOL_HEIGHT)
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .textAlign(TextAlign.Center)
-        .fontColor($r('app.color.text_primary'))
-      this.stepperPlus(STEPPER_BTN)
+    Column({ space: SPACING.xs }) {
+      this.stepperMinusBar()
+      this.stepperLabelBar()
+      this.stepperPlusBar()
     }
     .width('100%')
-    .borderRadius(RADIUS.sm)
-    .backgroundColor('#F7F8FA')
     .alignItems(HorizontalAlign.Center)
     .flexShrink(0)
+  }
+
+  /** 横屏步进器 `−`：独立按钮，`pageCount > 1` 才可点（禁用态只改字色，不整体透明）。 */
+  @Builder
+  stepperMinusBar() {
+    Text('−')
+      .width('100%')
+      .height(TOOL_HEIGHT)
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .textAlign(TextAlign.Center)
+      .borderRadius(RADIUS.sm)
+      .backgroundColor('#F1F3F5')
+      .fontColor(this.pageCount > 1 ? $r('app.color.danger') : $r('app.color.text_secondary'))
+      .enabled(this.pageCount > 1)
+      .onClick(() => {
+        this.startDeletePage();
+      })
+  }
+
+  /** 横屏步进器中间的 `n/m`：纯展示，不可点。 */
+  @Builder
+  stepperLabelBar() {
+    Text(`${this.currentPage + 1}/${this.pageCount}`)
+      .width('100%')
+      .height(TOOL_HEIGHT)
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .textAlign(TextAlign.Center)
+      .borderRadius(RADIUS.sm)
+      .backgroundColor('#F1F3F5')
+      .fontColor($r('app.color.text_primary'))
+  }
+
+  /** 横屏步进器 `+`：独立按钮，满 10 页禁用。 */
+  @Builder
+  stepperPlusBar() {
+    Text('+')
+      .width('100%')
+      .height(TOOL_HEIGHT)
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .textAlign(TextAlign.Center)
+      .borderRadius(RADIUS.sm)
+      .backgroundColor('#F1F3F5')
+      .fontColor(this.pageCount < MAX_HANDWRITING_PAGES ? $r('app.color.brand') : $r('app.color.text_secondary'))
+      .enabled(this.pageCount < MAX_HANDWRITING_PAGES)
+      .onClick(() => {
+        this.insertPage();
+      })
   }
 
   /** 步进器的 `−`（删页，两步确认；只剩 1 页时禁用，只改色不透明）。 */
