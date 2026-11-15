@@ -780,3 +780,49 @@ hiai.vision/OCR_LIB_MSG: InitLibrary::ocr finish : 205.51 ms
 - 多分辨率/手机形态未验（只测 MLR-AL00 一台 1600×2560 平板）。
 - AI 三个源的真机「测试」未做（没有可用 key）。
 
+
+## 13. 收口批次（2026-11-15 夜）：笔迹设置 / 主从布局 / 附件 zip / 未完成索引 / 日程桥
+
+### 13.1 产物
+
+| 产物 | 大小 | SHA256 |
+| --- | --- | --- |
+| `dist-harmony/arkui-schedule-harmony-debug-signed.hap` | 2,133,649 B | `E7E8245CB542ED2E7316DD6C62D073DEABDEF0858DB2F91263F919F98BE662A3` |
+| `dist-android/arkui-schedule-android-debug.apk` | 53,628,063 B | `FE20B6D7830C8F6B3583A552EEA4876D1F331EF93BC2CB781C111C2295C3AF9C` |
+
+回归：App `node --test` **704 pass / 0 fail**；插件包 **98 pass / 0 fail**；`validate-app` **8/8**；
+`verify-hap`（鸿蒙）`pages/Handwriting` + `Handwriting` 16 次 / `hw-page-` 1 / `PageBook` 2 / `OcrBatch` 7；
+`verify-hap --apk` **6/6**（无 Handwriting / OcrBatch / recognizeText / PenKit / hw-page- / HandwriteComponent）。
+
+### 13.2 真机已验（MLR-AL00，1600×2560 与 2560×1600，2026-11-15）
+
+- **笔迹设置合并菜单**：工具条只剩 `‹ | 钢笔 · 3.5 · 黑 ▾ | 橡皮 | 手动框 | ↶ | ↷ | [−|+] [1/1] [‹|›] | 完成`；
+  点开后三段齐全（实测 bounds：`笔形` 19,296 / `粗细` 19,581 / `颜色` 19,754，5 笔刷 + 5 档 + 5 色全部可见）；
+  选「圆珠笔 + 5 + 红」→ 按钮文案变 `圆珠笔 · 5 · 红` 且**面板不关**（hilog `[hw] ink … panel=open`）。
+- **分页三单元格（横屏）**：`−`@0,988→84,1083 与 `+`@87,988→171,1083 同格；`1/1`@0,1087→171,1182；
+  `‹`@0,1187→84,1282 与 `›`@87,1187→171,1282 同格；`完成`@0,1411→171,1516 固定底部**可见**。
+- **分页三单元格（竖屏）**：`−`@1144 / `+`@1188 / `1/1`@1239 / `‹`@1334 / `›`@1378 / `完成`@1429，全部完整（各 42px）。
+- **草稿**：画 2 笔 → `[hw] draft saved pages=1 bytes=24841`（debounce 2s）→ 点 `‹` → `[hw] exit` → 再进 → `[hw] draft restored … current=1`。
+- **插页 / 删页**：`+` → `2/2`（`[hw] pages insert total=2 canDelete=true`）；`−` → 两次确认（`stage=1` → `stage=2`）→ `1/1`（`canDelete=false`）。
+- **竖屏单列**：内容宽 768vp < 840vp → 单列，列表 57→1543，**无右栏节点**。
+- **横屏主从**：左栏 411vp + 竖分割线 + 右栏 788vp（内容 720 上限居中）。
+- **首页 AI 汇总第一项**：`✨ 今日汇总` @988,285 紧贴列表首位，空态灰字；头部 `✨ AI 汇总` + `⚙ 设置`（无 `⋯`、无提醒）。
+- **主从编辑**：点「新建」→ 右栏直接变表单（标题 / 正文 / 手写板 / 记录者 / 完成情况 / 取消 / 保存日程），不再跳二级页。
+
+### 13.3 真机未验（设备锁屏，待解锁后补）
+
+- 附件 zip 生成与「仓库里只有 zip」的 `git ls-files` 证据；
+- 详情页从 zip 解压显示手迹（新链路）与旧散图回退；
+- `GitBridgeHost` 隐藏 Web 在真机 WebView 里加载 jszip、`zipUpsert/zipRead` 真实往返；
+- 启动自动 pull 的 `[sync]` 日志与下拉刷新；
+- 「全部未完成」读 `open.jsonl` 后的列表结果；
+- Android APK 打开带手迹数据能否显示附件（JSZip 两端通用性）。
+
+### 13.4 已知限制
+
+- `@ohos.zlib` 在 ArkUI-X 安卓侧不可用 → zip 统一走 WebView 里的 **JSZip 3.10.1**（MIT，`rawfile/git/jszip.min.js`）。
+- zip 用 STORE（不二次压缩 JPEG）：体积≈原图之和，一天 10 页 ≈1.5MB 以内。
+- 电脑端工具依赖 `dsh-git-config-sync` 的 `tools` 服务（可选注入，`config.scheduleTools:false` 可关）。
+- 跨设备「全部未完成」仍走全量扫描（索引只覆盖本机设备目录）。
+- 手写板旋转坐标系、压感体感、多分辨率适配仍属未量化验证项。
+- 本轮修掉的真编译坑：`Web.darkMode` 在 ArkUI-X 不支持（`11706007`）、ArkTS 禁止对象字面量作类型、`failure.code` 需显式收窄。
