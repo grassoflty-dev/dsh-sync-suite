@@ -1,5 +1,5 @@
 /**
- * 本机设置存储（设备标识 / 仓库地址 / token / AI key / 作者名）。
+ * 本机设置存储（设备标识 / 仓库地址 / token / AI key / 作者名 / 平台 / 认证方式 / AI 模型）。
  *
  * 落盘方式：`@kit.ArkData` 的 `preferences`（值不外泄，不进 Git 同步载荷）。
  * 设备标识同时决定日程目录 `git-repo/devices/<deviceId>/`，因此必须匹配
@@ -9,6 +9,9 @@
  */
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
+import { DEFAULT_AI_MODEL } from '../model/aiRequest';
+import { AUTH_HTTPS, PLATFORM_GITHUB, normalizeAuthMode, normalizePlatform } from '../model/settingsForm';
+import { normalizeSyncAction } from '../model/syncError';
 
 /** 设备标识默认值：首次启动即 `phone-a`，可在设置页修改。 */
 export const DEFAULT_DEVICE_ID: string = 'phone-a';
@@ -26,8 +29,27 @@ export interface ScheduleSettings {
   token: string;
   /** DeepSeek API key（仅存本机）。 */
   aiKey: string;
+  /** DeepSeek 模型名，默认 `deepseek-chat`。 */
+  aiModel: string;
   /** 作者名，写入日程记录的 author 字段。 */
   author: string;
+  /** 托管平台：`github` | `gitee`（只影响提示文案与示例）。 */
+  gitPlatform: string;
+  /** 认证方式：`https` | `ssh`（只影响提示文案与 token 是否必填）。 */
+  authMode: string;
+  /** 上次同步成功的时刻（ISO 8601，空串表示从未同步）。仅用于设置页展示。 */
+  lastSyncAt: string;
+  /** 上次同步失败的**分级后中文文案**（空串表示上次没有失败）。仅用于设置页展示。 */
+  lastSyncError: string;
+  /** 上次同步动作：`pull` | `push` | `status`（空串表示没有可重试的动作）。 */
+  lastSyncAction: string;
+}
+
+/** 同步状态的部分更新（不触碰 token 等其它设置）。 */
+export interface SyncStatePatch {
+  lastSyncAt?: string;
+  lastSyncError?: string;
+  lastSyncAction?: string;
 }
 
 /** 部分更新（未出现的字段保持原值）。 */
@@ -36,7 +58,10 @@ export interface SettingsPatch {
   repoUrl?: string;
   token?: string;
   aiKey?: string;
+  aiModel?: string;
   author?: string;
+  gitPlatform?: string;
+  authMode?: string;
 }
 
 const PREFERENCES_NAME: string = 'schedule_settings';
@@ -44,12 +69,24 @@ const KEY_DEVICE_ID: string = 'deviceId';
 const KEY_REPO_URL: string = 'repoUrl';
 const KEY_TOKEN: string = 'token';
 const KEY_AI_KEY: string = 'aiKey';
+const KEY_AI_MODEL: string = 'aiModel';
 const KEY_AUTHOR: string = 'author';
+const KEY_GIT_PLATFORM: string = 'gitPlatform';
+const KEY_AUTH_MODE: string = 'authMode';
+const KEY_LAST_SYNC_AT: string = 'lastSyncAt';
+const KEY_LAST_SYNC_ERROR: string = 'lastSyncError';
+const KEY_LAST_SYNC_ACTION: string = 'lastSyncAction';
 
 /** 规范化设备标识：非法值回退默认，避免写出非法目录名。 */
 export function normalizeDeviceId(value: string): string {
   const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
   return DEVICE_ID_PATTERN.test(text) ? text : DEFAULT_DEVICE_ID;
+}
+
+/** 规范化模型名：空白回退默认 `deepseek-chat`。 */
+export function normalizeAiModel(value: string): string {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text.length > 0 ? text : DEFAULT_AI_MODEL;
 }
 
 /** 读取 preferences 里的字符串值（非字符串按默认值处理）。 */
@@ -80,13 +117,25 @@ export class SettingsStore {
     const repoUrl = readString(await prefs.get(KEY_REPO_URL, ''), '');
     const token = readString(await prefs.get(KEY_TOKEN, ''), '');
     const aiKey = readString(await prefs.get(KEY_AI_KEY, ''), '');
+    const aiModel = readString(await prefs.get(KEY_AI_MODEL, DEFAULT_AI_MODEL), DEFAULT_AI_MODEL);
     const author = readString(await prefs.get(KEY_AUTHOR, ''), '');
+    const gitPlatform = readString(await prefs.get(KEY_GIT_PLATFORM, PLATFORM_GITHUB), PLATFORM_GITHUB);
+    const authMode = readString(await prefs.get(KEY_AUTH_MODE, AUTH_HTTPS), AUTH_HTTPS);
+    const lastSyncAt = readString(await prefs.get(KEY_LAST_SYNC_AT, ''), '');
+    const lastSyncError = readString(await prefs.get(KEY_LAST_SYNC_ERROR, ''), '');
+    const lastSyncAction = readString(await prefs.get(KEY_LAST_SYNC_ACTION, ''), '');
     const settings: ScheduleSettings = {
       deviceId: normalizeDeviceId(deviceId),
       repoUrl: repoUrl,
       token: token,
       aiKey: aiKey,
-      author: author
+      aiModel: normalizeAiModel(aiModel),
+      author: author,
+      gitPlatform: normalizePlatform(gitPlatform),
+      authMode: normalizeAuthMode(authMode),
+      lastSyncAt: lastSyncAt,
+      lastSyncError: lastSyncError,
+      lastSyncAction: normalizeSyncAction(lastSyncAction)
     };
     this.cache = settings;
     return settings;
@@ -95,6 +144,14 @@ export class SettingsStore {
   /** 最近一次读取/写入的缓存（未加载过返回 null）。 */
   cached(): ScheduleSettings | null {
     return this.cache;
+  }
+
+  /** 缓存里的模型名（未加载过或为空时返回空串），供 services/deepseek 兜底取模型。 */
+  cachedAiModel(): string {
+    if (this.cache === null) {
+      return '';
+    }
+    return this.cache.aiModel.trim();
   }
 
   /** 部分更新并立即 flush 到磁盘，返回更新后的完整设置。 */
@@ -109,13 +166,59 @@ export class SettingsStore {
       repoUrl: patch.repoUrl === undefined ? current.repoUrl : patch.repoUrl.trim(),
       token: patch.token === undefined ? current.token : patch.token.trim(),
       aiKey: patch.aiKey === undefined ? current.aiKey : patch.aiKey.trim(),
-      author: patch.author === undefined ? current.author : patch.author.trim()
+      aiModel: patch.aiModel === undefined ? current.aiModel : normalizeAiModel(patch.aiModel),
+      author: patch.author === undefined ? current.author : patch.author.trim(),
+      gitPlatform: patch.gitPlatform === undefined ? current.gitPlatform : normalizePlatform(patch.gitPlatform),
+      authMode: patch.authMode === undefined ? current.authMode : normalizeAuthMode(patch.authMode),
+      lastSyncAt: current.lastSyncAt,
+      lastSyncError: current.lastSyncError,
+      lastSyncAction: current.lastSyncAction
     };
     await prefs.put(KEY_DEVICE_ID, next.deviceId);
     await prefs.put(KEY_REPO_URL, next.repoUrl);
     await prefs.put(KEY_TOKEN, next.token);
     await prefs.put(KEY_AI_KEY, next.aiKey);
+    await prefs.put(KEY_AI_MODEL, next.aiModel);
     await prefs.put(KEY_AUTHOR, next.author);
+    await prefs.put(KEY_GIT_PLATFORM, next.gitPlatform);
+    await prefs.put(KEY_AUTH_MODE, next.authMode);
+    await prefs.put(KEY_LAST_SYNC_AT, next.lastSyncAt);
+    await prefs.put(KEY_LAST_SYNC_ERROR, next.lastSyncError);
+    await prefs.put(KEY_LAST_SYNC_ACTION, next.lastSyncAction);
+    await prefs.flush();
+    this.cache = next;
+    return next;
+  }
+
+  /**
+   * 只更新「上次同步状态」三项（不动 token / 仓库地址等设置）。
+   *
+   * 设置页每次同步结束后调用：成功清空错误、失败写入分级后的中文文案。
+   * 单独一条写入路径可以避免「同步状态回写」把用户正在编辑的表单值顺带覆盖掉。
+   */
+  async saveSyncState(patch: SyncStatePatch, context?: object): Promise<ScheduleSettings> {
+    if (context !== undefined && this.prefs === null) {
+      await this.init(context);
+    }
+    const prefs = this.requirePrefs();
+    const current = await this.load();
+    const next: ScheduleSettings = {
+      deviceId: current.deviceId,
+      repoUrl: current.repoUrl,
+      token: current.token,
+      aiKey: current.aiKey,
+      aiModel: current.aiModel,
+      author: current.author,
+      gitPlatform: current.gitPlatform,
+      authMode: current.authMode,
+      lastSyncAt: patch.lastSyncAt === undefined ? current.lastSyncAt : patch.lastSyncAt,
+      lastSyncError: patch.lastSyncError === undefined ? current.lastSyncError : patch.lastSyncError,
+      lastSyncAction:
+        patch.lastSyncAction === undefined ? current.lastSyncAction : normalizeSyncAction(patch.lastSyncAction)
+    };
+    await prefs.put(KEY_LAST_SYNC_AT, next.lastSyncAt);
+    await prefs.put(KEY_LAST_SYNC_ERROR, next.lastSyncError);
+    await prefs.put(KEY_LAST_SYNC_ACTION, next.lastSyncAction);
     await prefs.flush();
     this.cache = next;
     return next;

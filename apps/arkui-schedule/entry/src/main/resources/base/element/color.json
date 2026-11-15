@@ -9,8 +9,16 @@
       "value": "#007DFF"
     },
     {
+      "name": "brand_soft",
+      "value": "#E8F1FF"
+    },
+    {
       "name": "page_background",
-      "value": "#F1F3F5"
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "surface",
+      "value": "#FFFFFF"
     },
     {
       "name": "text_primary",
@@ -23,6 +31,30 @@
     {
       "name": "divider",
       "value": "#33182431"
+    },
+    {
+      "name": "danger",
+      "value": "#D94838"
+    },
+    {
+      "name": "warning",
+      "value": "#B26A00"
+    },
+    {
+      "name": "warning_soft",
+      "value": "#FFF3E6"
+    },
+    {
+      "name": "scrim",
+      "value": "#66000000"
+    },
+    {
+      "name": "preview_background",
+      "value": "#000000"
+    },
+    {
+      "name": "text_inverse",
+      "value": "#FFFFFF"
     }
   ]
 }

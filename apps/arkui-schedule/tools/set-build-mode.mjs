@@ -13,7 +13,7 @@
  *   node tools/set-build-mode.mjs --mode arkui-x
  *   node tools/set-build-mode.mjs --check
  */
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, relative } from 'node:path'
@@ -100,7 +100,52 @@ if (mode === 'arkui-x') {
     writeFileSync(configPath, config.replace(/dependencies\s*:\s*\{/, `dependencies:{${arkuiDep},`))
   }
 } else {
-  writeFileSync(configPath, config.replace(/,?'@ohos\/hvigor-ohos-arkui-x-plugin':'[^']*'/g, ''))
+  // 去掉 arkui-x 插件依赖，并把它留下的多余逗号一起吃掉（否则 `dependencies:{,}` 会让 hvigor JSON5 解析失败）。
+  const cleaned = config
+    .replace(/,?'@ohos\/hvigor-ohos-arkui-x-plugin':'[^']*',?/g, '')
+    .replace(/\{\s*,/g, '{')
+    .replace(/,\s*\}/g, '}')
+  writeFileSync(configPath, cleaned)
+}
+
+// `.arkui-x/arkui-x-config.json5` 里的 `{crossplatform:true}` 是 hvigor 判定「这是 ArkUI-X 工程」的
+// 标记：一旦存在，构建就进入 crossplatform 模式（aceModuleRoot 固定 src/main/ets、@kit.CoreVisionKit
+// 被 "can't support crossplatform application" 拦），**鸿蒙覆盖层永远不会被编译**。
+// 所以 harmony 模式必须把它挪走、arkui-x 模式再放回来。
+const crossMarker = join(root, '.arkui-x/arkui-x-config.json5')
+const crossMarkerOff = `${crossMarker}.harmony-off`
+if (mode === 'harmony') {
+  if (existsSync(crossMarker)) {
+    renameSync(crossMarker, crossMarkerOff)
+  }
+} else {
+  if (existsSync(crossMarkerOff)) {
+    renameSync(crossMarkerOff, crossMarker)
+  }
+}
+
+// local.properties 里的 `arkui-x.dir` 会让 hvigor 进入 crossplatform 模式：此时
+// aceModuleRoot 只认 `src/main/ets`，`src/harmony` 覆盖层整棵被摇掉（HAP 里连
+// pages/Handwriting 都不会出现），并且 @kit.CoreVisionKit 之类会被
+// "can't support crossplatform application" 拦下。所以两种模式必须互斥地维护这一行。
+const localPropsPath = join(root, 'local.properties')
+const ARKUIX_LINE = 'arkui-x.dir=C\\:\\\\Users\\\\GWL\\\\AppData\\\\Local\\\\ArkUI-X\\\\Sdk'
+if (existsSync(localPropsPath)) {
+  const raw = readFileSync(localPropsPath, 'utf8')
+  const lines = raw.split(/\r?\n/)
+  const kept = lines.filter((line) => !/^\s*arkui-x\.dir\s*=/.test(line))
+  if (mode === 'arkui-x') {
+    const existing = lines.find((line) => /^\s*arkui-x\.dir\s*=/.test(line))
+    if (existing === undefined) {
+      kept.push(ARKUIX_LINE)
+    } else {
+      kept.push(existing)
+    }
+  }
+  const next = kept.filter((line, index, arr) => line.length > 0 || index < arr.length - 1).join('\n')
+  if (next !== raw) {
+    writeFileSync(localPropsPath, next)
+  }
 }
 
 // 装饰器：ArkUI-X 26 的 ets-loader 不认 @crossplatform，两种模式都清掉

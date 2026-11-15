@@ -110,7 +110,7 @@ test('ohosTest target 在 entry 里存在（ArkUI-X/ace 构建需要）', () => 
 // ---------------------------------------------------------------- 共享层装配逻辑（静态断言）
 
 test('platformFeatures（共享层）：installPlatformFeatures 依据 getPlatform() 装配，不再写死 android', () => {
-  const source = readText('entry/src/main/ets/common/platformFeatures.ts');
+  const source = readText('entry/src/main/ets/common/platformFeatures.ets');
   const start = source.indexOf('export function installPlatformFeatures');
   assert.notEqual(start, -1, 'platformFeatures.ts 必须有 installPlatformFeatures');
   const body = source.slice(start, source.indexOf('\n}', start));
@@ -123,7 +123,7 @@ test('platformFeatures（共享层）：installPlatformFeatures 依据 getPlatfo
 });
 
 test('platformFeatures（鸿蒙覆盖层）：无条件 setPlatform(harmony) + 打开手写/OCR', () => {
-  const source = readText('entry/src/harmony/ets/common/platformFeatures.ts');
+  const source = readText('entry/src/harmony/ets/common/platformFeatures.ets');
   const start = source.indexOf('export function installPlatformFeatures');
   assert.notEqual(start, -1, '鸿蒙覆盖层必须有 installPlatformFeatures');
   const body = source.slice(start, source.indexOf('\n}', start));

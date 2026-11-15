@@ -1,8 +1,8 @@
 {
-  "meta.title": "Config Sync",
-  "meta.description": "Sync DSH configuration across devices over Git (patch entries, providers, plugin manifest, MCP). Secrets never enter the repository.",
-  "meta.detail": "Push this machine's DSH profile configuration to your own Git repository as a redacted snapshot, then pull a per-entry preview and apply selected entries back on demand. Each device writes only its own directory, secrets never enter the repository, and every write is snapshotted first.\n\nWhat it does:\n- Repository & auth: GitHub / Gitee / self-hosted over HTTPS token or system ssh-agent\n- Scope: cordis.patch.yml entries, provider definitions, plugin manifest (MERGE-only), MCP\n- Preview & apply: grouped per source device, per-entry selection, adopt remote / keep local\n- Safety: confirm gate, post-write SHA-256 verification, snapshot rollback, never force-push\n\nSee docs/DETAIL.md inside the plugin.",
-  "nav": "Config Sync",
+  "meta.title": "Config sync",
+  "meta.description": "Sync DSH configuration across devices over Git (patch entries, providers, plugin manifest, MCP). Open Settings → Config sync; secrets never enter the repository.",
+  "meta.detail": "docs/DETAIL.md",
+  "nav": "Config sync",
   "title": "Git config sync",
   "subtitle": "Sync DSH configuration across devices. Each device writes only its own directory; conflicts are resolved entry by entry.",
   "repo.title": "Repository",

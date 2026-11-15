@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -72,6 +72,28 @@ test('locale exposes meta.title/description/detail', () => {
       assert.equal(typeof dict[key], 'string', `${lang} 缺少 ${key}`)
       assert.ok(dict[key].length > 0, `${lang}.${key} 不能为空`)
     }
+  }
+})
+
+test('meta.detail 必须是真实存在的包内 Markdown 文档路径（不是说明文本）', () => {
+  // DSH 插件详情页把 meta.detail 当文件路径读取：写成多行说明文本会显示加载失败，
+  // 而不是回退到 README（见 dsh-doc references/plugin-details.md）。
+  for (const [lang, dict] of [['en', en], ['zh', zh]]) {
+    const detail = dict['meta.detail']
+    assert.match(detail, /^docs\/[A-Za-z0-9._-]+\.md$/, `${lang}.meta.detail 必须是 docs/*.md 路径，实际：${detail}`)
+    assert.ok(!/[\r\n]/.test(detail), `${lang}.meta.detail 不能含换行`)
+    assert.ok(existsSync(path.join(pkgDir, detail)), `${lang}.meta.detail 指向的文件必须存在：${detail}`)
+  }
+  assert.equal(en['meta.detail'], 'docs/DETAIL.md')
+  assert.equal(zh['meta.detail'], 'docs/DETAIL.zh.md')
+})
+
+test('meta.description 是单行短文案（详情页展示用）', () => {
+  for (const [lang, dict] of [['en', en], ['zh', zh]]) {
+    const description = dict['meta.description']
+    assert.ok(!/[\r\n]/.test(description), `${lang}.meta.description 不能含换行`)
+    assert.ok(description.length <= 200, `${lang}.meta.description 不得超过 200 字符，实际 ${description.length}`)
+    assert.ok(!/^(TODO|待补充|template)/i.test(description), `${lang}.meta.description 不能是模板文案`)
   }
 })
 

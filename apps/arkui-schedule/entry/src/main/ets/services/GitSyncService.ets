@@ -60,6 +60,12 @@ export interface GitSyncResult {
   message: string;
   /** 成功且产生了提交/HEAD 时给出 commit sha */
   commit?: string;
+  /**
+   * 失败时的机器可读错误码，供 `model/syncError.ts` 分级：
+   * `E_AUTH` | `E_HTTP` | `E_GIT` | `E_FS`（来自桥）或 `E_INPUT`（本服务的配置/范围预检）。
+   * 成功时为空。
+   */
+  code?: string;
 }
 
 // ---------------------------------------------------------------- 桥协议类型
@@ -196,6 +202,15 @@ function messageOf(error: Object): string {
 
 function failed(prefix: string, error: Object): GitSyncResult {
   const result: GitSyncResult = { ok: false, message: prefix + '：' + messageOf(error) };
+  if (error instanceof SyncError) {
+    result.code = error.code;
+  }
+  return result;
+}
+
+/** 预检失败（配置/范围/未就绪）：统一标 `E_INPUT`，设置页据此显示「配置不完整」。 */
+function rejected(prefix: string, problem: string): GitSyncResult {
+  const result: GitSyncResult = { ok: false, message: prefix + '：' + problem, code: 'E_INPUT' };
   return result;
 }
 
@@ -385,8 +400,7 @@ export class GitSyncService {
   async pull(): Promise<GitSyncResult> {
     const problem: string = this.validateForSync();
     if (problem.length > 0) {
-      const rejected: GitSyncResult = { ok: false, message: '拉取失败：' + problem };
-      return rejected;
+      return rejected('拉取失败', problem);
     }
     try {
       const event: BridgeEvent = await this.callBridge('pull', this.configArgs());
@@ -421,14 +435,12 @@ export class GitSyncService {
   async push(message: string): Promise<GitSyncResult> {
     const problem: string = this.validateForSync();
     if (problem.length > 0) {
-      const rejected: GitSyncResult = { ok: false, message: '推送失败：' + problem };
-      return rejected;
+      return rejected('推送失败', problem);
     }
     // 提交范围不变量（docs/DATA-CONTRACT.md §1/§6）：待提交路径越界一律拒绝，且不触碰网络
     const scopeProblem: string = this.verifyPushScope();
     if (scopeProblem.length > 0) {
-      const rejected: GitSyncResult = { ok: false, message: '推送失败：' + scopeProblem };
-      return rejected;
+      return rejected('推送失败', scopeProblem);
     }
     try {
       const args: Record<string, string> = this.configArgs();
@@ -462,8 +474,7 @@ export class GitSyncService {
   async status(): Promise<GitSyncResult> {
     const problem: string = this.validateForStatus();
     if (problem.length > 0) {
-      const rejected: GitSyncResult = { ok: false, message: '查询失败：' + problem };
-      return rejected;
+      return rejected('查询失败', problem);
     }
     try {
       const event: BridgeEvent = await this.callBridge('status', this.configArgs());

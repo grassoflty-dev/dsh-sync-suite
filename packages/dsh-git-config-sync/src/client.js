@@ -1,7 +1,7 @@
 /**
  * dsh-git-config-sync — client half (hand-written `__ModuleLoader__` bundle, no build step).
  *
- * Registers one settings section (Settings → 配置同步 / Config Sync):
+ * Registers one settings section (Settings → 配置同步 / Config sync):
  *   slot `settings.section`, id `git-config-sync`, order 70, locale NS `git-config-sync`.
  *
  * Contents:
@@ -39,8 +39,8 @@ window.__ModuleLoader__.load({
     // ------------------------------------------------------------------
     const zh = {
       "meta.title": "配置同步",
-      "meta.description": "通过 Git 在设备间同步 DSH 配置（patch 条目、provider、插件清单、MCP），密钥永不进入仓库。",
-      "meta.detail": "把本机 DSH profile 的配置以脱敏快照推到自有 Git 仓库，并在需要时拉取预览、逐条覆盖回本机。每台设备只写自己的目录，密钥永不进入仓库，每次写入前自动快照。\n\n主要能力：\n- 仓库与认证：GitHub / Gitee / 自建仓库，HTTPS Token 或系统 ssh-agent\n- 同步范围：cordis.patch.yml 条目、provider 定义、插件清单（MERGE-only）、MCP\n- 预览与覆盖：按源设备分组、逐条差异勾选、采纳远端 / 保留本地\n- 安全边界：confirm:true 门禁、写后 SHA-256 校验、快照回滚、永不 force push\n\n详见插件内 docs/DETAIL.md。",
+      "meta.description": "通过 Git 在设备间同步 DSH 配置（patch 条目、provider、插件清单、MCP）。入口：设置 → 配置同步；密钥永不进入仓库。",
+      "meta.detail": "docs/DETAIL.zh.md",
       "nav": "配置同步",
       "title": "Git 配置同步",
       "subtitle": "在设备间同步 DSH 配置：本机只写自己的目录，冲突按条目人工确认。",
@@ -209,10 +209,10 @@ window.__ModuleLoader__.load({
     }
 
     const en = {
-      "meta.title": "Config Sync",
-      "meta.description": "Sync DSH configuration across devices over Git (patch entries, providers, plugin manifest, MCP). Secrets never enter the repository.",
-      "meta.detail": "Push this machine's DSH profile configuration to your own Git repository as a redacted snapshot, then pull a per-entry preview and apply selected entries back on demand. Each device writes only its own directory, secrets never enter the repository, and every write is snapshotted first.\n\nWhat it does:\n- Repository & auth: GitHub / Gitee / self-hosted over HTTPS token or system ssh-agent\n- Scope: cordis.patch.yml entries, provider definitions, plugin manifest (MERGE-only), MCP\n- Preview & apply: grouped per source device, per-entry selection, adopt remote / keep local\n- Safety: confirm gate, post-write SHA-256 verification, snapshot rollback, never force-push\n\nSee docs/DETAIL.md inside the plugin.",
-      "nav": "Config Sync",
+      "meta.title": "Config sync",
+      "meta.description": "Sync DSH configuration across devices over Git (patch entries, providers, plugin manifest, MCP). Open Settings → Config sync; secrets never enter the repository.",
+      "meta.detail": "docs/DETAIL.md",
+      "nav": "Config sync",
       "title": "Git config sync",
       "subtitle": "Sync DSH configuration across devices. Each device writes only its own directory; conflicts are resolved entry by entry.",
 
@@ -1058,7 +1058,15 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** Wrap rest-argument children in keyed fragments so React never warns about lists. */
+    /**
+     * React passes children in `props.children`, never as extra arguments:
+     * reading `arguments` here drops every child and renders empty cards/fields.
+     */
+    function childrenOf(props) {
+      return React.Children.toArray(props.children === undefined ? [] : props.children)
+    }
+
+    /** Wrap children in keyed fragments so React never warns about lists. */
     function keyedKids(kids, prefix) {
       return kids.map(function (kid, i) {
         return h(React.Fragment, { key: prefix + i }, kid)
@@ -1066,7 +1074,7 @@ window.__ModuleLoader__.load({
     }
 
     function Card(props) {
-      const kids = Array.prototype.slice.call(arguments, 1)
+      const kids = childrenOf(props)
       return h(
         'section',
         { style: Object.assign({}, S.card, props.style || null) },
@@ -1083,7 +1091,7 @@ window.__ModuleLoader__.load({
     }
 
     function Field(props) {
-      const kids = Array.prototype.slice.call(arguments, 1)
+      const kids = childrenOf(props)
       return h(
         'div',
         { style: S.field },
@@ -2293,10 +2301,15 @@ window.__ModuleLoader__.load({
         return ctx.locale.register(NS, { en: en, zh: zh })
       })
       try {
-        if (ctx.locale && typeof ctx.locale.t === 'function') {
+        // The Client locale service exposes `bind(ns)` (the LocaleFace); there is no
+        // `ctx.locale.t(ns, key)`, so probing `.t` would silently pin the copy to the
+        // bundle-time dictionary and ignore runtime language switches.
+        if (ctx.locale && typeof ctx.locale.bind === 'function') {
+          serviceT = ctx.locale.bind(NS)
+        } else if (ctx.locale && typeof ctx.locale.translate === 'function') {
           const service = ctx.locale
           serviceT = function (key) {
-            return service.t(NS, key)
+            return service.translate(NS, key)
           }
         }
       } catch (e) {

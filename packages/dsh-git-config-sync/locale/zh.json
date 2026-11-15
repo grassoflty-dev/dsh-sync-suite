@@ -1,7 +1,7 @@
 {
   "meta.title": "配置同步",
-  "meta.description": "通过 Git 在设备间同步 DSH 配置（patch 条目、provider、插件清单、MCP），密钥永不进入仓库。",
-  "meta.detail": "把本机 DSH profile 的配置以脱敏快照推到自有 Git 仓库，并在需要时拉取预览、逐条覆盖回本机。每台设备只写自己的目录，密钥永不进入仓库，每次写入前自动快照。\n\n主要能力：\n- 仓库与认证：GitHub / Gitee / 自建仓库，HTTPS Token 或系统 ssh-agent\n- 同步范围：cordis.patch.yml 条目、provider 定义、插件清单（MERGE-only）、MCP\n- 预览与覆盖：按源设备分组、逐条差异勾选、采纳远端 / 保留本地\n- 安全边界：confirm:true 门禁、写后 SHA-256 校验、快照回滚、永不 force push\n\n详见插件内 docs/DETAIL.md。",
+  "meta.description": "通过 Git 在设备间同步 DSH 配置（patch 条目、provider、插件清单、MCP）。入口：设置 → 配置同步；密钥永不进入仓库。",
+  "meta.detail": "docs/DETAIL.zh.md",
   "nav": "配置同步",
   "title": "Git 配置同步",
   "subtitle": "在设备间同步 DSH 配置：本机只写自己的目录，冲突按条目人工确认。",

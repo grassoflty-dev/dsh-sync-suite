@@ -48,6 +48,24 @@ export interface AiPayload {
 }
 
 /**
+ * 手写页上的一个矩形区域（用户框选的公式/图表等「不参与 OCR」的部分）。
+ *
+ * 坐标是**归一化**的（0..1，左上角原点，`w`/`h` 为宽高比例），与画布像素/VP 尺寸无关：
+ * 同一份区域数据在手机、平板、截图落盘后的原图上都指向同一块内容。
+ * 越界/负宽高/NaN 由 `model/regions.ts` 的 `sanitizeRegion` 统一清洗，模型层不假设数据干净。
+ */
+export interface RegionBox {
+  /** 左上角 x（0..1）。 */
+  x: number;
+  /** 左上角 y（0..1）。 */
+  y: number;
+  /** 宽（0..1）。 */
+  w: number;
+  /** 高（0..1）。 */
+  h: number;
+}
+
+/**
  * 复制一条日程记录。
  *
  * ArkTS 不支持对象展开（`arkts-no-spread`），因此「基于旧记录改几个字段再追加一行」

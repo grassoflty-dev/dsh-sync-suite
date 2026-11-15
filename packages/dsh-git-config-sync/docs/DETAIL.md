@@ -1,86 +1,81 @@
-# 配置同步（dsh-git-config-sync）详情
+# Config sync (dsh-git-config-sync) — details
 
-> 本文是插件的中文详情页：说明架构、数据目录、恢复流程、风险边界与排错。
-> 需求基准见仓库根 `BRIEF.md`，接口契约见 `docs/CONTRACT.md`、`docs/DATA-CONTRACT.md`。
+> English detail page: architecture, data directories, restore flow, risk boundaries, and troubleshooting.
+> The Chinese edition is `docs/DETAIL.zh.md`.
 
----
+## 1. What it solves
 
-## 1. 它解决什么问题
+Most of DSH's usable configuration lives under `~/.dsh/profiles/<profile>/`: `cordis.patch.yml`
+(an entry array that may contain `!!js` expressions and comments), the plugin manifest, MCP
+definitions, and provider definitions. Copying those files between machines by hand has three
+failure modes:
 
-DSH 的可用配置大多集中在 `~/.dsh/profiles/<profile>/` 里：`cordis.patch.yml`（插件与模型 provider 的
-entry 数组，含 `!!js` 表达式与注释）、插件依赖清单、MCP 定义、provider 定义。手工在多台机器之间
-复制这些文件有三个坑：
+1. **Secrets leak**: patches often contain `apiKey` / `token` values.
+2. **Whole-file copies destroy local content**: comments, local-only entries, and versions differ per machine.
+3. **Conflicts cannot be undone**: a bad overwrite has no one-click recovery.
 
-1. **密钥会被带出去**：patch 里常有 `apiKey` / `token`；
-2. **整文件覆盖会丢本地内容**：不同机器的注释、本地独有 entry、版本不同；
-3. **冲突无法回退**：覆盖错了没有一键恢复。
+The plugin answers them with "one directory per device + per-entry merge + secret redaction +
+pre-write snapshot".
 
-本插件用「每台设备只写自己目录 + 按 entry id 逐条合并 + 密钥脱敏 + 写前快照」解决这三点。
-
----
-
-## 2. 架构
+## 2. Architecture
 
 ```
-┌──────────────────────────── Web GUI（浏览器） ────────────────────────────┐
+┌──────────────────────────── Web GUI (browser) ────────────────────────────┐
 │  settings.section / id=git-config-sync / order=70                        │
-│  src/client.js（纯 JS，__ModuleLoader__ 注册，无需构建）                  │
-│    · 表单、状态徽标、预览差异、快照列表、内联错误                          │
-│    · 唯一出口：fetch('/dsh-git-config-sync/rpc', {action,...})            │
+│  src/client.js (plain JS, registered through __ModuleLoader__)            │
+│    · form, status badges, preview diffs, snapshot list, inline errors     │
+│    · single egress: fetch('/dsh-git-config-sync/rpc', {action, ...})      │
 └───────────────────────────────┬──────────────────────────────────────────┘
-                                │ 同源 POST，{ok,data} | {ok,error}
+                                │ same-origin POST, {ok,data} | {ok,error}
 ┌───────────────────────────────┴──────────────────────────────────────────┐
-│  Host 进程（Cordis 插件，dist/index.js）                                  │
+│  Host process (Cordis plugin, dist/index.js)                              │
 │    ctx.webServer.register({kind:'exact', path:'/dsh-git-config-sync/rpc'})│
 │    ctx.connection.requestRejection(req) → 401/403                        │
-│    rpc.ts：action 分发 + 写操作串行队列 + 10MB body 上限                   │
-│    engine/：collect → preview → apply/rollback（fail-closed）             │
-│              git.ts（execFile('git')）· patch.ts（逐条合并）               │
-│              secrets.ts（脱敏/回填）· pluginMerge.ts（MERGE-only）        │
-│              snapshot.ts（写前快照）· paths.ts（可注入路径）              │
+│    rpc.ts: action dispatch + serialized write queue + 10 MB body cap     │
+│    engine/: collect → preview → apply/rollback (fail-closed)             │
+│              git.ts (execFile('git')) · patch.ts (per-entry merge)       │
+│              secrets.ts (redact/restore) · pluginMerge.ts (MERGE-only)   │
+│              snapshot.ts (pre-write snapshot) · paths.ts (injectable dirs)│
 └───────────────────────────────┬──────────────────────────────────────────┘
-                                │ 系统 git（HTTPS 用临时 GIT_ASKPASS，SSH 用 ssh-agent）
+                                │ system git (HTTPS via temporary GIT_ASKPASS, SSH via ssh-agent)
                     ┌───────────┴────────────┐
-                    │ 用户自有私有仓库（main） │
+                    │ your private repository │
                     │ devices/<deviceId>/...  │
                     └────────────────────────┘
 ```
 
-要点：
+Key points:
 
-- **前端不直接碰文件**：所有落盘都在 host 侧，UI 只发 action。
-- **同源请求**：不存在跨域/外部服务调用，Token 不会经过浏览器存储。
-- **没有运行时 npm 依赖**：host 只用 `node:` 内置模块 + 系统 `git`；`dist/` 已构建入库。
-- **不使用** `ctx.settings.installSection` / `settings.plugin.item`（当前 DSH 0.2.2-rc.3 无此 API），
-  设置页走 `settings.section` 插槽。
+- **The browser never touches files**; every write happens on the Host side.
+- **Same-origin only**: no cross-origin or third-party service call, and the token never reaches browser storage.
+- **No runtime npm dependencies**: the Host uses `node:` built-ins plus the system `git`; `dist/` is committed.
+- The settings page uses the `settings.section` slot (not `ctx.settings.installSection` / `settings.plugin.item`).
 
----
+## 3. Data directories
 
-## 3. 数据目录
-
-### 3.1 本机（不进仓库）
+### 3.1 Local (never enters the repository)
 
 ```
 %USERPROFILE%\.dsh\git-config-sync\
-  settings.json            # repoUrl/platform/authMode/deviceId/branch/scope（无 token）
-  credentials.json         # { token }，0600，仅当前用户
-  work\<repoHash>\         # 工作副本，repoHash = sha256(repoUrl) 前 16 位
-  plugins.to-install.json  # MERGE-only 待安装计划
+  settings.json            # repoUrl/platform/authMode/deviceId/branch/scope (no token)
+  credentials.json         # { token }, mode 0600, current user only
+  work\<repoHash>\         # working copy, repoHash = first 16 hex chars of sha256(repoUrl)
+  plugins.to-install.json  # MERGE-only install plan
 %USERPROFILE%\.dsh\vet\restore-snapshots\
   <YYYYMMDD-HHmmss>[-n]\
-    files\<name>           # 写入前的 profile 文件副本
-    manifest.json          # 每文件 sha256 / bytes
+    files\<name>           # copy of a profile file before writing
+    manifest.json          # per-file sha256 / bytes
 ```
 
-保留策略：恢复快照只保留最近 **10** 份，超出由 `SnapshotStore.prune()` 清理。
+Retention: only the latest **10** restore snapshots are kept; `SnapshotStore.prune()` removes the rest.
 
-### 3.2 远端仓库
+### 3.2 Remote repository
 
 ```
 <repo>/
   devices/
     pc-a/
-      cordis.patch.yml     # 脱敏后的 profile patch（保留注释与 !!js）
+      cordis.patch.yml     # redacted profile patch (comments and !!js preserved)
       providers.json       # { providers: { <id>: definition } }
       plugins.json         # { plugins: [{ name, version, source, enabled }] }
       mcp.json             # { entries: [{ id, text }] }
@@ -88,19 +83,18 @@ entry 数组，含 `!!js` 表达式与注释）、插件依赖清单、MCP 定�
     pc-b/ ...
 ```
 
-规则：**一台设备只写自己的目录**，读别的目录只用于预览；`manifest.json` 是快照索引，
-`sha256` 用于传输/写入校验，不做内容级合并。设备标识必须匹配 `^[a-z0-9][a-z0-9-]{0,31}$`。
+Rules: **a device writes only its own directory**; other directories are read for preview only.
+`manifest.json` is the snapshot index, and its `sha256` values are transport/write checks, not a
+content merge. Device IDs must match `^[a-z0-9][a-z0-9-]{0,31}$`.
 
----
+## 4. Sync algorithm
 
-## 4. 同步算法
+### 4.1 Per-entry patch merge (no YAML round-trip)
 
-### 4.1 patch 逐条合并（不做 YAML round-trip）
-
-`cordis.patch.yml` 是 profile 的顶层 YAML 数组：
+`cordis.patch.yml` is a top-level YAML array:
 
 ```yaml
-# 文件头注释
+# file header comment
 - id: llm-pi-ai
   config:
     providers: ...
@@ -109,10 +103,14 @@ entry 数组，含 `!!js` 表达式与注释）、插件依赖清单、MCP 定�
       name: 'dsh-git-sync'
 ```
 
-- entry key：顶层 `id:` → 该 id；`insert:` → `insert:<内部第一个 id>`；否则 `entry:<序号>`。
-- **`insert:` 多行块限制（重要）**：一个 `insert:` 块内的多行插件行被视为**一个整体**，按内部第一个 `id`
-  作为 key，合并时整块替换。若一个 `insert:` 块里混了多个插件，跨设备合并会以“第一个 id”代表整块，
-  导致块内其他插件无法独立勾选/回滚。**规避方式：用户 profile 里一条 entry 只放一行 `insert`**，例如：
+- Entry key: a top-level `id:` becomes that id; an `insert:` entry becomes `insert:<first inner id>`;
+  anything else becomes `entry:<index>`.
+- **`insert:` multi-line block limit (important)**: an entire `insert:` block is one unit keyed by its
+  first inner `id`, and merging replaces the whole block. If one block mixes several plugins, the other
+  plugins in that block cannot be selected or rolled back independently across devices. Avoid it by
+  keeping exactly one row per `insert:` entry, and do not nest an `insert:` inside another one — the
+  Loader only reads `insert` at the patch's top level.
+
   ```yaml
   - insert:
       - id: plugin-a
@@ -121,112 +119,121 @@ entry 数组，含 `!!js` 表达式与注释）、插件依赖清单、MCP 定�
       - id: plugin-b
         name: 'plugin-b'
   ```
-  插件本身不会自动改写用户的 profile 结构（只做块级文本替换）；`preview` 会显示该块的完整文本，
-  发现整块替换时请保留本地版本或手动拆分后再同步。
-- 合并：**本地顺序为准**；本地独有保留；远端独有追加到末尾（连同其前置注释）；
-  同 key 文本不同 → `changed`（整块采用远端原文）；相同 → `same`；
-  远端块含 `__SECRET__` 且与本地不同 → `manual`（不自动覆盖，需本地填写）。
-- 输出保证：文件头/前置注释、条目内 `!!js`、缩进、键顺序不变；末尾恰好一个换行。
-- 因此**注释不会丢**，`!!js` 表达式也不会被解析后重新序列化破坏。
 
-### 4.2 密钥脱敏与回填
+  The plugin never rewrites the profile structure itself (it replaces entry text as a block).
+  `preview` shows the complete block text; when a whole-block replacement appears, keep the local
+  version or split the block by hand before syncing.
+- Merge: local order wins; local-only entries are kept; remote-only entries are appended (with their
+  leading comment); same key with different text → `changed` (the remote block text is used);
+  identical → `same`; a remote block containing `__SECRET__` and differing from local → `manual`
+  (never overwritten automatically).
+- Output guarantees: file header/leading comments, `!!js` expressions, indentation, and key order are
+  unchanged, with exactly one trailing newline. Comments therefore survive, and `!!js` is never
+  parsed and re-serialized.
 
-- 命中 secret 的 key 判定按**词边界**（非子串）：`token`/`secret`/`password`/`authorization`/`bearer`
-  精确词，或相邻词 `api`+`key`（`apiKey`/`api_key`）；`maxTokens`（复数）与 `apiKeyEnv`（环境变量名）
-  属正常字段，**不会**被脱敏。
-- 标量在进入同步载荷前替换为固定占位符 `__SECRET__`。
-- 恢复时：远端占位符处用**同一条 entry 内、同 key 名**的本地值回填（不按出现顺序，避免多 provider 错配）；
-  本地没有 → 保留占位符、该条进 `skipped`，界面标「需本地填写」，**不会**把占位符写进你的配置。
-- 字符串里内嵌的 `Bearer xxx` 不处理（避免误伤普通文本）。
+### 4.2 Secret redaction and restore
 
-### 4.3 插件清单 MERGE-only
+- Secret keys are matched on **word boundaries** (not substrings): exact `token` / `secret` /
+  `password` / `authorization` / `bearer`, or adjacent `api`+`key` (`apiKey` / `api_key`).
+  `maxTokens` (plural) and `apiKeyEnv` (an env-var name) are ordinary fields and are **not** redacted.
+- Scalars are replaced with the fixed placeholder `__SECRET__` before entering a sync payload.
+- On restore, the placeholder is filled from the local value with the **same key** inside the same
+  entry (not by occurrence order), avoiding multi-provider mismatches. If the local entry has no such
+  key, the placeholder is kept, the entry is reported in `skipped`, and the UI marks it "needs local
+  value"; the placeholder is never written into your configuration.
+- An inline `Bearer xxx` inside a normal string is left alone (to avoid damaging plain text).
 
-| 情况 | 动作 |
+### 4.3 Plugin manifest (MERGE-only)
+
+| Situation | Action |
 | --- | --- |
-| 远端有、本地无 | `install`（只写待安装计划，不执行 pnpm） |
-| 本地有、远端无 | `keep`（**永不删除**本地独有插件） |
-| 远端版本 > 本地 | `install`（升级） |
-| 本地版本 > 远端 | `noDowngrade`（**不降级**） |
-| 版本相同 | `keep` |
-| 来源不可解析 | `skip` |
+| remote only | `install` (writes an install plan only; never runs pnpm) |
+| local only | `keep` (local-only plugins are **never deleted**) |
+| remote version > local | `install` (upgrade) |
+| local version > remote | `noDowngrade` (**never downgrades**) |
+| same version | `keep` |
+| unparsable source | `skip` |
 
-同步内容只有元数据（包名/版本/来源/启用状态），**不传代码、不传 node_modules**。
+Only metadata is synced (package name/version/source/enabled): **no code and no node_modules**.
 
----
-
-## 5. 恢复流程（fail-closed 四层）
+## 5. Restore flow (fail-closed, four layers)
 
 ```
-① 拉取预览        preview → {previewId, sources:[{deviceId, entries, plugins, providers, mcp}]}
-                  （只读：不写任何文件；缓存 TTL 10 分钟，单实例只保留一个 previewId）
-② 逐条勾选        UI 默认全选 added/changed；manual 默认不选并标「需本地填写」
-③ 执行覆盖        apply {confirm:true, previewId, sourceDevice, entries}
-   ├─ confirm !== true               → E_CONFIRM_REQUIRED，不落盘
-   ├─ previewId 失效/条目不合法      → E_NOT_FOUND / E_VALIDATION（界面提示「请重新预览」）
-   ├─ 写前快照                       → %USERPROFILE%\.dsh\vet\restore-snapshots\<ts>\
-   ├─ 仅替换勾选条目（本地 secret 回填，回填不了 → skipped）
-   ├─ 原子写（临时文件 + rename）
-   └─ 写后整文件 SHA-256 校验          → 不一致：用快照回滚 + E_SHA_MISMATCH
-④ 历史回滚        rollback {snapshotId, confirm:true} → {restored, verified:true}
+1. preview       preview → {previewId, sources:[{deviceId, entries, plugins, providers, mcp}]}
+                 (read-only: writes nothing; cache TTL 10 minutes, one previewId per instance)
+2. select        UI preselects added/changed; manual stays unselected and is marked
+3. apply         apply {confirm:true, previewId, sourceDevice, entries}
+   ├─ confirm !== true               → E_CONFIRM_REQUIRED, nothing written
+   ├─ stale previewId/bad entries    → E_NOT_FOUND / E_VALIDATION (UI says "preview again")
+   ├─ pre-write snapshot             → %USERPROFILE%\.dsh\vet\restore-snapshots\<ts>\
+   ├─ replace selected entries only  (local secret values are restored; unrecoverable → skipped)
+   ├─ atomic write                   (temp file + rename)
+   └─ post-write whole-file SHA-256  → mismatch: roll back from the snapshot + E_SHA_MISMATCH
+4. rollback      rollback {snapshotId, confirm:true} → {restored, verified:true}
 ```
 
-界面上的「执行覆盖」与「回滚」都是**两步确认**：先点按钮展开确认条，再点「确认覆盖 / 确认回滚」。
-所有写操作按钮在请求进行中禁用并显示「…中」，组件卸载后不再 setState。
+Both "apply overwrite" and "roll back" are **two-step confirmations**: the first click expands a
+confirmation bar, and only "Apply now" / "Roll back now" sends the request. Every write button is
+disabled while a request is in flight and shows "…ing"; the component never calls setState after unmount.
 
----
+## 6. Risk boundaries (explicit non-goals)
 
-## 6. 风险边界（明确不做的事）
+- **No force push**: non-fast-forward pulls run `pull --rebase` at most twice, then report `E_CONFLICT`.
+- **No automatic semantic conflict resolution**: two devices changing the same line require a human
+  choice between "adopt remote" and "keep local".
+- **No cross-device deletion**: local plugins/entries missing from the remote are always kept.
+- **No token in the browser**: the token passes through one `saveSettings` call; afterwards only
+  `hasToken: true` represents it.
+- **No changes to DSH itself or profile dependencies**: the plugin manifest only writes a plan file;
+  the plugin never runs pnpm and never edits the profile `package.json`.
+- **No YAML semantic rewrite**: only text-level block replacement, so `!!js` stays intact.
+- **No cloud relay**: only you and your Git repository.
 
-- **不 force push**：非快进时先 `pull --rebase`，最多 2 次，仍冲突报 `E_CONFLICT`。
-- **不自动解决语义冲突**：两个设备改了同一个 entry 的同一行，需要人工选择「采纳远端 / 保留本地」。
-- **不跨设备删除**：远端没有的本地插件/条目永远保留。
-- **不在浏览器保存 token**：Token 只走一次 `saveSettings`，之后只用 `hasToken: true` 表示状态。
-- **不修改 DSH 本体与 profile 依赖**：插件清单只写计划文件；不调用 pnpm、不改 profile `package.json`。
-- **不做 YAML 语义重写**：只做文本块级替换，避免破坏 `!!js`。
-- **不做云端中转**：只有你和你的 Git 仓库，没有第三方服务。
+Known limitations:
 
-已知限制：
+- `preview` is in-memory: restarting DSH or previewing again invalidates the old `previewId` (the UI
+  asks you to preview again).
+- `plugins.to-install.json` is a plan only; installing still requires a manual step in DSH.
+- Only four scopes are synced: `cordis.patch.yml`, providers, plugin manifest, and MCP. Session and
+  workspace files are out of scope.
+- `insert:` blocks merge as a whole keyed by their first inner id; keep one row per `insert:` entry
+  (see 4.1).
+- `getState` reads local state only and never uses the network; `reachable` is `true | false | null`
+  (null = not probed). Network probes happen only on "test connection" / "push" / "preview", and a
+  single git network operation is capped at 8 seconds.
+- `apply` returns `fileSha256` for the whole post-write profile patch and `blockSha256` for one entry's
+  text; they serve different purposes (write verification vs. entry tracking).
 
-- `preview` 是内存态：DSH 重启或再次预览后，旧 `previewId` 失效（界面会提示重新预览）。
-- `plugins.to-install.json` 只是计划，实际安装需要你手动执行。
-- 只同步 `cordis.patch.yml`、provider、插件清单、MCP 四类；会话/工作区文件不在范围内。
-- `insert:` 多行块按“内部第一个 id”整体合并；建议用户 profile 一条 entry 只放一行 `insert`（见 §4.1）。
-- `getState` 只读本地状态、不联网；`reachable` 为 `true|false|null`（null=未探测），
-  网络探测只在「测试连接 / 推送 / 拉取预览」发生，且单次 git 网络操作 ≤8 秒超时。
-- `apply` 返回的 `fileSha256` 是写后整个 profile patch 的 SHA-256；`blockSha256` 是单条 entry 文本的
-  SHA-256，两者用途不同（前者校验落盘、后者追踪条目）。
+## 7. Troubleshooting
 
----
-
-## 7. 排错
-
-| 现象 | 错误码 | 处理 |
+| Symptom | Code | Action |
 | --- | --- | --- |
-| 设置页显示「网络异常」 | `E_NETWORK` | DSH 服务已停止或页面已断开；重启 DSH 后刷新页面 |
-| 「服务返回 HTTP 500」 | `E_HTTP` | 看 DSH 日志；多为 git 未安装或仓库地址不可达 |
-| 「未通过 DSH 鉴权」 | `E_AUTH` | 当前会话无权限，重新登录/打开 GUI |
-| 保存设置报校验失败 | `E_VALIDATION` | 检查仓库地址协议（仅 `https://`、`ssh://`、`git@host:path`）、deviceId 格式、分支非空 |
-| 测试连接失败 | `E_GIT` / `E_AUTH` | Token 无效或 SSH key 未加载；HTTPS 用最小权限 PAT，SSH 确认 `ssh-add -l` |
-| 推送被拒 | `E_CONFLICT` | 远端已有新提交且 rebase 冲突；先在 DSH 外手工处理该仓库 |
-| 「预览已过期，请重新预览」 | `E_NOT_FOUND` / `E_VALIDATION` | 重新点「拉取预览」；previewId 只能用一次 |
-| 「写入后校验失败，已回滚」 | `E_SHA_MISMATCH` | 目标文件被别的进程改动；关闭其他编辑器/程序后重试 |
-| 插件清单显示「不降级」 | — | 本地版本更高，属预期；如需降级请手工处理 |
-| 条目显示「需本地填写」 | — | 远端该字段是 `__SECRET__`，请在本机同名 entry 里手工补 key |
+| Settings page shows "Network error" | `E_NETWORK` | DSH server stopped or the page disconnected; restart DSH and refresh |
+| "Server returned HTTP 500" | `E_HTTP` | Check DSH logs; usually git is missing or the repository is unreachable |
+| "DSH authorization rejected" | `E_AUTH` | The session lacks permission; sign in / reopen the GUI |
+| Save fails validation | `E_VALIDATION` | Check the URL scheme (`https://`, `ssh://`, `git@host:path`), deviceId format, non-empty branch |
+| Test connection fails | `E_GIT` / `E_AUTH` | Bad token or SSH key not loaded; use a least-privilege PAT for HTTPS, check `ssh-add -l` for SSH |
+| Push rejected | `E_CONFLICT` | The remote has new commits and rebase conflicts; resolve that repository outside DSH first |
+| "Preview expired, preview again" | `E_NOT_FOUND` / `E_VALIDATION` | Click "Preview remote" again; a previewId is single-use |
+| "Post-write verification failed, rolled back" | `E_SHA_MISMATCH` | Another process changed the target file; close other editors/programs and retry |
+| Manifest shows "No downgrade" | — | Local version is higher, as expected; downgrade manually if needed |
+| Entry shows "Needs local value" | — | The remote field is `__SECRET__`; fill the key in the local entry by hand |
 
-排查顺序建议：
+Suggested order:
 
-1. 「测试连接」→ 确认网络/认证；
-2. 「拉取预览」→ 确认读写与合并结果；
-3. 只勾一条 → 「执行覆盖」→ 看「上次覆盖结果」里的 `applied / skipped / snapshotId / verified`；
-4. 不满意就「写前快照 → 回滚」。
+1. "Test connection" → verify network/authentication.
+2. "Preview remote" → verify read/write and merge results.
+3. Select one entry → "Apply overwrite" → inspect `applied / skipped / snapshotId / verified`.
+4. If unhappy, use "pre-write snapshot → roll back".
 
----
+## 8. Implementation and verification status
 
-## 8. 实现与验证状态
-
-- `src/client.js`：纯 JS，`node --check` 通过；locale `en`/`zh` key 集合一致（148 个），
-  且内联字典与 `locale/*.json` 逐字节一致。
-- 组件级验证：用桩 React + 桩 `fetch` 在 Node 中挂载设置面板，走通 `getState → preview → apply(confirm) →
-  rollback(confirm)` 与网络失败提示（详见仓库 `reports/client.md`）。
-- **未验证**：真实 DSH Web GUI 中的视觉/交互（需要把插件装进 profile 后人工确认）；
-  host 侧 RPC 与 git 链路由另一个执行者负责，本文只描述已约定的契约。
+- `src/client.js`: plain JS, passes `node --check`; the `en`/`zh` locales keep identical key sets
+  (151 keys), and the inline dictionaries are byte-identical to `locale/*.json`.
+- Rendering regression: `test/client-render.test.mjs` renders the settings panel with a
+  React-semantics stub (children arrive through `props.children`) and asserts that inputs, selects,
+  checkboxes, and action buttons survive.
+- Host/engine behavior is covered by `node --test` in the repository root.
+- **Not verified**: visual/interaction behavior inside a real, authenticated DSH Web GUI. The desktop
+  GUI used for this review answered `dsh web authentication required`, so the rendered page remains
+  unverified; component-level rendering and static bundle metadata are verified instead.

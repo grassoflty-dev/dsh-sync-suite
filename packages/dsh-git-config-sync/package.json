@@ -16,7 +16,7 @@
     "icon.svg",
     "cordis.patch.yml",
     "README.md",
-    "docs/DETAIL.md"
+    "docs"
   ],
   "keywords": ["dsh", "dsh-plugin", "config-sync", "git"],
   "license": "MIT",
