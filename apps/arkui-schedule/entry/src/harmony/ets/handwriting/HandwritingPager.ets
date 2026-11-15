@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 分页手写板（**仅 HarmonyOS**）：Canvas 槽位化 + 顶部页条 + 5 种笔刷（钢笔/圆珠笔/铅笔/马克笔/荧光笔）
  * + 橡皮 + 框选 overlay + 按页撤销重做。
  *
@@ -48,18 +48,10 @@ import { promptAction } from '@kit.ArkUI';
 import { PageBook, MAX_HANDWRITING_PAGES } from '../model/pageBook';
 import { MIN_REGION_SIDE, regionsToMaskRects, sanitizeRegion } from '../model/regions';
 import type { MaskRect } from '../model/regions';
-import { StrokeHistory, PEN_WIDTHS, PEN_COLORS, DEFAULT_PEN_WIDTH, DEFAULT_PEN_COLOR } from '../model/strokeHistory';
+import { StrokeHistory, DEFAULT_PEN_WIDTH, DEFAULT_PEN_COLOR } from '../model/strokeHistory';
 import type { Stroke, StrokePoint } from '../model/strokeHistory';
-import {
-  BRUSHES,
-  DEFAULT_BRUSH,
-  brushSpec,
-  paintFor,
-  pressureWidth,
-  speedWidthScaleFor,
-  jitterPoint
-} from '../model/brush';
-import type { BrushKind, BrushPaint, BrushSpec } from '../model/brush';
+import { DEFAULT_BRUSH, paintFor, pressureWidth, speedWidthScaleFor, jitterPoint } from '../model/brush';
+import type { BrushKind, BrushPaint } from '../model/brush';
 import { smoothPath } from '../model/strokeSmooth';
 import { StylusAssist } from './StylusAssist';
 import type { RegionBox } from '../model/types';
@@ -77,8 +69,6 @@ const REGION_FILL: string = 'rgba(245,158,11,0.10)';
 const HANDLE_SIZE: number = 14;
 /** 右上角删除按钮的边长（vp）。 */
 const DELETE_SIZE: number = 18;
-/** 粗细档位的视觉直径（与 PEN_WIDTHS 一一对应；只是 UI 展示，不等于线宽）。 */
-const PEN_DOT_SIZES: number[] = [6, 8, 10, 13, 16];
 
 /** 工具模式（字符串常量，避免 ArkTS 枚举样板）。 */
 const TOOL_BRUSH: string = 'brush';
@@ -91,11 +81,20 @@ const DRAG_CREATE: string = 'create';
 const DRAG_MOVE: string = 'move';
 const DRAG_RESIZE: string = 'resize';
 
+/** 工具模式（导出让父页面的工具条复用同一套取值）。 */
+export const HW_TOOL_BRUSH: string = TOOL_BRUSH;
+export const HW_TOOL_ERASER: string = TOOL_ERASER;
+export const HW_TOOL_SELECT: string = TOOL_SELECT;
+
 /**
  * 手写板状态（@Observed：父页面与子组件共享同一份）。
  *
  * 内部的 `book`（页序/框）与 `history`（笔迹）是事实来源；扁平字段只是 `book` 的**可观察快照**，
  * 供 `build()` / 父页面直接读取（ArkUI 不监听深层对象字段）。
+ *
+ * 2026-11-15 UI 定版：工具条挪到父页面（`pages/Handwriting.ets`），所以**笔刷/粗细/颜色/工具**
+ * 也上收到这里，父页面直接改、子组件画布直接读；ArkUI 拿不到子组件实例，
+ * 于是「撤销/重做/清空」这类需要画布的动作由子组件注册回调（`*Impl`），父页面通过本类转调。
  */
 @Observed
 export class HandwritingPagerState {
@@ -112,6 +111,20 @@ export class HandwritingPagerState {
   /** 按页索引的笔迹历史（页数变化时由本类维护；删中间页会整体重建）。 */
   history: StrokeHistory = new StrokeHistory(MAX_HANDWRITING_PAGES);
 
+  // ---- 书写设置（工具条在父页面，画布在子组件，共享这一份）
+  /** 当前工具：画笔 / 橡皮 / 框选。 */
+  tool: string = TOOL_BRUSH;
+  /** 当前笔刷。 */
+  brush: BrushKind = DEFAULT_BRUSH;
+  /** 粗细档（vp）。 */
+  penWidth: number = DEFAULT_PEN_WIDTH;
+  /** 颜色 `#RRGGBB`。 */
+  penColor: string = DEFAULT_PEN_COLOR;
+  /** 撤销可用步数（父页面用它控制撤销按钮）。 */
+  undoSteps: number = 0;
+  /** 是否有可重做的笔。 */
+  redoAvailable: boolean = false;
+
   /**
    * 区域填白实现（由 `HandwritingPager` 在 `aboutToAppear` 注册）。
    * 父页面拿不到子组件实例，只能通过它转调；未注册时 `maskPage()` 抛错。
@@ -124,6 +137,13 @@ export class HandwritingPagerState {
    */
   replayAllImpl: ((removedSlot: number) => void) | null = null;
 
+  /** 撤销 / 重做 / 清空本页（都需要重绘画布，所以由子组件注册实现）。 */
+  undoImpl: (() => void) | null = null;
+  redoImpl: (() => void) | null = null;
+  clearPageImpl: ((pageIndex: number) => void) | null = null;
+  /** 工具切换钩子：子组件用它结束进行中的这一笔（避免半笔悬空）。 */
+  toolChangeImpl: (() => void) | null = null;
+
   /** 页序账本（模型层纯逻辑，负责增删页与区域框）。 */
   private book: PageBook = new PageBook(MAX_HANDWRITING_PAGES);
 
@@ -133,6 +153,63 @@ export class HandwritingPagerState {
       this.book.addPage();
     }
     this.sync();
+  }
+
+  // ---- 书写设置（父页面工具条调用）
+  /** 切笔刷：自动切回画笔模式（笔刷与橡皮/框选互斥）。 */
+  setBrush(kind: BrushKind): void {
+    this.brush = kind;
+    this.setTool(TOOL_BRUSH);
+  }
+
+  /** 切粗细档（vp）。 */
+  setPenWidth(width: number): void {
+    if (Number.isFinite(width) && width > 0) {
+      this.penWidth = width;
+    }
+  }
+
+  /** 切颜色（`#RRGGBB`）。 */
+  setPenColor(color: string): void {
+    if (typeof color === 'string' && color.length > 0) {
+      this.penColor = color;
+    }
+  }
+
+  /** 切工具（画笔 / 橡皮 / 框选）；通知子组件结束进行中的一笔。 */
+  setTool(tool: string): void {
+    if (this.tool === tool) {
+      return;
+    }
+    this.tool = tool;
+    const impl: (() => void) | null = this.toolChangeImpl;
+    if (impl !== null) {
+      impl();
+    }
+  }
+
+  /** 撤销当前页（子组件注册的实现；未就绪时无操作）。 */
+  applyUndo(): void {
+    const impl: (() => void) | null = this.undoImpl;
+    if (impl !== null) {
+      impl();
+    }
+  }
+
+  /** 重做当前页（子组件注册的实现；未就绪时无操作）。 */
+  applyRedo(): void {
+    const impl: (() => void) | null = this.redoImpl;
+    if (impl !== null) {
+      impl();
+    }
+  }
+
+  /** 清空第 pageIndex 页（笔迹 + 框；子组件注册的实现）。 */
+  clearPage(pageIndex: number): void {
+    const impl: ((pageIndex: number) => void) | null = this.clearPageImpl;
+    if (impl !== null) {
+      impl(pageIndex);
+    }
   }
 
   /** 把账本的值复制到可观察扁平字段（重新赋值才会触发刷新）。 */
@@ -309,11 +386,10 @@ export struct HandwritingPager {
   /** 翻页/增页/删页后通知父页面（父页面用它显示页码）。 */
   onStateChange: (pages: number, current: number) => void = () => {};
   /**
-   * 笔迹/框数/工具变化后通知父页面（父页面显示状态行）：
-   * `(本页笔数, 本页框数, 撤销深度, 笔刷中文名, 粗细)`。
+   * 笔迹变化后通知父页面（工具条的撤销/重做按钮据此启用/禁用；不再有状态行文案）：
+   * `(可撤销步数, 是否可重做)`。
    */
-  onStatsChange: (strokes: number, regions: number, undoDepth: number, brushLabel: string, width: number) => void =
-    () => {};
+  onStatsChange: (undoSteps: number, redoAvailable: boolean) => void = () => {};
 
   private settings: RenderingContextSettings = new RenderingContextSettings(true);
   private contexts: CanvasRenderingContext2D[] = [];
@@ -326,19 +402,6 @@ export struct HandwritingPager {
   private lastY: number = 0;
   private lastMoveMs: number = 0;
 
-  /** 当前工具：画笔（某笔刷）/ 橡皮 / 框选（三选一，全局设置）。 */
-  @State tool: string = TOOL_BRUSH;
-  /** 当前笔刷（全局设置）。 */
-  @State brush: BrushKind = DEFAULT_BRUSH;
-  /** 粗细档（全局设置）。 */
-  @State penWidth: number = DEFAULT_PEN_WIDTH;
-  /** 颜色（全局设置）。 */
-  @State penColor: string = DEFAULT_PEN_COLOR;
-  /** 当前页笔迹数 / 框数 / 撤销可用性（用于按钮与状态行）。 */
-  @State strokeCount: number = 0;
-  @State regionCount: number = 0;
-  @State undoSteps: number = 0;
-  @State redoAvailable: boolean = false;
   /** 画布可视尺寸（vp；归一化坐标换算用）。 */
   @State canvasW: number = 0;
   @State canvasH: number = 0;
@@ -371,10 +434,24 @@ export struct HandwritingPager {
     this.state.replayAllImpl = (removedSlot: number) => {
       this.afterPageRemoved(removedSlot);
     };
+    // 工具条在父页面：撤销/重做/清空需要重绘画布，只能由本组件注册实现供父页面转调
+    this.state.undoImpl = () => {
+      this.onUndo();
+    };
+    this.state.redoImpl = () => {
+      this.onRedo();
+    };
+    this.state.clearPageImpl = (pageIndex: number) => {
+      this.clearPage(pageIndex);
+    };
+    // 切工具时结束进行中的这一笔（避免半笔悬空）
+    this.state.toolChangeImpl = () => {
+      this.resetGestureState();
+    };
     // 手写笔快捷操作：轻捏切橡皮、双击撤销（取不到就静默禁用，不影响书写）
     this.stylusShortcuts = StylusAssist.enableShortcuts(
       () => {
-        this.setTool(TOOL_ERASER);
+        this.state.setTool(HW_TOOL_ERASER);
         promptAction.showToast({ message: '手写笔轻捏：已切到橡皮', duration: 1200 });
       },
       () => {
@@ -395,15 +472,13 @@ export struct HandwritingPager {
     this.onStateChange(this.state.pages, this.state.current);
   }
 
-  /** 刷新笔迹数 / 框数 / 撤销重做可用性（ArkUI 只监听 @State，所以必须落到 @State）。 */
+  /** 刷新撤销/重做可用性（落到 state 的可观察字段 + 通知父页面工具条）。 */
   private refreshStats(): void {
     const current: number = this.state.current;
     const history: StrokeHistory = this.state.history;
-    this.strokeCount = history.strokesAt(current).length;
-    this.regionCount = this.currentRegions().length;
-    this.undoSteps = history.undoDepth(current);
-    this.redoAvailable = history.canRedo(current);
-    this.onStatsChange(this.strokeCount, this.regionCount, this.undoSteps, brushSpec(this.brush).label, this.penWidth);
+    this.state.undoSteps = history.undoDepth(current);
+    this.state.redoAvailable = history.canRedo(current);
+    this.onStatsChange(this.state.undoSteps, this.state.redoAvailable);
   }
 
   /** 当前页对应的画布槽位（无效时返回 -1）。 */
@@ -425,11 +500,11 @@ export struct HandwritingPager {
   }
 
   private isSelectMode(): boolean {
-    return this.tool === TOOL_SELECT;
+    return this.state.tool === HW_TOOL_SELECT;
   }
 
   private isEraseMode(): boolean {
-    return this.tool === TOOL_ERASER;
+    return this.state.tool === HW_TOOL_ERASER;
   }
 
   // ------------------------------------------------------------------ 笔迹绘制
@@ -515,24 +590,12 @@ export struct HandwritingPager {
 
   // ------------------------------------------------------------------ 工具 / 笔刷
 
-  private setTool(tool: string): void {
-    if (this.tool === tool) {
-      return;
-    }
-    // 切换工具时结束进行中的这一笔（避免半笔悬空）
+  /** 结束进行中的一笔（切工具/切页时调用；工具与笔刷本身由父页面工具条改 `state`）。 */
+  private endActiveStroke(): void {
     this.drawingSlot = -1;
     this.activeStroke = null;
     this.dragMode = DRAG_NONE;
     this.dragging = false;
-    this.tool = tool;
-    this.refreshStats();
-  }
-
-  /** 选笔刷：自动切回画笔模式（笔刷与橡皮/框选互斥）。 */
-  private setBrush(kind: BrushKind): void {
-    this.brush = kind;
-    this.setTool(TOOL_BRUSH);
-    this.refreshStats();
   }
 
   private initContext(slot: number): void {
@@ -540,7 +603,7 @@ export struct HandwritingPager {
       return;
     }
     const context = this.contexts[slot];
-    const paint: BrushPaint = paintFor(this.brush, this.penColor, this.penWidth, false);
+    const paint: BrushPaint = paintFor(this.state.brush, this.state.penColor, this.state.penWidth, false);
     context.globalCompositeOperation = 'source-over';
     context.lineWidth = paint.lineWidth;
     context.strokeStyle = paint.strokeStyle;
@@ -550,7 +613,7 @@ export struct HandwritingPager {
 
   /** 本笔的绘制参数（橡皮走 erase=true，其余按笔刷）。 */
   private paintForActiveStroke(): BrushPaint {
-    return paintFor(this.brush, this.penColor, this.penWidth, this.isEraseMode());
+    return paintFor(this.state.brush, this.state.penColor, this.state.penWidth, this.isEraseMode());
   }
 
   // ------------------------------------------------------------------ 触摸输入
@@ -697,10 +760,10 @@ export struct HandwritingPager {
     if (event.type === TouchType.Down) {
       const stroke: Stroke = {
         points: [{ x: x, y: y }],
-        width: this.penWidth,
-        color: this.penColor,
+        width: this.state.penWidth,
+        color: this.state.penColor,
         erase: this.isEraseMode(),
-        brush: this.brush
+        brush: this.state.brush
       };
       this.activeStroke = stroke;
       this.drawingSlot = slot;
@@ -976,233 +1039,6 @@ export struct HandwritingPager {
 
   // ------------------------------------------------------------------ 视图
 
-  /** 顶部页条：页码块（当前页高亮）+ 末尾「＋」加页块 + 当前页摘要。 */
-  @Builder
-  pageBar() {
-    Row({ space: 8 }) {
-      Scroll() {
-        Row({ space: 6 }) {
-          ForEach(
-            this.state.slots,
-            (slot: number, pageIndex: number) => {
-              Text(`${pageIndex + 1}`)
-                .width(36)
-                .height(36)
-                .fontSize(14)
-                .textAlign(TextAlign.Center)
-                .borderRadius(8)
-                .backgroundColor(pageIndex === this.state.current ? $r('app.color.brand') : '#F1F3F5')
-                .fontColor(pageIndex === this.state.current ? Color.White : $r('app.color.text_primary'))
-                .fontWeight(pageIndex === this.state.current ? FontWeight.Bold : FontWeight.Normal)
-                .onClick(() => {
-                  if (this.state.jumpTo(pageIndex)) {
-                    this.resetGestureState();
-                    this.notifyParent();
-                    this.refreshStats();
-                  }
-                })
-            },
-            (slot: number) => `page-slot-chip-${slot}`
-          )
-          Text('＋')
-            .width(36)
-            .height(36)
-            .fontSize(18)
-            .textAlign(TextAlign.Center)
-            .borderRadius(8)
-            .backgroundColor('#E8F1FF')
-            .fontColor($r('app.color.brand'))
-            .enabled(this.state.pages < this.state.maxPages)
-            .opacity(this.state.pages < this.state.maxPages ? 1 : 0.4)
-            .onClick(() => {
-              if (this.state.addPage()) {
-                this.resetGestureState();
-                this.notifyParent();
-                this.refreshStats();
-              }
-            })
-        }
-        .padding({ left: 1, right: 1 })
-      }
-      .scrollable(ScrollDirection.Horizontal)
-      .scrollBar(BarState.Off)
-      .height(40)
-      .layoutWeight(1)
-      .align(Alignment.Start)
-
-      Text(`第 ${this.state.current + 1} 页 · ${this.strokeCount} 笔 · ${this.regionCount} 框`)
-        .fontSize(11)
-        .fontColor($r('app.color.text_secondary'))
-    }
-    .width('100%')
-    .alignItems(VerticalAlign.Center)
-  }
-
-  /** 工具条第 1 行：5 种笔刷 chip。 */
-  @Builder
-  brushBar() {
-    Scroll() {
-      Row({ space: 6 }) {
-        ForEach(
-          BRUSHES,
-          (spec: BrushSpec) => {
-            Text(spec.label)
-              .fontSize(12)
-              .height(30)
-              .padding({ left: 10, right: 10 })
-              .borderRadius(8)
-              .backgroundColor(
-                this.tool === TOOL_BRUSH && this.brush === spec.kind ? $r('app.color.brand') : '#F1F3F5'
-              )
-              .fontColor(
-                this.tool === TOOL_BRUSH && this.brush === spec.kind
-                  ? Color.White
-                  : $r('app.color.text_primary')
-              )
-              .onClick(() => {
-                this.setBrush(spec.kind);
-              })
-          },
-          (spec: BrushSpec) => `brush-${spec.kind}`
-        )
-      }
-    }
-    .scrollable(ScrollDirection.Horizontal)
-    .scrollBar(BarState.Off)
-    .width('100%')
-    .height(32)
-    .align(Alignment.Start)
-  }
-
-  /** 工具条第 2 行：粗细 5 档 + 颜色 5 色。 */
-  @Builder
-  sizeColorBar() {
-    Row({ space: 8 }) {
-      ForEach(
-        PEN_WIDTHS,
-        (width: number, index: number) => {
-          Row() {
-            Text('')
-              .width(PEN_DOT_SIZES[index])
-              .height(PEN_DOT_SIZES[index])
-              .borderRadius(PEN_DOT_SIZES[index] / 2)
-              .backgroundColor($r('app.color.text_primary'))
-          }
-          .width(PEN_DOT_SIZES[index] + 10)
-          .height(26)
-          .justifyContent(FlexAlign.Center)
-          .borderRadius(6)
-          .border({ width: this.penWidth === width ? 2 : 0, color: $r('app.color.brand') })
-          .backgroundColor(this.penWidth === width ? '#E8F1FF' : '#F7F8FA')
-          .opacity(this.isEraseMode() ? 0.5 : 1)
-          .onClick(() => {
-            this.penWidth = width;
-            this.refreshStats();
-          })
-        },
-        (width: number) => `pen-width-${width}`
-      )
-      Blank()
-      ForEach(
-        PEN_COLORS,
-        (color: string) => {
-          Text('')
-            .width(22)
-            .height(22)
-            .borderRadius(4)
-            .backgroundColor(color)
-            .border({ width: this.penColor === color ? 2 : 0, color: $r('app.color.brand') })
-            .onClick(() => {
-              this.penColor = color;
-              this.refreshStats();
-            })
-        },
-        (color: string) => `pen-color-${color}`
-      )
-    }
-    .width('100%')
-    .height(30)
-    .alignItems(VerticalAlign.Center)
-  }
-
-  /** 工具条第 3 行：橡皮 / 框选 / 撤销 / 重做 / 清空本页 + 当前提示。 */
-  @Builder
-  modeBar() {
-    Column({ space: 4 }) {
-      Scroll() {
-        Row({ space: 8 }) {
-          Button('橡皮')
-            .height(30)
-            .fontSize(12)
-            .backgroundColor(this.isEraseMode() ? $r('app.color.brand') : '#F1F3F5')
-            .fontColor(this.isEraseMode() ? Color.White : $r('app.color.text_primary'))
-            .onClick(() => {
-              this.setTool(TOOL_ERASER);
-            })
-          Button('框选')
-            .height(30)
-            .fontSize(12)
-            .backgroundColor(this.isSelectMode() ? $r('app.color.brand') : '#F1F3F5')
-            .fontColor(this.isSelectMode() ? Color.White : $r('app.color.text_primary'))
-            .onClick(() => {
-              this.setTool(TOOL_SELECT);
-            })
-          Button(`撤销(${this.undoSteps})`)
-            .height(30)
-            .fontSize(12)
-            .backgroundColor('#EEF1F4')
-            .fontColor($r('app.color.text_primary'))
-            .enabled(this.undoSteps > 0)
-            .opacity(this.undoSteps > 0 ? 1 : 0.4)
-            .onClick(() => {
-              this.onUndo();
-            })
-          Button('重做')
-            .height(30)
-            .fontSize(12)
-            .backgroundColor('#EEF1F4')
-            .fontColor($r('app.color.text_primary'))
-            .enabled(this.redoAvailable)
-            .opacity(this.redoAvailable ? 1 : 0.4)
-            .onClick(() => {
-              this.onRedo();
-            })
-          Button('清空本页')
-            .height(30)
-            .fontSize(12)
-            .backgroundColor('#FDECEC')
-            .fontColor('#C0392B')
-            .onClick(() => {
-              this.clearPage(this.state.current);
-            })
-        }
-      }
-      .scrollable(ScrollDirection.Horizontal)
-      .scrollBar(BarState.Off)
-      .width('100%')
-      .height(32)
-      .align(Alignment.Start)
-
-      Text(this.modeHint())
-        .fontSize(11)
-        .fontColor(this.isSelectMode() ? '#B26A00' : $r('app.color.text_secondary'))
-        .width('100%')
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
-  }
-
-  /** 当前工具的提示语。 */
-  private modeHint(): string {
-    if (this.isSelectMode()) {
-      return '在画布上拖出一个矩形；框内内容不做 OCR，只保存原图';
-    }
-    if (this.isEraseMode()) {
-      return '橡皮：擦掉笔迹（不会擦掉白底）';
-    }
-    return `${brushSpec(this.brush).label}：直接在画布上书写`;
-  }
-
   /** 单个区域框：虚线框体 + 右下角改大小手柄 + 右上角删除按钮（手势统一在 overlay 上）。 */
   @Builder
   regionBox(box: RegionBox, index: number) {
@@ -1250,152 +1086,82 @@ export struct HandwritingPager {
   }
 
   build() {
-    Column({ space: 6 }) {
-      this.pageBar()
-      this.brushBar()
-      this.sizeColorBar()
-      this.modeBar()
+    // 画布铺满父页面给的空间：工具条/页码/完成都在父页面（`pages/Handwriting.ets`），
+    // 这里只负责 Canvas 槽位 + 框选 overlay —— 「画布最大化」的关键。
+    Stack() {
+      ForEach(
+        this.state.slots,
+        (slot: number) => {
+          Canvas(this.contexts[slot])
+            .id(`${HANDWRITING_PAGE_ID_PREFIX}${slot}`)
+            .width('100%')
+            .height('100%')
+            .backgroundColor(Color.White)
+            .opacity(slot === this.activeSlot() ? 1 : 0)
+            // 框选模式下画布不接收触摸（交给上面的 overlay）
+            .hitTestBehavior(
+              slot === this.activeSlot() && !this.isSelectMode() ? HitTestMode.Default : HitTestMode.None
+            )
+            .onReady(() => {
+              this.initContext(slot);
+            })
+            .onTouch((event: TouchEvent) => {
+              this.handleTouch(slot, event);
+            })
+        },
+        (slot: number) => `page-slot-${slot}`
+      )
 
+      // ---- 框选 overlay：与笔迹 Canvas **兄弟节点**，永远不会进入 componentSnapshot 截图。
+      // 关键字里带几何值：几何一变组件就重建，保证拖动/改大小每帧都能看到新位置；
+      // 手势挂在这一层（自身不重建），所以手势不会被重建打断。
       Stack() {
         ForEach(
-          this.state.slots,
-          (slot: number) => {
-            Canvas(this.contexts[slot])
-              .id(`${HANDWRITING_PAGE_ID_PREFIX}${slot}`)
-              .width('100%')
-              .height('100%')
-              .backgroundColor(Color.White)
-              .opacity(slot === this.activeSlot() ? 1 : 0)
-              // 框选模式下画布不接收触摸（交给上面的 overlay）
-              .hitTestBehavior(
-                slot === this.activeSlot() && !this.isSelectMode() ? HitTestMode.Default : HitTestMode.None
-              )
-              .onReady(() => {
-                this.initContext(slot);
-              })
-              .onTouch((event: TouchEvent) => {
-                this.handleTouch(slot, event);
-              })
+          this.currentRegions(),
+          (box: RegionBox, index: number) => {
+            this.regionBox(box, index)
           },
-          (slot: number) => `page-slot-${slot}`
+          (box: RegionBox, index: number) =>
+            `region-${this.state.current}-${index}-${box.x}-${box.y}-${box.w}-${box.h}`
         )
-
-        // ---- 框选 overlay：与笔迹 Canvas **兄弟节点**，永远不会进入 componentSnapshot 截图。
-        // 关键字里带几何值：几何一变组件就重建，保证拖动/改大小每帧都能看到新位置；
-        // 手势挂在这一层（自身不重建），所以手势不会被重建打断。
-        Stack() {
-          ForEach(
-            this.currentRegions(),
-            (box: RegionBox, index: number) => {
-              this.regionBox(box, index)
-            },
-            (box: RegionBox, index: number) =>
-              `region-${this.state.current}-${index}-${box.x}-${box.y}-${box.w}-${box.h}`
-          )
-          if (this.dragging) {
-            Stack() {}
-            .width(Math.abs(this.dragCurX - this.dragStartX))
-            .height(Math.abs(this.dragCurY - this.dragStartY))
-            .position({
-              x: Math.min(this.dragStartX, this.dragCurX),
-              y: Math.min(this.dragStartY, this.dragCurY)
-            })
-            .border({ width: 1.5, color: REGION_STROKE, style: BorderStyle.Dashed })
-            .backgroundColor(REGION_FILL)
-            .borderRadius(4)
-            .hitTestBehavior(HitTestMode.None)
-          }
+        if (this.dragging) {
+          Stack() {}
+          .width(Math.abs(this.dragCurX - this.dragStartX))
+          .height(Math.abs(this.dragCurY - this.dragStartY))
+          .position({
+            x: Math.min(this.dragStartX, this.dragCurX),
+            y: Math.min(this.dragStartY, this.dragCurY)
+          })
+          .border({ width: 1.5, color: REGION_STROKE, style: BorderStyle.Dashed })
+          .backgroundColor(REGION_FILL)
+          .borderRadius(4)
+          .hitTestBehavior(HitTestMode.None)
         }
-        .width('100%')
-        .height('100%')
-        .hitTestBehavior(this.isSelectMode() ? HitTestMode.Default : HitTestMode.None)
-        .gesture(
-          PanGesture()
-            .onActionStart((event: GestureEvent) => {
-              this.handleGestureStart(event);
-            })
-            .onActionUpdate((event: GestureEvent) => {
-              this.handleGestureUpdate(event);
-            })
-            .onActionEnd((event: GestureEvent) => {
-              this.handleGestureEnd(event);
-            })
-        )
       }
       .width('100%')
-      .layoutWeight(1)
-      .backgroundColor(Color.White)
-      .borderRadius(12)
-      .clip(true)
-      .onAreaChange((_oldValue: Area, newValue: Area) => {
-        // 画布 vp 尺寸：归一化坐标 = 触摸坐标 / 尺寸（换算处都做了除零保护）
-        this.canvasW = newValue.width as number;
-        this.canvasH = newValue.height as number;
-      })
-
-      Row({ space: 8 }) {
-        Button('上一页')
-          .height(32)
-          .fontSize(12)
-          .backgroundColor('#E8F1FF')
-          .fontColor($r('app.color.brand'))
-          .enabled(this.state.current > 0)
-          .onClick(() => {
-            if (this.state.prev()) {
-              this.resetGestureState();
-              this.notifyParent();
-              this.refreshStats();
-            }
+      .height('100%')
+      .hitTestBehavior(this.isSelectMode() ? HitTestMode.Default : HitTestMode.None)
+      .gesture(
+        PanGesture()
+          .onActionStart((event: GestureEvent) => {
+            this.handleGestureStart(event);
           })
-        Text(`${this.state.current + 1} / ${this.state.pages}`)
-          .fontSize(13)
-          .fontColor($r('app.color.text_primary'))
-          .layoutWeight(1)
-          .textAlign(TextAlign.Center)
-        Button('下一页')
-          .height(32)
-          .fontSize(12)
-          .backgroundColor('#E8F1FF')
-          .fontColor($r('app.color.brand'))
-          .enabled(this.state.current < this.state.pages - 1)
-          .onClick(() => {
-            if (this.state.next()) {
-              this.resetGestureState();
-              this.notifyParent();
-              this.refreshStats();
-            }
+          .onActionUpdate((event: GestureEvent) => {
+            this.handleGestureUpdate(event);
           })
-      }
-      .width('100%')
-
-      Row({ space: 8 }) {
-        Button('清空本页框')
-          .layoutWeight(1)
-          .height(32)
-          .fontSize(12)
-          .backgroundColor('#FFF3E0')
-          .fontColor('#B26A00')
-          .enabled(this.regionCount > 0)
-          .opacity(this.regionCount > 0 ? 1 : 0.4)
-          .onClick(() => {
-            this.state.setRegions(this.state.current, []);
-            this.refreshStats();
+          .onActionEnd((event: GestureEvent) => {
+            this.handleGestureEnd(event);
           })
-        Button('删除本页')
-          .layoutWeight(1)
-          .height(32)
-          .fontSize(12)
-          .backgroundColor('#FDECEC')
-          .fontColor('#C0392B')
-          .enabled(this.state.pages > 1)
-          .opacity(this.state.pages > 1 ? 1 : 0.4)
-          .onClick(() => {
-            this.removeCurrentPage();
-          })
-      }
-      .width('100%')
+      )
     }
     .width('100%')
     .height('100%')
+    .backgroundColor(Color.White)
+    .clip(true)
+    .onAreaChange((_oldValue: Area, newValue: Area) => {
+      // 画布 vp 尺寸：归一化坐标 = 触摸坐标 / 尺寸（换算处都做了除零保护）
+      this.canvasW = newValue.width as number;
+      this.canvasH = newValue.height as number;
+    })
   }
 }

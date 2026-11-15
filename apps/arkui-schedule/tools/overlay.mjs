@@ -63,8 +63,13 @@ function readManifest() {
 function apply() {
   const existing = readManifest()
   if (existing !== null) {
-    console.log(`覆盖层已应用（${existing.replaced.length} 覆盖 / ${existing.created.length} 新建），先 restore 再 apply`)
-    return 0
+    // 并发构建会抢这份状态：如果这里只打印警告就继续，构建会编出一个「没有手写链路」的 HAP
+    // （main_pages.json 只剩 4 页）。所以必须硬失败，让 build-harmony.ps1 当场停下。
+    console.error(
+      `✗ 覆盖层已被应用（${existing.replaced.length} 覆盖 / ${existing.created.length} 新建，时间 ${existing.at}）。` +
+        '这说明另一个构建正在进行；并发构建会破坏产物。先等它结束，或手动 `node tools/overlay.mjs restore` 后再试。'
+    )
+    return 1
   }
   mkdirSync(backupDir, { recursive: true })
   const files = walk(harmonyDir)

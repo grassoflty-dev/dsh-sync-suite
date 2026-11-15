@@ -1,8 +1,8 @@
 /**
- * DeepSeek 每日 AI 汇总（共享层，Android 与 HarmonyOS 都可用）。
+ * 每日 AI 汇总（共享层，Android 与 HarmonyOS 都可用）。
  *
  * 契约（BRIEF §3.4、`docs/CONTRACT.md` §3.3）：
- * - 端点 `https://api.deepseek.com/chat/completions`，模型默认 `deepseek-chat`（设置页可改）；
+ * - 端点与模型来自 `model/aiProvider` 的预设表：`chatCompletionsURL(baseURL)` + `resolveModel(源, 模型)`；
  * - `messages` 由 `buildAiPrompt` 产出（system 固定整理约束 + user 记录明细），
  *   提示词里已注入当前时间与时区；
  * - 解析 `choices[0].message.content`；
@@ -11,10 +11,18 @@
  * - **key 只出现在 Authorization 头里，本文件不打印任何请求头/请求体/响应体。**
  *
  * 纯逻辑（URL 拼接、请求体、错误分类、重试判定、回复解析）都在 `model/aiRequest.ts`，
- * 由 `tools/test/aiRequest.test.mjs` 覆盖；本文件只负责真实网络调用与重试编排。
+ * 源/模型归一在 `model/aiProvider.ts`；本文件只负责真实网络调用与重试编排。
  */
 import { http } from '@kit.NetworkKit';
 import { buildAiPrompt } from '../model/aiPayload';
+import {
+  DEFAULT_PROVIDER_ID,
+  chatCompletionsURL,
+  defaultModelOf,
+  findProvider,
+  resolveModel as resolvePresetModel
+} from '../model/aiProvider';
+import type { AiProviderPreset } from '../model/aiProvider';
 import {
   AI_DEFAULT_MAX_TOKENS,
   AI_PROBE_MAX_TOKENS,
@@ -22,7 +30,6 @@ import {
   AI_RETRY_BACKOFF_MS,
   AI_STATUS_NETWORK,
   AI_STATUS_TIMEOUT,
-  DEFAULT_AI_BASE_URL,
   DEFAULT_AI_MODEL,
   buildAiRequest,
   classifyAiError,
@@ -32,7 +39,7 @@ import {
 } from '../model/aiRequest';
 import type { AiRequest } from '../model/aiRequest';
 import type { AiPayload } from '../model/types';
-import { settingsStore } from './settingsStore';
+import { aiBaseURLFor, settingsStore } from './settingsStore';
 
 const CONNECT_TIMEOUT_MS: number = 20000;
 const READ_TIMEOUT_MS: number = 120000;
@@ -58,8 +65,15 @@ export interface AiTestResult {
   ok: boolean;
   /** 拿到的 HTTP 状态码（超时为 -1，网络错误为 0）。 */
   status: number;
-  /** 中文提示，例如 `成功：HTTP 200 / 模型 deepseek-chat`。 */
+  /** 中文提示，例如 `成功：HTTP 200 / 模型 deepseek-chat（DeepSeek 官方）`。 */
   message: string;
+}
+
+/** 一次调用的路由：源决定地址与可用模型。 */
+interface AiRoute {
+  providerId: string;
+  model: string;
+  baseURL: string;
 }
 
 /** 整体超时用的哨兵错误（比字符串匹配可靠）。 */
@@ -88,16 +102,50 @@ export function deviceTimeZone(): string {
   return `UTC${sign}${hh}:${mm}`;
 }
 
-/** 解析实际使用的模型名：显式参数 > 设置页缓存 > 默认 `deepseek-chat`。 */
-function resolveModel(explicit: string): string {
-  if (typeof explicit === 'string' && explicit.trim().length > 0) {
-    return explicit.trim();
+/** 解析实际使用的源：显式参数 > 设置页缓存 > 默认源。 */
+function cachedProviderId(): string {
+  const cached: string = settingsStore.cachedProviderId();
+  return cached.length > 0 ? cached : DEFAULT_PROVIDER_ID;
+}
+
+/** 接口基地址：显式参数 > 设置页缓存 > 预设；预设源不采用缓存里的旧地址。 */
+function baseURLFor(providerId: string, explicit: string): string {
+  const text: string = typeof explicit === 'string' ? explicit.trim() : '';
+  if (text.length > 0) {
+    return aiBaseURLFor(providerId, text);
+  }
+  return aiBaseURLFor(providerId, settingsStore.cachedBaseURL());
+}
+
+/** 把「显式参数 / 设置缓存 / 预设」归一成一次调用的路由。 */
+function routeFor(providerId: string, model: string, baseURL: string): AiRoute {
+  const preset: AiProviderPreset = findProvider(providerId.length > 0 ? providerId : cachedProviderId());
+  const route: AiRoute = {
+    providerId: preset.id,
+    model: resolveModel(preset.id, model),
+    baseURL: baseURLFor(preset.id, baseURL)
+  };
+  return route;
+}
+
+/**
+ * 解析实际使用的模型名：显式参数 > 设置页缓存 > 该源默认模型。
+ *
+ * 解析结果还要过一遍该源的模型表：换源后旧模型名不在新源列表里，会自动回到新源默认模型。
+ */
+function resolveModel(providerId: string, explicit: string): string {
+  const explicitModel: string = typeof explicit === 'string' ? explicit.trim() : '';
+  if (explicitModel.length > 0) {
+    return resolvePresetModel(providerId, explicitModel);
   }
   const cached: string = settingsStore.cachedAiModel();
   if (cached.length > 0) {
-    return cached;
+    return resolvePresetModel(providerId, cached);
   }
-  return DEFAULT_AI_MODEL;
+  if (providerId === DEFAULT_PROVIDER_ID) {
+    return DEFAULT_AI_MODEL;
+  }
+  return defaultModelOf(providerId);
 }
 
 /** 把 `http.HttpResponse` 归一成一次尝试的结果。 */
@@ -225,21 +273,31 @@ async function requestContent(apiKey: string, request: AiRequest): Promise<strin
  * （失败时保持 `ai_processed:false`、不写 `ai_structured`）。
  *
  * @param payload 由 `buildAiPayload` 生成的载荷（只含当天未处理记录）
- * @param apiKey DeepSeek API key（设置页填写）
+ * @param apiKey AI 密钥（设置页填写；换源不必重填）
  * @param nowIso 当前时间（注入提示词）
  * @param timeZone 时区标签（通常用 `deviceTimeZone()`）
- * @param model 模型名（可选；缺省时用设置页保存的模型，再缺省用 `deepseek-chat`）
+ * @param model 模型名（可选；缺省用设置页保存的模型，再缺省用该源默认模型）
+ * @param providerId 源 id（可选；缺省用设置页保存的源，再缺省用 `deepseek`）
+ * @param baseURL 接口基地址（可选；只有自定义源采用，其余源用预设地址）
  */
 export async function summarize(
   payload: AiPayload,
   apiKey: string,
   nowIso: string,
   timeZone: string,
-  model?: string
+  model?: string,
+  providerId?: string,
+  baseURL?: string
 ): Promise<string> {
   const key = typeof apiKey === 'string' ? apiKey.trim() : '';
+  const route: AiRoute = routeFor(
+    providerId === undefined ? '' : providerId,
+    model === undefined ? '' : model,
+    baseURL === undefined ? '' : baseURL
+  );
+  const preset: AiProviderPreset = findProvider(route.providerId);
   if (key.length === 0) {
-    throw new Error('未设置 DeepSeek API Key，请先在设置页填写');
+    throw new Error(`未设置 ${preset.label} 密钥，请先在设置页填写（密钥只保存在本机）`);
   }
   if (payload.records.length === 0) {
     throw new Error('当天没有需要 AI 整理的记录');
@@ -247,8 +305,8 @@ export async function summarize(
 
   const prompt = buildAiPrompt(payload, nowIso, timeZone);
   const request = buildAiRequest(
-    DEFAULT_AI_BASE_URL,
-    resolveModel(model === undefined ? '' : model),
+    chatCompletionsURL(route.baseURL),
+    route.model,
     prompt,
     AI_DEFAULT_MAX_TOKENS,
     SYSTEM_PROMPT
@@ -256,31 +314,50 @@ export async function summarize(
   return requestContent(key, request);
 }
 
+/** 第二个参数是不是已知源 id（否则按旧签名的「模型名」解释）。 */
+function isProviderId(text: string): boolean {
+  const value: string = typeof text === 'string' ? text.trim().toLowerCase() : '';
+  return value.length > 0 && findProvider(value).id === value;
+}
+
 /**
  * 设置页的「测试 AI 连通性」：用最小 prompt（`ping`，max_tokens=1）真调一次接口。
  *
- * **不抛异常**，所有失败都折成中文文案；返回的 message 里只有状态码与模型名，
- * 绝不包含 key 的任何片段。
+ * **不抛异常**，所有失败都折成中文文案；返回的 message 里只有源/状态码/模型名，
+ * 绝不包含 key 的任何片段。旧签名 `testAiConnection(key, model)` 仍可用：
+ * 第二个参数不是已知源 id 时按模型名处理，源取设置页缓存。
  */
-export async function testAiConnection(apiKey: string, model: string): Promise<AiTestResult> {
+export async function testAiConnection(
+  apiKey: string,
+  providerIdOrModel: string = '',
+  modelId: string = '',
+  baseURL: string = ''
+): Promise<AiTestResult> {
   const key: string = typeof apiKey === 'string' ? apiKey.trim() : '';
-  const name: string = resolveModel(model);
+  const legacyCall: boolean = !isProviderId(providerIdOrModel);
+  const route: AiRoute = routeFor(
+    legacyCall ? '' : providerIdOrModel,
+    legacyCall ? providerIdOrModel : modelId,
+    baseURL
+  );
+  const preset: AiProviderPreset = findProvider(route.providerId);
+  const label: string = preset.label;
   if (key.length === 0) {
     const missing: AiTestResult = {
       ok: false,
       status: AI_STATUS_NETWORK,
-      message: '失败：未填写 DeepSeek API Key（key 只保存在本机，不会写进日志）'
+      message: `失败：未填写 ${label} 密钥（密钥只存本机，不会写进日志）`
     };
     return missing;
   }
   let request: AiRequest;
   try {
-    request = buildAiRequest(DEFAULT_AI_BASE_URL, name, AI_PROBE_PROMPT, AI_PROBE_MAX_TOKENS);
+    request = buildAiRequest(chatCompletionsURL(route.baseURL), route.model, AI_PROBE_PROMPT, AI_PROBE_MAX_TOKENS);
   } catch (error) {
     const invalid: AiTestResult = {
       ok: false,
       status: AI_STATUS_NETWORK,
-      message: describeAiTestResult(false, AI_STATUS_NETWORK, name, describeError(error as Object))
+      message: describeAiTestResult(false, AI_STATUS_NETWORK, route.model, describeError(error as Object))
     };
     return invalid;
   }
@@ -294,14 +371,14 @@ export async function testAiConnection(apiKey: string, model: string): Promise<A
     const okResult: AiTestResult = {
       ok: true,
       status: 200,
-      message: describeAiTestResult(true, 200, name, '')
+      message: `${describeAiTestResult(true, 200, route.model, '')}（${label}）`
     };
     return okResult;
   }
   const failedResult: AiTestResult = {
     ok: false,
     status: outcome.status,
-    message: describeAiTestResult(false, outcome.status, name, failureMessage(outcome))
+    message: `${describeAiTestResult(false, outcome.status, route.model, failureMessage(outcome))}（${label}）`
   };
   return failedResult;
 }
