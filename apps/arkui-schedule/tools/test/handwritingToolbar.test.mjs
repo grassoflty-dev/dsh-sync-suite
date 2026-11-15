@@ -30,11 +30,17 @@ const code = source
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .replace(/(^|[^:])\/\/.*$/gm, '$1');
 
-/** 取出某个 `@Builder`/方法体（从 `name(` 到下一个 `@Builder` 或 `build()`）。 */
+/**
+ * 取出某个 `@Builder`/方法**定义**体（两空格缩进的 `name(` 开头，到下一个 `@Builder` 或 `build()`）。
+ *
+ * 注意必须匹配「定义」而不是调用点：同一个 builder 可能先被 `this.xxx()` 调用、后定义
+ * （例如 `pageStepperVertical` 先被 railBar 调用），用 `indexOf('xxx(')` 会命中调用处。
+ */
 function builderBody(name) {
-  const start = code.indexOf(`${name}(`);
-  assert.ok(start >= 0, `找不到 ${name}`);
-  const rest = code.slice(start);
+  // 允许 `private ` 之类修饰符（`currentBrushLabel` / `currentColorLabel` 是私有方法）
+  const match = new RegExp(`\\n  (?:private |static )?${name}\\(`).exec(code);
+  assert.ok(match !== null, `找不到 ${name} 的定义`);
+  const rest = code.slice(match.index);
   const next = rest.search(/\n\s*@Builder|\n\s*build\(\) \{/);
   return next > 0 ? rest.slice(0, next) : rest;
 }
@@ -235,20 +241,47 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     assert.ok(rail >= 72, `RAIL_WIDTH 必须 ≥72，实际 ${rail}`);
   });
 
-  test('横屏步进器是纵向三行（− / n/m / +），不再是横向 Row', () => {
+  test('横屏步进器是纵向三行、且拆成三个独立按钮（风格与橡皮/手动框一致）', () => {
     const bar = builderBody('railBar');
     assert.ok(/this\.pageStepperVertical\(\)/.test(bar), 'railBar 必须用纵向步进器');
     assert.equal(/this\.pageStepper\(\)/.test(bar), false, 'railBar 不得再用横向步进器');
 
     const vertical = builderBody('pageStepperVertical');
-    assert.ok(/Column\(\)\s*\{/.test(vertical), '纵向步进器必须是 Column');
+    assert.ok(/Column\(\{ space: SPACING\.xs \}\)/.test(vertical), '纵向步进器必须是 Column + 4vp 间距');
     assert.ok(/\.width\('100%'\)/.test(vertical), '纵向步进器必须撑满 rail 宽');
-    assert.ok(/this\.stepperMinus\(/.test(vertical), '纵向步进器含 −');
-    assert.ok(/this\.stepperPlus\(/.test(vertical), '纵向步进器含 +');
-    // 三行各 40vp 高：minus/plus 各一处 + 中间 n/m 一处
-    assert.equal((vertical.match(/\.height\(TOOL_HEIGHT\)/g) ?? []).length, 1, '中间 n/m 行必须 40vp 高');
-    assert.ok(/stepperMinus\(width: number\)[\s\S]*?\.height\(TOOL_HEIGHT\)/.test(code), '− 行必须 40vp 高');
-    assert.ok(/stepperPlus\(width: number\)[\s\S]*?\.height\(TOOL_HEIGHT\)/.test(code), '+ 行必须 40vp 高');
+    assert.ok(/this\.stepperMinusBar\(\)/.test(vertical), '含独立 `−` 按钮');
+    assert.ok(/this\.stepperLabelBar\(\)/.test(vertical), '含 `n/m` 展示行');
+    assert.ok(/this\.stepperPlusBar\(\)/.test(vertical), '含独立 `+` 按钮');
+    // 整块灰底必须消失：外层不能再有 backgroundColor / borderRadius
+    assert.equal(/backgroundColor/.test(vertical), false, '纵向步进器外层不得再有整块灰底');
+    assert.equal(/borderRadius/.test(vertical), false, '纵向步进器外层不得再有整块圆角');
+  });
+
+  test('三个独立按钮同款样式：宽 100% / 高 40 / 圆角 sm / 底色 #F1F3F5 / 字号 caption', () => {
+    for (const name of ['stepperMinusBar', 'stepperLabelBar', 'stepperPlusBar']) {
+      const body = builderBody(name);
+      assert.ok(/\.width\('100%'\)/.test(body), `${name} 必须宽 100%`);
+      assert.ok(/\.height\(TOOL_HEIGHT\)/.test(body), `${name} 必须 40vp 高`);
+      assert.ok(/\.borderRadius\(RADIUS\.sm\)/.test(body), `${name} 必须与其他按钮同圆角`);
+      assert.ok(/\.backgroundColor\('#F1F3F5'\)/.test(body), `${name} 必须与橡皮/手动框同底色`);
+      assert.ok(/\.fontSize\(FONT\.caption\)/.test(body), `${name} 必须同字号 caption`);
+    }
+  });
+
+  test('`−` 仅 pageCount>1 可点、`n/m` 纯展示、`+` 满 10 页禁用（禁用态只改字色）', () => {
+    const minus = builderBody('stepperMinusBar');
+    assert.ok(/\.enabled\(this\.pageCount > 1\)/.test(minus), '`−` 必须 pageCount>1 才可点');
+    assert.ok(/fontColor\(this\.pageCount > 1 \? \$r\('app\.color\.danger'\) : \$r\('app\.color\.text_secondary'\)\)/.test(minus), '`−` 禁用态只改字色');
+    assert.equal(/\.opacity\(/.test(minus), false, '`−` 不得用 opacity 表达禁用');
+
+    const label = builderBody('stepperLabelBar');
+    assert.equal(/\.onClick\(/.test(label), false, '`n/m` 必须不可点（无 onClick）');
+    assert.equal(/\.enabled\(/.test(label), false, '`n/m` 纯展示，不需要 enabled');
+
+    const plus = builderBody('stepperPlusBar');
+    assert.ok(/\.enabled\(this\.pageCount < MAX_HANDWRITING_PAGES\)/.test(plus), '`+` 必须满 10 页禁用');
+    assert.ok(/fontColor\(this\.pageCount < MAX_HANDWRITING_PAGES \?/.test(plus), '`+` 禁用态只改字色');
+    assert.equal(/\.opacity\(/.test(plus), false, '`+` 不得用 opacity 表达禁用');
   });
 
   test('竖屏仍是横向 `− n/m +`（不能被横屏改动带跑）', () => {
@@ -282,9 +315,11 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
   test('横屏 rail 高度核算：控件 + 间距 + 完成 ≤ 屏高 674vp（2560×1600 @2.375）', () => {
     const toolHeight = Number(/const TOOL_HEIGHT: number = (\d+);/.exec(code)?.[1]);
     const gap = 4; // SPACING.xs
-    const spacing = 8; // SPACING.sm，rail 上下 padding
-    // 7 个 40vp 控件 + 步进器 3 行 + 完成 + 9 个间隙 + 上下 padding
-    const total = toolHeight * 7 + toolHeight * 3 + toolHeight + gap * 9 + spacing * 2;
+    const padding = 8; // SPACING.sm，rail 上下 padding
+    // 7 个独立按钮 + 步进器（3 行 + 2 个内部间距）+ 完成 + 9 个外层间隙 + 上下 padding
+    const stepper = toolHeight * 3 + gap * 2;
+    const total = toolHeight * 7 + stepper + toolHeight + gap * 9 + padding * 2;
+    assert.equal(total, 500, `rail 内容总高应为 500vp，实际算出 ${total}`);
     assert.ok(total <= 674, `rail 内容总高 ${total}vp 超过横屏可用高度 674vp`);
   });
 
