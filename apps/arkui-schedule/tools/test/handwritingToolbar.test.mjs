@@ -254,12 +254,54 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     const exitAt = bar.indexOf('this.railExitButton()');
     const brushAt = bar.indexOf('this.railBrushButton()');
     assert.ok(exitAt >= 0 && exitAt < brushAt, '`‹` 退出按钮必须在 rail 最上方（笔形之前）');
-    // 三个单元格纵向堆叠在工具之后、「完成」之前
-    const stepperAt = bar.indexOf('this.insertDeleteCell()');
+    // 三个单元格纵向堆叠在工具之后、「完成」之前（都按 CELL_WIDTH 传参）
+    const stepperAt = bar.indexOf('this.insertDeleteCell(CELL_WIDTH)');
     const finishAt = bar.indexOf('this.railFinishButton()');
     assert.ok(stepperAt > brushAt, '分页单元格必须在工具按钮之后');
     assert.ok(finishAt > stepperAt, '「完成」在最后（压底）');
     assert.ok(/Blank\(\)/.test(bar), 'rail 用 Blank() 把「完成」压到底部');
+  });
+
+  test('竖屏：分页三单元格在横向 Scroll 之外（固定可见，不被裁切）', () => {
+    const bar = builderBody('topBar');
+    const scrollAt = bar.indexOf('Scroll()');
+    const stepperAt = bar.indexOf('this.pageStepper()');
+    const finishAt = bar.indexOf('this.finishButton()');
+    const exitAt = bar.indexOf('this.exitButton()');
+    assert.ok(exitAt >= 0 && exitAt < scrollAt, '退出按钮在 Scroll 之前');
+    assert.ok(stepperAt > scrollAt, '分页组在 Scroll 之后（即 Scroll 之外）');
+    assert.ok(finishAt > stepperAt, '分页组固定在「完成」左侧');
+    // Scroll 内只放 7 个工具按钮，不再塞分页组
+    const scrollBody = bar.slice(scrollAt, bar.indexOf('.align(Alignment.Start)'));
+    assert.equal(/this\.pageStepper\(\)/.test(scrollBody), false, '分页组不得在 Scroll 内（真机曾被裁成 20px）');
+    for (const tool of ['this.brushMenuButton()', 'this.sizeMenuButton()', 'this.colorMenuButton()']) {
+      assert.ok(scrollBody.includes(tool), `Scroll 内必须保留工具按钮 ${tool}`);
+    }
+  });
+
+  test('竖屏单元格用紧凑宽度（36vp ≈84px），两半各 ≥34px 宽', () => {
+    const compact = Number(/const CELL_W_COMPACT: number = (\d+);/.exec(code)?.[1]);
+    assert.ok(compact >= 34 && compact <= 36, `CELL_W_COMPACT 必须落在 34~36vp（≈81~85px），实际 ${compact}`);
+    const portrait = builderBody('pageStepper');
+    for (const token of ['this.insertDeleteCell(CELL_W_COMPACT)', 'this.pageLabelCell(CELL_W_COMPACT)', 'this.prevNextCell(CELL_W_COMPACT)']) {
+      assert.ok(portrait.includes(token), `竖屏分页区必须用紧凑宽度：${token}`);
+    }
+    // 整格 ≈84px（验收口径）
+    const cellPx = compact * 2.375;
+    assert.ok(cellPx >= 81 && cellPx <= 86, `单元格 ${cellPx.toFixed(1)}px 应 ≈84px`);
+    // 两半每半宽 = (compact − 1vp 分割线) / 2，换算成 px 必须 ≥34px（验收线）
+    const halfPx = ((compact - 1) / 2) * 2.375;
+    assert.ok(halfPx >= 34, `两半每半 ${halfPx.toFixed(1)}px 必须 ≥34px`);
+    // 竖屏宽度预算：退出 + 分页组 + 完成 + 间距 后，Scroll 仍有 ≥400vp（7 个工具放得下）
+    const exitW = Number(/const EXIT_SIZE: number = (\d+);/.exec(code)?.[1]);
+    const finishW = Number(/const FINISH_MIN_WIDTH: number = (\d+);/.exec(code)?.[1]);
+    const gap = 4;
+    const fixed = 16 /* 左右 padding */ + exitW + 3 * compact + 2 * gap + finishW + 4 * gap;
+    // 竖屏屏宽 1600px / 2.375 = 673.7vp
+    assert.ok(673.7 - fixed >= 400, `Scroll 剩余宽度只有 ${(673.7 - fixed).toFixed(1)}vp，放不下 7 个工具`);
+    // 横屏仍用 72vp
+    const rail = builderBody('railBar');
+    assert.ok(rail.includes('this.insertDeleteCell(CELL_WIDTH)'), '横屏必须用 CELL_WIDTH(72)');
   });
 
   test('rail 内控件尺寸统一：72vp 宽 / 高 44（退出 40）/ 同圆角 / 同底色', () => {
@@ -270,12 +312,18 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
       assert.ok(/\.height\(RAIL_ITEM_HEIGHT\)/.test(body), `${name} 必须统一 44vp 高`);
       assert.ok(/\.borderRadius\(RADIUS\.sm\)/.test(body), `${name} 必须统一圆角`);
     }
-    // 三个分页单元格与完成：固定 72vp 宽 + 44vp 高（与 rail 其它控件等尺寸）
-    for (const name of ['insertDeleteCell', 'pageLabelCell', 'prevNextCell', 'railFinishButton']) {
+    // 三个分页单元格与完成：宽度由调用方传（横屏 CELL_WIDTH=72）/ 完成固定 72vp，高都是 44vp
+    for (const name of ['insertDeleteCell', 'pageLabelCell', 'prevNextCell']) {
       const body = builderBody(name);
-      assert.ok(/\.width\((CELL_WIDTH|'100%')\)/.test(body), `${name} 必须 72vp 宽`);
-      assert.ok(/\.height\((RAIL_ITEM_HEIGHT|TOOL_HEIGHT)\)/.test(body), `${name} 必须 44vp 高`);
+      assert.ok(/\.width\(width\)/.test(body), `${name} 必须由调用方传宽度（竖屏紧凑/横屏 72）`);
+      assert.ok(/\.height\(RAIL_ITEM_HEIGHT\)/.test(body), `${name} 必须 44vp 高`);
       assert.ok(/\.borderRadius\(RADIUS\.sm\)/.test(body), `${name} 必须统一圆角`);
+    }
+    {
+      const body = builderBody('railFinishButton');
+      assert.ok(/\.width\(CELL_WIDTH\)/.test(body), 'railFinishButton 必须 72vp 宽');
+      assert.ok(/\.height\(RAIL_ITEM_HEIGHT\)/.test(body), 'railFinishButton 必须 44vp 高');
+      assert.ok(/\.borderRadius\(RADIUS\.sm\)/.test(body), 'railFinishButton 必须统一圆角');
     }
     // 橡皮/手动框 + 三个单元格：同底色 #F1F3F5 / #F7F8FA 系（railToolButton 是三元）
     for (const name of ['insertDeleteCell', 'pageLabelCell', 'prevNextCell', 'railToolButton']) {
@@ -325,20 +373,25 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     assert.equal(/\.onClick\(/.test(label), false, '页码单元格不可点');
     assert.equal(/\.enabled\(/.test(label), false, '页码单元格不需要 enabled');
 
-    // 三个单元格同宽（72 = CELL_WIDTH = RAIL_WIDTH）、同高、同圆角
+    // 三个单元格：宽度由调用方传（竖屏紧凑 / 横屏 72），高 44、圆角统一
     for (const name of ['insertDeleteCell', 'pageLabelCell', 'prevNextCell']) {
       const body = builderBody(name);
-      assert.ok(/\.width\(CELL_WIDTH\)/.test(body), `${name} 必须固定 CELL_WIDTH（72vp）`);
-      assert.ok(/\.height\(TOOL_HEIGHT\)/.test(body), `${name} 必须 40vp 高`);
+      assert.ok(/\.width\(width\)/.test(body), `${name} 必须由调用方传宽度`);
+      assert.ok(/\.height\(RAIL_ITEM_HEIGHT\)/.test(body), `${name} 必须 44vp 高`);
       assert.ok(/\.borderRadius\(RADIUS\.sm\)/.test(body), `${name} 必须统一圆角`);
     }
-    assert.ok(/const CELL_WIDTH: number = 72;/.test(code), 'CELL_WIDTH 必须是 72（与 rail 宽一致）');
+    assert.ok(/const CELL_WIDTH: number = 72;/.test(code), 'CELL_WIDTH（横屏）必须是 72（与 rail 宽一致）');
+    assert.ok(/const CELL_W_COMPACT: number = 36;/.test(code), 'CELL_W_COMPACT（竖屏）必须是 36vp ≈ 84px');
 
-    // 竖屏：一个 Row 里三个单元格（同一行）
+    // 竖屏：一个 Row 里三个单元格（同一行），且用紧凑宽度
     const portrait = builderBody('pageStepper');
     assert.ok(/Row\(\{ space: SPACING\.xs \}\)/.test(portrait), '竖屏分页区必须是横向 Row');
     let cursor = -1;
-    for (const token of ['this.insertDeleteCell()', 'this.pageLabelCell()', 'this.prevNextCell()']) {
+    for (const token of [
+      'this.insertDeleteCell(CELL_W_COMPACT)',
+      'this.pageLabelCell(CELL_W_COMPACT)',
+      'this.prevNextCell(CELL_W_COMPACT)'
+    ]) {
       const at = portrait.indexOf(token);
       assert.ok(at >= 0, `竖屏分页区缺少 ${token}`);
       assert.ok(at > cursor, `${token} 顺序不对（应为 [−|+] [n/m] [‹|›]）`);
@@ -346,12 +399,19 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     }
     assert.ok(/this\.pageStepper\(\)/.test(builderBody('topBar')), '竖屏顶部条必须用 pageStepper()');
 
-    // 横屏：rail 里纵向堆叠同样三个单元格，且在「完成」之前
+    // 横屏：rail 里纵向堆叠同样三个单元格（72vp），且在「完成」之前
     const rail = builderBody('railBar');
-    for (const token of ['this.insertDeleteCell()', 'this.pageLabelCell()', 'this.prevNextCell()']) {
+    for (const token of [
+      'this.insertDeleteCell(CELL_WIDTH)',
+      'this.pageLabelCell(CELL_WIDTH)',
+      'this.prevNextCell(CELL_WIDTH)'
+    ]) {
       assert.ok(rail.includes(token), `rail 缺少 ${token}`);
     }
-    assert.ok(rail.indexOf('this.prevNextCell()') < rail.indexOf('this.railFinishButton()'), '三个单元格必须在「完成」之前');
+    assert.ok(
+      rail.indexOf('this.prevNextCell(CELL_WIDTH)') < rail.indexOf('this.railFinishButton()'),
+      '三个单元格必须在「完成」之前'
+    );
   });
 
   test('竖屏按钮仍是「内容自适应 + minWidth 44」（两套布局分开写，rail 的固定宽不要污染竖屏）', () => {
