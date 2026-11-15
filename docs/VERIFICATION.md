@@ -694,3 +694,89 @@ devecocli ui layout --device 6MFBB25C27205131 --format json --mode simplified
 - `StrokeHistory` 没有 `redoDepth`，「重做」只有可用/不可用，没有步数；
 - 填白是**破坏性**的（抹掉框内笔迹），依赖"阶段 A 已先落盘原图"这一顺序保证；取消整批时不会恢复画布。
 
+## 12. Pen Kit 评估与手写板定版（2026-11-15 实测）
+
+### 12.1 Pen Kit spike：不通过（已回退自研）
+
+`@kit.Penkit` 在本机 SDK 里存在（`sdk/default/hms/ets/kits/@kit.Penkit.d.ts` → `@hms.stylus.HandwriteComponent.d.ets`，
+API 26 声明齐全，`tablet-hmos.json` 也声明了 `SystemCapability.Stylus.Handwrite`），但真机 spike 在第 2 项失败：
+
+```
+E ArkCompiler: TypeError: Cannot read property createSystemHspModuleResourceManager of undefined
+    at initPaintView (penkit|penkit|1.0.0|.../HspPaintController.ts:15:1)
+    at PaintController (penkit|@hw-penengine/library|1.0.20240621|.../PaintController.ts:189:14)
+    at HandwriteController (penkit|penkit|1.0.0|.../HandwritePaint.ts:373:1)
+    at PenKitSpike entry (.../PenKitSpike.ets:27:45)
+E AceRouter: failed to create page: pages/PenKitSpike
+```
+
+`new HandwriteController()` 依赖 Pen Kit 自带 HSP 模块的资源管理器，普通 entry 应用（系统 hms 包形态）取不到；
+要修就得把 Pen Kit 的 HSP 作为依赖正确接入，属文档外的逆向。按 gate 规则**停止改造、回退自研**。
+
+> 结论（写进设计取舍）：**`@kit.Penkit` 是闭源系统组件，不能 fork/修改**，只能用其公开 props
+> （`defaultPenType` / `defaultPenInfo` / `hiddenTools` / `widthRatio` / `heightRatio` / `maxCanvasHeight` / `scaleDisabled`）；
+> 我们选择仿制其交互而非集成，是因为它没有分页概念、存专有笔记文件、导出图片能否用于 OCR 未验证，
+> 与"分页 + 逐页截图 + 框选遮罩"链路冲突。
+
+### 12.2 手写板定版（自研，真机验证）
+
+工具条 9 个位置（竖屏顶部横排 ≤48vp；横屏左侧竖排 rail ≤56vp）：
+
+```
+[笔形▾] [粗细▾] [颜色▾] [橡皮] [手动框] [撤销] [重做] [− n/m +] [完成]
+```
+
+- 笔形按钮显示**当前笔刷名 + ▾**（钢笔/圆珠笔/铅笔/马克笔/荧光笔），粗细显示**当前档位圆点 + 数值 + ▾**，
+  颜色显示 20×20 色块 + ▾；按钮宽度**按内容自适应**（`minWidth(44)` + 左右 8vp padding，`flexShrink(0)`），
+  整行 `Scroll` 横向滚动（溢出就滚、不换行、不压缩、不省略、禁 `TextOverflow.Ellipsis`）。
+- 二级面板是**绝对定位浮层**（`minWidth(140)`，行高 44），不挤压画布、不遮画布中心。
+- 步进器 `− n/m +`：`−` = 删除当前页（**两次确认**，只剩 1 页置灰）；`+` = **在当前页之后插入**空白页并跳转（上限 10）。
+- 页用**稳定 id**（`p1/p2…`，`pageBook.ids`），插页/删页时笔迹、框、撤销历史、截图 id 一起跟随；占位符「第N页」用显示顺序。
+- 「清空本页」已删除（用户要求：删除就够了），代码与 UI 里 `清空` 字样零命中。
+- 首次进入弹一次引导（`preferences` 的 `handwriting.tipShown`），之后不再出现；页面无常驻提示与开发期文案。
+
+真机 layout 证据（`devecocli ui layout`，1600×2560 竖屏）：
+
+```
+钢笔 @38,138→105,185   ▾ @110,138    3.5 @195,138→241,185  ▾ @246,138
+(色块) ▾ @359,138      橡皮 @402,114→507,209   手动框 @516,114→654,209
+↶ @664,114→769,209     ↷ @778,114→883,209      − @893,114→988,209
+1/1 @988,114→1121,209  + @1121,114→1216,209    完成 @1429,114→1581,209（152px）
+Canvas hw-page-p1: 0,218 → 1600,2494（高 2276/2560 = 88.9% 屏高）
+```
+
+菜单（点开后 `ui layout` 里可见）：笔形 `钢笔 ✓ / 圆珠笔 / 铅笔 / 马克笔 / 荧光笔`；
+粗细 `2 vp / 3.5 vp / ✓ / 5 vp / 7 vp / 10 vp`。hilog 自证：`[hw] menu=brush open=1` / `[hw] menu=size open=1`。
+
+### 12.3 端到端真机验证（写→框→完成）
+
+操作：首页「新建」→「手写板」→ `uitest uiInput swipe` 写 2 笔 → 点「手动框」→ 拖一个框 → 点「完成」。
+
+结果（回到编辑页后的 `ui layout`）：
+
+```
+正文
+[图表/公式: 查看手迹 · 第1页·区域1]     ← 占位符写入正文
+手迹附件（1 页）
+```
+
+hilog 同时出现真实 OCR 引擎日志（证明不是假通过）：
+
+```
+hiai.vision/OCR_LIB_MSG: LoadDetectModel::end : 195.08 ms
+hiai.vision/OCR_LIB_MSG: InitLibrary::ocr finish : 205.51 ms
+```
+
+进程始终存活（同 PID），无 jscrash/appfreeze。截图：
+`docs/images/ui-index-portrait.jpeg`、`ui-handwriting-portrait.jpeg`、`ui-handwriting-toolbar-menu.jpeg`、
+`ui-edit-handwriting-result.jpeg`。
+
+### 12.4 未验证 / 边界
+
+- **横屏截图没取到**：`uitest uiInput` 无 `rotate` 命令、设备无 `wm`、`devecocli ui window` 只能 list；
+  `orientation: auto_rotation` 只能等用户开系统自动旋转后物理横屏验证。仓库里的
+  `ui-index-landscape.jpeg` 是**旋转失败**的那张（内容与竖屏相同），已如实标注，不当作横屏证据。
+- 压感/铅笔抖动的手感只有"真机写过、不崩"这一级结论，缺少笔尖压力与视觉评估（工具注入无法产生压感）。
+- 多分辨率/手机形态未验（只测 MLR-AL00 一台 1600×2560 平板）。
+- AI 三个源的真机「测试」未做（没有可用 key）。
+
