@@ -401,3 +401,12 @@ test('两个可复用视图：入参与回调齐全，手写回填走 refreshTic
   assert.match(EDITOR_VIEW, /AppStorage\.setOrCreate<string>\('handwriting\.result', ''\)/, '回填后必须清键')
   assert.match(EDITOR_VIEW, /handwritingPageRoute\(\)/, '手写板入口两种容器都可用')
 })
+
+test('主从右栏支持下拉刷新，且编辑有未保存内容时不推进 paneTick', () => {
+  assert.match(INDEX_CODE, /@State paneRefreshing: boolean = false/, '右栏要有独立的刷新状态')
+  assert.match(INDEX_CODE, /Refresh\(\{ refreshing: \$\$this\.paneRefreshing \}\)/, '右栏要用 Refresh 包住内容')
+  assert.match(INDEX_CODE, /\.onRefreshing\(/, '右栏要处理下拉事件')
+  assert.match(INDEX_CODE, /this\.onPullRefresh\(\)/, '复用左栏同一套 pull + reload 逻辑')
+  assert.match(INDEX_CODE, /this\.paneMode === 'editor' && this\.editorDirty/, '编辑脏态要特殊处理')
+  assert.match(INDEX_CODE, /this\.paneRefreshing = false/, '刷新结束必须复位')
+})
