@@ -61,7 +61,7 @@ import {
 } from '../model/aiProvider';
 import type { AiModelOption, AiProviderPreset } from '../model/aiProvider';
 import { PageLayout } from '../components/PageLayout';
-import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
+import { DIVIDER, FONT, HOME_INCLUDE_OTHER_KEY, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
 
 /** 同步分支：与 `docs/DATA-CONTRACT.md` §1 一致，固定 main。 */
 const SYNC_BRANCH: string = 'main';
@@ -81,7 +81,6 @@ const PANEL_SYNC_MORE: string = 'syncMore';
 const PANEL_PROVIDER: string = 'provider';
 const PANEL_MODEL: string = 'model';
 const PANEL_PRIVACY: string = 'privacy';
-const PANEL_AGC: string = 'agc';
 const PANEL_REPO: string = 'repo';
 
 @Entry
@@ -134,6 +133,8 @@ struct Settings {
   @State panel: string = PANEL_NONE;
   /** 「高级」是否展开（选自定义源时自动展开）。 */
   @State advancedOpen: boolean = false;
+  /** 首页是否展示其他设备的只读记录（写 AppStorage，首页读取）。 */
+  @State includeOtherDevices: boolean = false;
 
   /** 从列表页跳转过来时要自动执行的同步动作（pull / push / status）。 */
   private autoAction: string = '';
@@ -146,6 +147,8 @@ struct Settings {
     const features = getFeatures();
     this.handwritingText = features.handwriting ? '手写可用' : '手写不可用';
     this.ocrText = features.ocr ? 'OCR 可用' : 'OCR 不可用';
+    const storedFilter: boolean | undefined = AppStorage.get<boolean>(HOME_INCLUDE_OTHER_KEY);
+    this.includeOtherDevices = storedFilter === true;
     this.readAutoAction();
     this.bootstrap();
   }
@@ -835,6 +838,25 @@ struct Settings {
       .width('100%')
       .alignItems(VerticalAlign.Center)
 
+      // 从首页搬来的过滤开关：首页列表是否同时展示其他设备的只读记录
+      Row({ space: SPACING.sm }) {
+        Text('首页含其他设备（只读）')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .layoutWeight(1)
+          .textAlign(TextAlign.Start)
+        Toggle({ type: ToggleType.Switch, isOn: this.includeOtherDevices })
+          .selectedColor($r('app.color.brand'))
+          .onChange((isOn: boolean) => {
+            this.includeOtherDevices = isOn;
+            AppStorage.setOrCreate<boolean>(HOME_INCLUDE_OTHER_KEY, isOn);
+          })
+      }
+      .width('100%')
+      .height(TOUCH_MIN + SPACING.sm)
+      .alignItems(VerticalAlign.Center)
+
       if (this.lastSyncError.length > 0) {
         Text(`上次错误：${this.lastSyncError}`)
           .fontSize(FONT.caption)
@@ -1112,28 +1134,6 @@ struct Settings {
       .width('100%')
       .height(TOUCH_MIN)
       .alignItems(VerticalAlign.Center)
-
-      Row({ space: SPACING.sm }) {
-        Text('提醒权限与开放能力')
-          .fontSize(FONT.body)
-          .lineHeight(LINE_HEIGHT.body)
-          .fontColor($r('app.color.text_primary'))
-          .layoutWeight(1)
-          .textAlign(TextAlign.Start)
-        Text('?')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.brand'))
-          .width(TOUCH_MIN)
-          .height(TOUCH_MIN)
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
-            this.panel = PANEL_AGC;
-          })
-      }
-      .width('100%')
-      .height(TOUCH_MIN)
-      .alignItems(VerticalAlign.Center)
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
@@ -1380,31 +1380,15 @@ struct Settings {
     .alignItems(HorizontalAlign.Start)
   }
 
-  /** `?` 帮助弹层：隐私 / 提醒权限 / 仓库地址说明。 */
+  /** `?` 帮助弹层：隐私与凭据 / 仓库地址说明。 */
   @Builder
   HelpSheet() {
     Column({ space: SPACING.md }) {
-      this.SheetHeader(
-        this.panel === PANEL_PRIVACY ? '隐私与凭据' : (this.panel === PANEL_AGC ? '提醒权限与开放能力' : '仓库地址')
-      )
+      this.SheetHeader(this.panel === PANEL_PRIVACY ? '隐私与凭据' : '仓库地址')
       Scroll() {
         Column({ space: SPACING.md }) {
           if (this.panel === PANEL_PRIVACY) {
             Text('token / AI Key 只保存在本机 preferences，不会写进同步仓库（jsonl 载荷里没有凭据字段），也不会出现在日志里。')
-              .fontSize(FONT.body)
-              .lineHeight(LINE_HEIGHT.body)
-              .fontColor($r('app.color.text_primary'))
-              .width('100%')
-          } else if (this.panel === PANEL_AGC) {
-            Text(
-              '日历提醒依赖 ohos.permission.PUBLISH_AGENT_REMINDER，单应用最多 30 条；权限未获批时降级为应用内通知。\n\n' +
-              '线上签名 / 真机安装：\n' +
-              '1. AppGallery Connect → 我的项目 → 本应用 →「开放能力」申请日历提醒/通知权限；\n' +
-              '2. 审核通过后到「证书、APP ID 和 Profile」重新生成 Profile；\n' +
-              '3. DevEco Studio → Project Structure → Signing Configs 勾选手动签名，导入 .p12 与 .p7b；\n' +
-              '4. 重新安装应用，首次创建提醒时按系统弹窗授权；\n' +
-              '5. 开放能力审批约 8 个工作日，请预留时间。'
-            )
               .fontSize(FONT.body)
               .lineHeight(LINE_HEIGHT.body)
               .fontColor($r('app.color.text_primary'))

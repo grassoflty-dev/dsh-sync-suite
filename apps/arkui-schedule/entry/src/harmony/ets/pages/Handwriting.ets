@@ -41,11 +41,29 @@ import {
 } from '../handwriting/HandwritingPager';
 import { OcrBatchManager } from '../ocr/OcrBatchManager';
 import { attachmentStore } from '../services/attachmentStore';
-import { describeError } from '../services/scheduleStore';
+import { draftStore } from '../services/draftStore';
+import { describeError, scheduleStore } from '../services/scheduleStore';
 import { BRUSHES, brushSpec } from '../model/brush';
 import type { BrushKind, BrushSpec } from '../model/brush';
 import { PEN_WIDTHS, PEN_COLORS } from '../model/strokeHistory';
-import { FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN, isLandscapeSize } from '../common/uiTokens';
+import type { Stroke } from '../model/strokeHistory';
+import {
+  DRAFT_KEY_DEFAULT,
+  DRAFT_MAX_BYTES,
+  DRAFT_MAX_PAGES,
+  DRAFT_VERSION,
+  fitDraftToLimits,
+  fromDraftBoxes,
+  fromDraftStrokes,
+  hasContent,
+  isUsableCanvas,
+  parseDraft,
+  sanitizeDraftKey,
+  toDraftBoxes,
+  toDraftStrokes
+} from '../model/draft';
+import type { DraftDoc, DraftPage } from '../model/draft';
+import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN, isLandscapeSize } from '../common/uiTokens';
 import type { RegionBox } from '../model/types';
 
 /** 竖屏顶部工具条高度（vp）——定版要求 ≤48vp。 */
@@ -57,14 +75,26 @@ const TOP_BAR_HEIGHT: number = 48;
  * 步进器 −/+ 被挤出 rail。加宽到 72vp 后 3 字标签完整、步进器改竖向堆叠。
  */
 const RAIL_WIDTH: number = 72;
+/** 横屏 rail 内每个控件的统一高度（vp）——比竖屏的 40vp 高一档，图标/文字更好点。 */
+const RAIL_ITEM_HEIGHT: number = 44;
+/**
+ * 横屏 rail 内控件间距（vp）。
+ *
+ * 取 2vp 而不是 4vp：rail 竖向空间被「退出（固定 40）+ 完成（固定 48）」吃掉后只剩
+ * ~500vp，2vp 间距能让滚动区多容纳一项；视觉上仍与竖屏 4vp 差异不大。
+ */
+const RAIL_GAP: number = 2;
+/**
+ * 分页区的单元格宽度（vp）：`[−|+]`、`[n/m]`、`[‹|›]` 三个单元格都是 72vp 宽，
+ * 两半各 ≈35.5vp（≥32vp 点击区），中间 1vp 分割线。
+ */
+const CELL_WIDTH: number = 72;
+/** 横屏 rail 底色（比画布浅一点，与内容区分开；不用投影）。 */
+const RAIL_BG: string = '#F7F9FB';
 /** 工具条控件高度（vp）。 */
 const TOOL_HEIGHT: number = 40;
 /** 工具条控件最小宽度（vp）——定版要求 ≥44vp（徽标 + ▾ 不再被挤没）。 */
 const TOOL_MIN_WIDTH: number = 44;
-/** 步进器 `−` / `+` 的边长（vp）。 */
-const STEPPER_BTN: number = 40;
-/** 步进器中间「当前/总数」宽度（vp）——定版要求 ≥56vp。 */
-const STEPPER_LABEL_W: number = 56;
 /** 「完成」最小宽度（vp）——定版要求 ≥64vp。 */
 const FINISH_MIN_WIDTH: number = 64;
 /** 二级面板每行高度（vp）。 */
@@ -88,6 +118,14 @@ const TIP_KEY: string = 'handwriting.tipShown';
 const CONFIRM_NONE: number = 0;
 const CONFIRM_FIRST: number = 1;
 const CONFIRM_SECOND: number = 2;
+/** 抬笔后自动保存草稿的防抖时间（ms）。 */
+const DRAFT_SAVE_DEBOUNCE_MS: number = 2000;
+/** 退出按钮（`‹`）的边长（vp，与工具条同高）。 */
+const EXIT_SIZE: number = 40;
+/** 草稿提示文案（用户可见，别写内部术语）。 */
+const DRAFT_TOAST_RESTORED: string = '已恢复上次未完成的手迹';
+const DRAFT_TOAST_TOO_LARGE: string = '草稿过大，已只保留前 10 页';
+const DRAFT_TOAST_SAVE_FAILED: string = '暂存失败，退出后可能丢失这次手迹';
 
 @Entry
 @Component
@@ -97,10 +135,11 @@ struct Handwriting {
    * 画布读同一份；撤销/重做由画布组件注册的实现转调）。
    */
   @State pagerState: HandwritingPagerState = new HandwritingPagerState();
-  @State pageCount: number = 1;
-  @State currentPage: number = 0;
-  @State undoSteps: number = 0;
-  @State redoAvailable: boolean = false;
+  // ⚠ 不在这里维护 pageCount / currentPage / undoSteps / redoAvailable 副本：
+  // 它们是 `HandwritingPagerState`（@Observed）的字段，**唯一真相源**在 pagerState 里。
+  // 过去父页面持有一份 @State 副本，只靠 onStateChange 同步 —— 插页/删页走的是
+  // `state.insertPageAfterCurrent()/removePage()`，不会触发那个回调，于是页码停在 1/1、
+  // `−` 的 enabled 也停在旧值（删除功能直接不可用，真机 P0）。现改为 build 里直接读 pagerState。
   /** 当前展开的二级面板（'' = 全关）。 */
   @State panel: string = '';
   /** 删除确认阶段（0/1/2）。 */
@@ -112,19 +151,265 @@ struct Handwriting {
   @State pageH: number = 0;
   /** 首次引导是否可见。 */
   @State tipVisible: boolean = false;
+  /**
+   * 重绘信号（值本身无意义）：变更 pagerState 后 bump 一次，保证本页 build() 重跑。
+   * 之所以还要它：`@Observed` 字段变化在个别 ArkUI 版本上不会稳定触发父页面重绘，
+   * 而页码/`−` 的可用性必须立刻反映真实页数（真机 P0：插页后页码停在 1/1、删除按钮不可用）。
+   */
+  @State uiTick: number = 0;
   @State busy: boolean = false;
   private manager: OcrBatchManager | null = null;
   private tipLoaded: boolean = false;
+  /** 草稿键：编辑已有记录 = recordId，新建 = new-<时间戳>（由 Edit 页路由参数传入）。 */
+  private draftKey: string = DRAFT_KEY_DEFAULT;
+  /** 防抖定时器 id（-1 = 没有待触发的保存）。 */
+  private draftTimer: number = -1;
+  /** 已读到但还没落到画布上的草稿（等画布量出尺寸再按归一化重投影）。 */
+  private pendingDraft: DraftDoc | null = null;
+  /** 是否已经完成过一次草稿恢复（避免每次 onAreaChange 都重放）。 */
+  private draftApplied: boolean = false;
+  /**
+   * 「完成」且 OCR 成功后置 true：本页不再写草稿。
+   *
+   * 否则 `discardDraft()` 删掉草稿后，紧接着的 `aboutToDisappear()` 又会从画布
+   * 重新生成一份存回去 —— 用户下次进来就会看到「已经识别过了的手迹」还在。
+   */
+  private draftClosed: boolean = false;
 
   aboutToAppear(): void {
+    this.draftKey = this.resolveDraftKey();
     this.loadTipFlag();
+    // 画布尺寸变化/落笔/改框都通过 state 的钩子回调本页（父页面拿不到子组件实例）
+    this.pagerState.dirtyImpl = () => {
+      this.scheduleDraftSave();
+    };
+    this.pagerState.canvasReadyImpl = () => {
+      this.applyPendingDraft();
+    };
+    this.restoreDraft();
   }
 
   aboutToDisappear(): void {
+    this.clearDraftTimer();
+    // 兜底再存一次（正常情况下退出按钮/返回键已经存过了）
+    this.saveDraftNow(false);
     if (this.manager !== null) {
       this.manager.cancel();
       this.manager = null;
     }
+  }
+
+  /** 系统返回 / 侧滑返回：与「‹」按钮走同一条路径（先存草稿再放行）。 */
+  onBackPress(): boolean {
+    this.clearDraftTimer();
+    this.saveDraftNow(false);
+    // 返回 false = 仍按系统默认行为退出页面（此时草稿已落盘）
+    return false;
+  }
+
+  // ------------------------------------------------------------------ 草稿（退出暂存 / 再进恢复）
+
+  /**
+   * 解析 draftKey：优先路由参数 `draftKey`，其次 `AppStorage['handwriting.draftKey']`，都没有用默认键。
+   *
+   * Edit 页只加了一个传参（`router.pushUrl({ url, params: { draftKey } })`），
+   * 编辑已有记录传 recordId、新建传 `new-<时间戳>`，同一次编辑会话内保持不变。
+   */
+  private resolveDraftKey(): string {
+    try {
+      const params: Record<string, string> = router.getParams() as Record<string, string>;
+      if (params !== undefined && params !== null) {
+        const fromRoute: string = params['draftKey'];
+        if (typeof fromRoute === 'string' && fromRoute.length > 0) {
+          return sanitizeDraftKey(fromRoute);
+        }
+      }
+    } catch {
+      // 取不到路由参数不算错，用下面的兜底
+    }
+    const fromStorage: string | undefined = AppStorage.get<string>('handwriting.draftKey');
+    if (fromStorage !== undefined && fromStorage.length > 0) {
+      return sanitizeDraftKey(fromStorage);
+    }
+    return DRAFT_KEY_DEFAULT;
+  }
+
+  /** 把当前分页状态打包成草稿（笔迹点在这里归一化）。 */
+  private buildDraftDoc(): DraftDoc | null {
+    const w: number = this.pagerState.canvasW;
+    const h: number = this.pagerState.canvasH;
+    if (!isUsableCanvas(w, h)) {
+      return null;
+    }
+    const pages: DraftPage[] = [];
+    const count: number = this.pageTotal();
+    for (let index = 0; index < count; index++) {
+      const strokes: Stroke[] = this.pagerState.history.strokesAt(index);
+      const ids: string[] = this.pagerState.pageIds;
+      pages.push({
+        id: index < ids.length ? ids[index] : `p${index + 1}`,
+        strokes: toDraftStrokes(strokes, w, h),
+        boxes: toDraftBoxes(this.pagerState.regionsAt(index))
+      });
+    }
+    return {
+      version: DRAFT_VERSION,
+      draftKey: this.draftKey,
+      canvas: { w: w, h: h },
+      current: this.pageIndex(),
+      pages: pages,
+      updatedAt: Date.now()
+    };
+  }
+
+  /**
+   * 立即把草稿写盘（同步，几百 KB 级别）。
+   *
+   * - 没有内容就不写（避免留下一份空草稿把下次进入搞成「恢复了空白」）；
+   * - 超 10 页 / 2MB 由 `fitDraftToLimits` 裁掉多余页并 toast 一次；
+   * - `notifyFailure = true` 时失败才 toast（退出路径上静默，不挡用户离开）。
+   */
+  private saveDraftNow(notifyFailure: boolean): void {
+    if (this.draftClosed) {
+      return;
+    }
+    const doc: DraftDoc | null = this.buildDraftDoc();
+    if (doc === null || !hasContent(doc)) {
+      return;
+    }
+    const encoded = fitDraftToLimits(doc, DRAFT_MAX_PAGES, DRAFT_MAX_BYTES);
+    if (encoded.trimmed) {
+      promptAction.showToast({ message: DRAFT_TOAST_TOO_LARGE, duration: 3000 });
+    }
+    try {
+      draftStore.saveDraftSync(this.draftKey, encoded.json);
+      console.info(`[hw] draft saved key=${this.draftKey} pages=${encoded.pages} bytes=${encoded.bytes}`);
+    } catch (error) {
+      console.error(`[hw] draft save failed: ${describeError(error)}`);
+      if (notifyFailure) {
+        promptAction.showToast({ message: DRAFT_TOAST_SAVE_FAILED, duration: 4000 });
+      }
+    }
+  }
+
+  /** 安排一次防抖保存（抬笔 2s 后、或页/框变化后触发）。 */
+  private scheduleDraftSave(): void {
+    this.clearDraftTimer();
+    this.draftTimer = setTimeout(() => {
+      this.draftTimer = -1;
+      this.saveDraftNow(true);
+    }, DRAFT_SAVE_DEBOUNCE_MS);
+  }
+
+  private clearDraftTimer(): void {
+    if (this.draftTimer !== -1) {
+      clearTimeout(this.draftTimer);
+      this.draftTimer = -1;
+    }
+  }
+
+  /** 进入页面时读草稿：有就等画布就绪后恢复（归一化重投影），坏文件直接删掉。 */
+  private async restoreDraft(): Promise<void> {
+    try {
+      await scheduleStore.ensureReady(getContext(this) as common.UIAbilityContext);
+    } catch (error) {
+      console.error(`[hw] draft restore skipped: ${describeError(error)}`);
+      return;
+    }
+    let text: string = '';
+    try {
+      text = draftStore.readDraftSync(this.draftKey);
+    } catch (error) {
+      console.error(`[hw] draft read failed: ${describeError(error)}`);
+      return;
+    }
+    const parsed = parseDraft(text, this.draftKey);
+    if (parsed.reason === 'empty') {
+      return;
+    }
+    if (!parsed.ok) {
+      // 损坏：删掉坏文件，页面照常空白进入
+      try {
+        draftStore.deleteDraftSync(this.draftKey);
+        console.info(`[hw] draft corrupt, removed key=${this.draftKey}`);
+      } catch (error) {
+        console.error(`[hw] draft corrupt, remove failed: ${describeError(error)}`);
+      }
+      return;
+    }
+    this.pendingDraft = parsed.doc;
+    this.applyPendingDraft();
+  }
+
+  /**
+   * 把已读到的草稿落到画布上。
+   *
+   * 必须等画布量出尺寸：草稿里是归一化点，要用**当前**画布宽高重投影
+   * （旋转/换尺寸后位置才对）。这套换算与框选 `RegionBox` 完全一致。
+   */
+  private applyPendingDraft(): void {
+    const doc: DraftDoc | null = this.pendingDraft;
+    if (doc === null || this.draftApplied) {
+      return;
+    }
+    const w: number = this.pagerState.canvasW;
+    const h: number = this.pagerState.canvasH;
+    if (!isUsableCanvas(w, h)) {
+      return;
+    }
+    this.draftApplied = true;
+    this.pendingDraft = null;
+
+    // 页数：先补到草稿页数（`PageBook` 只提供「追加」的公开操作）
+    const target: number = doc.pages.length;
+    while (this.pagerState.pages < target) {
+      if (!this.pagerState.addPage()) {
+        break;
+      }
+    }
+    for (let index = 0; index < doc.pages.length && index < this.pagerState.pages; index++) {
+      const page: DraftPage = doc.pages[index];
+      const strokes: Stroke[] = fromDraftStrokes(page.strokes, w, h);
+      this.pagerState.clearPageHistory(index);
+      for (let step = 0; step < strokes.length; step++) {
+        this.pagerState.history.push(index, strokes[step]);
+      }
+      this.pagerState.setRegions(index, fromDraftBoxes(page.boxes));
+    }
+    this.pagerState.jumpTo(doc.current);
+    const replay = this.pagerState.replayAllImpl;
+    if (replay !== null) {
+      replay();
+    }
+    this.touchUi();
+    if (hasContent(doc)) {
+      promptAction.showToast({ message: DRAFT_TOAST_RESTORED, duration: 2500 });
+      console.info(
+        `[hw] draft restored key=${this.draftKey} pages=${doc.pages.length} current=${doc.current + 1}`
+      );
+    }
+  }
+
+  /** 「完成」且 OCR 成功：草稿作废（失败要保留，让用户能重试）。 */
+  private discardDraft(): void {
+    this.clearDraftTimer();
+    this.pendingDraft = null;
+    // 关掉后续保存（否则离开页面时 aboutToDisappear 会把刚删的草稿又写回去）
+    this.draftClosed = true;
+    try {
+      draftStore.deleteDraftSync(this.draftKey);
+      console.info(`[hw] draft cleared key=${this.draftKey}`);
+    } catch (error) {
+      console.error(`[hw] draft clear failed: ${describeError(error)}`);
+    }
+  }
+
+  /** 「‹」退出：存草稿 → 返回上一页（不二次确认）。 */
+  private exitWritingBoard(): void {
+    this.clearDraftTimer();
+    this.saveDraftNow(false);
+    console.info(`[hw] exit key=${this.draftKey}`);
+    router.back();
   }
 
   // ------------------------------------------------------------------ 首次引导（只弹一次）
@@ -216,40 +501,64 @@ struct Handwriting {
 
   // ------------------------------------------------------------------ 页序动作
 
-  private syncHistoryState(): void {
-    const current: number = this.pagerState.current;
-    this.undoSteps = this.pagerState.history.undoDepth(current);
-    this.redoAvailable = this.pagerState.history.canRedo(current);
+  /** 总页数（直接读唯一真相源）。 */
+  private pageTotal(): number {
+    return this.pagerState.pages;
+  }
+
+  /** 当前页下标 0 起（直接读唯一真相源）。 */
+  private pageIndex(): number {
+    return this.pagerState.current;
+  }
+
+  /**
+   * 强制重绘信号：只用来让本页重新走一遍 `build()`，**不承载任何状态值**
+   * （页数/当前页/撤销可用性都直接读 `pagerState`，那里才是唯一真相源）。
+   */
+  private touchUi(): void {
+    this.uiTick = this.uiTick + 1;
+  }
+
+  /** 打印当前页状态（真机取证用：页码文本必须与这里一致）。 */
+  private logPageState(action: string): void {
+    console.info(
+      `[hw] pages ${action} total=${this.pageTotal()} current=${this.pageIndex() + 1}` +
+        ` canDelete=${this.pageTotal() > 1} canInsert=${this.pageTotal() < MAX_HANDWRITING_PAGES}`
+    );
   }
 
   private goPrevPage(): void {
     if (this.pagerState.prev()) {
-      this.syncHistoryState();
+      this.touchUi();
+      this.scheduleDraftSave();
     }
   }
 
   private goNextPage(): void {
     if (this.pagerState.next()) {
-      this.syncHistoryState();
+      this.touchUi();
+      this.scheduleDraftSave();
     }
   }
 
   /** `+`：在当前页之后插入空白页（自动跳到新页）。 */
   private insertPage(): void {
     if (this.pagerState.insertPageAfterCurrent()) {
-      this.syncHistoryState();
       console.info(`[hw] page insert after, now=${this.pagerState.current + 1}/${this.pagerState.pages}`);
+      this.logPageState('insert');
+      this.touchUi();
+      this.scheduleDraftSave();
     }
   }
 
   /** `−`：删除当前页（两步确认）。 */
   private startDeletePage(): void {
-    if (this.pageCount <= 1) {
+    if (this.pageTotal() <= 1) {
       return;
     }
     this.closeOverlays();
     this.confirmStage = CONFIRM_FIRST;
-    console.info(`[hw] delete confirm stage=1 page=${this.currentPage + 1}/${this.pageCount}`);
+    console.info(`[hw] delete confirm stage=1 page=${this.pageIndex() + 1}/${this.pageTotal()}`);
   }
 
   private confirmDelete(): void {
@@ -262,8 +571,10 @@ struct Handwriting {
       this.confirmStage = CONFIRM_NONE;
       const pageNo: number = this.pagerState.current + 1;
       if (this.pagerState.removePage(this.pagerState.current)) {
-        this.syncHistoryState();
         console.info(`[hw] page deleted ${pageNo}, pages=${this.pagerState.pages}`);
+        this.logPageState('delete');
+        this.touchUi();
+        this.scheduleDraftSave();
       }
     }
   }
@@ -279,8 +590,7 @@ struct Handwriting {
     if (this.pagerState.current !== pageIndex) {
       this.pagerState.jumpTo(pageIndex);
     }
-    this.currentPage = pageIndex;
-    this.pageCount = this.pagerState.pages;
+    // 切页只走 pagerState.jumpTo（真相源），不再维护本地副本
     await new Promise<void>((resolve) => {
       setTimeout(() => {
         resolve();
@@ -332,6 +642,8 @@ struct Handwriting {
           '（框内未识别，原始截图已保存）',
         duration: 3000
       });
+      // 只有「完成且 OCR 成功」才作废草稿；失败路径保留（catch 里不动草稿）
+      this.discardDraft();
       router.back();
     } catch (error) {
       promptAction.showToast({ message: `识别失败：${describeError(error)}`, duration: 5000 });
@@ -602,15 +914,85 @@ struct Handwriting {
   }
 
   /**
-   * 竖屏：页码步进器 `− n/m +`（横向一行，整体一个控件，`flexShrink(0)`）。
-   * `−` 删当前页（两步确认）、`+` 在当前页之后插入空白页。
+   * 分页区 = **三个单元格**（用户定版：`-+` 一个单元格、`3/5` 一个、`<>` 一个）。
+   *
+   * ```
+   * [ − | + ]   [ 3/5 ]   [ ‹ | › ]
+   * ```
+   * 竖屏放在顶部条里（横向一行）；横屏放在 rail 里（纵向堆叠，每个单元格宽度都是 72vp）。
    */
   @Builder
   pageStepper() {
+    Row({ space: SPACING.xs }) {
+      this.insertDeleteCell()
+      this.pageLabelCell()
+      this.prevNextCell()
+    }
+    .height(TOOL_HEIGHT)
+    .flexShrink(0)
+  }
+
+  /** 是否还有上一页（首页禁用 `‹`）。 */
+  private canPrevPage(): boolean {
+    return this.pageIndex() > 0;
+  }
+
+  /** 是否还有下一页（末页禁用 `›`）。 */
+  private canNextPage(): boolean {
+    return this.pageIndex() < this.pageTotal() - 1;
+  }
+
+  /** `[−|+]` 单元格：左半删当前页（两次确认）、右半在当前页之后插页，各自独立禁用。 */
+  @Builder
+  insertDeleteCell() {
     Row() {
-      this.stepperMinus(STEPPER_BTN)
-      Text(`${this.currentPage + 1}/${this.pageCount}`)
-        .width(STEPPER_LABEL_W)
+      Text('−')
+        .layoutWeight(1)
+        .height(TOOL_HEIGHT)
+        .fontSize(FONT.body)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .textAlign(TextAlign.Center)
+        .fontColor(this.pageTotal() > 1 ? $r('app.color.danger') : $r('app.color.text_secondary'))
+        .enabled(this.pageTotal() > 1)
+        .onClick(() => {
+          this.startDeletePage();
+        })
+
+      // 两半之间的 1vp 分割线（单元格内部结构，不是控件之间的间距）
+      Divider()
+        .vertical(true)
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+        .height(TOOL_HEIGHT)
+
+      Text('+')
+        .layoutWeight(1)
+        .height(TOOL_HEIGHT)
+        .fontSize(FONT.body)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .textAlign(TextAlign.Center)
+        .fontColor(this.pageTotal() < MAX_HANDWRITING_PAGES ? $r('app.color.brand') : $r('app.color.text_secondary'))
+        .enabled(this.pageTotal() < MAX_HANDWRITING_PAGES)
+        .onClick(() => {
+          this.insertPage();
+        })
+    }
+    .width(CELL_WIDTH)
+    .height(TOOL_HEIGHT)
+    .borderRadius(RADIUS.sm)
+    .backgroundColor('#F7F8FA')
+    .clip(true)
+    .flexShrink(0)
+  }
+
+  /** `[n/m]` 单元格：只读页码。 */
+  @Builder
+  pageLabelCell() {
+    Row() {
+      Text(`${this.pageIndex() + 1}/${this.pageTotal()}`)
+        .width('100%')
         .height(TOOL_HEIGHT)
         .fontSize(FONT.caption)
         .lineHeight(LINE_HEIGHT.caption)
@@ -618,136 +1000,71 @@ struct Handwriting {
         .textOverflow({ overflow: TextOverflow.None })
         .textAlign(TextAlign.Center)
         .fontColor($r('app.color.text_primary'))
-      this.stepperPlus(STEPPER_BTN)
     }
+    .width(CELL_WIDTH)
     .height(TOOL_HEIGHT)
-    .constraintSize({ minWidth: STEPPER_BTN * 2 + STEPPER_LABEL_W })
     .borderRadius(RADIUS.sm)
     .backgroundColor('#F7F8FA')
+    .clip(true)
     .flexShrink(0)
   }
 
-  /**
-   * 横屏：页码步进器**纵向三行、三个独立按钮** `−` / `n/m` / `+`。
-   *
-   * 真机两轮反馈：① 横向排被 56vp 的 rail 挤出去（`−`/`+` 看不见）→ 改纵向；
-   * ② 整块灰底与「橡皮/手动框」风格不一致 → **拆成三个独立按钮**：同底色 `#F1F3F5`、
-   * 同圆角 `RADIUS.sm`、同字号 `FONT.caption`、各 40vp 高、宽撑满 rail、彼此 4vp 间距。
-   * 中间 `n/m` 是纯展示（无 onClick）。
-   */
+  /** `[‹|›]` 单元格：左半上一页（首页禁用）、右半下一页（末页禁用）。 */
   @Builder
-  pageStepperVertical() {
-    Column({ space: SPACING.xs }) {
-      this.stepperMinusBar()
-      this.stepperLabelBar()
-      this.stepperPlusBar()
+  prevNextCell() {
+    Row() {
+      Text('‹')
+        .layoutWeight(1)
+        .height(TOOL_HEIGHT)
+        .fontSize(FONT.body)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .textAlign(TextAlign.Center)
+        .fontColor(this.canPrevPage() ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
+        .enabled(this.canPrevPage())
+        .onClick(() => {
+          this.goPrevPage();
+        })
+
+      Divider()
+        .vertical(true)
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+        .height(TOOL_HEIGHT)
+
+      Text('›')
+        .layoutWeight(1)
+        .height(TOOL_HEIGHT)
+        .fontSize(FONT.body)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .textAlign(TextAlign.Center)
+        .fontColor(this.canNextPage() ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
+        .enabled(this.canNextPage())
+        .onClick(() => {
+          this.goNextPage();
+        })
     }
-    .width('100%')
-    .alignItems(HorizontalAlign.Center)
+    .width(CELL_WIDTH)
+    .height(TOOL_HEIGHT)
+    .borderRadius(RADIUS.sm)
+    .backgroundColor('#F7F8FA')
+    .clip(true)
     .flexShrink(0)
-  }
-
-  /** 横屏步进器 `−`：独立按钮，`pageCount > 1` 才可点（禁用态只改字色，不整体透明）。 */
-  @Builder
-  stepperMinusBar() {
-    Text('−')
-      .width('100%')
-      .height(TOOL_HEIGHT)
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.None })
-      .textAlign(TextAlign.Center)
-      .borderRadius(RADIUS.sm)
-      .backgroundColor('#F1F3F5')
-      .fontColor(this.pageCount > 1 ? $r('app.color.danger') : $r('app.color.text_secondary'))
-      .enabled(this.pageCount > 1)
-      .onClick(() => {
-        this.startDeletePage();
-      })
-  }
-
-  /** 横屏步进器中间的 `n/m`：纯展示，不可点。 */
-  @Builder
-  stepperLabelBar() {
-    Text(`${this.currentPage + 1}/${this.pageCount}`)
-      .width('100%')
-      .height(TOOL_HEIGHT)
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.None })
-      .textAlign(TextAlign.Center)
-      .borderRadius(RADIUS.sm)
-      .backgroundColor('#F1F3F5')
-      .fontColor($r('app.color.text_primary'))
-  }
-
-  /** 横屏步进器 `+`：独立按钮，满 10 页禁用。 */
-  @Builder
-  stepperPlusBar() {
-    Text('+')
-      .width('100%')
-      .height(TOOL_HEIGHT)
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.None })
-      .textAlign(TextAlign.Center)
-      .borderRadius(RADIUS.sm)
-      .backgroundColor('#F1F3F5')
-      .fontColor(this.pageCount < MAX_HANDWRITING_PAGES ? $r('app.color.brand') : $r('app.color.text_secondary'))
-      .enabled(this.pageCount < MAX_HANDWRITING_PAGES)
-      .onClick(() => {
-        this.insertPage();
-      })
-  }
-
-  /** 步进器的 `−`（删页，两步确认；只剩 1 页时禁用，只改色不透明）。 */
-  @Builder
-  stepperMinus(width: number) {
-    Text('−')
-      .width(width)
-      .height(TOOL_HEIGHT)
-      .fontSize(FONT.body)
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.None })
-      .textAlign(TextAlign.Center)
-      .fontColor(this.pageCount > 1 ? $r('app.color.danger') : $r('app.color.text_secondary'))
-      .enabled(this.pageCount > 1)
-      .onClick(() => {
-        this.startDeletePage();
-      })
-  }
-
-  /** 步进器的 `+`（在当前页之后插入；满 10 页禁用）。 */
-  @Builder
-  stepperPlus(width: number) {
-    Text('+')
-      .width(width)
-      .height(TOOL_HEIGHT)
-      .fontSize(FONT.body)
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.None })
-      .textAlign(TextAlign.Center)
-      .fontColor(this.pageCount < MAX_HANDWRITING_PAGES ? $r('app.color.brand') : $r('app.color.text_secondary'))
-      .enabled(this.pageCount < MAX_HANDWRITING_PAGES)
-      .onClick(() => {
-        this.insertPage();
-      })
   }
 
   /**
    * 「完成」：唯一主操作，实底品牌蓝 + 白字、不收缩。
    *
    * 真机缺陷：rail 里 56vp 宽时 Button 内部 padding 把 2 个字挤成「...」。
-   * 现在：竖屏 64vp、横屏 rail 宽 −4vp（72−4=68），并显式给 4vp 左右 padding，内容区 ≥50vp。
+   * 现在：竖屏固定 64vp 宽（横屏改用 `railFinishButton()`），并显式给 4vp 左右 padding，
+   * 否则 Button 默认内边距会把 2 个字挤成「...」。
    */
   @Builder
-  finishButton(fullWidth: boolean) {
+  finishButton() {
     Button(this.busy ? '识别中' : '完成')
       .height(TOOL_HEIGHT)
-      .width(fullWidth ? RAIL_WIDTH - SPACING.xs : FINISH_MIN_WIDTH)
+      .width(FINISH_MIN_WIDTH)
       .constraintSize({ minWidth: FINISH_MIN_WIDTH })
       .padding({ left: SPACING.xs, right: SPACING.xs })
       .fontSize(FONT.caption)
@@ -760,10 +1077,38 @@ struct Handwriting {
       })
   }
 
-  /** 竖屏：顶部单行工具条（48vp，9 个控件；溢出时该行横向滚动、不换行不加高）。 */
+  /**
+   * 「‹」退出：**暂存草稿后返回**（不二次确认）。
+   *
+   * 用户诉求：「退出后应该要暂存当前手写页的所有内容，可以后续进入再修改，
+   * 完成才是按照要求做 OCR」——所以退出只存草稿，不触发识别。
+   */
+  @Builder
+  exitButton() {
+    Text('‹')
+      .width(EXIT_SIZE)
+      .height(TOOL_HEIGHT)
+      .constraintSize({ minWidth: EXIT_SIZE })
+      .fontSize(FONT.title)
+      .lineHeight(LINE_HEIGHT.title)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .textAlign(TextAlign.Center)
+      .borderRadius(RADIUS.sm)
+      .backgroundColor('#F1F3F5')
+      .fontColor($r('app.color.text_primary'))
+      .flexShrink(0)
+      .onClick(() => {
+        this.exitWritingBoard();
+      })
+  }
+
+  /** 竖屏：顶部单行工具条（48vp，`‹` + 9 个控件；溢出时该行横向滚动、不换行不加高）。 */
   @Builder
   topBar() {
     Row({ space: SPACING.xs }) {
+      this.exitButton()
+
       Scroll() {
         Row({ space: SPACING.xs }) {
           this.brushMenuButton()
@@ -771,8 +1116,8 @@ struct Handwriting {
           this.colorMenuButton()
           this.toolButton('橡皮', HW_TOOL_ERASER)
           this.toolButton('手动框', HW_TOOL_SELECT)
-          this.historyButton('undo', '↶', this.undoSteps > 0)
-          this.historyButton('redo', '↷', this.redoAvailable)
+          this.historyButton('undo', '↶', this.pagerState.undoSteps > 0)
+          this.historyButton('redo', '↷', this.pagerState.redoAvailable)
           this.pageStepper()
         }
         .height(TOOL_HEIGHT)
@@ -784,7 +1129,7 @@ struct Handwriting {
       .height(TOOL_HEIGHT)
       .align(Alignment.Start)
 
-      this.finishButton(false)
+      this.finishButton()
     }
     .width('100%')
     .height(TOP_BAR_HEIGHT)
@@ -793,43 +1138,255 @@ struct Handwriting {
     .alignItems(VerticalAlign.Center)
   }
 
-  /** 横屏：最左侧竖排 rail（56vp），「完成」贴底。 */
+  /** 竖屏：工具条与画布之间的 1vp 横分割线（用户反馈两者「糊在一起」）。 */
+  @Builder
+  topBarDivider() {
+    Divider()
+      .strokeWidth(DIVIDER)
+      .color($r('app.color.divider'))
+      .width('100%')
+  }
+
+  /**
+   * 横屏：最左侧竖排 rail（72vp 内容 + 1vp 分割线）。
+   *
+   * 11 项：`‹` 退出 + 笔形/粗细/颜色 + 橡皮 + 手动框 + ↶ + ↷ + **三个分页单元格**
+   * （`[−|+]` / `[n/m]` / `[‹|›]`），`完成` 用 `Blank()` 压到底部固定可见。
+   *
+   * 高度核算：11×44 + 10×2(间距) = 504，再加完成 44 + 间距 2 + 上下 padding 16 ≈ **566vp**
+   * ≤ 真机 rail 可用 ≈601vp ⇒ 不需要 Scroll，「完成」也不会被挤出屏幕。
+   */
   @Builder
   railBar() {
-    Column({ space: SPACING.xs }) {
-      this.brushMenuButton()
-      this.sizeMenuButton()
-      this.colorMenuButton()
-      this.toolButton('橡皮', HW_TOOL_ERASER)
-      this.toolButton('手动框', HW_TOOL_SELECT)
-      this.historyButton('undo', '↶', this.undoSteps > 0)
-      this.historyButton('redo', '↷', this.redoAvailable)
-      // 横屏：步进器纵向三行（横向排会被 56/72vp 的 rail 挤出去）
-      this.pageStepperVertical()
-      Blank()
-      this.finishButton(true)
+    Row() {
+      Column({ space: RAIL_GAP }) {
+        // 横屏专用一套按钮：**统一 72vp 宽（100%）+ 高 44vp（退出 40）+ 同圆角/同底色**
+        this.railExitButton()
+        this.railBrushButton()
+        this.railSizeButton()
+        this.railColorButton()
+        this.railToolButton('橡皮', HW_TOOL_ERASER)
+        this.railToolButton('手动框', HW_TOOL_SELECT)
+        this.railHistoryButton('undo', '↶', this.pagerState.undoSteps > 0)
+        this.railHistoryButton('redo', '↷', this.pagerState.redoAvailable)
+        // 分页三单元格：宽度同为 72vp（CELL_WIDTH == RAIL_WIDTH），与上面按钮等宽
+        this.insertDeleteCell()
+        this.pageLabelCell()
+        this.prevNextCell()
+        Blank()
+        this.railFinishButton()
+      }
+      .width(RAIL_WIDTH)
+      .height('100%')
+      .padding({ top: SPACING.sm, bottom: SPACING.sm })
+      .backgroundColor(RAIL_BG)
+      .alignItems(HorizontalAlign.Center)
+
+      // 与画布之间的 1vp 分割线（用户反馈：工具条与画布「糊在一起」）
+      Divider()
+        .vertical(true)
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+        .height('100%')
     }
-    .width(RAIL_WIDTH)
+    .width(RAIL_WIDTH + DIVIDER)
     .height('100%')
-    .padding({ top: SPACING.sm, bottom: SPACING.sm })
-    .backgroundColor($r('app.color.page_background'))
-    .alignItems(HorizontalAlign.Center)
+    .alignItems(VerticalAlign.Top)
+  }
+
+  // ------------------------------------------------------------------ 横屏 rail 专用按钮（统一 100% × 44vp）
+
+  /** rail 顶部「‹」退出：固定 72×40、不参与滚动（与竖屏同一个动作：存草稿 → 返回）。 */
+  @Builder
+  railExitButton() {
+    Text('‹')
+      .width('100%')
+      .height(TOOL_HEIGHT)
+      .fontSize(FONT.title)
+      .lineHeight(LINE_HEIGHT.title)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .textAlign(TextAlign.Center)
+      .borderRadius(RADIUS.sm)
+      .backgroundColor('#F1F3F5')
+      .fontColor($r('app.color.text_primary'))
+      .flexShrink(0)
+      .onClick(() => {
+        this.exitWritingBoard();
+      })
+  }
+
+  /** rail 笔形按钮：宽 100%（=72vp）、高 44vp、内容水平居中。 */
+  @Builder
+  railBrushButton() {
+    Row({ space: 2 }) {
+      Text(this.currentBrushLabel())
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === PANEL_BRUSH ? Color.White : $r('app.color.text_primary'))
+      Text('▾')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === PANEL_BRUSH ? Color.White : $r('app.color.text_secondary'))
+    }
+    .justifyContent(FlexAlign.Center)
+    .width('100%')
+    .height(RAIL_ITEM_HEIGHT)
+    .borderRadius(RADIUS.sm)
+    .backgroundColor(this.panel === PANEL_BRUSH ? $r('app.color.brand') : '#F1F3F5')
+    .onClick(() => {
+      this.togglePanel(PANEL_BRUSH);
+    })
+  }
+
+  @Builder
+  railSizeButton() {
+    Row({ space: 2 }) {
+      Text('')
+        .width(this.currentDotSize())
+        .height(this.currentDotSize())
+        .borderRadius(this.currentDotSize() / 2)
+        .backgroundColor(this.panel === PANEL_SIZE ? Color.White : $r('app.color.text_primary'))
+      Text(`${this.pagerState.penWidth}`)
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === PANEL_SIZE ? Color.White : $r('app.color.text_primary'))
+        .margin({ left: 2 })
+      Text('▾')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === PANEL_SIZE ? Color.White : $r('app.color.text_secondary'))
+    }
+    .justifyContent(FlexAlign.Center)
+    .width('100%')
+    .height(RAIL_ITEM_HEIGHT)
+    .borderRadius(RADIUS.sm)
+    .backgroundColor(this.panel === PANEL_SIZE ? $r('app.color.brand') : '#F1F3F5')
+    .onClick(() => {
+      this.togglePanel(PANEL_SIZE);
+    })
+  }
+
+  @Builder
+  railColorButton() {
+    Row({ space: 2 }) {
+      Text('')
+        .width(20)
+        .height(20)
+        .borderRadius(RADIUS.sm)
+        .backgroundColor(this.pagerState.penColor)
+        .border({ width: 1, color: this.panel === PANEL_COLOR ? Color.White : '#DDDDDD' })
+      Text(this.currentColorLabel())
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === PANEL_COLOR ? Color.White : $r('app.color.text_primary'))
+        .margin({ left: 2 })
+      Text('▾')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === PANEL_COLOR ? Color.White : $r('app.color.text_secondary'))
+    }
+    .justifyContent(FlexAlign.Center)
+    .width('100%')
+    .height(RAIL_ITEM_HEIGHT)
+    .borderRadius(RADIUS.sm)
+    .backgroundColor(this.panel === PANEL_COLOR ? $r('app.color.brand') : '#F1F3F5')
+    .onClick(() => {
+      this.togglePanel(PANEL_COLOR);
+    })
+  }
+
+  /** rail 的橡皮 / 手动框：与竖屏语义一致（再点回画笔），尺寸统一。 */
+  @Builder
+  railToolButton(label: string, tool: string) {
+    Text(label)
+      .width('100%')
+      .height(RAIL_ITEM_HEIGHT)
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .textAlign(TextAlign.Center)
+      .borderRadius(RADIUS.sm)
+      .backgroundColor(this.pagerState.tool === tool ? '#E8F1FF' : '#F1F3F5')
+      .fontColor(this.pagerState.tool === tool ? $r('app.color.brand') : $r('app.color.text_primary'))
+      .border({ width: this.pagerState.tool === tool ? 1 : 0, color: $r('app.color.brand') })
+      .onClick(() => {
+        this.toggleTool(tool);
+      })
+  }
+
+  /** rail 的撤销 / 重做。 */
+  @Builder
+  railHistoryButton(kind: string, label: string, enabled: boolean) {
+    Text(label)
+      .width('100%')
+      .height(RAIL_ITEM_HEIGHT)
+      .fontSize(FONT.body)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .textAlign(TextAlign.Center)
+      .borderRadius(RADIUS.sm)
+      .backgroundColor('#EEF1F4')
+      .fontColor(enabled ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
+      .enabled(enabled)
+      .onClick(() => {
+        if (!enabled) {
+          return;
+        }
+        if (kind === 'undo') {
+          this.pagerState.applyUndo();
+        } else {
+          this.pagerState.applyRedo();
+        }
+      })
+  }
+
+  /** rail 底部「完成」：72×44 实底品牌蓝 + 白字，固定底部、不压缩、不参与滚动。 */
+  @Builder
+  railFinishButton() {
+    Button(this.busy ? '识别中' : '完成')
+      .width(CELL_WIDTH)
+      .height(RAIL_ITEM_HEIGHT)
+      .borderRadius(RADIUS.sm)
+      .constraintSize({ minWidth: FINISH_MIN_WIDTH })
+      .fontSize(FONT.caption)
+      .backgroundColor($r('app.color.brand'))
+      .fontColor(Color.White)
+      .enabled(!this.busy)
+      .flexShrink(0)
+      .onClick(() => {
+        this.finish();
+      })
   }
 
   // ------------------------------------------------------------------ 二级面板（绝对定位浮层，不挤压画布）
 
   /** 面板锚点：竖屏在工具条下方、横屏在 rail 右侧（都不碰画布中心）。 */
   private panelLeft(): number {
-    return this.landscape ? RAIL_WIDTH + SPACING.sm : SPACING.sm;
+    // 横屏：rail（72）+ 1vp 分割线 + 8vp 间距；竖屏：贴工具条左边 8vp
+    return this.landscape ? RAIL_WIDTH + DIVIDER + SPACING.sm : SPACING.sm;
   }
 
   private panelTop(): number {
     if (this.landscape) {
-      // rail 里第 1~3 个按钮对应笔形/粗细/颜色
+      // rail 里第 1~3 个按钮对应笔形/粗细/颜色（rail 控件统一 44vp 高）
       const index: number = this.panel === PANEL_BRUSH ? 0 : (this.panel === PANEL_SIZE ? 1 : 2);
-      return SPACING.sm + index * (TOOL_HEIGHT + SPACING.xs);
+      return SPACING.sm + index * (RAIL_ITEM_HEIGHT + SPACING.xs);
     }
-    return TOP_BAR_HEIGHT + SPACING.xs;
+    return TOP_BAR_HEIGHT + DIVIDER + SPACING.xs;
   }
 
   /** 面板宽度（按内容给足，避免文字被截断）。 */
@@ -1004,7 +1561,7 @@ struct Handwriting {
           .fontColor($r('app.color.text_primary'))
         Text(
           this.confirmStage === CONFIRM_FIRST
-            ? `删除第 ${this.currentPage + 1} 页？该页手迹与附件将一并移除。`
+            ? `删除第 ${this.pageIndex() + 1} 页？该页手迹与附件将一并移除。`
             : '再次确认：删除后无法恢复。'
         )
           .fontSize(FONT.body)
@@ -1089,28 +1646,25 @@ struct Handwriting {
         Column() {
           this.railBar()
         }
-        .width(this.landscape ? RAIL_WIDTH : 0)
+        // rail 容器 = 72vp 内容 + 1vp 分割线（分割线在 railBar 内部，宽度也算进来）
+        .width(this.landscape ? RAIL_WIDTH + DIVIDER : 0)
         .height('100%')
         .clip(true)
 
         Column() {
           Column() {
             this.topBar()
+            this.topBarDivider()
           }
-          .height(this.landscape ? 0 : TOP_BAR_HEIGHT)
+          .height(this.landscape ? 0 : TOP_BAR_HEIGHT + DIVIDER)
           .clip(true)
 
           HandwritingPager({
             state: this.pagerState,
             maxPages: MAX_HANDWRITING_PAGES,
-            onStateChange: (pages: number, current: number) => {
-              this.pageCount = pages;
-              this.currentPage = current;
-              this.syncHistoryState();
-            },
-            onStatsChange: (undoSteps: number, redoAvailable: boolean) => {
-              this.undoSteps = undoSteps;
-              this.redoAvailable = redoAvailable;
+            // 页码/撤销可用性都直接读 pagerState（唯一真相源）；这个回调只用来**触发重绘**
+            onStateChange: () => {
+              this.touchUi();
             }
           })
             .width('100%')
@@ -1121,6 +1675,12 @@ struct Handwriting {
       }
       .width('100%')
       .height('100%')
+
+      // 读取 uiTick 建立重绘依赖（条件恒为假，不渲染任何东西）：
+      // 页数/当前页变化后 bump 一次，页码与 `− / +` 的可用性立刻跟着变。
+      if (this.uiTick < 0) {
+        Text('')
+      }
 
       // 浮层永远画在画布之上，但**不参与布局**（绝对定位），所以不挤压画布
       if (this.panel !== '') {

@@ -24,12 +24,28 @@ function textForAi(record: ScheduleRecord): string {
 
 /** 构建某天的 AI 载荷：只取 `ai_processed === false` 且归属该天的记录。 */
 export function buildAiPayload(date: string, records: ScheduleRecord[]): AiPayload {
+  return selectPayload(date, records, true);
+}
+
+/**
+ * 构建某天的**全量**载荷（含已 `ai_processed` 的记录）。
+ *
+ * 每日汇总要把整天重新讲一遍，与增量整理（只取未处理）区分；两者共用同一套字段映射，
+ * 不复制第二份。
+ */
+export function buildDaySummaryPayload(date: string, records: ScheduleRecord[]): AiPayload {
+  return selectPayload(date, records, false);
+}
+
+/** 载荷选取的共用实现：`unprocessedOnly` 决定是否跳过已处理记录。 */
+function selectPayload(date: string, records: ScheduleRecord[], unprocessedOnly: boolean): AiPayload {
   if (!DATE_RE.test(date)) {
     throw new Error(`日期格式必须是 YYYY-MM-DD：${String(date)}`);
   }
   const selected: AiPayload['records'] = [];
-  for (const record of records) {
-    if (record.ai_processed !== false) {
+  const list: ScheduleRecord[] = Array.isArray(records) ? records : [];
+  for (const record of list) {
+    if (unprocessedOnly && record.ai_processed !== false) {
       continue;
     }
     // ts 是含时区的 ISO 8601，前 10 位即记录者本地日期（与 model/jsonl 的日期归属一致）

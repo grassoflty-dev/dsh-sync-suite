@@ -66,6 +66,27 @@ test('decodeLine：空行/坏 JSON/字段缺失都返回 null', () => {
   assert.equal(ok.id, 'rec-1');
 });
 
+// 数据兼容：历史日志里可能残留已删除功能写过的字段（例如 remindAt）。
+// 契约是「不认识的多余字段一律忽略、不迁移、不报错」，读路径不得因此丢行或抛错。
+test('decodeLine/parseJsonl：历史行带未知字段（remindAt）仍能读取，不报错也不丢行', () => {
+  const legacy = { ...makeRecord({ id: 'legacy' }), remindAt: '2026-11-14T09:00:00+08:00' };
+  const line = `${JSON.stringify(legacy)}\n`;
+
+  const decoded = decodeLine(line);
+  assert.notEqual(decoded, null, '带未知字段的历史行必须能解析');
+  assert.equal(decoded.id, 'legacy');
+  assert.equal(decoded.remindAt, '2026-11-14T09:00:00+08:00', '未知字段原样保留，不参与校验');
+
+  const parsed = parseJsonl(line);
+  assert.equal(parsed.errors.length, 0, '未知字段不得被判定为坏行');
+  assert.equal(parsed.records.length, 1);
+  assert.equal(foldById(parsed.records).length, 1);
+
+  // 再编码（只追加场景）同样不因未知字段抛错，且字段不丢
+  const encoded = encodeRecord(decoded);
+  assert.equal(JSON.parse(encoded).remindAt, '2026-11-14T09:00:00+08:00');
+});
+
 test('parseJsonl：多行解析、空行跳过、坏行不中断且行号正确', () => {
   const text = [
     encodeRecord(makeRecord({ id: 'a' })).trim(),

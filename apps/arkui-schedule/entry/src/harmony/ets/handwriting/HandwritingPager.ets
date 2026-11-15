@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 分页手写板（**仅 HarmonyOS**）：Canvas 槽位化 + 顶部页条 + 5 种笔刷（钢笔/圆珠笔/铅笔/马克笔/荧光笔）
  * + 橡皮 + 框选 overlay + 按页撤销重做。
  *
@@ -144,6 +144,37 @@ export class HandwritingPagerState {
   redoImpl: (() => void) | null = null;
   /** 工具切换钩子：子组件用它结束进行中的这一笔（避免半笔悬空）。 */
   toolChangeImpl: (() => void) | null = null;
+
+  /**
+   * 画布 vp 尺寸（由子组件在 `onAreaChange` 里写入）。
+   *
+   * 草稿落盘要把笔迹点归一化（除以宽高），父页面因此必须能读到画布尺寸；
+   * 恢复时再用**当前**宽高乘回去（旋转/换尺寸后位置才对）。
+   */
+  canvasW: number = 0;
+  canvasH: number = 0;
+
+  /** 「内容变了，该存草稿了」（抬笔 / 撤销重做 / 建框删框拖框后由子组件调用）。 */
+  dirtyImpl: (() => void) | null = null;
+
+  /** 画布首次量出尺寸时通知父页面（父页面据此把待恢复的草稿投影到画布上）。 */
+  canvasReadyImpl: (() => void) | null = null;
+
+  /** 通知「内容脏了」（父页面注册的 `dirtyImpl` 里做防抖存盘）。 */
+  notifyDirty(): void {
+    const impl: (() => void) | null = this.dirtyImpl;
+    if (impl !== null) {
+      impl();
+    }
+  }
+
+  /** 画布尺寸就绪（父页面据此恢复草稿）。 */
+  notifyCanvasReady(): void {
+    const impl: (() => void) | null = this.canvasReadyImpl;
+    if (impl !== null) {
+      impl();
+    }
+  }
 
   /** 页序账本（模型层纯逻辑，负责增删页与区域框）。 */
   private book: PageBook = new PageBook(MAX_HANDWRITING_PAGES);
@@ -846,6 +877,8 @@ export struct HandwritingPager {
       }
       this.state.pushStroke(this.state.current, stroke);
       this.refreshStats();
+      // 抬笔：内容脏了 → 父页面防抖 2s 存草稿（防杀进程丢稿）
+      this.state.notifyDirty();
     }
   }
 
@@ -973,6 +1006,8 @@ export struct HandwritingPager {
 
   /** 手势结束：新建框归一化 + sanitize 后入账（太小/越界直接丢弃，不弹错）。 */
   private handleGestureEnd(event: GestureEvent): void {
+    // 拖动/改大小结束时框已经变了，同样要存草稿
+    const endedMode: string = this.dragMode;
     if (this.dragMode === DRAG_CREATE && this.dragging) {
       this.dragging = false;
       if (this.canvasW > 0 && this.canvasH > 0) {
@@ -988,16 +1023,21 @@ export struct HandwritingPager {
         if (box !== null) {
           this.state.addRegion(this.state.current, box);
           this.refreshStats();
+          this.state.notifyDirty();
         }
       }
     }
     this.dragMode = DRAG_NONE;
     this.dragIndex = -1;
+    if (endedMode === DRAG_MOVE || endedMode === DRAG_RESIZE) {
+      this.state.notifyDirty();
+    }
   }
 
   private removeRegionAt(index: number): void {
     if (this.state.removeRegion(this.state.current, index)) {
       this.refreshStats();
+      this.state.notifyDirty();
     }
   }
 
@@ -1155,6 +1195,10 @@ export struct HandwritingPager {
       // 画布 vp 尺寸：归一化坐标 = 触摸坐标 / 尺寸（换算处都做了除零保护）
       this.canvasW = newValue.width as number;
       this.canvasH = newValue.height as number;
+      // 镜像给父页面（草稿归一化要用），并通知「尺寸就绪」——恢复草稿就等这一下
+      this.state.canvasW = this.canvasW;
+      this.state.canvasH = this.canvasH;
+      this.state.notifyCanvasReady();
     })
   }
 }

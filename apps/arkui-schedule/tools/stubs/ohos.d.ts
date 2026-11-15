@@ -102,40 +102,10 @@ declare module '@kit.ImageKit' {
 }
 
 declare module '@kit.BackgroundTasksKit' {
-  export interface ReminderRequestCalendar {
-    dateTime: {
-      year: number;
-      month: number;
-      day: number;
-      hour: number;
-      minute: number;
-      second?: number;
-    };
-    title?: string;
-    content?: string;
-    reminderType?: number;
-  }
-
-  interface ReminderAgentManager {
-    publishReminder(reminder: unknown, callback: (err: unknown, id: number) => void): void;
-    cancelReminder(reminderId: number, callback: (err: unknown) => void): void;
-    getValidReminders(callback: (err: unknown, reminders: unknown[]) => void): void;
-  }
-
-  export const reminderAgentManager: ReminderAgentManager;
   export interface WantAgentInfo {
     pkgName: string;
     abilityName: string;
   }
-}
-
-declare module '@kit.NotificationKit' {
-  interface NotificationManager {
-    publish(request: unknown): Promise<void>;
-    requestEnableNotification(): Promise<void>;
-  }
-
-  export const notificationManager: NotificationManager;
 }
 
 declare module '@kit.ArkUI' {

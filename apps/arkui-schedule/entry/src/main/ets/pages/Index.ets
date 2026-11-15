@@ -1,19 +1,19 @@
 /**
  * 主页：日期条 + 今日待办/全部未完成 + 列表（左勾选 / 中标题+时间 / 右手迹）+ 「新建」主操作
- * + 「更多」面板（AI 汇总 / 同步 / 提醒 / 含其他设备）。
+ * + 页头两个明确动作（✨ AI 汇总 / ⚙ 设置）。
  *
- * 契约：BRIEF §3.5、`docs/CONTRACT.md` §3.4。**行为完全不变**，只重排 UI（`docs/UI-DESIGN.md`）：
+ * 契约：BRIEF §3.5、`docs/CONTRACT.md` §3.4：
  * - 勾选完成 = `appendRecord` 追加一条同 id 新记录（ts=nowIso()），绝不改写历史行；
- * - 「AI 汇总」读当天 `ai_processed:false` 的记录，允许逐条取消勾选；
- * - 「同步」进入设置页并自动触发拉取（Web 版 Git 内核只挂在设置页，见 services/GitSyncService.ets）；
- * - 「提醒」入口只在 HarmonyOS 侧显示，实际由平台覆盖文件调用 ReminderService。
+ * - 「AI 汇总」读当天 `ai_processed:false` 的记录，允许逐条取消勾选（结果面板里可「重选」）；
+ * - 同步配置（仓库/token/含其他设备/立即同步/推送/测试连接）全部在设置页，首页不再提供入口；
+ * - 日历提醒功能已按用户要求删除（UI 侧调用点与文案已移除）。
  *
  * 布局：断点由 `PageLayout` 统一计算（`onAreaChange` + 方向），本页只做一处粗粒度分支
  * `breakpoint === 'compact'`：紧凑屏单列（日期条在上面），宽屏/横屏双栏（左日期条、右列表）。
  *
  * 每日 AI 汇总为**手动触发**（BRIEF §3.4）：不做定时汇总。原因：鸿蒙侧 `setInterval` 在应用
  * 退到后台后会被系统回收，纯 TS 定时器无法保证按时触发；真要做定时汇总，必须申请长时任务
- * （`continuousTask`）+ 前台通知，或改用 `reminderAgentManager` 到点拉起。这里刻意不加
+ * （`continuousTask`）+ 前台通知，或在到点拉起应用后由用户点触发。这里刻意不加
  * 「看起来能用、实际会被回收」的定时器。
  */
 import { promptAction, router } from '@kit.ArkUI';
@@ -22,15 +22,24 @@ import { localDateKey, nextTsSameDate, nowIso } from '../common/date';
 import { applyAiResult, buildAiPayload } from '../model/aiPayload';
 import type { AiPayload, ScheduleRecord } from '../model/types';
 import { cloneRecord } from '../model/types';
-import { isHarmonyOS } from '../common/platform';
-import { createReminders } from '../common/platformFeatures';
+import { SUMMARY_MAX_POINTS, truncateSummaryForDisplay } from '../model/dailySummary';
+import type { DailySummary, SummaryDisplay } from '../model/dailySummary';
 import { describeError, scheduleStore } from '../services/scheduleStore';
+import { summaryStore } from '../services/summaryStore';
 import { settingsStore } from '../services/settingsStore';
 import { deviceTimeZone, summarize } from '../services/deepseek';
-import { EmptyState } from '../components/EmptyState';
 import { PageLayout } from '../components/PageLayout';
 import { RecordRow } from '../components/RecordRow';
-import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN, sidebarWidth } from '../common/uiTokens';
+import {
+  DIVIDER,
+  FONT,
+  HOME_INCLUDE_OTHER_KEY,
+  LINE_HEIGHT,
+  RADIUS,
+  SPACING,
+  TOUCH_MIN,
+  sidebarWidth
+} from '../common/uiTokens';
 
 /** `YYYY-MM-DD` → 本地 Date（避免 `new Date('2026-11-14')` 按 UTC 解析造成偏移）。 */
 function dateFromKey(key: string): Date {
@@ -53,8 +62,13 @@ const PRIMARY_HEIGHT: number = 48;
 /** 宽屏左栏「新建」按钮宽度（vp）：固定 240 左对齐，占满整列会显得笨重。 */
 const SIDEBAR_ACTION_WIDTH: number = 240;
 
-/** 宽屏列表最大宽度（vp）：超过后居中留白，避免单条记录横跨整个宽屏。 */
-const LIST_MAX_WIDTH: number = 900;
+/** 宽屏列表最大宽度（vp）：超过后居中留白，避免单条记录横跨整个宽屏（720vp ≈ 14fp 下 45–50 字/行）。 */
+const LIST_MAX_WIDTH: number = 720;
+
+/** 两位补零（本地 HH:MM 展示用）。 */
+function two(value: number): string {
+  return value < 10 ? `0${value}` : `${value}`;
+}
 
 @Entry
 @Component
@@ -71,14 +85,11 @@ struct Index {
   @State records: ScheduleRecord[] = [];
   @State statusText: string = '';
   @State ready: boolean = false;
-  @State canRemind: boolean = false;
 
   /** 断点（由 `PageLayout` 回调同步，页面只按 compact / 非 compact 分支）。 */
   @State breakpoint: string = 'compact';
   /** 内容区宽度（vp），宽屏下算侧栏宽度。 */
   @State contentWidth: number = 0;
-  /** 「更多」面板是否展开。 */
-  @State showMore: boolean = false;
 
   // AI 汇总面板状态
   @State showAiPanel: boolean = false;
@@ -89,22 +100,40 @@ struct Index {
   @State aiResultVisible: boolean = false;
   @State aiResultText: string = '';
 
+  // 「今日汇总」块（列表第一项）的展示状态。
+  // 单一数据源 = `summaryStore.read(date)`（落盘在 devices/<id>/summaries/<date>.json），
+  // 仅把读到的结果物化到下面这几个 @State 供渲染；`aiResultText` 同时供「查看全部」面板使用。
+  /** 汇总标题；空串 = 这一天还没有汇总。 */
+  @State summaryHeadline: string = '';
+  /** 正文要点（最多展示 3 条）。 */
+  @State summaryPoints: string[] = [];
+  /** 要点总条数（>3 时显示「查看全部」）。 */
+  @State summaryPointTotal: number = 0;
+  /** 更新时间（HH:MM）。 */
+  @State summaryUpdatedAt: string = '';
+  /** 生成失败的一行文案；空串 = 无错误。 */
+  @State summaryError: string = '';
+
   aboutToAppear(): void {
-    this.canRemind = isHarmonyOS();
+    this.syncHomeFilter();
     this.bootstrap();
   }
 
   /** 从编辑页/设置页返回时重新加载（追加写语义下必须重读）。 */
   onPageShow(): void {
+    // 「含其他设备」开关归设置页管，回来时同步一次
+    this.syncHomeFilter();
     if (this.ready) {
       this.reload();
+      this.loadSummary();
       return;
     }
-    scheduleStore
+    summaryStore
       .ensureReady(getContext(this) as common.UIAbilityContext)
       .then(() => {
         this.ready = true;
         this.reload();
+        this.loadSummary();
       })
       .catch((error: Error) => {
         this.statusText = `存储初始化失败：${describeError(error)}`;
@@ -113,9 +142,12 @@ struct Index {
 
   private async bootstrap(): Promise<void> {
     try {
+      // summaryStore.ensureReady 内部会先 ensureReady(scheduleStore)，这里两处都调以保持幂等与顺序清晰
       await scheduleStore.ensureReady(getContext(this) as common.UIAbilityContext);
+      await summaryStore.ensureReady(getContext(this) as common.UIAbilityContext);
       this.ready = true;
       this.reload();
+      this.loadSummary();
     } catch (error) {
       this.ready = false;
       this.statusText = `存储初始化失败：${describeError(error)}`;
@@ -185,6 +217,7 @@ struct Index {
     this.selectedDate = localDateKey(base);
     this.showAllPending = false;
     this.reload();
+    this.loadSummary();
   }
 
   private goToday(): void {
@@ -192,6 +225,7 @@ struct Index {
     this.showAllPending = false;
     this.showDatePicker = false;
     this.reload();
+    this.loadSummary();
   }
 
   private openNew(): void {
@@ -201,6 +235,140 @@ struct Index {
     });
   }
 
+  /** 进设置页：同步配置（仓库/token/含其他设备/立即同步/推送/测试连接）全部在那里。 */
+  private openSettings(): void {
+    router.pushUrl({ url: 'pages/Settings' }).catch((error: Error) => {
+      promptAction.showToast({ message: `打开设置页失败：${describeError(error)}` });
+    });
+  }
+
+  /** 「含其他设备」由设置页的开关写 AppStorage，首页返回时读一次（不新增配置项）。 */
+  private syncHomeFilter(): void {
+    const stored: boolean | undefined = AppStorage.get<boolean>(HOME_INCLUDE_OTHER_KEY);
+    this.includeOtherDevices = stored === true;
+  }
+
+  // ------------------------------------------------------------------ 今日汇总块（数据源：summaryStore 持久化）
+
+  /** 汇总块标题（页头图标也用它判断该「生成」还是「打开面板」）。 */
+  private hasSummary(): boolean {
+    return this.summaryHeadline.length > 0;
+  }
+
+  /** 头部图标：有汇总 → 打开完整面板；没有 → 立即生成。 */
+  private onHeaderSummaryAction(): void {
+    if (this.hasSummary()) {
+      this.aiResultVisible = true;
+      return;
+    }
+    this.generateSummary();
+  }
+
+  /** `generatedAt`（epoch ms）→ 本地 `HH:MM`。 */
+  private clockOf(generatedAt: number): string {
+    if (!Number.isFinite(generatedAt) || generatedAt <= 0) {
+      return '';
+    }
+    const date = new Date(generatedAt);
+    return `${two(date.getHours())}:${two(date.getMinutes())}`;
+  }
+
+  /** 把持久化汇总铺到块上（`null` = 该日无汇总 → ④ 态）。 */
+  private applySummary(summary: DailySummary | null): void {
+    if (summary === null) {
+      this.summaryHeadline = '';
+      this.summaryPoints = [];
+      this.summaryPointTotal = 0;
+      this.summaryUpdatedAt = '';
+      this.aiResultText = '';
+      return;
+    }
+    const display: SummaryDisplay = truncateSummaryForDisplay(summary, SUMMARY_MAX_POINTS);
+    this.summaryHeadline = display.headline;
+    this.summaryPoints = display.points;
+    this.summaryPointTotal = summary.points.length;
+    this.summaryUpdatedAt = this.clockOf(summary.generatedAt);
+    // 「查看全部」复用结果面板：正文 = 标题 + 全部要点 + 一行元信息
+    const lines: string[] = [];
+    if (display.headline.length > 0) {
+      lines.push(display.headline);
+    }
+    for (const point of display.points) {
+      lines.push(`· ${point}`);
+    }
+    lines.push(`共 ${summary.recordCount} 条 · 已完成 ${summary.doneCount} 条 · ${summary.model}`);
+    this.aiResultText = lines.join('\n');
+  }
+
+  /** 读当前日期的汇总（`aboutToAppear` / 换日期 / 换模式 都走它，单一数据源）。 */
+  private loadSummary(): void {
+    this.summaryError = '';
+    if (!this.ready) {
+      this.applySummary(null);
+      return;
+    }
+    try {
+      this.applySummary(summaryStore.read(this.selectedDate));
+    } catch (error) {
+      this.applySummary(null);
+      this.summaryError = `读取汇总失败：${describeError(error)}`;
+    }
+  }
+
+  /**
+   * 生成今日汇总并落盘（`summaryStore.generate` 内部保证：失败不覆盖旧文件）。
+   *
+   * 失败时**不清空**：重新 `read()` 一次旧汇总继续显示，块内只多一行错误 + 重试。
+   */
+  private async generateSummary(): Promise<void> {
+    if (this.aiBusy || this.records.length === 0) {
+      return;
+    }
+    this.summaryError = '';
+    this.aiBusy = true;
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      let aiKey: string = '';
+      let providerId: string = '';
+      let model: string = '';
+      let baseURL: string = '';
+      try {
+        const settings = await settingsStore.load(context);
+        aiKey = settings.aiKey;
+        providerId = settings.aiProviderId;
+        model = settings.aiModel;
+        baseURL = settings.aiBaseURL;
+      } catch (error) {
+        this.summaryError = `读取设置失败：${describeError(error)}`;
+        return;
+      }
+      // 全量当天记录（含已处理），不要自己按 ai_processed 过滤
+      const dayRecords: ScheduleRecord[] = scheduleStore.readDay(this.selectedDate);
+      const saved: DailySummary = await summaryStore.generate(
+        dayRecords,
+        this.selectedDate,
+        aiKey,
+        providerId,
+        model,
+        baseURL
+      );
+      this.applySummary(saved);
+      // 结果已经进块里了，不自动弹面板（要看全部点块或头部图标）
+      this.aiResultVisible = false;
+    } catch (error) {
+      // C2 抛中文 Error；旧汇总保持不变 → 重新读回来继续显示
+      this.summaryError = describeError(error);
+      try {
+        this.applySummary(summaryStore.read(this.selectedDate));
+      } catch (readError) {
+        // 读失败也不清空错误文案
+      }
+    } finally {
+      this.aiBusy = false;
+    }
+  }
+
+  /** 打开详情页。 */
   private openDetail(id: string): void {
     const params: Record<string, string> = { 'id': id };
     router.pushUrl({ url: 'pages/Detail', params: params }).catch((error: Error) => {
@@ -208,7 +376,12 @@ struct Index {
     });
   }
 
-  /** 同步入口：设置页挂载了 Git Web 内核，这里带参数过去自动触发拉取。 */
+  /**
+   * 首页快捷同步（带 `autoAction=pull` 跳设置页）。
+   *
+   * **当前没有入口**：同步相关动作已按用户要求全部收进「设置 → 同步(Git)」组，
+   * 这里保留实现与 `autoAction` 参数通道，将来若要恢复首页快捷同步直接接回来即可。
+   */
   private openSync(): void {
     const params: Record<string, string> = { 'autoAction': 'pull' };
     router.pushUrl({ url: 'pages/Settings', params: params }).catch((error: Error) => {
@@ -239,16 +412,6 @@ struct Index {
       promptAction.showToast({ message: `保存失败：${describeError(error)}` });
     }
     this.reload();
-  }
-
-  private async createRemindersNow(): Promise<void> {
-    try {
-      const all = scheduleStore.readAll();
-      const message = await createReminders(all, getContext(this) as common.UIAbilityContext);
-      promptAction.showToast({ message: message, duration: 4000 });
-    } catch (error) {
-      promptAction.showToast({ message: `创建提醒失败：${describeError(error)}`, duration: 4000 });
-    }
   }
 
   // ------------------------------------------------------------------ AI 汇总
@@ -434,6 +597,7 @@ struct Index {
             this.showDatePicker = false;
             this.showAllPending = false;
             this.reload();
+            this.loadSummary();
           })
       }
     }
@@ -513,6 +677,158 @@ struct Index {
       .onClick(() => this.openNew())
   }
 
+  /**
+   * 「今日汇总」块：今日日程列表的第一项。
+   *
+   * 五态（同一时刻只显示一态，互斥）：
+   * ① 今日无日程 → 灰字「今天还没有日程」（无按钮）
+   * ② 生成中   → 「正在生成…」
+   * ③ 失败     → 一行错误 + 「重试」（不覆盖旧汇总，由 generateSummary 保证）
+   * ④ 无汇总   → 一行「✨ 生成今日汇总」（可点）
+   * ⑤ 有汇总   → 标题一行 + 要点 ≤3 条 +（>3 时「查看全部」）+ 「更新于 HH:MM · 重新生成」
+   */
+  @Builder
+  SummaryCard() {
+    Column({ space: SPACING.sm }) {
+      Row({ space: SPACING.sm }) {
+        Text('✨ 今日汇总')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.brand'))
+          .layoutWeight(1)
+          .textAlign(TextAlign.Start)
+        if (this.hasSummary() && this.summaryPointTotal > 3) {
+          Text('查看全部')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.brand'))
+            .height(TOUCH_MIN)
+            .padding({ left: SPACING.sm, right: SPACING.sm })
+            .textAlign(TextAlign.Center)
+            .onClick(() => {
+              this.aiResultVisible = true;
+            })
+        }
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      if (this.records.length === 0) {
+        // ① 无日程：只给一句弱提示，不出现生成按钮（避免两个都显示）
+        Text('今天还没有日程')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+      } else if (this.aiBusy) {
+        // ② 生成中（与页头图标共用 aiBusy，两处状态不会打架）
+        Text('正在生成今日汇总…')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+      } else if (this.summaryError.length > 0) {
+        // ③ 失败：一行错误 + 重试；旧汇总内容保持不变
+        Row({ space: SPACING.sm }) {
+          Text(this.summaryError)
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.danger'))
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
+            .textAlign(TextAlign.Start)
+          Text('重试')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.brand'))
+            .height(TOUCH_MIN)
+            .padding({ left: SPACING.sm, right: SPACING.sm })
+            .textAlign(TextAlign.Center)
+            .onClick(() => {
+              this.generateSummary();
+            })
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+      } else if (!this.hasSummary()) {
+        // ④ 无汇总：整行可点，直接生成
+        Text('✨ 生成今日汇总')
+          .fontSize(FONT.body)
+          .lineHeight(LINE_HEIGHT.body)
+          .fontColor($r('app.color.brand'))
+          .width('100%')
+          .height(TOUCH_MIN)
+          .textAlign(TextAlign.Start)
+          .onClick(() => {
+            this.generateSummary();
+          })
+      } else {
+        // ⑤ 有汇总：标题 + 要点（点标题/要点 → 打开完整面板）
+        Column({ space: SPACING.xs }) {
+          Text(this.summaryHeadline)
+            .fontSize(FONT.body)
+            .lineHeight(LINE_HEIGHT.body)
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.text_primary'))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .width('100%')
+            .textAlign(TextAlign.Start)
+          ForEach(
+            this.summaryPoints,
+            (item: string) => {
+              Text(`· ${item}`)
+                .fontSize(FONT.caption)
+                .lineHeight(LINE_HEIGHT.caption)
+                .fontColor($r('app.color.text_secondary'))
+                .maxLines(2)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .width('100%')
+                .textAlign(TextAlign.Start)
+            },
+            (item: string, index: number) => `point-${index}-${item}`
+          )
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .onClick(() => {
+          this.aiResultVisible = true;
+        })
+
+        Row({ space: SPACING.sm }) {
+          Text(`更新于 ${this.summaryUpdatedAt}`)
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.text_secondary'))
+            .layoutWeight(1)
+            .textAlign(TextAlign.End)
+          Text('重新生成')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.brand'))
+            .height(TOUCH_MIN)
+            .padding({ left: SPACING.sm, right: SPACING.sm })
+            .textAlign(TextAlign.Center)
+            .enabled(!this.aiBusy)
+            .onClick(() => {
+              this.generateSummary();
+            })
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+      }
+
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
   /** 列表行（两条断点共用；行自带 1vp 分割线，所以 List space 为 0）。 */
   @Builder
   ListRows() {
@@ -540,53 +856,44 @@ struct Index {
     .scrollBar(BarState.Off)
   }
 
-  /** 紧凑屏/宽屏共用的空态文案。 */
-  @Builder
-  EmptyHint() {
-    EmptyState({
-      title: this.showAllPending ? '没有未完成的日程' : '这一天还没有日程',
-      hint: this.showAllPending ? '切换回「今日待办」看看当天安排' : '点「新建」记录一条，或切换日期'
-    })
-  }
-
-  /** 紧凑屏列表：空态只有文案（底部还有全宽「新建」）。 */
+  /** 紧凑屏列表：空态已由「今日汇总」块与底部「新建」表达，这里不再重复文案。 */
   @Builder
   RecordList() {
-    if (this.records.length === 0) {
-      this.EmptyHint()
-    } else {
+    if (this.records.length > 0) {
       this.ListRows()
     }
   }
 
-  /** 宽屏右栏：空态居中给主操作；有数据时列表最大 900vp 居中，避免单行横跨整个宽屏。 */
+  /** 宽屏右栏：汇总块在顶部（同一 720vp 容器内），空态只留居中主操作。 */
   @Builder
   WideList() {
     Column() {
-      if (this.records.length === 0) {
-        Column({ space: SPACING.xl }) {
-          this.EmptyHint()
-          this.EmptyCta()
+      Column() {
+        if (!this.showAllPending) {
+          this.SummaryCard()
         }
-        .width('100%')
-        .height('100%')
-        .justifyContent(FlexAlign.Center)
-        .alignItems(HorizontalAlign.Center)
-      } else {
-        Column() {
+        if (this.records.length === 0) {
+          Column() {
+            this.EmptyCta()
+          }
+          .width('100%')
+          .layoutWeight(1)
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Center)
+        } else {
           this.ListRows()
         }
-        .width('100%')
-        .height('100%')
-        .constraintSize({ maxWidth: LIST_MAX_WIDTH })
       }
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: LIST_MAX_WIDTH })
     }
     .width('100%')
     .height('100%')
     .alignItems(HorizontalAlign.Center)
   }
 
-  /** 紧凑屏：日期条 → 模式 → 列表 → 新建（单列自上而下）。 */
+  /** 紧凑屏：日期条 → 模式 → 今日汇总块（列表第一项）→ 列表 → 新建。 */
   @Builder
   CompactBody() {
     Column({ space: SPACING.md }) {
@@ -595,7 +902,15 @@ struct Index {
       Divider()
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
-      this.RecordList()
+      Column() {
+        if (!this.showAllPending) {
+          this.SummaryCard()
+        }
+        this.RecordList()
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
       this.PrimaryAction()
     }
     .width('100%')
@@ -636,101 +951,6 @@ struct Index {
     .width('100%')
     .height('100%')
     .alignItems(VerticalAlign.Top)
-  }
-
-  /** 「更多」底部面板：次要操作全部收在这里，每行 48vp。 */
-  @Builder
-  MoreSheet() {
-    Column() {
-      Row() {
-        Text('更多')
-          .fontSize(FONT.body)
-          .lineHeight(LINE_HEIGHT.body)
-          .fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.text_primary'))
-        Blank()
-        Text('关闭')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .height(TOUCH_MIN)
-          .padding({ left: SPACING.md, right: SPACING.md })
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
-            this.showMore = false;
-          })
-      }
-      .width('100%')
-
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-
-      Text('AI 汇总（今日记录）')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .height(PRIMARY_HEIGHT)
-        .textAlign(TextAlign.Start)
-        .onClick(() => {
-          this.showMore = false;
-          this.openAiPanel();
-        })
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-
-      Text('同步（拉取远端）')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .height(PRIMARY_HEIGHT)
-        .textAlign(TextAlign.Start)
-        .onClick(() => {
-          this.showMore = false;
-          this.openSync();
-        })
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-
-      if (this.canRemind) {
-        Text('创建提醒')
-          .fontSize(FONT.body)
-          .lineHeight(LINE_HEIGHT.body)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-          .height(PRIMARY_HEIGHT)
-          .textAlign(TextAlign.Start)
-          .onClick(() => {
-            this.showMore = false;
-            this.createRemindersNow();
-          })
-        Divider()
-          .strokeWidth(DIVIDER)
-          .color($r('app.color.divider'))
-      }
-
-      Text(this.includeOtherDevices ? '只看本机（当前含其他设备）' : '含其他设备（只读）')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontColor(this.includeOtherDevices ? $r('app.color.brand') : $r('app.color.text_primary'))
-        .width('100%')
-        .height(PRIMARY_HEIGHT)
-        .textAlign(TextAlign.Start)
-        .onClick(() => {
-          this.includeOtherDevices = !this.includeOtherDevices;
-          this.showMore = false;
-          this.reload();
-        })
-    }
-    .width('100%')
-    .padding(SPACING.lg)
-    .backgroundColor($r('app.color.surface'))
-    .borderRadius({ topLeft: RADIUS.md, topRight: RADIUS.md })
-    .alignItems(HorizontalAlign.Start)
   }
 
   /** AI 汇总候选面板（保留逐条勾选与全选/全不选）。 */
@@ -855,6 +1075,18 @@ struct Index {
           .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.text_primary'))
         Blank()
+        Text('重选')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .height(TOUCH_MIN)
+          .padding({ left: SPACING.md, right: SPACING.md })
+          .textAlign(TextAlign.Center)
+          .onClick(() => {
+            // 逐条取消勾选的入口：关掉结果、回到候选面板
+            this.aiResultVisible = false;
+            this.openAiPanel();
+          })
         Text('关闭')
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)
@@ -897,8 +1129,15 @@ struct Index {
       PageLayout({
         title: this.pageTitle(),
         subtitle: this.subtitleText(),
-        onMore: () => {
-          this.showMore = true;
+        // 明确动作：直接跑当天的 AI 汇总 / 进设置（同步相关配置都在设置页）
+        // 明确动作：有汇总→打开面板，无汇总→立即生成；生成中显示 loading 与列表块同源（aiBusy）
+        headerActionOne: this.aiBusy ? '✨ 生成中…' : '✨ AI 汇总',
+        onHeaderActionOne: () => {
+          this.onHeaderSummaryAction();
+        },
+        headerActionTwo: '⚙ 设置',
+        onHeaderActionTwo: () => {
+          this.openSettings();
         },
         onBreakpointChange: (breakpoint: string, widthVp: number) => {
           this.breakpoint = breakpoint;
@@ -912,7 +1151,7 @@ struct Index {
         }
       }
 
-      if (this.showAiPanel || this.aiResultVisible || this.showMore) {
+      if (this.showAiPanel || this.aiResultVisible) {
         Column()
           .width('100%')
           .height('100%')
@@ -921,17 +1160,8 @@ struct Index {
             if (!this.aiBusy) {
               this.showAiPanel = false;
               this.aiResultVisible = false;
-              this.showMore = false;
             }
           })
-      }
-      if (this.showMore) {
-        Column() {
-          Blank()
-          this.MoreSheet()
-        }
-        .width('100%')
-        .height('100%')
       }
       if (this.showAiPanel) {
         this.AiPanel()
