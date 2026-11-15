@@ -1,26 +1,31 @@
-﻿/**
+/**
  * 手写板页面（**仅 HarmonyOS**，只在鸿蒙清单 `entry/src/harmony/resources/base/profile/main_pages.json` 登记）。
  *
  * 契约：BRIEF §3.2、`docs/CONTRACT.md` §3.4 + 「区域框内不做 OCR，只保存原图」。
  *
- * 流程：逐页书写（画笔 / 橡皮 / 框选，笔宽 5 档、颜色 5 色、撤销重做按页）→
+ * 流程：逐页书写（画笔 / 橡皮 / 手动框，笔宽 5 档、颜色 5 色、撤销重做按页）→
  * **全部写完**后点「完成」→ OcrBatchManager 两阶段处理：
  *   阶段 A：按页序逐页「切页 → 截图 → 落盘 attachments/<sha256>.png」（**原始截图**，含框内内容）；
  *   阶段 B：有框的页先把框内填白 → 二次截图 → 只对遮罩图 OCR；正文对应位置插入区域占位符；
  * 最后 0→N 拼接到 `AppStorage['handwriting.result']` 并 `router.back()`。
  *
- * 2026-11-15 UI 定版（用户拍板）：
- * - **竖屏**：顶部单行工具条（高度 48vp）
- *   `[笔▾][粗▾][色▾][工具▾][撤销][重做][‹ n/m › +][完成]`；
- * - **横屏**：最左侧竖排 rail（宽度 56vp），同序竖排，「完成」贴底；
- * - 带 ▾ 的按钮点开**二级浮层**（绝对定位在根 Stack 上，不参与布局、**不挤压画布**，也不遮挡画布中心）；
- * - 「完成」是唯一主操作且**始终可见**（不随工具条横向滚动）；
- * - 页码与加页合并成 `‹ n/m › +` 一个组件；长按它 = 页面菜单（清空本页 / 清空本页框 / 删除本页 / 返回）；
- * - 页面上**没有任何常驻提示文案**：识别进度只走 toast，失败也只 toast；
- * - 首次进入弹一次引导（`preferences` 的 `handwriting.tipShown`），点「知道了」写入标记，不加设置项。
+ * 2026-11-15 UI 定版（用户逐条确认）——**9 个位置**：
+ * ```
+ * 竖屏顶部横排： [笔形▾] [粗细▾] [颜色▾] [橡皮] [手动框] [撤销] [重做] [− n/m +] [完成]
+ * 横屏左侧竖排： 同序自上而下（rail ≤56vp，「完成」贴底）
+ * ```
+ * 2026-11-15 真机缺陷修复（第二轮，Lead 定版）：
+ * - 笔形/粗细/颜色按钮改成**图标 + ▾**（不再显示「钢」「粗」「色」单字，真机被截断）；
+ * - 每个控件 `minWidth ≥44vp`、`height 40vp`、`flexShrink(0)`，`Text` 一律 `maxLines(1)` +
+ *   `textOverflow(TextOverflow.None)`，**禁止省略号**；整行仍是横向 `Scroll`（溢出滚动、不加高）；
+ * - 二级面板改成**竖向列表**：笔形「图标 + 名称 + ✓」、粗细「圆点 + 数值 + ✓」、颜色「色块 + 名称 + ✓」，
+ *   行高 44vp（用户原话：粗细微菜单「5 个选项空白」= 旧实现只画了空 Text 没画圆点）；
+ * - 禁用态**不再整体降透明度**（用户反馈「-」看不见）：只改文字/图标颜色，控件本体保持不透明；
+ * - 「完成」实底品牌蓝 + 白字、`minWidth 64vp`、`flexShrink(0)`（真机被省略号截断）；
+ * - 面板开合打 `[hw] panel open=...` 日志，便于 `hilog | grep '[hw]'` 自证（Popup 不一定进 `ui layout`）。
  *
- * 布局不用 `if/else` 切横竖屏（那会重建 `HandwritingPager`，画布已画的像素会丢）：
- * rail 宽度、顶部条高度都随 `landscape` 变化，组件树结构保持恒定。
+ * 布局不用 `if/else` 切横竖屏（会重建 `HandwritingPager`，画布已画的像素会丢）：
+ * rail 宽度、顶部条高度随 `landscape` 变化，组件树结构保持恒定。
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
@@ -47,25 +52,42 @@ import type { RegionBox } from '../model/types';
 const TOP_BAR_HEIGHT: number = 48;
 /** 横屏左侧 rail 宽度（vp）——定版要求 ≤56vp。 */
 const RAIL_WIDTH: number = 56;
-/** 工具条按钮边长（vp）：取 `TOUCH_MIN`，满足最小触控目标。 */
-const BAR_BUTTON: number = TOUCH_MIN;
-/** 粗细档的视觉直径（只是示意，不等于线宽）。 */
-const PEN_DOT_SIZES: number[] = [6, 8, 10, 13, 16];
-/** 二级面板文案。 */
+/** 工具条控件高度（vp）。 */
+const TOOL_HEIGHT: number = 40;
+/** 工具条控件最小宽度（vp）——定版要求 ≥44vp（徽标 + ▾ 不再被挤没）。 */
+const TOOL_MIN_WIDTH: number = 44;
+/** 步进器 `−` / `+` 的边长（vp）。 */
+const STEPPER_BTN: number = 40;
+/** 步进器中间「当前/总数」宽度（vp）——定版要求 ≥56vp。 */
+const STEPPER_LABEL_W: number = 56;
+/** 「完成」最小宽度（vp）——定版要求 ≥64vp。 */
+const FINISH_MIN_WIDTH: number = 64;
+/** 二级面板每行高度（vp）。 */
+const MENU_ROW_HEIGHT: number = 44;
+/** 面板里粗细圆点的直径（与 `PEN_WIDTHS` 一一对应，定版 4/7/10/13/16）。 */
+const SIZE_DOTS: number[] = [4, 7, 10, 13, 16];
+/** 面板里颜色块的边长（vp）。 */
+const SWATCH: number = 28;
+/** 颜色名（与 `PEN_COLORS` 顺序一一对应）。 */
+const COLOR_LABELS: string[] = ['黑', '红', '蓝', '绿', '橙'];
+/** 二级面板标识。 */
 const PANEL_BRUSH: string = 'brush';
 const PANEL_SIZE: string = 'size';
 const PANEL_COLOR: string = 'color';
-const PANEL_TOOL: string = 'tool';
 /** 首次引导存储（不建设置项，只存一个布尔标记）。 */
 const TIP_STORE: string = 'handwriting';
 const TIP_KEY: string = 'handwriting.tipShown';
+/** 两步删除确认的阶段。 */
+const CONFIRM_NONE: number = 0;
+const CONFIRM_FIRST: number = 1;
+const CONFIRM_SECOND: number = 2;
 
 @Entry
 @Component
 struct Handwriting {
   /**
    * 与手写板组件共享的分页/书写状态（工具条直接改 `state` 里的 brush/penWidth/penColor/tool，
-   * 画布读同一份；撤销/重做/清空由画布组件注册的实现转调）。
+   * 画布读同一份；撤销/重做由画布组件注册的实现转调）。
    */
   @State pagerState: HandwritingPagerState = new HandwritingPagerState();
   @State pageCount: number = 1;
@@ -74,8 +96,8 @@ struct Handwriting {
   @State redoAvailable: boolean = false;
   /** 当前展开的二级面板（'' = 全关）。 */
   @State panel: string = '';
-  /** 页面菜单（长按页码组件）。 */
-  @State pageMenuOpen: boolean = false;
+  /** 删除确认阶段（0/1/2）。 */
+  @State confirmStage: number = CONFIRM_NONE;
   /** 是否横屏（由 `onAreaChange` 的宽高比较得出，不依赖 mediaquery）。 */
   @State landscape: boolean = false;
   /** 页面尺寸（vp）：浮层定位用。 */
@@ -85,7 +107,6 @@ struct Handwriting {
   @State tipVisible: boolean = false;
   @State busy: boolean = false;
   private manager: OcrBatchManager | null = null;
-  /** 本次识别是否已提示（避免重复 toast）。 */
   private tipLoaded: boolean = false;
 
   aboutToAppear(): void {
@@ -93,14 +114,13 @@ struct Handwriting {
   }
 
   aboutToDisappear(): void {
-    // 页面销毁时取消在跑的批次，释放所有未处理的 PixelMap
     if (this.manager !== null) {
       this.manager.cancel();
       this.manager = null;
     }
   }
 
-  // ------------------------------------------------------------------ 首次引导
+  // ------------------------------------------------------------------ 首次引导（只弹一次）
 
   /** 读 `handwriting.tipShown`：读不到/出错都**不弹**（宁可少弹，也不要每次进来都骚扰）。 */
   private async loadTipFlag(): Promise<void> {
@@ -116,7 +136,7 @@ struct Handwriting {
         this.tipVisible = true;
       }
     } catch {
-      // 读不到偏好：视为已看过（不弹），保证不会「每次进来都弹」
+      // 读不到偏好：视为已看过（不弹）
     }
   }
 
@@ -143,54 +163,47 @@ struct Handwriting {
 
   // ------------------------------------------------------------------ 工具条动作
 
-  /** 开/关二级面板（同一个按钮再点一次收起）。 */
   private togglePanel(name: string): void {
-    this.pageMenuOpen = false;
-    this.panel = this.panel === name ? '' : name;
+    this.confirmStage = CONFIRM_NONE;
+    const next: string = this.panel === name ? '' : name;
+    this.panel = next;
+    // 真机自证：Popup/自定义浮层不一定出现在 `ui layout` 里，用 hilog 记开合
+    console.info(`[hw] panel open=${next.length === 0 ? 'none' : next}`);
   }
 
   private closeOverlays(): void {
+    if (this.panel.length > 0) {
+      console.info('[hw] panel open=none');
+    }
     this.panel = '';
-    this.pageMenuOpen = false;
+    this.confirmStage = CONFIRM_NONE;
   }
 
   private pickBrush(kind: BrushKind): void {
     this.pagerState.setBrush(kind);
     this.panel = '';
+    console.info(`[hw] panel open=none brush=${kind}`);
   }
 
   private pickWidth(width: number): void {
     this.pagerState.setPenWidth(width);
     this.panel = '';
+    console.info(`[hw] panel open=none penWidth=${width}`);
   }
 
   private pickColor(color: string): void {
     this.pagerState.setPenColor(color);
     this.panel = '';
+    console.info(`[hw] panel open=none penColor=${color}`);
   }
 
-  private pickTool(tool: string): void {
-    this.pagerState.setTool(tool);
+  /** 橡皮 / 手动框：点一下进该模式，**再点一次回到画笔**（定版语义），与画笔互斥。 */
+  private toggleTool(tool: string): void {
     this.panel = '';
-  }
-
-  /** 当前工具的显示名（工具条按钮文案）。 */
-  private currentToolLabel(): string {
-    if (this.pagerState.tool === HW_TOOL_ERASER) {
-      return '橡皮';
-    }
-    if (this.pagerState.tool === HW_TOOL_SELECT) {
-      return '手动框';
-    }
-    return '画笔';
-  }
-
-  /** 当前笔形显示名（没选笔形时显示「笔」）。 */
-  private currentBrushLabel(): string {
-    if (this.pagerState.tool !== HW_TOOL_BRUSH) {
-      return '笔';
-    }
-    return brushSpec(this.pagerState.brush).label.substring(0, 1);
+    this.confirmStage = CONFIRM_NONE;
+    const next: string = this.pagerState.tool === tool ? HW_TOOL_BRUSH : tool;
+    this.pagerState.setTool(next);
+    console.info(`[hw] tool=${next}`);
   }
 
   // ------------------------------------------------------------------ 页序动作
@@ -213,28 +226,38 @@ struct Handwriting {
     }
   }
 
-  private addPage(): void {
-    if (this.pagerState.addPage()) {
+  /** `+`：在当前页之后插入空白页（自动跳到新页）。 */
+  private insertPage(): void {
+    if (this.pagerState.insertPageAfterCurrent()) {
       this.syncHistoryState();
+      console.info(`[hw] page insert after, now=${this.pagerState.current + 1}/${this.pagerState.pages}`);
     }
   }
 
-  private removePage(): void {
-    if (this.pagerState.removePage(this.pagerState.current)) {
-      this.syncHistoryState();
+  /** `−`：删除当前页（两步确认）。 */
+  private startDeletePage(): void {
+    if (this.pageCount <= 1) {
+      return;
     }
-    this.pageMenuOpen = false;
+    this.closeOverlays();
+    this.confirmStage = CONFIRM_FIRST;
+    console.info(`[hw] delete confirm stage=1 page=${this.currentPage + 1}/${this.pageCount}`);
   }
 
-  private clearPage(): void {
-    this.pagerState.clearPage(this.pagerState.current);
-    this.syncHistoryState();
-    this.pageMenuOpen = false;
-  }
-
-  private clearRegions(): void {
-    this.pagerState.setRegions(this.pagerState.current, []);
-    this.pageMenuOpen = false;
+  private confirmDelete(): void {
+    if (this.confirmStage === CONFIRM_FIRST) {
+      this.confirmStage = CONFIRM_SECOND;
+      console.info('[hw] delete confirm stage=2');
+      return;
+    }
+    if (this.confirmStage === CONFIRM_SECOND) {
+      this.confirmStage = CONFIRM_NONE;
+      const pageNo: number = this.pagerState.current + 1;
+      if (this.pagerState.removePage(this.pagerState.current)) {
+        this.syncHistoryState();
+        console.info(`[hw] page deleted ${pageNo}, pages=${this.pagerState.pages}`);
+      }
+    }
   }
 
   // ------------------------------------------------------------------ 完成（统一识别）
@@ -268,7 +291,7 @@ struct Handwriting {
       promptAction.showToast({ message: `附件存储初始化失败：${describeError(error)}`, duration: 5000 });
       return;
     }
-    // 按页序取槽位 id（删除中间页后页序 ≠ 0..N，必须用 slots 映射）
+    // 按页序取截图 id（稳定页 id：插页/删页后 id 不漂移）
     const ids: string[] = this.pagerState.snapshotIds(HANDWRITING_PAGE_ID_PREFIX);
     const pageRegions: RegionBox[][] = this.pagerState.regionsList();
     let regionTotal: number = 0;
@@ -310,42 +333,168 @@ struct Handwriting {
     }
   }
 
-  // ------------------------------------------------------------------ 工具条（竖屏横排 / 横屏竖排共用一套按钮）
+  // ------------------------------------------------------------------ 图标（自绘几何，不依赖 sys.symbol 名字）
 
-  /** 带 ▾ 的菜单按钮。 */
+  /** 笔形的图标粗细（vp，按笔刷类型区分）。 */
+  private brushIconWidth(kind: string): number {
+    if (kind === 'ballpoint') {
+      return 2;
+    }
+    if (kind === 'pencil') {
+      return 4;
+    }
+    if (kind === 'marker') {
+      return 7;
+    }
+    if (kind === 'highlighter') {
+      return 9;
+    }
+    return 3;
+  }
+
+  /** 笔形的图标颜色（铅笔灰、荧光笔黄，其余主文字色）。 */
+  private brushIconColor(kind: string): ResourceColor {
+    if (kind === 'pencil') {
+      return '#8A8A8A';
+    }
+    if (kind === 'highlighter') {
+      return '#F5B700';
+    }
+    return $r('app.color.text_primary');
+  }
+
+  /** 笔形图标：一根按笔刷类型变粗的斜杆（18vp 高）。 */
   @Builder
-  menuButton(label: string, panelName: string) {
-    Text(`${label}▾`)
-      .height(BAR_BUTTON)
-      .width(BAR_BUTTON)
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .textAlign(TextAlign.Center)
-      .borderRadius(RADIUS.sm)
-      .backgroundColor(this.panel === panelName ? $r('app.color.brand') : '#F1F3F5')
-      .fontColor(this.panel === panelName ? Color.White : $r('app.color.text_primary'))
-      .onClick(() => {
-        this.togglePanel(panelName);
-      })
+  brushIcon(kind: string) {
+    Text('')
+      .width(this.brushIconWidth(kind))
+      .height(18)
+      .borderRadius(2)
+      .backgroundColor(this.brushIconColor(kind))
+      .rotate({ angle: -35 })
+  }
+
+  /** 粗细图标：三个递增圆点。 */
+  @Builder
+  sizeIcon() {
+    Row({ space: 1 }) {
+      Text('')
+        .width(4)
+        .height(4)
+        .borderRadius(2)
+        .backgroundColor($r('app.color.text_primary'))
+      Text('')
+        .width(7)
+        .height(7)
+        .borderRadius(3.5)
+        .backgroundColor($r('app.color.text_primary'))
+      Text('')
+        .width(10)
+        .height(10)
+        .borderRadius(5)
+        .backgroundColor($r('app.color.text_primary'))
+    }
+    .height(18)
+    .alignItems(VerticalAlign.Center)
+  }
+
+  /** 颜色图标：三个小色块。 */
+  @Builder
+  colorIcon() {
+    Row({ space: 1 }) {
+      Text('')
+        .width(7)
+        .height(12)
+        .backgroundColor('#1A1A1A')
+      Text('')
+        .width(7)
+        .height(12)
+        .backgroundColor('#D93025')
+      Text('')
+        .width(7)
+        .height(12)
+        .backgroundColor('#1A73E8')
+    }
+    .height(18)
+  }
+
+  /** 按面板/工具类型挑图标。 */
+  @Builder
+  toolbarIcon(kind: string) {
+    if (kind === PANEL_SIZE) {
+      this.sizeIcon()
+    } else if (kind === PANEL_COLOR) {
+      this.colorIcon()
+    } else {
+      this.brushIcon(this.pagerState.brush)
+    }
+  }
+
+  // ------------------------------------------------------------------ 工具条按钮
+
+  /** 图标 + ▾ 的菜单按钮（笔形 / 粗细 / 颜色）。 */
+  @Builder
+  iconMenuButton(kind: string, panelName: string) {
+    Row({ space: 2 }) {
+      this.toolbarIcon(kind)
+      Text('▾')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === panelName ? Color.White : $r('app.color.text_secondary'))
+    }
+    .justifyContent(FlexAlign.Center)
+    .constraintSize({ minWidth: TOOL_MIN_WIDTH })
+    .height(TOOL_HEIGHT)
+    .padding({ left: SPACING.xs, right: SPACING.xs })
+    .borderRadius(RADIUS.sm)
+    .backgroundColor(this.panel === panelName ? $r('app.color.brand') : '#F1F3F5')
+    .flexShrink(0)
+    .onClick(() => {
+      this.togglePanel(panelName);
+    })
   }
 
   /**
-   * 撤销 / 重做（图标按钮：不用文字，省出竖屏宽度）。
-   *
-   * 不把回调传进 `@Builder`（ArkUI 的 Builder 参数只适合值类型），改用 `kind` 字符串分发。
+   * 橡皮 / 手动框：独立按钮，点一次进该模式、再点一次回画笔。
+   * 选中态品牌淡底 + 品牌色文字；**禁用态不降透明度**（定版：只改颜色）。
    */
+  @Builder
+  toolButton(label: string, tool: string) {
+    Text(label)
+      .height(TOOL_HEIGHT)
+      .constraintSize({ minWidth: TOOL_MIN_WIDTH })
+      .padding({ left: SPACING.xs, right: SPACING.xs })
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .textAlign(TextAlign.Center)
+      .borderRadius(RADIUS.sm)
+      .backgroundColor(this.pagerState.tool === tool ? '#E8F1FF' : '#F1F3F5')
+      .fontColor(this.pagerState.tool === tool ? $r('app.color.brand') : $r('app.color.text_primary'))
+      .border({ width: this.pagerState.tool === tool ? 1 : 0, color: $r('app.color.brand') })
+      .flexShrink(0)
+      .onClick(() => {
+        this.toggleTool(tool);
+      })
+  }
+
+  /** 撤销 / 重做（图标按钮；`kind` 分发，避免把回调传进 @Builder）。 */
   @Builder
   historyButton(kind: string, label: string, enabled: boolean) {
     Text(label)
-      .height(BAR_BUTTON)
-      .width(BAR_BUTTON)
+      .height(TOOL_HEIGHT)
+      .constraintSize({ minWidth: TOOL_MIN_WIDTH })
       .fontSize(FONT.body)
       .textAlign(TextAlign.Center)
       .borderRadius(RADIUS.sm)
       .backgroundColor('#EEF1F4')
-      .fontColor($r('app.color.text_primary'))
+      // 禁用态：只改颜色，不整体透明（真机上透明会被误认为「按钮没了」）
+      .fontColor(enabled ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
       .enabled(enabled)
-      .opacity(enabled ? 1 : 0.35)
+      .flexShrink(0)
       .onClick(() => {
         if (!enabled) {
           return;
@@ -358,99 +507,93 @@ struct Handwriting {
       })
   }
 
-  /** 页码 + 加页：`‹ n/m › +`（长按 = 页面菜单）。 */
+  /**
+   * 页码步进器 `− n/m +`（整体一个控件，`flexShrink(0)`）：
+   * `−` 删当前页（两步确认）、`+` 在当前页之后插入空白页。
+   */
   @Builder
   pageStepper() {
     Row() {
-      Text('‹')
-        .width(this.landscape ? BAR_BUTTON : 22)
-        .height(BAR_BUTTON)
+      Text('−')
+        .width(STEPPER_BTN)
+        .height(TOOL_HEIGHT)
         .fontSize(FONT.body)
         .textAlign(TextAlign.Center)
-        .fontColor($r('app.color.brand'))
-        .opacity(this.currentPage > 0 ? 1 : 0.35)
-        .enabled(this.currentPage > 0)
+        // 禁用态只改色，不降透明度
+        .fontColor(this.pageCount > 1 ? $r('app.color.danger') : $r('app.color.text_secondary'))
+        .enabled(this.pageCount > 1)
         .onClick(() => {
-          this.goPrevPage();
+          this.startDeletePage();
         })
       Text(`${this.currentPage + 1}/${this.pageCount}`)
-        .height(BAR_BUTTON)
-        .width(this.landscape ? BAR_BUTTON : 36)
+        .width(STEPPER_LABEL_W)
+        .height(TOOL_HEIGHT)
         .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
         .textAlign(TextAlign.Center)
         .fontColor($r('app.color.text_primary'))
-        .onClick(() => {
-          this.pageMenuOpen = !this.pageMenuOpen;
-          this.panel = '';
-        })
-        .gesture(
-          LongPressGesture()
-            .onAction(() => {
-              this.pageMenuOpen = true;
-              this.panel = '';
-            })
-        )
-      Text('›')
-        .width(this.landscape ? BAR_BUTTON : 22)
-        .height(BAR_BUTTON)
+      Text('+')
+        .width(STEPPER_BTN)
+        .height(TOOL_HEIGHT)
         .fontSize(FONT.body)
         .textAlign(TextAlign.Center)
-        .fontColor($r('app.color.brand'))
-        .opacity(this.currentPage < this.pageCount - 1 ? 1 : 0.35)
-        .enabled(this.currentPage < this.pageCount - 1)
-        .onClick(() => {
-          this.goNextPage();
-        })
-      Text('＋')
-        .width(this.landscape ? BAR_BUTTON : 26)
-        .height(BAR_BUTTON)
-        .fontSize(FONT.body)
-        .textAlign(TextAlign.Center)
-        .fontColor($r('app.color.brand'))
-        .opacity(this.pageCount < MAX_HANDWRITING_PAGES ? 1 : 0.35)
+        .fontColor(this.pageCount < MAX_HANDWRITING_PAGES ? $r('app.color.brand') : $r('app.color.text_secondary'))
         .enabled(this.pageCount < MAX_HANDWRITING_PAGES)
         .onClick(() => {
-          this.addPage();
+          this.insertPage();
         })
     }
-    .height(BAR_BUTTON)
+    .height(TOOL_HEIGHT)
+    .constraintSize({ minWidth: STEPPER_BTN * 2 + STEPPER_LABEL_W })
     .borderRadius(RADIUS.sm)
+    .backgroundColor('#F7F8FA')
+    .flexShrink(0)
   }
 
-  /** 「完成」：唯一主操作，横竖屏都常驻（竖屏不参与横向滚动、横屏贴 rail 底部）。 */
+  /** 「完成」：唯一主操作，实底品牌蓝 + 白字、`minWidth 64vp`、不收缩。 */
   @Builder
   finishButton(fullWidth: boolean) {
     Button(this.busy ? '识别中' : '完成')
-      .height(BAR_BUTTON)
-      .width(fullWidth ? RAIL_WIDTH - SPACING.sm : 56)
+      .height(TOOL_HEIGHT)
+      .width(fullWidth ? RAIL_WIDTH - SPACING.sm : undefined)
+      .constraintSize({ minWidth: FINISH_MIN_WIDTH })
       .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
       .backgroundColor($r('app.color.brand'))
       .fontColor(Color.White)
       .enabled(!this.busy)
+      .flexShrink(0)
       .onClick(() => {
         this.finish();
       })
   }
 
-  /** 竖屏：顶部单行工具条（48vp）。 */
+  /** 竖屏：顶部单行工具条（48vp，9 个控件；溢出时该行横向滚动、不换行不加高）。 */
   @Builder
   topBar() {
     Row({ space: SPACING.xs }) {
       Scroll() {
         Row({ space: SPACING.xs }) {
-          this.menuButton(this.currentBrushLabel(), PANEL_BRUSH)
-          this.menuButton('粗', PANEL_SIZE)
-          this.menuButton('色', PANEL_COLOR)
-          this.menuButton('工具', PANEL_TOOL)
+          this.iconMenuButton(PANEL_BRUSH, PANEL_BRUSH)
+          this.iconMenuButton(PANEL_SIZE, PANEL_SIZE)
+          this.iconMenuButton(PANEL_COLOR, PANEL_COLOR)
+          this.toolButton('橡皮', HW_TOOL_ERASER)
+          this.toolButton('手动框', HW_TOOL_SELECT)
           this.historyButton('undo', '↶', this.undoSteps > 0)
           this.historyButton('redo', '↷', this.redoAvailable)
           this.pageStepper()
         }
+        .height(TOOL_HEIGHT)
+        .alignItems(VerticalAlign.Center)
       }
       .scrollable(ScrollDirection.Horizontal)
       .scrollBar(BarState.Off)
       .layoutWeight(1)
-      .height(BAR_BUTTON)
+      .height(TOOL_HEIGHT)
       .align(Alignment.Start)
 
       this.finishButton(false)
@@ -466,10 +609,11 @@ struct Handwriting {
   @Builder
   railBar() {
     Column({ space: SPACING.xs }) {
-      this.menuButton(this.currentBrushLabel(), PANEL_BRUSH)
-      this.menuButton('粗', PANEL_SIZE)
-      this.menuButton('色', PANEL_COLOR)
-      this.menuButton('具', PANEL_TOOL)
+      this.iconMenuButton(PANEL_BRUSH, PANEL_BRUSH)
+      this.iconMenuButton(PANEL_SIZE, PANEL_SIZE)
+      this.iconMenuButton(PANEL_COLOR, PANEL_COLOR)
+      this.toolButton('橡皮', HW_TOOL_ERASER)
+      this.toolButton('手动框', HW_TOOL_SELECT)
       this.historyButton('undo', '↶', this.undoSteps > 0)
       this.historyButton('redo', '↷', this.redoAvailable)
       this.pageStepper()
@@ -483,7 +627,7 @@ struct Handwriting {
     .alignItems(HorizontalAlign.Center)
   }
 
-  // ------------------------------------------------------------------ 二级浮层（绝对定位，不挤压画布）
+  // ------------------------------------------------------------------ 二级面板（绝对定位浮层，不挤压画布）
 
   /** 面板锚点：竖屏在工具条下方、横屏在 rail 右侧（都不碰画布中心）。 */
   private panelLeft(): number {
@@ -492,152 +636,147 @@ struct Handwriting {
 
   private panelTop(): number {
     if (this.landscape) {
-      // rail 里第 1~4 个按钮对应笔形/粗细/颜色/工具
-      const index: number = this.panel === PANEL_BRUSH
-        ? 0
-        : (this.panel === PANEL_SIZE ? 1 : (this.panel === PANEL_COLOR ? 2 : 3));
-      return SPACING.sm + index * (BAR_BUTTON + SPACING.xs);
+      // rail 里第 1~3 个按钮对应笔形/粗细/颜色
+      const index: number = this.panel === PANEL_BRUSH ? 0 : (this.panel === PANEL_SIZE ? 1 : 2);
+      return SPACING.sm + index * (TOOL_HEIGHT + SPACING.xs);
     }
     return TOP_BAR_HEIGHT + SPACING.xs;
   }
 
-  /** 二级面板内容（笔形 / 粗细 / 颜色 / 工具）。 */
+  /** 面板宽度（按内容给足，避免文字被截断）。 */
+  private panelWidth(): number {
+    if (this.panel === PANEL_BRUSH) {
+      return 176;
+    }
+    if (this.panel === PANEL_SIZE) {
+      return 140;
+    }
+    return 156;
+  }
+
+  /** 选中行底色。 */
+  private rowBackground(selected: boolean): ResourceColor {
+    return selected ? '#E8F1FF' : Color.Transparent;
+  }
+
+  /** 二级面板：竖向列表（行高 44vp），笔形 / 粗细 / 颜色各一套。 */
   @Builder
   overlayPanel() {
     Column() {
       if (this.panel === PANEL_BRUSH) {
-        Row({ space: SPACING.xs }) {
-          ForEach(
-            BRUSHES,
-            (spec: BrushSpec) => {
+        ForEach(
+          BRUSHES,
+          (spec: BrushSpec) => {
+            Row() {
+              this.brushIcon(spec.kind)
               Text(spec.label)
-                .height(BAR_BUTTON - 8)
-                .padding({ left: SPACING.sm, right: SPACING.sm })
                 .fontSize(FONT.caption)
-                .textAlign(TextAlign.Center)
-                .borderRadius(RADIUS.sm)
-                .backgroundColor(
-                  this.pagerState.brush === spec.kind && this.pagerState.tool === HW_TOOL_BRUSH
-                    ? $r('app.color.brand')
-                    : '#F1F3F5'
-                )
-                .fontColor(
-                  this.pagerState.brush === spec.kind && this.pagerState.tool === HW_TOOL_BRUSH
-                    ? Color.White
-                    : $r('app.color.text_primary')
-                )
-                .onClick(() => {
-                  this.pickBrush(spec.kind);
-                })
-            },
-            (spec: BrushSpec) => `panel-brush-${spec.kind}`
-          )
-        }
+                .lineHeight(LINE_HEIGHT.caption)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.None })
+                .fontColor($r('app.color.text_primary'))
+                .margin({ left: SPACING.sm })
+              Blank()
+              if (this.pagerState.brush === spec.kind && this.pagerState.tool === HW_TOOL_BRUSH) {
+                Text('✓')
+                  .fontSize(FONT.caption)
+                  .fontColor($r('app.color.brand'))
+              }
+            }
+            .width('100%')
+            .height(MENU_ROW_HEIGHT)
+            .padding({ left: SPACING.sm, right: SPACING.sm })
+            .backgroundColor(
+              this.rowBackground(this.pagerState.brush === spec.kind && this.pagerState.tool === HW_TOOL_BRUSH)
+            )
+            .onClick(() => {
+              this.pickBrush(spec.kind);
+            })
+          },
+          (spec: BrushSpec) => `panel-brush-${spec.kind}`
+        )
       } else if (this.panel === PANEL_SIZE) {
-        Row({ space: SPACING.xs }) {
-          ForEach(
-            PEN_WIDTHS,
-            (width: number, index: number) => {
+        ForEach(
+          PEN_WIDTHS,
+          (width: number, index: number) => {
+            Row() {
+              // 用户反馈「5 个选项空白」：圆点必须显式给宽高/圆角/颜色
               Text('')
-                .width(PEN_DOT_SIZES[index] + 14)
-                .height(BAR_BUTTON - 8)
+                .width(SIZE_DOTS[index])
+                .height(SIZE_DOTS[index])
+                .borderRadius(SIZE_DOTS[index] / 2)
+                .backgroundColor($r('app.color.text_primary'))
+              Text(`${width}`)
                 .fontSize(FONT.caption)
-                .borderRadius(RADIUS.sm)
-                .border({
-                  width: this.pagerState.penWidth === width ? 2 : 0,
-                  color: $r('app.color.brand')
-                })
-                .backgroundColor('#F7F8FA')
-                .onClick(() => {
-                  this.pickWidth(width);
-                })
-            },
-            (width: number) => `panel-size-${width}`
-          )
-        }
-      } else if (this.panel === PANEL_COLOR) {
-        Row({ space: SPACING.xs }) {
-          ForEach(
-            PEN_COLORS,
-            (color: string) => {
+                .lineHeight(LINE_HEIGHT.caption)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.None })
+                .fontColor($r('app.color.text_primary'))
+                .margin({ left: SPACING.sm })
+              Blank()
+              if (this.pagerState.penWidth === width) {
+                Text('✓')
+                  .fontSize(FONT.caption)
+                  .fontColor($r('app.color.brand'))
+              }
+            }
+            .width('100%')
+            .height(MENU_ROW_HEIGHT)
+            .padding({ left: SPACING.sm, right: SPACING.sm })
+            .backgroundColor(this.rowBackground(this.pagerState.penWidth === width))
+            .onClick(() => {
+              this.pickWidth(width);
+            })
+          },
+          (width: number) => `panel-size-${width}`
+        )
+      } else {
+        ForEach(
+          PEN_COLORS,
+          (color: string, index: number) => {
+            Row() {
               Text('')
-                .width(BAR_BUTTON - 12)
-                .height(BAR_BUTTON - 12)
+                .width(SWATCH)
+                .height(SWATCH)
                 .borderRadius(RADIUS.sm)
                 .backgroundColor(color)
-                .border({ width: this.pagerState.penColor === color ? 2 : 0, color: $r('app.color.brand') })
-                .onClick(() => {
-                  this.pickColor(color);
+                .border({
+                  width: this.pagerState.penColor === color ? 2 : 1,
+                  color: this.pagerState.penColor === color ? $r('app.color.brand') : '#DDDDDD'
                 })
-            },
-            (color: string) => `panel-color-${color}`
-          )
-        }
-      } else {
-        Row({ space: SPACING.xs }) {
-          this.toolChip('橡皮', HW_TOOL_ERASER)
-          this.toolChip('手动框', HW_TOOL_SELECT)
-        }
+              Text(COLOR_LABELS[index])
+                .fontSize(FONT.caption)
+                .lineHeight(LINE_HEIGHT.caption)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.None })
+                .fontColor($r('app.color.text_primary'))
+                .margin({ left: SPACING.sm })
+              Blank()
+              if (this.pagerState.penColor === color) {
+                Text('✓')
+                  .fontSize(FONT.caption)
+                  .fontColor($r('app.color.brand'))
+              }
+            }
+            .width('100%')
+            .height(MENU_ROW_HEIGHT)
+            .padding({ left: SPACING.sm, right: SPACING.sm })
+            .backgroundColor(this.rowBackground(this.pagerState.penColor === color))
+            .onClick(() => {
+              this.pickColor(color);
+            })
+          },
+          (color: string) => `panel-color-${color}`
+        )
       }
     }
-    .padding(SPACING.xs)
+    .width(this.panelWidth())
+    .padding({ top: SPACING.xs, bottom: SPACING.xs })
     .borderRadius(RADIUS.md)
     .backgroundColor(Color.White)
     .shadow({ radius: 16, color: 'rgba(0,0,0,0.16)', offsetY: 4 })
     .position({ x: this.panelLeft(), y: this.panelTop() })
-  }
-
-  /** 工具面板里的选项（橡皮 / 手动框）。 */
-  @Builder
-  toolChip(label: string, tool: string) {
-    Text(label)
-      .height(BAR_BUTTON - 8)
-      .padding({ left: SPACING.md, right: SPACING.md })
-      .fontSize(FONT.caption)
-      .textAlign(TextAlign.Center)
-      .borderRadius(RADIUS.sm)
-      .backgroundColor(this.pagerState.tool === tool ? $r('app.color.brand') : '#F1F3F5')
-      .fontColor(this.pagerState.tool === tool ? Color.White : $r('app.color.text_primary'))
-      .onClick(() => {
-        this.pickTool(tool);
-      })
-  }
-
-  /** 长按页码后的页面菜单（破坏性动作都收在这里，工具条保持定版结构）。 */
-  @Builder
-  pageMenu() {
-    Column({ space: SPACING.xs }) {
-      this.pageMenuItem('清空本页笔迹', 'clear')
-      this.pageMenuItem('清空本页框', 'regions')
-      this.pageMenuItem('删除本页', 'remove')
-      this.pageMenuItem('返回（不保存）', 'back')
-    }
-    .padding(SPACING.xs)
-    .borderRadius(RADIUS.md)
-    .backgroundColor(Color.White)
-    .shadow({ radius: 16, color: 'rgba(0,0,0,0.16)', offsetY: 4 })
-    .position({ x: this.panelLeft(), y: this.panelTop() })
-  }
-
-  @Builder
-  pageMenuItem(label: string, action: string) {
-    Text(label)
-      .height(BAR_BUTTON - 8)
-      .padding({ left: SPACING.md, right: SPACING.md })
-      .fontSize(FONT.caption)
-      .fontColor($r('app.color.text_primary'))
-      .onClick(() => {
-        if (action === 'clear') {
-          this.clearPage();
-        } else if (action === 'regions') {
-          this.clearRegions();
-        } else if (action === 'remove') {
-          this.removePage();
-        } else {
-          this.pageMenuOpen = false;
-          router.back();
-        }
-      })
+    .alignItems(HorizontalAlign.Start)
   }
 
   /** 透明遮罩：点空白处收起浮层（画布点击不会漏进去）。 */
@@ -652,7 +791,65 @@ struct Handwriting {
       })
   }
 
-  // ------------------------------------------------------------------ 首次引导对话框（自绘遮罩，不占常驻空间）
+  // ------------------------------------------------------------------ 删除页两步确认
+
+  private dialogWidth(): number {
+    return Math.min(360, Math.max(240, this.pageW - 2 * SPACING.xl));
+  }
+
+  @Builder
+  deleteDialog() {
+    Column() {
+      Column({ space: SPACING.md }) {
+        Text(this.confirmStage === CONFIRM_FIRST ? '删除这一页？' : '再次确认')
+          .fontSize(FONT.title)
+          .lineHeight(LINE_HEIGHT.title)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+        Text(
+          this.confirmStage === CONFIRM_FIRST
+            ? `删除第 ${this.currentPage + 1} 页？该页手迹与附件将一并移除。`
+            : '再次确认：删除后无法恢复。'
+        )
+          .fontSize(FONT.body)
+          .lineHeight(LINE_HEIGHT.body)
+          .fontColor($r('app.color.text_secondary'))
+        Row({ space: SPACING.sm }) {
+          Button('取消')
+            .layoutWeight(1)
+            .height(TOUCH_MIN)
+            .fontSize(FONT.body)
+            .backgroundColor('#EEF1F4')
+            .fontColor($r('app.color.text_primary'))
+            .onClick(() => {
+              this.confirmStage = CONFIRM_NONE;
+              console.info('[hw] delete confirm cancelled');
+            })
+          Button(this.confirmStage === CONFIRM_FIRST ? '删除' : '确认删除')
+            .layoutWeight(1)
+            .height(TOUCH_MIN)
+            .fontSize(FONT.body)
+            .backgroundColor($r('app.color.danger'))
+            .fontColor(Color.White)
+            .onClick(() => {
+              this.confirmDelete();
+            })
+        }
+        .width('100%')
+      }
+      .width(this.dialogWidth())
+      .padding(SPACING.lg)
+      .borderRadius(RADIUS.md)
+      .backgroundColor(Color.White)
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor('rgba(0,0,0,0.35)')
+  }
+
+  // ------------------------------------------------------------------ 首次引导
 
   @Builder
   tipDialog() {
@@ -677,7 +874,7 @@ struct Handwriting {
             this.markTipShown();
           })
       }
-      .width(Math.min(360, Math.max(240, this.pageW - 2 * SPACING.xl)))
+      .width(this.dialogWidth())
       .padding(SPACING.lg)
       .borderRadius(RADIUS.md)
       .backgroundColor(Color.White)
@@ -730,14 +927,13 @@ struct Handwriting {
       .height('100%')
 
       // 浮层永远画在画布之上，但**不参与布局**（绝对定位），所以不挤压画布
-      if (this.panel !== '' || this.pageMenuOpen) {
+      if (this.panel !== '') {
         this.overlayScrim()
-        if (this.panel !== '') {
-          this.overlayPanel()
-        }
-        if (this.pageMenuOpen) {
-          this.pageMenu()
-        }
+        this.overlayPanel()
+      }
+
+      if (this.confirmStage !== CONFIRM_NONE) {
+        this.deleteDialog()
       }
 
       if (this.tipVisible) {

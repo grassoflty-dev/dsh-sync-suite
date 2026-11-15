@@ -65,6 +65,36 @@ describe('AI_PROVIDERS：预设表', () => {
     }
   });
 
+  test('端点与模型按发布版预设钉住', () => {
+    assert.equal(findProvider('deepseek').baseURL, 'https://api.deepseek.com/v1');
+    assert.equal(findProvider('opencode-go').baseURL, 'https://opencode.ai/inference/go/v1');
+    assert.equal(findProvider('codex').baseURL, 'https://api.openai.com/v1');
+    assert.equal(findProvider('custom').baseURL, '');
+    assert.deepEqual(modelsOf('deepseek').map((model) => model.id), ['deepseek-chat', 'deepseek-reasoner']);
+    assert.deepEqual(modelsOf('opencode-go').map((model) => model.id), ['deepseek-v4.1-flash', 'deepseek-v4-pro']);
+    assert.deepEqual(modelsOf('codex').map((model) => model.id), ['gpt-5.1-codex', 'gpt-5-codex', 'gpt-5.1']);
+    assert.equal(findProvider('codex').label, 'Codex API');
+  });
+
+  test('experimental 只标记 opencode-go', () => {
+    assert.equal(findProvider('opencode-go').experimental, true);
+    for (const id of ['deepseek', 'codex', 'custom']) {
+      assert.notEqual(findProvider(id).experimental, true, `${id} 不该是实验源`);
+    }
+  });
+
+  test('实验标记不影响模型归一', () => {
+    assert.equal(defaultModelOf('opencode-go'), 'deepseek-v4.1-flash');
+    assert.equal(resolveModel('opencode-go', 'deepseek-v4.1-flash'), 'deepseek-v4.1-flash');
+    assert.equal(resolveModel('opencode-go', 'deepseek-v4-pro'), 'deepseek-v4-pro');
+  });
+
+  test('keyHint：OpenCode 说明未实测，Codex 说明是 API Key 模式', () => {
+    assert.match(findProvider('opencode-go').keyHint, /端点未实测/);
+    assert.match(findProvider('codex').keyHint, /OpenAI API key/);
+    assert.match(findProvider('codex').keyHint, /不支持 ChatGPT 订阅/);
+  });
+
   test('每个源都有非空且唯一的模型 id', () => {
     for (const preset of AI_PROVIDERS) {
       assert.ok(preset.models.length >= 1, `${preset.id} 没有模型`);
@@ -102,27 +132,30 @@ describe('模型归一', () => {
 
   test('defaultModelOf 取列表首个', () => {
     assert.equal(defaultModelOf('deepseek'), 'deepseek-chat');
-    assert.equal(defaultModelOf('opencode-go'), 'deepseek-v4-pro');
-    assert.equal(defaultModelOf('codex'), 'gpt-5-codex');
+    assert.equal(defaultModelOf('opencode-go'), 'deepseek-v4.1-flash');
+    assert.equal(defaultModelOf('codex'), 'gpt-5.1-codex');
   });
 
   test('resolveModel 空模型回退该源默认', () => {
-    assert.equal(resolveModel('opencode-go', ''), 'deepseek-v4-pro');
-    assert.equal(resolveModel('codex', '   '), 'gpt-5-codex');
+    assert.equal(resolveModel('opencode-go', ''), 'deepseek-v4.1-flash');
+    assert.equal(resolveModel('codex', '   '), 'gpt-5.1-codex');
   });
 
-  test('resolveModel 未知模型回退该源默认', () => {
-    assert.equal(resolveModel('deepseek', 'gpt-5'), 'deepseek-chat');
-    assert.equal(resolveModel('opencode-go', 'deepseek-chat'), 'deepseek-v4-pro');
+  test('resolveModel 未知模型原样接受（模型下线时可手输）', () => {
+    assert.equal(resolveModel('deepseek', 'gpt-5'), 'gpt-5');
+    assert.equal(resolveModel('opencode-go', 'deepseek-chat'), 'deepseek-chat');
+    assert.equal(resolveModel('codex', 'my-local-model'), 'my-local-model');
   });
 
   test('resolveModel 合法模型原样返回', () => {
     assert.equal(resolveModel('deepseek', 'deepseek-reasoner'), 'deepseek-reasoner');
-    assert.equal(resolveModel('opencode-go', 'deepseek-v4.1-flash'), 'deepseek-v4.1-flash');
+    assert.equal(resolveModel('opencode-go', 'deepseek-v4-pro'), 'deepseek-v4-pro');
+    assert.equal(resolveModel('codex', 'gpt-5.1'), 'gpt-5.1');
   });
 
   test('resolveModel 未知源按默认源解析', () => {
     assert.equal(resolveModel('nope', 'deepseek-reasoner'), 'deepseek-reasoner');
+    assert.equal(resolveModel('nope', ''), 'deepseek-chat');
   });
 
   test('resolveModel 自定义源保留任意模型名', () => {
@@ -216,11 +249,19 @@ describe('settingsStore 迁移：旧 aiKey → deepseek + deepseek-chat', () => 
   test('load() 里 provider → 模型 → 地址 依次成对归一', () => {
     const body = methodBody(SETTINGS_STORE, 'async load(');
     const providerAt = body.indexOf('findProvider(aiProviderIdRaw).id');
-    const modelAt = body.indexOf('resolveAiModel(aiProviderId, normalizeAiModel(aiModel))');
+    const legacyModelAt = body.indexOf('normalizeAiModel(aiModel)');
+    const modelAt = body.indexOf('resolveAiModel(aiProviderId, aiModelForSource)');
     const baseAt = body.indexOf('aiBaseURLFor(aiProviderId, aiBaseURLRaw)');
     assert.ok(providerAt >= 0, '缺少 providerId 归一');
-    assert.ok(modelAt > providerAt, '模型必须在 providerId 之后解析');
+    assert.ok(legacyModelAt > providerAt, '默认源要沿用 deepseek-chat（旧数据迁移）');
+    assert.ok(modelAt > legacyModelAt, '模型必须在 providerId 之后解析');
     assert.ok(baseAt > modelAt, '基地址必须跟着 providerId 走');
+  });
+
+  test('换源且未手填模型时重置为新源默认', () => {
+    const body = methodBody(SETTINGS_STORE, 'async save(');
+    assert.match(body, /nextProviderId === current\.aiProviderId/);
+    assert.match(body, /defaultModelOf\(nextProviderId\)/);
   });
 
   test('save() 写回三个新键（否则迁移值会丢）', () => {
@@ -249,6 +290,15 @@ describe('deepseek 接入多源', () => {
 
   test('testAiConnection 兼容旧签名（第二参非源 id 按模型名处理）', () => {
     assert.match(DEEPSEEK, /const legacyCall: boolean = !isProviderId\(providerIdOrModel\);/);
+  });
+
+  test('testAiConnection 真实请求并返回耗时', () => {
+    assert.match(DEEPSEEK, /elapsedMs: number;/);
+    assert.match(DEEPSEEK, /let elapsedMs: number = Date\.now\(\) - startedAt;/);
+    assert.match(DEEPSEEK, /AI_PROBE_MAX_TOKENS/);
+    for (const result of DEEPSEEK.matchAll(/elapsedMs: (\w+)/g)) {
+      assert.ok(result[1].length > 0, 'elapsedMs 必须有值');
+    }
   });
 
   test('密钥只进 Authorization 头', () => {

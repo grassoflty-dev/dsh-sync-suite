@@ -60,13 +60,15 @@ interface AiHttpOutcome {
   error: string;
 }
 
-/** 连通性测试结果（页面直接展示 `message`）。 */
+/** 连通性测试结果（页面直接展示 `message`，`elapsedMs` 用于「成功 · 320ms」）。 */
 export interface AiTestResult {
   ok: boolean;
   /** 拿到的 HTTP 状态码（超时为 -1，网络错误为 0）。 */
   status: number;
   /** 中文提示，例如 `成功：HTTP 200 / 模型 deepseek-chat（DeepSeek 官方）`。 */
   message: string;
+  /** 本次请求耗时（毫秒）：取最后一次尝试；未发出请求时为 0。 */
+  elapsedMs: number;
 }
 
 /** 一次调用的路由：源决定地址与可用模型。 */
@@ -186,12 +188,12 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-/** 取失败文案：拿到响应时按状态码映射，否则用网络/超时文案。 */
-function failureMessage(outcome: AiHttpOutcome): string {
+/** 取失败文案：拿到响应时按状态码映射，否则用网络/超时文案（源名由调用方给出）。 */
+function failureMessage(outcome: AiHttpOutcome, providerLabel: string): string {
   if (outcome.responded) {
-    return classifyAiError(outcome.status, outcome.body);
+    return classifyAiError(outcome.status, outcome.body, providerLabel);
   }
-  return classifyAiError(outcome.status, outcome.error);
+  return classifyAiError(outcome.status, outcome.error, providerLabel);
 }
 
 /**
@@ -250,20 +252,20 @@ async function attemptOnce(apiKey: string, request: AiRequest): Promise<AiHttpOu
  * 重试策略：网络错误 / 429 / 5xx → 退避 `AI_RETRY_BACKOFF_MS` 后重试**一次**；
  * 401/403/404/400 等确定性错误与超时直接失败（重试只会让用户多等）。
  */
-async function requestContent(apiKey: string, request: AiRequest): Promise<string> {
+async function requestContent(apiKey: string, request: AiRequest, providerLabel: string): Promise<string> {
   let outcome: AiHttpOutcome = await attemptOnce(apiKey, request);
   if (outcome.responded && outcome.status === 200) {
     return parseAiReply(outcome.body);
   }
   if (!shouldRetry(outcome.status)) {
-    throw new Error(failureMessage(outcome));
+    throw new Error(failureMessage(outcome, providerLabel));
   }
   await sleep(AI_RETRY_BACKOFF_MS);
   outcome = await attemptOnce(apiKey, request);
   if (outcome.responded && outcome.status === 200) {
     return parseAiReply(outcome.body);
   }
-  throw new Error(`${failureMessage(outcome)}（已自动重试 1 次）`);
+  throw new Error(`${failureMessage(outcome, providerLabel)}（已自动重试 1 次）`);
 }
 
 /**
@@ -311,7 +313,7 @@ export async function summarize(
     AI_DEFAULT_MAX_TOKENS,
     SYSTEM_PROMPT
   );
-  return requestContent(key, request);
+  return requestContent(key, request, preset.label);
 }
 
 /** 第二个参数是不是已知源 id（否则按旧签名的「模型名」解释）。 */
@@ -321,7 +323,8 @@ function isProviderId(text: string): boolean {
 }
 
 /**
- * 设置页的「测试 AI 连通性」：用最小 prompt（`ping`，max_tokens=1）真调一次接口。
+ * 设置页的「测试 AI 连通性」：真实发一次最小 chat completions（`ping`，max_tokens=8），
+ * 返回状态码、中文文案与耗时，供界面显示「成功 · 320ms」。
  *
  * **不抛异常**，所有失败都折成中文文案；返回的 message 里只有源/状态码/模型名，
  * 绝不包含 key 的任何片段。旧签名 `testAiConnection(key, model)` 仍可用：
@@ -346,7 +349,8 @@ export async function testAiConnection(
     const missing: AiTestResult = {
       ok: false,
       status: AI_STATUS_NETWORK,
-      message: `失败：未填写 ${label} 密钥（密钥只存本机，不会写进日志）`
+      message: `失败：未填写 ${label} 密钥（密钥只存本机，不会写进日志）`,
+      elapsedMs: 0
     };
     return missing;
   }
@@ -357,28 +361,36 @@ export async function testAiConnection(
     const invalid: AiTestResult = {
       ok: false,
       status: AI_STATUS_NETWORK,
-      message: describeAiTestResult(false, AI_STATUS_NETWORK, route.model, describeError(error as Object))
+      message: describeAiTestResult(false, AI_STATUS_NETWORK, route.model, describeError(error as Object)),
+      elapsedMs: 0
     };
     return invalid;
   }
-  // 连通性测试也允许重试一次：网络抖动很常见，用户在设置页等 1 秒无感
+  // 连通性测试也允许重试一次：网络抖动很常见，用户在设置页等 1 秒无感。
+  // 耗时不累计退避的 1 秒，只报最后一次请求本身（否则延迟数字会虚高）。
+  const startedAt: number = Date.now();
   let outcome: AiHttpOutcome = await attemptOnce(key, request);
+  let elapsedMs: number = Date.now() - startedAt;
   if (!(outcome.responded && outcome.status === 200) && shouldRetry(outcome.status)) {
     await sleep(AI_RETRY_BACKOFF_MS);
+    const retryStartedAt: number = Date.now();
     outcome = await attemptOnce(key, request);
+    elapsedMs = Date.now() - retryStartedAt;
   }
   if (outcome.responded && outcome.status === 200) {
     const okResult: AiTestResult = {
       ok: true,
       status: 200,
-      message: `${describeAiTestResult(true, 200, route.model, '')}（${label}）`
+      message: `${describeAiTestResult(true, 200, route.model, '')}（${label}）`,
+      elapsedMs: elapsedMs
     };
     return okResult;
   }
   const failedResult: AiTestResult = {
     ok: false,
     status: outcome.status,
-    message: `${describeAiTestResult(false, outcome.status, route.model, failureMessage(outcome))}（${label}）`
+    message: describeAiTestResult(false, outcome.status, route.model, failureMessage(outcome, label)),
+    elapsedMs: elapsedMs
   };
   return failedResult;
 }

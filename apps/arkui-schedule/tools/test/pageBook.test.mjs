@@ -1,4 +1,4 @@
-// 分页账本（`model/pageBook.ts`）测试：页序 → 画布槽位映射、区域跟随页重排、槽位复用、上限与裁剪。
+﻿// 分页账本（`model/pageBook.ts`）测试：页序 → 画布槽位映射、区域跟随页重排、槽位复用、上限与裁剪。
 //
 // 前置：先构建纯逻辑层
 //   node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json
@@ -357,15 +357,145 @@ describe('PageBook：区域增删改查', () => {
 describe('PageBook：snapshotIds', () => {
   test('按页序拼 `${prefix}${slot}`，删页后跟随槽位', () => {
     const book = bookWithPages(3);
-    assert.deepEqual(book.snapshotIds('hw-page-'), ['hw-page-0', 'hw-page-1', 'hw-page-2']);
+    assert.deepEqual(book.snapshotIds('hw-page-'), ['hw-page-p1', 'hw-page-p2', 'hw-page-p3']);
 
     book.removePage(1);
-    assert.deepEqual(book.snapshotIds('hw-page-'), ['hw-page-0', 'hw-page-2'], '中间页删除后 id 跟着槽位走');
+    assert.deepEqual(book.snapshotIds('hw-page-'), ['hw-page-p1', 'hw-page-p3'], '中间页删除后 id 跟着页走（不是下标）');
 
     book.addPage();
-    assert.deepEqual(book.snapshotIds('hw-page-'), ['hw-page-0', 'hw-page-2', 'hw-page-1']);
+    assert.deepEqual(book.snapshotIds('hw-page-'), ['hw-page-p1', 'hw-page-p3', 'hw-page-p4'], '新页拿新 id（不复用被删页的 id）');
 
     const other = bookWithPages(2);
-    assert.deepEqual(other.snapshotIds('canvas#'), ['canvas#0', 'canvas#1']);
+    assert.deepEqual(other.snapshotIds('canvas#'), ['canvas#p1', 'canvas#p2']);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// 稳定页 id + 中间插页（2026-11-15 UI 定版：`- 3/5 +` 步进器）
+// ---------------------------------------------------------------------------
+
+describe('PageBook：稳定页 id', () => {
+  test('初始 1 页 id=p1；addPage / insertPageAfter 分配单调递增且不复用的 id', () => {
+    const book = new PageBook();
+    assert.deepEqual(book.pageIds(), ['p1']);
+    assert.equal(book.idAt(0), 'p1');
+    assert.equal(book.indexOfId('p1'), 0);
+    assert.equal(book.idAt(99), '', '越界返回空串');
+    assert.equal(book.indexOfId('nope'), -1);
+
+    book.addPage();
+    assert.deepEqual(book.pageIds(), ['p1', 'p2']);
+
+    book.removePage(1); // 删掉 p2
+    assert.deepEqual(book.pageIds(), ['p1']);
+
+    book.insertPageAfter(0); // 新页拿 p3（不复用 p2）
+    assert.deepEqual(book.pageIds(), ['p1', 'p3'], 'id 永不复用');
+    assert.equal(book.indexOfId('p3'), 1);
+  });
+
+  test('pageIds 返回副本：改返回值不影响账本', () => {
+    const book = bookWithPages(2);
+    const ids = book.pageIds();
+    ids.push('p99');
+    ids[0] = 'hacked';
+    assert.deepEqual(book.pageIds(), ['p1', 'p2']);
+  });
+
+  test('ids 与 slots / regions 永远等长同序（含插页、删页、裁剪）', () => {
+    const book = bookWithPages(4);
+    assert.equal(book.ids.length, book.slots.length);
+    assert.equal(book.ids.length, book.regions.length);
+
+    book.insertPageAfter(1);
+    assert.equal(book.ids.length, 5);
+    assert.equal(book.slots.length, 5);
+    assert.equal(book.regions.length, 5);
+
+    book.removePage(2);
+    assert.equal(book.ids.length, 4);
+
+    book.setMaxPages(2);
+    assert.equal(book.ids.length, 2);
+    assert.equal(new Set(book.ids).size, 2, 'id 不得重复');
+  });
+});
+
+describe('PageBook：insertPageAfter（在当前页之后插入）', () => {
+  test('中间插页：原第 3 页变第 4 页，其框与槽位、id 一起后移', () => {
+    const book = bookWithPages(3);
+    // 给每页打标记：区域 + 记录原 id / 槽位
+    book.addRegion(0, { x: 0.1, y: 0.1, w: 0.2, h: 0.2 });
+    book.addRegion(1, { x: 0.3, y: 0.3, w: 0.2, h: 0.2 });
+    book.addRegion(2, { x: 0.5, y: 0.5, w: 0.3, h: 0.3 });
+    const beforeIds = book.pageIds();
+    const beforeSlots = book.slots.slice();
+    const thirdRegion = book.regionsAt(2);
+
+    const inserted = book.insertPageAfter(1); // 在第 2 页之后插一页
+    assert.equal(inserted, 2, '返回新页页序');
+
+    assert.equal(book.pageCount(), 4);
+    assert.deepEqual(book.pageIds().slice(0, 2), beforeIds.slice(0, 2), '前两页 id 不变');
+    assert.equal(book.pageIds()[2] === beforeIds[2], false, '第 3 位是新页 id');
+    assert.equal(book.pageIds()[3], beforeIds[2], '原第 3 页 → 第 4 页，id 跟着走');
+    assert.deepEqual(book.regionsAt(3), thirdRegion, '原第 3 页的框跟着页走');
+    assert.deepEqual(book.regionsAt(2), [], '新页没有框');
+    assert.equal(book.slots[2] !== beforeSlots[2], true, '新页用空闲槽位');
+    assert.equal(book.slots[3], beforeSlots[2], '原第 3 页的槽位跟着页走');
+    assert.equal(book.current, 2, '插入后 current 指向新页');
+    assert.equal(new Set(book.slots).size, 4, '槽位不重复');
+  });
+
+  test('在末页之后插入 = 追加到末尾；在首页之前不支持（用 addPage）', () => {
+    const book = bookWithPages(2);
+    const at = book.insertPageAfter(1);
+    assert.equal(at, 2);
+    assert.equal(book.pageCount(), 3);
+    assert.equal(book.current, 2);
+
+    assert.equal(book.insertPageAfter(3), -1, '越界返回 -1');
+    assert.equal(book.insertPageAfter(-1), -1);
+    assert.equal(book.pageCount(), 3, '失败不改状态');
+  });
+
+  test('插页上限 10：满 10 页后 insertPageAfter 返回 -1 且不改状态', () => {
+    const book = bookWithPages(MAX_HANDWRITING_PAGES);
+    const beforeIds = book.pageIds();
+    const beforeSlots = book.slots.slice();
+    assert.equal(book.insertPageAfter(0), -1);
+    assert.deepEqual(book.pageIds(), beforeIds);
+    assert.deepEqual(book.slots, beforeSlots);
+  });
+
+  test('删中间页 → 后续页前移（id / 框 / 槽位一起前移）', () => {
+    const book = bookWithPages(3);
+    book.addRegion(2, { x: 0.5, y: 0.5, w: 0.3, h: 0.3 });
+    const ids = book.pageIds();
+    const thirdSlot = book.slots[2];
+    const thirdRegion = book.regionsAt(2);
+
+    assert.equal(book.removePage(1), true);
+    assert.deepEqual(book.pageIds(), [ids[0], ids[2]], '原第 3 页变第 2 页');
+    assert.equal(book.slots[1], thirdSlot, '槽位跟着页走');
+    assert.deepEqual(book.regionsAt(1), thirdRegion, '框跟着页走');
+  });
+
+  test('删除后再插页：顺序与 id 正确（不复用被删页 id）', () => {
+    const book = bookWithPages(3); // p1 p2 p3
+    book.removePage(1); // p1 p3
+    const at = book.insertPageAfter(0); // p1 p4 p3
+    assert.equal(at, 1);
+    assert.deepEqual(book.pageIds(), ['p1', 'p4', 'p3']);
+    assert.equal(book.current, 1);
+    assert.equal(new Set(book.slots).size, 3);
+  });
+
+  test('只剩 1 页时不能删（步进器 `-` 置灰的模型层依据）', () => {
+    const book = new PageBook();
+    assert.equal(book.pageCount(), 1);
+    assert.equal(book.removePage(0), false);
+    assert.equal(book.pageCount(), 1);
   });
 });

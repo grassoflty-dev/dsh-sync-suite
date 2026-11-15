@@ -12,6 +12,8 @@ import { common } from '@kit.AbilityKit';
 import { DEFAULT_AI_MODEL } from '../model/aiRequest';
 import {
   CUSTOM_PROVIDER_ID,
+  DEFAULT_PROVIDER_ID,
+  defaultModelOf,
   findProvider,
   normalizeBaseURL,
   resolveModel as resolveAiModel
@@ -155,13 +157,15 @@ export class SettingsStore {
     const lastSyncError = readString(await prefs.get(KEY_LAST_SYNC_ERROR, ''), '');
     const lastSyncAction = readString(await prefs.get(KEY_LAST_SYNC_ACTION, ''), '');
     const aiProviderId: string = findProvider(aiProviderIdRaw).id;
+    // 默认源沿用旧默认值 deepseek-chat（迁移）；其它源的空模型由 resolveModel 回落到该源默认模型
+    const aiModelForSource: string = aiProviderId === DEFAULT_PROVIDER_ID ? normalizeAiModel(aiModel) : aiModel;
     const settings: ScheduleSettings = {
       deviceId: normalizeDeviceId(deviceId),
       repoUrl: repoUrl,
       token: token,
       aiKey: aiKey,
       aiProviderId: aiProviderId,
-      aiModel: resolveAiModel(aiProviderId, normalizeAiModel(aiModel)),
+      aiModel: resolveAiModel(aiProviderId, aiModelForSource),
       aiBaseURL: aiBaseURLFor(aiProviderId, aiBaseURLRaw),
       author: author,
       gitPlatform: normalizePlatform(gitPlatform),
@@ -212,13 +216,22 @@ export class SettingsStore {
     const current = await this.load();
     const nextProviderId: string =
       patch.aiProviderId === undefined ? current.aiProviderId : findProvider(patch.aiProviderId).id;
+    // 模型名允许手输（预设列表只是建议），因此只有「换源且没手填模型」时才重置成新源默认，
+    // 否则旧源的模型名会跟着带过去（例：deepseek-chat 落到 codex 上必 404）。
+    const requestedModel: string = patch.aiModel === undefined ? '' : patch.aiModel;
+    const nextModel: string =
+      requestedModel.length > 0
+        ? resolveAiModel(nextProviderId, requestedModel)
+        : nextProviderId === current.aiProviderId
+          ? resolveAiModel(nextProviderId, current.aiModel)
+          : defaultModelOf(nextProviderId);
     const next: ScheduleSettings = {
       deviceId: patch.deviceId === undefined ? current.deviceId : normalizeDeviceId(patch.deviceId),
       repoUrl: patch.repoUrl === undefined ? current.repoUrl : patch.repoUrl.trim(),
       token: patch.token === undefined ? current.token : patch.token.trim(),
       aiKey: patch.aiKey === undefined ? current.aiKey : patch.aiKey.trim(),
       aiProviderId: nextProviderId,
-      aiModel: resolveAiModel(nextProviderId, patch.aiModel === undefined ? current.aiModel : patch.aiModel),
+      aiModel: nextModel,
       aiBaseURL: aiBaseURLFor(nextProviderId, patch.aiBaseURL === undefined ? current.aiBaseURL : patch.aiBaseURL),
       author: patch.author === undefined ? current.author : patch.author.trim(),
       gitPlatform: patch.gitPlatform === undefined ? current.gitPlatform : normalizePlatform(patch.gitPlatform),

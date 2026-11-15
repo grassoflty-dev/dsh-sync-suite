@@ -94,7 +94,7 @@ export const HW_TOOL_SELECT: string = TOOL_SELECT;
  *
  * 2026-11-15 UI 定版：工具条挪到父页面（`pages/Handwriting.ets`），所以**笔刷/粗细/颜色/工具**
  * 也上收到这里，父页面直接改、子组件画布直接读；ArkUI 拿不到子组件实例，
- * 于是「撤销/重做/清空」这类需要画布的动作由子组件注册回调（`*Impl`），父页面通过本类转调。
+ * 于是「撤销/重做」这类需要画布的动作由子组件注册回调（`*Impl`），父页面通过本类转调。
  */
 @Observed
 export class HandwritingPagerState {
@@ -104,8 +104,10 @@ export class HandwritingPagerState {
   current: number = 0;
   /** 页数上限。 */
   maxPages: number = MAX_HANDWRITING_PAGES;
-  /** 页序 → 画布槽位（第 i 页用哪个 Canvas 索引）。 */
+  /** 页序 → 画布槽位（第 i 页用哪个 Canvas 索引；仅模型层/测试使用）。 */
   slots: number[] = [];
+  /** 页序 → **稳定页 id**（p1…）：画布上下文与截图组件 id 都按它绑定，插页/删页都不漂移。 */
+  pageIds: string[] = [];
   /** 每页的区域框（与 `slots` 等长同序；归一化坐标，框内不做 OCR）。 */
   regions: RegionBox[][] = [];
   /** 按页索引的笔迹历史（页数变化时由本类维护；删中间页会整体重建）。 */
@@ -133,14 +135,13 @@ export class HandwritingPagerState {
 
   /**
    * 页序重排后的重绘钩子（由 `HandwritingPager` 注册）：
-   * 入参是「被删页原来的画布槽位」，组件据此清空该槽位并按新页序重绘其余页面。
+   * 入参是「被删页原来的画布槽位」，组件据此按新页序重绘其余页面。
    */
-  replayAllImpl: ((removedSlot: number) => void) | null = null;
+  replayAllImpl: (() => void) | null = null;
 
-  /** 撤销 / 重做 / 清空本页（都需要重绘画布，所以由子组件注册实现）。 */
+  /** 撤销 / 重做（都需要重绘画布，所以由子组件注册实现）。 */
   undoImpl: (() => void) | null = null;
   redoImpl: (() => void) | null = null;
-  clearPageImpl: ((pageIndex: number) => void) | null = null;
   /** 工具切换钩子：子组件用它结束进行中的这一笔（避免半笔悬空）。 */
   toolChangeImpl: (() => void) | null = null;
 
@@ -204,20 +205,13 @@ export class HandwritingPagerState {
     }
   }
 
-  /** 清空第 pageIndex 页（笔迹 + 框；子组件注册的实现）。 */
-  clearPage(pageIndex: number): void {
-    const impl: ((pageIndex: number) => void) | null = this.clearPageImpl;
-    if (impl !== null) {
-      impl(pageIndex);
-    }
-  }
-
   /** 把账本的值复制到可观察扁平字段（重新赋值才会触发刷新）。 */
   private sync(): void {
     this.pages = this.book.pageCount();
     this.current = this.book.current;
     this.maxPages = this.book.maxPages;
     this.slots = this.book.indexes().slice();
+    this.pageIds = this.book.pageIds();
     const regions: RegionBox[][] = [];
     for (let index = 0; index < this.pages; index++) {
       // regionsAt 返回副本；外层再包一个新数组 → 赋值即触发刷新
@@ -241,6 +235,44 @@ export class HandwritingPagerState {
   }
 
   /**
+   * 在**当前页之后插入**一张空白页（工具条 `+`）；插入后 `current` 自动指向新页。
+   * 达上限/失败返回 false。
+   *
+   * 与 `removePage` 同理：`StrokeHistory` 按页索引存笔迹，插页会让后面所有页后移，
+   * 所以必须按**新页序**重建历史，再让画布整页重放（笔迹画在按 **页 id** 绑定的画布上，
+   * 页 id 不变 ⇒ 内容不会错位）。
+   */
+  insertPageAfterCurrent(): boolean {
+    const beforeCount: number = this.pages;
+    const at: number = this.book.current + 1;
+    const snapshot: Stroke[][] = [];
+    for (let page = 0; page < beforeCount; page++) {
+      snapshot.push(this.history.strokesAt(page));
+    }
+    if (this.book.insertPageAfter(this.book.current) < 0) {
+      return false;
+    }
+    this.sync();
+    const rebuilt: StrokeHistory = new StrokeHistory(this.pages);
+    for (let page = 0; page < this.pages; page++) {
+      if (page === at) {
+        continue; // 新页：空白
+      }
+      const oldPage: number = page < at ? page : page - 1;
+      const strokes: Stroke[] = oldPage < snapshot.length ? snapshot[oldPage] : [];
+      for (let step = 0; step < strokes.length; step++) {
+        rebuilt.push(page, strokes[step]);
+      }
+    }
+    this.history = rebuilt;
+    const replay = this.replayAllImpl;
+    if (replay !== null) {
+      replay();
+    }
+    return true;
+  }
+
+  /**
    * 删除第 index 页；只剩 1 页返回 false。
    *
    * `PageBook` 会把后面的页整体前移，但 `StrokeHistory` 只按页索引存笔迹，
@@ -257,7 +289,6 @@ export class HandwritingPagerState {
     for (let page = 0; page < beforeCount; page++) {
       snapshot.push(this.history.strokesAt(page));
     }
-    const removedSlot: number = this.slots[index];
     if (!this.book.removePage(index)) {
       return false;
     }
@@ -273,7 +304,7 @@ export class HandwritingPagerState {
     this.history = rebuilt;
     const replay = this.replayAllImpl;
     if (replay !== null) {
-      replay(removedSlot);
+      replay();
     }
     return true;
   }
@@ -352,7 +383,7 @@ export class HandwritingPagerState {
     this.history.push(pageIndex, stroke);
   }
 
-  /** 清空某页笔迹历史（同时清掉重做栈）。 */
+  /** 丢掉某页笔迹历史（重做栈一并丢弃）。 */
   clearPageHistory(pageIndex: number): void {
     this.history.clearPage(pageIndex);
   }
@@ -392,9 +423,15 @@ export struct HandwritingPager {
   onStatsChange: (undoSteps: number, redoAvailable: boolean) => void = () => {};
 
   private settings: RenderingContextSettings = new RenderingContextSettings(true);
-  private contexts: CanvasRenderingContext2D[] = [];
-  /** 正在书写的画布槽位（-1 表示未落笔）。 */
-  private drawingSlot: number = -1;
+  /**
+   * 画布上下文池：**按稳定页 id 绑定**（`p1`/`p2`…）。
+   *
+   * 为什么不能按槽位/页序下标：`+` 插入页会让后面所有页后移，按槽位绑上下文就会把笔迹留在旧槽位，
+   * 于是「第 3 页的字跑到第 4 页」。按页 id 绑则上下文跟着页走，插入/删除都不会错位。
+   */
+  private contextById: Map<string, CanvasRenderingContext2D> = new Map<string, CanvasRenderingContext2D>();
+  /** 正在书写的页 id（空串表示未落笔）。 */
+  private drawingPageId: string = '';
   /** 正在画的那一笔（未结束时为 null）。 */
   private activeStroke: Stroke | null = null;
   /** 上一移动点与时间（钢笔速度调制用）。 */
@@ -423,26 +460,20 @@ export struct HandwritingPager {
   private stylusShortcuts: boolean = false;
 
   aboutToAppear(): void {
-    for (let i = 0; i < MAX_HANDWRITING_PAGES; i++) {
-      this.contexts.push(new CanvasRenderingContext2D(this.settings));
-    }
     this.state.setMaxPages(this.maxPages);
     // 注册填白实现：父页面通过 state.maskPage() 用到它
     this.state.maskImpl = (pageIndex: number, regions: RegionBox[]): Promise<void> =>
       this.maskPage(pageIndex, regions);
     // 注册页序重排后的重绘：删中间页时 state 会重建 StrokeHistory，再让这里整页重绘
-    this.state.replayAllImpl = (removedSlot: number) => {
-      this.afterPageRemoved(removedSlot);
+    this.state.replayAllImpl = () => {
+      this.replayAllPages();
     };
-    // 工具条在父页面：撤销/重做/清空需要重绘画布，只能由本组件注册实现供父页面转调
+    // 工具条在父页面：撤销/重做需要重绘画布，只能由本组件注册实现供父页面转调
     this.state.undoImpl = () => {
       this.onUndo();
     };
     this.state.redoImpl = () => {
       this.onRedo();
-    };
-    this.state.clearPageImpl = (pageIndex: number) => {
-      this.clearPage(pageIndex);
     };
     // 切工具时结束进行中的这一笔（避免半笔悬空）
     this.state.toolChangeImpl = () => {
@@ -481,13 +512,24 @@ export struct HandwritingPager {
     this.onStatsChange(this.state.undoSteps, this.state.redoAvailable);
   }
 
-  /** 当前页对应的画布槽位（无效时返回 -1）。 */
-  private activeSlot(): number {
-    const slots: number[] = this.state.slots;
-    if (this.state.current < 0 || this.state.current >= slots.length) {
-      return -1;
+  /** 取某个页 id 的画布上下文（第一次用到时创建；页 id 稳定 ⇒ 内容跟着页走）。 */
+  private contextFor(pageId: string): CanvasRenderingContext2D {
+    const existing: CanvasRenderingContext2D | undefined = this.contextById.get(pageId);
+    if (existing !== undefined) {
+      return existing;
     }
-    return slots[this.state.current];
+    const created: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
+    this.contextById.set(pageId, created);
+    return created;
+  }
+
+  /** 当前页的稳定 id（无效时返回空串）。 */
+  private currentPageId(): string {
+    const ids: string[] = this.state.pageIds;
+    if (this.state.current < 0 || this.state.current >= ids.length) {
+      return '';
+    }
+    return ids[this.state.current];
   }
 
   /** 当前页的框列表（缺页时给空数组，避免渲染期取到 undefined）。 */
@@ -554,17 +596,13 @@ export struct HandwritingPager {
     context.stroke();
   }
 
-  /** 整页重绘（先清空该页画布，再按顺序重放笔迹）。 */
+  /** 整页重绘（先清掉该页画布内容，再按顺序重放笔迹）。 */
   private replayPage(pageIndex: number, strokes: Stroke[]): void {
-    const slots: number[] = this.state.slots;
-    if (pageIndex < 0 || pageIndex >= slots.length) {
+    const ids: string[] = this.state.pageIds;
+    if (pageIndex < 0 || pageIndex >= ids.length) {
       return;
     }
-    const slot: number = slots[pageIndex];
-    if (slot < 0 || slot >= this.contexts.length) {
-      return;
-    }
-    const context = this.contexts[slot];
+    const context: CanvasRenderingContext2D = this.contextFor(ids[pageIndex]);
     context.save();
     context.globalCompositeOperation = 'source-over';
     context.clearRect(0, 0, context.width, context.height);
@@ -574,35 +612,27 @@ export struct HandwritingPager {
     context.restore();
   }
 
-  /** 删页后：清掉被删页的槽位，再按新页序重绘每一页。 */
-  private afterPageRemoved(removedSlot: number): void {
-    if (removedSlot >= 0 && removedSlot < this.contexts.length) {
-      const context = this.contexts[removedSlot];
-      context.clearRect(0, 0, context.width, context.height);
-    }
+  /**
+   * 页结构变化（插页 / 删页）后：按当前页序把**每一页**整页重放一遍。
+   *
+   * 笔迹画在按页 id 绑定的上下文上，「页移动」不需要搬画布，重放即可保持一致。
+   */
+  private replayAllPages(): void {
     for (let page = 0; page < this.state.pages; page++) {
       this.replayPage(page, this.state.history.strokesAt(page));
     }
-    this.drawingSlot = -1;
+    this.drawingPageId = '';
     this.activeStroke = null;
     this.refreshStats();
   }
 
   // ------------------------------------------------------------------ 工具 / 笔刷
 
-  /** 结束进行中的一笔（切工具/切页时调用；工具与笔刷本身由父页面工具条改 `state`）。 */
-  private endActiveStroke(): void {
-    this.drawingSlot = -1;
-    this.activeStroke = null;
-    this.dragMode = DRAG_NONE;
-    this.dragging = false;
-  }
-
-  private initContext(slot: number): void {
-    if (slot < 0 || slot >= this.contexts.length) {
+  private initContext(pageId: string): void {
+    if (pageId.length === 0) {
       return;
     }
-    const context = this.contexts[slot];
+    const context: CanvasRenderingContext2D = this.contextFor(pageId);
     const paint: BrushPaint = paintFor(this.state.brush, this.state.penColor, this.state.penWidth, false);
     context.globalCompositeOperation = 'source-over';
     context.lineWidth = paint.lineWidth;
@@ -742,19 +772,19 @@ export struct HandwritingPager {
     context.stroke();
   }
 
-  private handleTouch(slot: number, event: TouchEvent): void {
+  private handleTouch(pageId: string, event: TouchEvent): void {
     // 框选模式下画布不落笔（触摸交给 overlay 层建框）
     if (this.isSelectMode()) {
       return;
     }
-    if (slot !== this.activeSlot()) {
+    if (pageId !== this.currentPageId()) {
       return;
     }
     const touch: TouchObject | null = this.primaryTouch(event);
     if (touch === null) {
       return;
     }
-    const context = this.contexts[slot];
+    const context: CanvasRenderingContext2D = this.contextFor(pageId);
     const x: number = touch.x;
     const y: number = touch.y;
     if (event.type === TouchType.Down) {
@@ -766,7 +796,7 @@ export struct HandwritingPager {
         brush: this.state.brush
       };
       this.activeStroke = stroke;
-      this.drawingSlot = slot;
+      this.drawingPageId = pageId;
       this.applyPaint(context, this.paintForActiveStroke());
       this.lastX = x;
       this.lastY = y;
@@ -779,7 +809,7 @@ export struct HandwritingPager {
     }
     if (event.type === TouchType.Move) {
       const stroke: Stroke | null = this.activeStroke;
-      if (this.drawingSlot !== slot || stroke === null) {
+      if (this.drawingPageId !== pageId || stroke === null) {
         return;
       }
       const paint: BrushPaint = paintFor(stroke.brush, stroke.color, stroke.width, stroke.erase);
@@ -797,7 +827,7 @@ export struct HandwritingPager {
     }
     if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
       const stroke: Stroke | null = this.activeStroke;
-      this.drawingSlot = -1;
+      this.drawingPageId = '';
       this.activeStroke = null;
       StylusAssist.boostFrame(1);
       if (stroke === null) {
@@ -819,7 +849,7 @@ export struct HandwritingPager {
     }
   }
 
-  // ------------------------------------------------------------------ 撤销 / 重做 / 清空
+  // ------------------------------------------------------------------ 撤销 / 重做
 
   private onUndo(): void {
     const strokes: Stroke[] | null = this.state.history.undo(this.state.current);
@@ -836,40 +866,6 @@ export struct HandwritingPager {
       return;
     }
     this.replayPage(this.state.current, strokes);
-    this.refreshStats();
-  }
-
-  /** 清空第 position 页：笔迹 + 笔迹历史 + 该页的框（避免「字没了框还在」）。 */
-  clearPage(position: number): void {
-    if (position < 0 || position >= this.state.slots.length) {
-      return;
-    }
-    const slot: number = this.state.slots[position];
-    if (slot < 0 || slot >= this.contexts.length) {
-      return;
-    }
-    const context = this.contexts[slot];
-    context.save();
-    context.globalCompositeOperation = 'source-over';
-    context.clearRect(0, 0, context.width, context.height);
-    context.restore();
-    this.state.clearPageHistory(position);
-    this.state.setRegions(position, []);
-    this.drawingSlot = -1;
-    this.activeStroke = null;
-    this.refreshStats();
-  }
-
-  /** 删除当前页；槽位清空 / 历史重建 / 其余页重绘都由 state.removePage → replayAllImpl 完成。 */
-  private removeCurrentPage(): void {
-    if (!this.state.removePage(this.state.current)) {
-      return;
-    }
-    this.dragMode = DRAG_NONE;
-    this.dragging = false;
-    this.drawingSlot = -1;
-    this.activeStroke = null;
-    this.notifyParent();
     this.refreshStats();
   }
 
@@ -1017,15 +1013,11 @@ export struct HandwritingPager {
    * 画布重新绘制完成后再截图。
    */
   async maskPage(pageIndex: number, regions: RegionBox[]): Promise<void> {
-    const slots: number[] = this.state.slots;
-    if (pageIndex < 0 || pageIndex >= slots.length) {
+    const ids: string[] = this.state.pageIds;
+    if (pageIndex < 0 || pageIndex >= ids.length) {
       throw new Error(`第 ${pageIndex + 1} 页不存在，无法区域填白`);
     }
-    const slot: number = slots[pageIndex];
-    if (slot < 0 || slot >= this.contexts.length) {
-      throw new Error(`第 ${pageIndex + 1} 页画布尚未就绪，无法区域填白`);
-    }
-    const context = this.contexts[slot];
+    const context: CanvasRenderingContext2D = this.contextFor(ids[pageIndex]);
     const rects: MaskRect[] = regionsToMaskRects(regions, context.width, context.height);
     context.save();
     context.globalCompositeOperation = 'source-over';
@@ -1079,7 +1071,7 @@ export struct HandwritingPager {
 
   /** 切页/增删页时清掉进行中的手势与未完成的一笔。 */
   private resetGestureState(): void {
-    this.drawingSlot = -1;
+    this.drawingPageId = '';
     this.activeStroke = null;
     this.dragMode = DRAG_NONE;
     this.dragging = false;
@@ -1087,29 +1079,30 @@ export struct HandwritingPager {
 
   build() {
     // 画布铺满父页面给的空间：工具条/页码/完成都在父页面（`pages/Handwriting.ets`），
-    // 这里只负责 Canvas 槽位 + 框选 overlay —— 「画布最大化」的关键。
+    // 这里只负责 Canvas 池 + 框选 overlay —— 「画布最大化」的关键。
+    // Canvas 按**稳定页 id** 绑定：插页/删页后内容跟着页走，截图 id 也不漂移。
     Stack() {
       ForEach(
-        this.state.slots,
-        (slot: number) => {
-          Canvas(this.contexts[slot])
-            .id(`${HANDWRITING_PAGE_ID_PREFIX}${slot}`)
+        this.state.pageIds,
+        (pageId: string) => {
+          Canvas(this.contextFor(pageId))
+            .id(`${HANDWRITING_PAGE_ID_PREFIX}${pageId}`)
             .width('100%')
             .height('100%')
             .backgroundColor(Color.White)
-            .opacity(slot === this.activeSlot() ? 1 : 0)
+            .opacity(pageId === this.currentPageId() ? 1 : 0)
             // 框选模式下画布不接收触摸（交给上面的 overlay）
             .hitTestBehavior(
-              slot === this.activeSlot() && !this.isSelectMode() ? HitTestMode.Default : HitTestMode.None
+              pageId === this.currentPageId() && !this.isSelectMode() ? HitTestMode.Default : HitTestMode.None
             )
             .onReady(() => {
-              this.initContext(slot);
+              this.initContext(pageId);
             })
             .onTouch((event: TouchEvent) => {
-              this.handleTouch(slot, event);
+              this.handleTouch(pageId, event);
             })
         },
-        (slot: number) => `page-slot-${slot}`
+        (pageId: string) => `page-id-${pageId}`
       )
 
       // ---- 框选 overlay：与笔迹 Canvas **兄弟节点**，永远不会进入 componentSnapshot 截图。

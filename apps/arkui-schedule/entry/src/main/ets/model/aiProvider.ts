@@ -4,8 +4,9 @@
  * 参考 DSH 的 LLM 路由：具名 provider + 模型列表 + 凭据引用。用户只选「源 + 模型」，
  * 密钥单独存（`settingsStore.aiKey`），换源不必重填 key，也不必手抄一堆端点字段。
  *
- * 模型 id 以各服务商公开文档为准；不确定的（opencode-go 地址、codex 模型清单）
- * 标「待核实」，不要照抄猜测值。
+ * 端点与模型 id 取自本机 DSH 安装包（`resources/app.asar`）里的真实路由；三个预设源都是
+ * **OpenAI 兼容的 API Key 模式**（含 codex，走 api.openai.com，不是 ChatGPT 订阅登录）。
+ * 模型名允许用户手改（防模型下线），因此 `resolveModel` 对非空模型名一律保留。
  */
 
 /** 单个模型选项（id 为请求体里的 `model` 值）。 */
@@ -22,6 +23,8 @@ export interface AiProviderPreset {
   models: AiModelOption[];
   /** 一行提示：去哪拿 key / 用什么形态的凭据。 */
   keyHint: string;
+  /** 实验源：端点尚未实测，界面应弱化提示，不当成稳定能力宣传。 */
+  experimental?: boolean;
 }
 
 /** 顺序即设置页展示顺序。 */
@@ -34,31 +37,33 @@ export const AI_PROVIDERS: AiProviderPreset[] = [
       { id: 'deepseek-chat', label: 'DeepSeek Chat' },
       { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner' }
     ],
-    keyHint: 'platform.deepseek.com → API keys 创建（sk- 开头）'
+    keyHint: 'platform.deepseek.com 的 API key（sk- 开头）'
   },
   {
     id: 'opencode-go',
     label: 'OpenCode Go',
-    baseURL: 'https://api.opencode.ai/v1',
+    baseURL: 'https://opencode.ai/inference/go/v1',
     models: [
-      { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
-      { id: 'deepseek-v4.1-flash', label: 'DeepSeek V4.1 Flash' }
+      { id: 'deepseek-v4.1-flash', label: 'DeepSeek V4.1 Flash' },
+      { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' }
     ],
-    keyHint: '密钥与接口地址以服务商控制台为准（地址为占位，待核实）'
+    keyHint: '端点未实测，失败请检查 key 与地址',
+    experimental: true
   },
   {
     id: 'codex',
-    label: 'Codex 订阅',
-    baseURL: 'https://chatgpt.com/backend-api/codex',
+    label: 'Codex API',
+    baseURL: 'https://api.openai.com/v1',
     models: [
+      { id: 'gpt-5.1-codex', label: 'GPT-5.1 Codex' },
       { id: 'gpt-5-codex', label: 'GPT-5 Codex' },
-      { id: 'gpt-5', label: 'GPT-5' }
+      { id: 'gpt-5.1', label: 'GPT-5.1' }
     ],
-    keyHint: '使用订阅 OAuth 登录，不是 API Key（模型与额度取决于账号）'
+    keyHint: 'OpenAI API key（platform.openai.com），不支持 ChatGPT 订阅登录'
   },
   {
     id: 'custom',
-    label: '自定义',
+    label: '自定义（OpenAI 兼容）',
     baseURL: '',
     models: [{ id: 'custom-model', label: '自定义模型' }],
     keyHint: '填 OpenAI 兼容接口地址（…/v1）与密钥'
@@ -100,21 +105,16 @@ export function defaultModelOf(id: string): string {
 }
 
 /**
- * 归一模型名：空/未知 → 该源默认模型。
+ * 归一模型名：非空一律原样保留，只有空/空白才回落该源默认模型。
  *
- * 自定义源例外：端点与模型都由用户掌握，非空模型名原样保留，
- * 否则「自定义」等于只剩一个写死的模型。
+ * 预设源的模型列表只是**建议**（模型下线、灰度新模型时用户可手输），因此这里不做白名单校验；
+ * 真正打错模型名时由服务商返回 400/404，错误文案里会带出模型名。
  */
 export function resolveModel(providerId: string, modelId: string): string {
   const preset: AiProviderPreset = findProvider(providerId);
   const text: string = typeof modelId === 'string' ? modelId.trim() : '';
-  if (preset.id === CUSTOM_PROVIDER_ID && text.length > 0) {
+  if (text.length > 0) {
     return text;
-  }
-  for (const model of preset.models) {
-    if (model.id === text) {
-      return text;
-    }
   }
   return defaultModelOf(preset.id);
 }

@@ -3,7 +3,8 @@
  *
  * 契约（P2）：
  * - `buildAiRequest` 只负责拼 URL 与 JSON 请求体（`model` + `messages`），不发网络请求；
- * - `classifyAiError` 把 HTTP 状态/网络异常映射成**中文**文案（页面直接展示）；
+ * - `classifyAiError` 把 HTTP 状态/网络异常映射成**中文**文案（页面直接展示）；源名由调用方
+ *   经 `providerLabel` 传入，缺省「AI 服务」——本模块不认识任何具体服务商；
  * - `shouldRetry` 只对「网络错误 / 429 / 5xx」放行重试（超时不重试，避免用户白等两倍时间）；
  * - `parseAiReply` 取 `choices[0].message.content`，缺字段给出明确中文错误。
  *
@@ -24,14 +25,16 @@ export const AI_RETRY_BACKOFF_MS: number = 1000;
 export const AI_DEFAULT_MAX_TOKENS: number = 2000;
 /** 连通性测试用的最小提示词。 */
 export const AI_PROBE_PROMPT: string = 'ping';
-/** 连通性测试的 max_tokens（只要 1 个 token，几乎不耗额度）。 */
-export const AI_PROBE_MAX_TOKENS: number = 1;
+/** 连通性测试的 max_tokens（真实发一次最小请求，8 个 token 足够验证鉴权与路由）。 */
+export const AI_PROBE_MAX_TOKENS: number = 8;
 /** 伪状态码：网络层失败（没拿到 HTTP 响应）。 */
 export const AI_STATUS_NETWORK: number = 0;
 /** 伪状态码：整体超时。 */
 export const AI_STATUS_TIMEOUT: number = -1;
 /** 成功状态码。 */
 export const AI_STATUS_OK: number = 200;
+/** 错误文案里的缺省源名（调用方可用 `providerLabel` 覆盖成具体服务商）。 */
+export const AI_SERVICE_LABEL: string = 'AI 服务';
 /** 错误响应体在文案里的最大截断长度。 */
 export const AI_ERROR_SNIPPET_MAX: number = 160;
 
@@ -173,42 +176,47 @@ function aiErrorDetail(bodyText: string): string {
 /**
  * 把 HTTP 状态码（或伪状态码 `0` 网络错误 / `-1` 超时）映射成中文文案。
  *
+ * 本模块不认识具体服务商：源名由调用方经 `providerLabel` 传入，缺省用中性的「AI 服务」。
+ *
  * @param status   HTTP 状态码；`AI_STATUS_NETWORK`（0）= 网络层失败，`AI_STATUS_TIMEOUT`（-1）= 超时
  * @param bodyText 响应体文本（用于提取 `error.message`，可为空）
+ * @param providerLabel 源名（如 `OpenCode Go`），空白/缺省 → `AI 服务`
  * @returns 中文文案；状态码 200 返回空串（没有错误）
  */
-export function classifyAiError(status: number, bodyText: string): string {
+export function classifyAiError(status: number, bodyText: string, providerLabel: string = AI_SERVICE_LABEL): string {
+  const label: string =
+    typeof providerLabel === 'string' && providerLabel.trim().length > 0 ? providerLabel.trim() : AI_SERVICE_LABEL;
   switch (status) {
     case AI_STATUS_OK:
       return '';
     case AI_STATUS_TIMEOUT:
-      return `请求超时（${AI_TIMEOUT_MS / 1000} 秒内没有响应）：请检查网络后重试，或换一个网络环境`;
+      return `${label} 请求超时（${AI_TIMEOUT_MS / 1000} 秒内没有响应）：请检查网络后重试，或换一个网络环境`;
     case AI_STATUS_NETWORK:
-      return `网络异常：无法连接 DeepSeek 接口（请检查网络、代理或防火墙）${aiErrorDetail(bodyText)}`;
+      return `${label} 网络异常：无法连接接口（请检查网络、代理或防火墙）${aiErrorDetail(bodyText)}`;
     case 400:
-      return `请求无效（HTTP 400）：请求体格式有误，请检查模型名${aiErrorDetail(bodyText)}`;
+      return `${label} 400：请求无效，请检查模型名${aiErrorDetail(bodyText)}`;
     case 401:
-      return `密钥无效（HTTP 401）：DeepSeek API Key 不正确或已失效，请到设置页重新填写${aiErrorDetail(bodyText)}`;
+      return `${label} 401：密钥无效或已失效，请到设置页重新填写${aiErrorDetail(bodyText)}`;
     case 402:
-      return `余额不足（HTTP 402）：请到 DeepSeek 控制台充值${aiErrorDetail(bodyText)}`;
+      return `${label} 402：余额不足，请到服务商控制台充值${aiErrorDetail(bodyText)}`;
     case 403:
-      return `无访问权限（HTTP 403）：该 Key 没有调用该模型的权限${aiErrorDetail(bodyText)}`;
+      return `${label} 403：无访问权限，该密钥没有调用该模型的权限${aiErrorDetail(bodyText)}`;
     case 404:
-      return `接口不存在（HTTP 404）：请检查模型名或接口地址${aiErrorDetail(bodyText)}`;
+      return `${label} 404：接口不存在，请检查模型名或接口地址${aiErrorDetail(bodyText)}`;
     case 422:
-      return `参数错误（HTTP 422）：请检查模型名与 max_tokens${aiErrorDetail(bodyText)}`;
+      return `${label} 422：参数错误，请检查模型名与 max_tokens${aiErrorDetail(bodyText)}`;
     case 429:
-      return `请求过于频繁或额度超限（HTTP 429）：请稍后重试${aiErrorDetail(bodyText)}`;
+      return `${label} 429：请求过于频繁或额度超限，请稍后重试${aiErrorDetail(bodyText)}`;
     default:
       break;
   }
   if (status >= 500) {
-    return `DeepSeek 服务端错误（HTTP ${status}）：服务暂时不可用，请稍后重试${aiErrorDetail(bodyText)}`;
+    return `${label} ${status}：服务端错误，服务暂时不可用，请稍后重试${aiErrorDetail(bodyText)}`;
   }
   if (status >= 400) {
-    return `请求失败（HTTP ${status}）${aiErrorDetail(bodyText)}`;
+    return `${label} ${status}：请求失败${aiErrorDetail(bodyText)}`;
   }
-  return `未知响应（HTTP ${status}）${aiErrorDetail(bodyText)}`;
+  return `${label} ${status}：未知响应${aiErrorDetail(bodyText)}`;
 }
 
 /**
