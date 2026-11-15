@@ -28,8 +28,10 @@ export struct RecordRow {
   };
   /** 勾选回调：页面负责 appendRecord 追加新记录。 */
   onToggle: (id: string, done: boolean) => void = () => {};
-  /** 点击行回调：进入详情。 */
+  /** 点击行回调：进入详情（紧凑屏跳页 / 主从布局切右栏）。 */
   onOpen: (id: string) => void = () => {};
+  /** 是否选中（主从布局的左侧列表用：浅蓝底 + 2vp 品牌竖条）。 */
+  @Prop selected: boolean = false;
 
   private attachmentCount(): number {
     const list = this.record.attachments;
@@ -119,6 +121,11 @@ export struct RecordRow {
       .width('100%')
       .padding({ top: SPACING.md, bottom: SPACING.md })
       .alignItems(VerticalAlign.Center)
+      .backgroundColor(this.selected ? $r('app.color.brand_soft') : $r('app.color.page_background'))
+      .border({
+        width: { left: this.selected ? 2 : 0 },
+        color: { left: $r('app.color.brand') }
+      })
 
       Divider()
         .strokeWidth(DIVIDER)

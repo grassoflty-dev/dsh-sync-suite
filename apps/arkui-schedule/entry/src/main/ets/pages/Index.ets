@@ -29,6 +29,8 @@ import { summaryStore } from '../services/summaryStore';
 import { settingsStore } from '../services/settingsStore';
 import { deviceTimeZone, summarize } from '../services/deepseek';
 import { PageLayout } from '../components/PageLayout';
+import { RecordDetailView } from '../components/RecordDetailView';
+import { RecordEditorView } from '../components/RecordEditorView';
 import { RecordRow } from '../components/RecordRow';
 import {
   DIVIDER,
@@ -38,7 +40,7 @@ import {
   RADIUS,
   SPACING,
   TOUCH_MIN,
-  sidebarWidth
+  masterPaneWidth
 } from '../common/uiTokens';
 
 /** `YYYY-MM-DD` → 本地 Date（避免 `new Date('2026-11-14')` 按 UTC 解析造成偏移）。 */
@@ -91,6 +93,18 @@ struct Index {
   /** 内容区宽度（vp），宽屏下算侧栏宽度。 */
   @State contentWidth: number = 0;
 
+  // 主从布局（横屏/宽屏）右栏状态
+  /** 右栏当前模式：`empty`（未选）/ `detail`（选中记录）/ `editor`（新建或编辑）。 */
+  @State paneMode: string = 'empty';
+  /** 左栏选中的记录 id（空串 = 未选）。 */
+  @State selectedId: string = '';
+  /** 右栏编辑器的目标 id（空串 = 新建）。 */
+  @State editorRecordId: string = '';
+  /** 右栏编辑器是否有未保存内容（切选中行时用来提示）。 */
+  @State editorDirty: boolean = false;
+  /** 右栏子组件重读触发器（保存/取消/手写板返回后 +1）。 */
+  @State paneTick: number = 0;
+
   // AI 汇总面板状态
   @State showAiPanel: boolean = false;
   @State aiCandidates: ScheduleRecord[] = [];
@@ -126,6 +140,7 @@ struct Index {
     if (this.ready) {
       this.reload();
       this.loadSummary();
+      this.paneTick = this.paneTick + 1;
       return;
     }
     summaryStore
@@ -134,6 +149,7 @@ struct Index {
         this.ready = true;
         this.reload();
         this.loadSummary();
+        this.paneTick = this.paneTick + 1;
       })
       .catch((error: Error) => {
         this.statusText = `存储初始化失败：${describeError(error)}`;
@@ -186,6 +202,25 @@ struct Index {
     } catch (error) {
       this.records = [];
       this.statusText = `读取日程失败：${describeError(error)}`;
+    }
+    this.pruneSelection();
+  }
+
+  /** 刷新后如果选中的记录已不在列表里（被删/换日期）→ 右栏回空态。 */
+  private pruneSelection(): void {
+    if (this.selectedId.length === 0 || this.paneMode === 'editor') {
+      return;
+    }
+    let found = false;
+    for (const record of this.records) {
+      if (record.id === this.selectedId) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      this.selectedId = '';
+      this.paneMode = 'empty';
     }
   }
 
@@ -240,6 +275,91 @@ struct Index {
     router.pushUrl({ url: 'pages/Settings' }).catch((error: Error) => {
       promptAction.showToast({ message: `打开设置页失败：${describeError(error)}` });
     });
+  }
+
+  // ------------------------------------------------------------------ 主从布局交互（仅宽屏/横屏）
+
+  /** 右栏编辑有未保存内容时先确认；确认后清脏标记再执行动作。 */
+  private guardEditor(action: () => void): void {
+    if (!this.editorDirty) {
+      action();
+      return;
+    }
+    promptAction
+      .showDialog({
+        title: '放弃当前编辑？',
+        message: '右栏有未保存的内容，切换后会丢失。',
+        buttons: [
+          { text: '继续编辑', color: '#182431' },
+          { text: '放弃修改', color: '#0A59F7' }
+        ]
+      })
+      .then((result: promptAction.ShowDialogSuccessResponse) => {
+        if (result.index === 1) {
+          this.editorDirty = false;
+          action();
+        }
+      })
+      .catch(() => {
+        // 对话框失败：保持当前编辑，不做危险动作
+      });
+  }
+
+  /** 点列表行：紧凑屏跳详情页；宽屏切右栏。 */
+  private onRowTap(id: string): void {
+    if (this.breakpoint === 'compact') {
+      this.openDetail(id);
+      return;
+    }
+    this.guardEditor(() => {
+      this.selectedId = id;
+      this.paneMode = 'detail';
+      this.paneTick = this.paneTick + 1;
+    });
+  }
+
+  /** 点「新建」：紧凑屏跳编辑页；宽屏右栏直接变编辑表单。 */
+  private onNewTap(): void {
+    if (this.breakpoint === 'compact') {
+      this.openNew();
+      return;
+    }
+    this.guardEditor(() => {
+      this.editorRecordId = '';
+      this.editorDirty = false;
+      this.paneMode = 'editor';
+      this.paneTick = this.paneTick + 1;
+    });
+  }
+
+  /** 右栏的「编辑」：切到编辑模式，目标 = 当前选中记录。 */
+  private startEditSelected(): void {
+    if (this.selectedId.length === 0) {
+      return;
+    }
+    this.editorRecordId = this.selectedId;
+    this.editorDirty = false;
+    this.paneMode = 'editor';
+    this.paneTick = this.paneTick + 1;
+  }
+
+  /** 右栏编辑保存成功：刷新左栏并把右栏切到该记录详情。 */
+  private onEditorSaved(record: ScheduleRecord): void {
+    this.editorDirty = false;
+    this.editorRecordId = '';
+    this.selectedId = record.id;
+    this.paneMode = 'detail';
+    this.reload();
+    this.loadSummary();
+    this.paneTick = this.paneTick + 1;
+  }
+
+  /** 右栏编辑取消：回上一条详情；没有上一条则回空态。 */
+  private onEditorCancel(): void {
+    this.editorDirty = false;
+    this.editorRecordId = '';
+    this.paneMode = this.selectedId.length > 0 ? 'detail' : 'empty';
+    this.paneTick = this.paneTick + 1;
   }
 
   /** 「含其他设备」由设置页的开关写 AppStorage，首页返回时读一次（不新增配置项）。 */
@@ -637,8 +757,7 @@ struct Index {
     .width('100%')
   }
 
-  /** 唯一主操作：新建（强调色实底，全宽 48vp）。 */
-  /** 紧凑屏底部主操作：全宽。 */
+  /** 紧凑屏底部主操作：全宽（紧凑屏跳编辑页）。 */
   @Builder
   PrimaryAction() {
     Button('新建')
@@ -648,10 +767,10 @@ struct Index {
       .backgroundColor($r('app.color.brand'))
       .fontColor($r('app.color.text_inverse'))
       .borderRadius(RADIUS.sm)
-      .onClick(() => this.openNew())
+      .onClick(() => this.onNewTap())
   }
 
-  /** 宽屏左栏的工具按钮：固定 240vp 左对齐，不占满整列（占满会显得笨重）。 */
+  /** 宽屏左栏的工具按钮：固定 240vp 左对齐（宽屏下右栏直接变编辑表单）。 */
   @Builder
   SidebarAction() {
     Button('新建')
@@ -661,20 +780,7 @@ struct Index {
       .backgroundColor($r('app.color.brand'))
       .fontColor($r('app.color.text_inverse'))
       .borderRadius(RADIUS.sm)
-      .onClick(() => this.openNew())
-  }
-
-  /** 宽屏空态里的主操作：右栏垂直居中，用户不必回左栏点。 */
-  @Builder
-  EmptyCta() {
-    Button('新建日程')
-      .width(SIDEBAR_ACTION_WIDTH)
-      .height(PRIMARY_HEIGHT)
-      .fontSize(FONT.body)
-      .backgroundColor($r('app.color.brand'))
-      .fontColor($r('app.color.text_inverse'))
-      .borderRadius(RADIUS.sm)
-      .onClick(() => this.openNew())
+      .onClick(() => this.onNewTap())
   }
 
   /**
@@ -839,11 +945,12 @@ struct Index {
           ListItem() {
             RecordRow({
               record: item,
+              selected: this.selectedId === item.id,
               onToggle: (id: string, done: boolean) => {
                 this.toggleDone(id, done);
               },
               onOpen: (id: string) => {
-                this.openDetail(id);
+                this.onRowTap(id);
               }
             })
           }
@@ -864,33 +971,39 @@ struct Index {
     }
   }
 
-  /** 宽屏右栏：汇总块在顶部（同一 720vp 容器内），空态只留居中主操作。 */
+  /** 宽屏/横屏右栏：三态（空 / 详情 / 编辑），内容限宽 720vp 居中便于阅读。 */
   @Builder
-  WideList() {
+  RightPane() {
     Column() {
-      Column() {
-        if (!this.showAllPending) {
-          this.SummaryCard()
-        }
-        if (this.records.length === 0) {
-          Column() {
-            this.EmptyCta()
+      if (this.paneMode === 'editor') {
+        RecordEditorView({
+          recordId: this.editorRecordId,
+          defaultDate: this.selectedDate,
+          refreshTick: this.paneTick,
+          onSaved: (record: ScheduleRecord) => {
+            this.onEditorSaved(record);
+          },
+          onCancel: () => {
+            this.onEditorCancel();
+          },
+          onDirtyChange: (dirty: boolean) => {
+            this.editorDirty = dirty;
           }
-          .width('100%')
-          .layoutWeight(1)
-          .justifyContent(FlexAlign.Center)
-          .alignItems(HorizontalAlign.Center)
-        } else {
-          this.ListRows()
-        }
+        })
+      } else {
+        RecordDetailView({
+          recordId: this.paneMode === 'detail' ? this.selectedId : '',
+          refreshTick: this.paneTick,
+          onEdit: () => {
+            this.startEditSelected();
+          }
+        })
       }
-      .width('100%')
-      .height('100%')
-      .constraintSize({ maxWidth: LIST_MAX_WIDTH })
     }
     .width('100%')
     .height('100%')
-    .alignItems(HorizontalAlign.Center)
+    .constraintSize({ maxWidth: LIST_MAX_WIDTH })
+    .alignItems(HorizontalAlign.Start)
   }
 
   /** 紧凑屏：日期条 → 模式 → 今日汇总块（列表第一项）→ 列表 → 新建。 */
@@ -917,7 +1030,11 @@ struct Index {
     .height('100%')
   }
 
-  /** 宽屏/横屏：左日期列（日期条 + 模式 + 新建）+ 右列表；空态时主操作落在右栏居中。 */
+  /**
+   * 宽屏/横屏：左右主从。
+   * 左栏（`masterPaneWidth` 360–420vp）= 日期条 + 模式 + 汇总块 + 列表 + 新建；
+   * 右栏 = 详情 / 编辑 / 空态（点行切右栏内容，点「新建」右栏直接变表单）。
+   */
   @Builder
   WideBody() {
     Row({ space: SPACING.lg }) {
@@ -927,12 +1044,18 @@ struct Index {
         Divider()
           .strokeWidth(DIVIDER)
           .color($r('app.color.divider'))
-        // 空态时右栏已有居中主操作，左栏不再放第二个「新建」（同屏只留 1 个主操作）
-        if (this.records.length > 0) {
-          this.SidebarAction()
+        Column() {
+          if (!this.showAllPending) {
+            this.SummaryCard()
+          }
+          this.RecordList()
         }
+        .width('100%')
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+        this.SidebarAction()
       }
-      .width(sidebarWidth(this.contentWidth))
+      .width(masterPaneWidth(this.contentWidth))
       .height('100%')
       .alignItems(HorizontalAlign.Start)
 
@@ -943,10 +1066,11 @@ struct Index {
         .height('100%')
 
       Column() {
-        this.WideList()
+        this.RightPane()
       }
       .layoutWeight(1)
       .height('100%')
+      .alignItems(HorizontalAlign.Center)
     }
     .width('100%')
     .height('100%')

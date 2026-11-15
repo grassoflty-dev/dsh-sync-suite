@@ -73,11 +73,9 @@ describe('手写板工具条：宽度自适应与不截断', () => {
   });
 
   test('固定宽度清零：按钮容器不得给固定 width（图标内部允许），改用 minWidth + padding 自适应', () => {
-    // 图标本身可以有宽高（圆点/色块），这里把「图标宽」排除后再断言容器没有固定宽
+    // 图标本身可以有宽高（色块），这里把「图标宽」排除后再断言容器没有固定宽
     const iconWidths = {
-      brushMenuButton: [],
-      sizeMenuButton: ['.width(this.currentDotSize())'],
-      colorMenuButton: ['.width(20)'],
+      brushMenuButton: ['.width(12)'],
       toolButton: [],
       historyButton: []
     };
@@ -94,27 +92,32 @@ describe('手写板工具条：宽度自适应与不截断', () => {
     }
   });
 
-  test('笔形按钮显示「当前笔刷名 + ▾」（动态文案，不是单字/固定标签）', () => {
+  test('工具条只有「笔迹设置」+「颜色」两个菜单（粗细不再单独占位）', () => {
     const body = builderBody('brushMenuButton');
-    assert.ok(/Text\(this\.currentBrushLabel\(\)\)/.test(body), '笔形按钮必须显示动态笔刷名');
-    assert.ok(/Text\('▾'\)/.test(body), '笔形按钮必须有 ▾');
-    assert.equal(/substring\(0,\s*1\)/.test(code), false, '不得再截断成单字');
-    const label = builderBody('currentBrushLabel');
-    assert.ok(/brushSpec\(this\.pagerState\.brush\)\.label/.test(label), '文案必须来自 brushSpec(...).label');
+    assert.ok(/Text\(this\.inkSummary\(\)\)/.test(body), '「笔迹设置」按钮必须显示当前状态文案（inkSummary）');
+    assert.ok(/Text\('▾'\)/.test(body), '「笔迹设置」按钮必须有 ▾');
+    assert.equal(/substring\(0,\s*1\)/.test(code), false, '不得把文案截成单字');
+    const summary = builderBody('inkSummary');
+    assert.ok(/currentBrushLabel\(\)/.test(summary), '文案必须含当前笔刷名');
+    assert.ok(/pagerState\.penWidth/.test(summary), '文案必须含当前粗细档位');
+    // 笔形/粗细/颜色 三段全部并入「笔迹设置」：独立按钮一个都不能留
+    for (const gone of ['sizeMenuButton', 'railSizeButton', 'colorMenuButton', 'railColorButton']) {
+      assert.equal(new RegExp(gone).test(code), false, `不得再有 ${gone}（已并入笔迹设置）`);
+    }
+    for (const bar of ['topBar', 'railBar']) {
+      const barBody = builderBody(bar);
+      assert.equal(/sizeMenuButton|railSizeButton/.test(barBody), false, `${bar} 不得再渲染独立粗细按钮`);
+      assert.equal(/colorMenuButton|railColorButton/.test(barBody), false, `${bar} 不得再渲染独立颜色按钮`);
+      assert.ok(/this\.(brushMenuButton|railBrushButton)\(\)/.test(barBody), `${bar} 必须有「笔迹设置」按钮`);
+    }
   });
 
-  test('粗细按钮显示「当前档位圆点 + 数值 + ▾」', () => {
-    const body = builderBody('sizeMenuButton');
-    assert.ok(/this\.currentDotSize\(\)/.test(body), '粗细按钮必须画当前档位圆点');
-    assert.ok(/Text\(`\$\{this\.pagerState\.penWidth\}`\)/.test(body), '粗细按钮必须显示当前数值（layout 可断言）');
-    assert.ok(/Text\('▾'\)/.test(body), '粗细按钮必须有 ▾');
-  });
-
-  test('颜色按钮显示「20×20 当前色块 + ▾」', () => {
-    const body = builderBody('colorMenuButton');
-    assert.ok(/\.width\(20\)/.test(body) && /\.height\(20\)/.test(body), '颜色按钮必须 20×20 色块');
+  test('「笔迹设置」按钮带 12×12 当前色块（颜色文字可收缩但颜色永远可见）', () => {
+    const body = builderBody('brushMenuButton');
+    assert.ok(/\.width\(12\)/.test(body) && /\.height\(12\)/.test(body), '按钮必须有 12×12 色块');
     assert.ok(/backgroundColor\(this\.pagerState\.penColor\)/.test(body), '色块必须是当前颜色');
-    assert.ok(/Text\('▾'\)/.test(body), '颜色按钮必须有 ▾');
+    const summary = builderBody('inkSummary');
+    assert.ok(/currentColorLabel\(\)/.test(summary), '文案必须含当前色名（钢笔 · 3.5 · 黑）');
   });
 
   test('溢出时该行横向滚动：Scroll + 横向 + 无滚动条 + 高度 48（不换行不加高）', () => {
@@ -125,43 +128,66 @@ describe('手写板工具条：宽度自适应与不截断', () => {
     assert.ok(/\.height\(TOP_BAR_HEIGHT\)/.test(bar), '工具条高度固定 48（≤48vp）');
   });
 
-  test('二级菜单每项 minWidth ≥140，且三套面板结构正确', () => {
+  test('「笔迹设置」面板 = 笔形 + 粗细 + 颜色 三段：标题、chip、档位格、色块、两条 1vp 分割线', () => {
     const panel = builderBody('overlayPanel');
-    assert.ok(
-      /\.constraintSize\(\{ minWidth: MENU_MIN_WIDTH \}\)/.test(panel),
-      '面板必须 constraintSize({ minWidth: MENU_MIN_WIDTH })'
-    );
-    // 笔形：图标 + 名称 + ✓
-    assert.ok(/this\.brushIcon\(spec\.kind\)/.test(panel), '笔形行必须画图标');
-    assert.ok(/Text\(spec\.label\)/.test(panel), '笔形行必须显示名称');
-    // 粗细：圆点 + 「N vp」+ ✓
-    assert.ok(/\.width\(SIZE_DOTS\[index\]\)/.test(panel), '粗细行圆点必须显式 width');
-    assert.ok(/\.height\(SIZE_DOTS\[index\]\)/.test(panel), '粗细行圆点必须显式 height');
-    assert.ok(/\.borderRadius\(SIZE_DOTS\[index\] \/ 2\)/.test(panel), '粗细行圆点必须显式 borderRadius');
-    assert.ok(/\.backgroundColor\(\$r\('app\.color\.text_primary'\)\)/.test(panel), '粗细行圆点必须显式颜色');
-    assert.ok(/Text\(`\$\{width\} vp`\)/.test(panel), '粗细行必须显示「N vp」');
-    // 颜色：28×28 + 名称 + 选中描边
-    assert.ok(/const SWATCH: number = 28;/.test(code), 'SWATCH 必须是 28');
-    assert.ok(/\.width\(SWATCH\)/.test(panel) && /\.height\(SWATCH\)/.test(panel), '色块必须 28×28');
-    assert.ok(/Text\(COLOR_LABELS\[index\]\)/.test(panel), '颜色行必须显示名称');
-    assert.ok(/\.border\(\{/.test(panel), '选中色块必须有描边');
-    // 选中 ✓
-    assert.ok(/Text\('✓'\)/.test(panel), '选中行必须有 ✓');
+    // 面板宽度 ≥260vp（三段后用户定版），且只在「笔迹设置」时用宽面板
+    assert.ok(/const INK_PANEL_MIN_WIDTH: number = 260;/.test(code), 'INK_PANEL_MIN_WIDTH 必须是 260');
+    assert.ok(/INK_PANEL_MIN_WIDTH \+ 2 \* SPACING\.sm/.test(builderBody('panelWidth')), '笔迹设置面板宽 = 260 + 两侧 padding');
+    assert.ok(/\.constraintSize\(\{ minWidth: MENU_MIN_WIDTH \}\)/.test(panel), '面板仍要 ≥140 的下限兜底');
+
+    // 三段小标题 + 总标题
+    assert.ok(/Text\('笔迹设置'\)/.test(panel), '面板必须有「笔迹设置」标题');
+    assert.ok(/Text\('笔形'\)/.test(panel), '面板必须有「笔形」小标题');
+    assert.ok(/Text\('粗细'\)/.test(panel), '面板必须有「粗细」小标题');
+    assert.ok(/Text\('颜色'\)/.test(panel), '面板必须有「颜色」小标题');
+
+    // 段 1：5 个笔刷 chip（名称来自 BRUSHES，选中显示 ✓）
+    assert.ok(/ForEach\(\s*BRUSHES/.test(panel), '笔形段必须遍历 5 种笔刷');
+    assert.ok(/Text\(spec\.label\)/.test(panel), 'chip 必须显示笔刷名');
+    assert.ok(/Text\('✓'\)/.test(panel), '选中 chip 必须显示 ✓');
+    assert.ok(/Flex\(\{ direction: FlexDirection\.Row, wrap: FlexWrap\.Wrap/.test(panel), 'chip 必须可换行（窄屏两行）');
+    assert.ok(/CHIP_HEIGHT/.test(panel), 'chip 触控高度必须用 CHIP_HEIGHT');
+    assert.ok(/const CHIP_HEIGHT: number = 40;/.test(code), 'CHIP_HEIGHT 必须是 40（≥40 触控）');
+
+    // 三条段之间各有 1vp 分割线（笔形→粗细、粗细→颜色）→ 至少 2 处
+    const dividers = (panel.match(/Divider\(\)\s*\n\s*\.strokeWidth\(DIVIDER\)/g) ?? []).length;
+    assert.ok(dividers >= 2, `段间应有 ≥2 条 1vp 分割线，实际 ${dividers}`);
+    assert.ok(/\.color\(\$r\('app\.color\.divider'\)\)/.test(panel), '分割线颜色必须是 app.color.divider');
+
+    // 段 2：5 个档位格（圆点 + 数值，等分，选中加粗描边 + 高亮）
+    assert.ok(/ForEach\(\s*PEN_WIDTHS/.test(panel), '粗细段必须遍历 5 档');
+    assert.ok(/\.width\(SIZE_DOTS\[index\]\)/.test(panel), '档位圆点必须显式 width');
+    assert.ok(/\.height\(SIZE_DOTS\[index\]\)/.test(panel), '档位圆点必须显式 height');
+    assert.ok(/\.borderRadius\(SIZE_DOTS\[index\] \/ 2\)/.test(panel), '档位圆点必须显式 borderRadius');
+    assert.ok(/Text\(`\$\{width\}`\)/.test(panel), '档位格必须显示数值');
+    assert.ok(/FontWeight\.Bold/.test(panel), '选中的档位数值必须加粗');
+
+    // 段 3：5 个颜色（20×20 色块 + 色名，选中加 2vp 描边）
+    assert.ok(/ForEach\(\s*PEN_COLORS/.test(panel), '颜色段必须遍历 5 种颜色');
+    assert.ok(/Text\(COLOR_LABELS\[index\]\)/.test(panel), '颜色格必须显示色名');
+    assert.ok(/width: this\.pagerState\.penColor === color \? 2 : 1/.test(panel), '选中色块必须加粗描边');
+    assert.ok(/\.layoutWeight\(1\)/.test(panel), '档位格/颜色格必须等分');
   });
 
-  test('面板行高 44、行宽 100%（点得中、不截断）', () => {
+  test('点选项只生效、不关面板（方便连续调）；点面板外由 scrim 关', () => {
+    for (const fn of ['pickBrush', 'pickWidth', 'pickColor']) {
+      const body = builderBody(fn);
+      assert.equal(/this\.panel = ''/.test(body), false, `${fn} 不得再关面板（用户要求连续调）`);
+      assert.ok(/panel=open/.test(body), `${fn} 日志必须标明 panel=open`);
+    }
+    // 三个 pick 都被面板直接调用
     const panel = builderBody('overlayPanel');
-    const rows = panel.split('.height(MENU_ROW_HEIGHT)').length - 1;
-    assert.ok(rows >= 3, `三个面板共应有 ≥3 处行高 44，实际 ${rows}`);
-    assert.ok(/\.width\('100%'\)/.test(panel), '面板行必须 width 100%');
+    assert.ok(/this\.pickBrush\(spec\.kind\)/.test(panel), 'chip 点击必须直接 pickBrush');
+    assert.ok(/this\.pickWidth\(width\)/.test(panel), '档位格点击必须直接 pickWidth');
+    assert.ok(/this\.pickColor\(color\)/.test(panel), '颜色格点击必须直接 pickColor');
+    // 点面板外仍能关（scrim 走 closeOverlays）
+    assert.ok(/this\.closeOverlays\(\)/.test(builderBody('overlayScrim')), '点面板外必须走 closeOverlays 关闭');
   });
 
   test('禁止省略号：页面无 TextOverflow.Ellipsis，工具条/面板文字都有 maxLines(1)', () => {
     assert.equal(/TextOverflow\.Ellipsis/.test(code), false, '页面不得出现 TextOverflow.Ellipsis');
     const chrome = [
       'brushMenuButton',
-      'sizeMenuButton',
-      'colorMenuButton',
       'toolButton',
       'historyButton',
       'pageStepper',
@@ -173,7 +199,7 @@ describe('手写板工具条：宽度自适应与不截断', () => {
       .map((name) => builderBody(name))
       .join('\n');
     const texts = labelledTexts(chrome);
-    assert.ok(texts.length >= 10, `工具条/面板里的文字 Text 太少：${texts.length}`);
+    assert.ok(texts.length >= 9, `工具条/面板里的文字 Text 太少：${texts.length}`);
     for (const block of texts) {
       const head = block.slice(0, 40).trim().split('\n')[0];
       assert.ok(/\.maxLines\(1\)/.test(block), `${head} 缺少 maxLines(1)`);
@@ -205,8 +231,6 @@ describe('手写板工具条：宽度自适应与不截断', () => {
     const order = [
       'this.exitButton()',
       'this.brushMenuButton()',
-      'this.sizeMenuButton()',
-      'this.colorMenuButton()',
       "this.toolButton('橡皮'",
       "this.toolButton('手动框'",
       "this.historyButton('undo'",
@@ -227,11 +251,35 @@ describe('手写板工具条：宽度自适应与不截断', () => {
     assert.ok(exitAt >= 0 && scrollAt > exitAt, '退出按钮必须在 Scroll 之前（不参与横向滚动）');
   });
 
-  test('菜单开合有 hilog 自证标记 `[hw] menu=<name> open=<0|1>`', () => {
+  test('菜单开合有 hilog 自证标记 `[hw] menu=<name> open=<0|1>` / `[hw] ink …`', () => {
     assert.ok(/\[hw\] menu=\$\{name\} open=/.test(source), '缺少 [hw] menu=<name> open=<0|1> 日志');
-    for (const marker of ['[hw] menu=none open=0', '[hw] tool=', '[hw] delete confirm stage=', '[hw] page insert', '[hw] page deleted']) {
+    for (const marker of [
+      '[hw] menu=none open=0',
+      '[hw] tool=',
+      '[hw] delete confirm stage=',
+      '[hw] page insert',
+      '[hw] page deleted',
+      '[hw] ink brush='
+    ]) {
       assert.ok(source.includes(marker), `缺少日志标记 ${marker}`);
     }
+    // 选笔形 / 选档位都要打「组合 + 已关闭」，真机可对照按钮文案
+    for (const fn of ['pickBrush', 'pickWidth']) {
+      const body = builderBody(fn);
+      assert.ok(/panel=open/.test(body), `${fn} 日志必须标明 panel=open（选完不关面板）`);
+      assert.ok(/\[hw\] ink brush=/.test(body), `${fn} 必须打 [hw] ink 日志`);
+    }
+  });
+
+  test('「笔迹设置」面板方位：竖屏向下展开、横屏向右展开，且不遮画布中心', () => {
+    const left = builderBody('panelLeft');
+    assert.ok(/RAIL_WIDTH \+ DIVIDER \+ SPACING\.sm/.test(left), '横屏面板贴 rail 右侧展开');
+    assert.ok(/: SPACING\.sm;/.test(left), '竖屏面板贴左边 8vp');
+    const top = builderBody('panelTop');
+    assert.ok(/TOP_BAR_HEIGHT \+ DIVIDER \+ SPACING\.xs/.test(top), '竖屏面板在工具条下方（向下展开）');
+    assert.ok(/this\.panel === PANEL_INK \? 0 : 1/.test(top), '横屏：笔迹设置对应 rail 第 1 个按钮（index 0）');
+    const width = builderBody('panelWidth');
+    assert.ok(/INK_PANEL_MIN_WIDTH \+ 2 \* SPACING\.sm/.test(width), '笔迹设置面板宽 240+16');
   });
 });
 
@@ -274,7 +322,7 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     // Scroll 内只放 7 个工具按钮，不再塞分页组
     const scrollBody = bar.slice(scrollAt, bar.indexOf('.align(Alignment.Start)'));
     assert.equal(/this\.pageStepper\(\)/.test(scrollBody), false, '分页组不得在 Scroll 内（真机曾被裁成 20px）');
-    for (const tool of ['this.brushMenuButton()', 'this.sizeMenuButton()', 'this.colorMenuButton()']) {
+    for (const tool of ["this.toolButton('橡皮'", "this.toolButton('手动框'"]) {
       assert.ok(scrollBody.includes(tool), `Scroll 内必须保留工具按钮 ${tool}`);
     }
   });
@@ -305,7 +353,7 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
   });
 
   test('rail 内控件尺寸统一：72vp 宽 / 高 44（退出 40）/ 同圆角 / 同底色', () => {
-    const railControls = ['railBrushButton', 'railSizeButton', 'railColorButton', 'railToolButton', 'railHistoryButton'];
+    const railControls = ['railBrushButton', 'railToolButton', 'railHistoryButton'];
     for (const name of railControls) {
       const body = builderBody(name);
       assert.ok(/\.width\('100%'\)/.test(body), `${name} 必须宽 100%（rail 内容宽统一 72vp）`);
@@ -336,7 +384,7 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     for (const name of ['railToolButton', 'railHistoryButton']) {
       assert.ok(/\.textAlign\(TextAlign\.Center\)/.test(builderBody(name)), `${name} 内容必须水平居中`);
     }
-    for (const name of ['railBrushButton', 'railSizeButton', 'railColorButton']) {
+    for (const name of ['railBrushButton']) {
       assert.ok(/\.justifyContent\(FlexAlign\.Center\)/.test(builderBody(name)), `${name} 内容必须水平居中`);
     }
   });
@@ -415,7 +463,7 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
   });
 
   test('竖屏按钮仍是「内容自适应 + minWidth 44」（两套布局分开写，rail 的固定宽不要污染竖屏）', () => {
-    const controls = ['brushMenuButton', 'sizeMenuButton', 'colorMenuButton', 'toolButton', 'historyButton'];
+    const controls = ['brushMenuButton', 'toolButton', 'historyButton'];
     for (const name of controls) {
       const body = builderBody(name);
       assert.ok(/\.flexShrink\(0\)/.test(body), `${name} 缺少 flexShrink(0)`);
@@ -450,8 +498,8 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     const item = Number(/const RAIL_ITEM_HEIGHT: number = (\d+);/.exec(code)?.[1]);
     const gap = Number(/const RAIL_GAP: number = (\d+);/.exec(code)?.[1]);
     const padding = 8; // SPACING.sm，rail 上下 padding
-    const soloButtons = (bar.match(/this\.rail(Exit|Brush|Size|Color|Tool|History)Button\(/g) ?? []).length;
-    assert.equal(soloButtons, 8, 'rail 独立按钮应为 8 个（退出/笔形/粗细/颜色/橡皮/手动框/撤销/重做）');
+    const soloButtons = (bar.match(/this\.rail(Exit|Brush|Tool|History)Button\(/g) ?? []).length;
+    assert.equal(soloButtons, 6, 'rail 独立按钮应为 6 个（退出/笔迹设置/橡皮/手动框/撤销/重做）');
     const exitIsShorter = /\.height\(TOOL_HEIGHT\)/.test(builderBody('railExitButton'));
     const items = soloButtons + 3 /* [−|+] [n/m] [‹|›] */ + 1 /* 完成 */;
     const content =
@@ -460,7 +508,7 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
       padding * 2;
     // 真机实测 rail 竖向可用高度 ≈601vp（状态栏 105px 起、底边 1534px，@2.375）
     assert.ok(content <= 601, `rail 内容 ${content}vp 必须 ≤ 真机可用 601vp（否则「完成」会被挤出屏幕）`);
-    assert.ok(content >= 500 && content <= 601, `rail 内容 ${content}vp 应落在合理区间（Blank 吸收余量）`);
+    assert.ok(content >= 440 && content <= 601, `rail 内容 ${content}vp 应落在合理区间（Blank 吸收余量）`);
   });
 
   test('竖屏「完成」也在针向 Scroll 之外（不会被横向滚走）', () => {
@@ -473,11 +521,15 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     assert.ok(exitAt >= 0 && exitAt < scrollAt, '竖屏「‹」退出必须在 Scroll 之外（固定可见）');
   });
 
-  test('颜色按钮带当前色名短标签（黑/红/蓝/绿/橙）', () => {
-    const body = builderBody('colorMenuButton');
-    assert.ok(/Text\(this\.currentColorLabel\(\)\)/.test(body), '颜色按钮必须显示当前色名');
+  test('颜色并入面板：色名表 + 面板内 5 个色块（工具条不再有颜色按钮）', () => {
     assert.ok(/COLOR_LABELS: string\[\] = \['黑', '红', '蓝', '绿', '橙'\]/.test(code), '色名表必须是 黑/红/蓝/绿/橙');
-    assert.ok(/\.width\(20\)/.test(body) && /\.height\(20\)/.test(body), '色块必须 20×20');
+    const panel = builderBody('overlayPanel');
+    assert.ok(/Text\(COLOR_LABELS\[index\]\)/.test(panel), '颜色段必须显示色名');
+    assert.ok(/ForEach\(\s*PEN_COLORS/.test(panel), '颜色段必须遍历 5 种颜色');
+    assert.ok(/\.width\(20\)/.test(panel) && /\.height\(20\)/.test(panel), '颜色色块必须 20×20');
+    for (const bar of ['topBar', 'railBar']) {
+      assert.equal(/colorMenuButton|railColorButton/.test(builderBody(bar)), false, `${bar} 不得再有颜色按钮`);
+    }
   });
 });
 
