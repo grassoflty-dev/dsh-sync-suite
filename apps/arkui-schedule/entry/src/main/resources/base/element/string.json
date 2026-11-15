@@ -11,18 +11,6 @@
     {
       "name": "EntryAbility_label",
       "value": "日程助手"
-    },
-    {
-      "name": "reminder_reason",
-      "value": "用于在日程时间点提醒你处理待办事项"
-    },
-    {
-      "name": "reminder_label",
-      "value": "日程提醒"
-    },
-    {
-      "name": "notification_reason",
-      "value": "日程提醒权限不可用时，用普通通知在应用内提醒"
     }
   ]
 }

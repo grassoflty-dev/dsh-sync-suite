@@ -24,8 +24,14 @@ export struct PageLayout {
   @Prop subtitle: string = '';
   /** 返回回调；为 null 时不显示返回按钮（首页）。 */
   onBack: (() => void) | null = null;
-  /** 「更多」回调；为 null 时不显示「更多」入口。 */
+  /** 「更多」回调；为 null 时不显示「更多」入口（详情页用）。 */
   onMore: (() => void) | null = null;
+  /** 标题栏右侧动作 1（标签 + 回调；标签为空则不渲染，如 `✨ AI 汇总`）。 */
+  headerActionOne: string = '';
+  onHeaderActionOne: (() => void) | null = null;
+  /** 标题栏右侧动作 2（标签 + 回调；标签为空则不渲染，如 `⚙ 设置`）。 */
+  headerActionTwo: string = '';
+  onHeaderActionTwo: (() => void) | null = null;
   /** 断点变化回调（页面据此做单列/双栏分支）。参数：断点名 + 内容区宽度(vp)。 */
   onBreakpointChange: ((breakpoint: string, widthVp: number) => void) | null = null;
 
@@ -124,6 +130,38 @@ export struct PageLayout {
       }
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
+
+      // 明确的图标动作（替代语义含糊的「更多」）：标签为空则不渲染
+      if (this.headerActionOne.length > 0 && this.onHeaderActionOne !== null) {
+        Text(this.headerActionOne)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.brand'))
+          .height(TOUCH_MIN)
+          .padding({ left: SPACING.sm, right: SPACING.sm })
+          .textAlign(TextAlign.Center)
+          .onClick(() => {
+            const handler: (() => void) | null = this.onHeaderActionOne;
+            if (handler !== null) {
+              handler();
+            }
+          })
+      }
+      if (this.headerActionTwo.length > 0 && this.onHeaderActionTwo !== null) {
+        Text(this.headerActionTwo)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.brand'))
+          .height(TOUCH_MIN)
+          .padding({ left: SPACING.sm, right: SPACING.sm })
+          .textAlign(TextAlign.Center)
+          .onClick(() => {
+            const handler: (() => void) | null = this.onHeaderActionTwo;
+            if (handler !== null) {
+              handler();
+            }
+          })
+      }
 
       if (this.onMore !== null) {
         Text('更多')

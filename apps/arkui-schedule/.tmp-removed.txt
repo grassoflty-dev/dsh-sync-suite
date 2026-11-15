@@ -1,0 +1,127 @@
+  /** rail 的页码区：五个独立按钮 `−` / `‹` / `n/m` / `›` / `+`，统一 100% × 44vp。 */
+  @Builder
+  railStepper() {
+    Column({ space: RAIL_GAP }) {
+      this.railStepperMinus()
+      this.railStepperPrev()
+      this.railStepperLabel()
+      this.railStepperNext()
+      this.railStepperPlus()
+    }
+    .width('100%')
+    .flexShrink(0)
+  }
+
+  @Builder
+  railStepperMinus() {
+    Text('−')
+      .width('100%')
+      .height(RAIL_ITEM_HEIGHT)
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .textAlign(TextAlign.Center)
+      .borderRadius(RADIUS.sm)
+      .backgroundColor('#F1F3F5')
+      .fontColor(this.pageTotal() > 1 ? $r('app.color.danger') : $r('app.color.text_secondary'))
+      .enabled(this.pageTotal() > 1)
+      .onClick(() => {
+        this.startDeletePage();
+      })
+  }
+
+  /** rail 的 `‹`：上一页（首页禁用，只改字色）。 */
+  @Builder
+  railStepperPrev() {
+    Text('‹')
+      .width('100%')
+      .height(RAIL_ITEM_HEIGHT)
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .textAlign(TextAlign.Center)
+      .borderRadius(RADIUS.sm)
+      .backgroundColor('#F1F3F5')
+      .fontColor(this.canPrevPage() ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
+      .enabled(this.canPrevPage())
+      .onClick(() => {
+        this.goPrevPage();
+      })
+  }
+
+  @Builder
+  railStepperLabel() {
+    Text(`${this.pageIndex() + 1}/${this.pageTotal()}`)
+      .width('100%')
+      .height(RAIL_ITEM_HEIGHT)
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .textAlign(TextAlign.Center)
+      .borderRadius(RADIUS.sm)
+      .backgroundColor('#F1F3F5')
+      .fontColor($r('app.color.text_primary'))
+  }
+
+  /** rail 的 `›`：下一页（末页禁用）。 */
+  @Builder
+  railStepperNext() {
+    Text('›')
+      .width('100%')
+      .height(RAIL_ITEM_HEIGHT)
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .textAlign(TextAlign.Center)
+      .borderRadius(RADIUS.sm)
+      .backgroundColor('#F1F3F5')
+      .fontColor(this.canNextPage() ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
+      .enabled(this.canNextPage())
+      .onClick(() => {
+        this.goNextPage();
+      })
+  }
+
+  @Builder
+  railStepperPlus() {
+    Text('+')
+      .width('100%')
+      .height(RAIL_ITEM_HEIGHT)
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .textAlign(TextAlign.Center)
+      .borderRadius(RADIUS.sm)
+      .backgroundColor('#F1F3F5')
+      .fontColor(this.pageTotal() < MAX_HANDWRITING_PAGES ? $r('app.color.brand') : $r('app.color.text_secondary'))
+      .enabled(this.pageTotal() < MAX_HANDWRITING_PAGES)
+      .onClick(() => {
+        this.insertPage();
+      })
+  }
+
+  /** rail 底部「完成」：固定 72×48、品牌蓝实底 + 白字、不参与滚动、不压缩。 */
+  @Builder
+  railFinishButton() {
+    Button(this.busy ? '识别中' : '完成')
+      .width('100%')
+      .height(RAIL_FINISH_HEIGHT)
+      .borderRadius(RADIUS.sm)
+      .constraintSize({ minWidth: FINISH_MIN_WIDTH })
+      .fontSize(FONT.caption)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .backgroundColor($r('app.color.brand'))
+      .fontColor(Color.White)
+      .enabled(!this.busy)
+      .flexShrink(0)
+      .onClick(() => {
+        this.finish();
+      })
+  }
+

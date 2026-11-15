@@ -25,6 +25,11 @@ export interface SyncSettings {
   repoUrl: string
   platform: Platform
   authMode: AuthMode
+  /**
+   * HTTPS 认证用户名（Gitee 必填：登录名 + 私人令牌作密码；GitHub 可留空，
+   * 默认 `x-access-token`）。只存 settings.json，**不进** credentials.json。
+   */
+  username?: string
   deviceId: string
   branch: string
   scope: SyncScope

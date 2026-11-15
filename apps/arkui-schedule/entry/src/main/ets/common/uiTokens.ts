@@ -93,6 +93,13 @@ export const TOUCH_MIN: number = 40;
 /** 细分割线宽度（vp）。 */
 export const DIVIDER: number = 1;
 
+/**
+ * 首页「含其他设备（只读）」过滤开关的 AppStorage 键。
+ *
+ * 设置页写、首页读；只存在于内存（重启回到「只看本机」），因此**不新增持久化配置项**。
+ */
+export const HOME_INCLUDE_OTHER_KEY: string = 'home.includeOtherDevices';
+
 /** 横屏判定阈值：宽高比大于该值视为横屏（避免 1:1 方屏误判）。 */
 export const LANDSCAPE_ASPECT: number = 1.0;
 

@@ -50,10 +50,25 @@ export function defaultSettings(): SyncSettings {
     repoUrl: '',
     platform: 'github',
     authMode: 'https',
+    username: '',
     deviceId: defaultDeviceId(),
     branch: 'main',
     scope: { ...DEFAULT_SCOPE },
   }
+}
+
+/**
+ * 按仓库地址纠正明显不匹配的平台选择。
+ *
+ * 只纠正 `github`（默认值）：用户明确选 `custom`/`gitee` 时尊重原选择；
+ * 例如把 Gitee 地址留在默认 GitHub 平台会导致 HTTPS 用户名默认成
+ * `x-access-token`，认证必然失败。客户端保存时用同一规则并显示提示。
+ */
+export function inferPlatform(repoUrl: string, platform: Platform): Platform {
+  const url = typeof repoUrl === 'string' ? repoUrl.toLowerCase() : ''
+  if (platform === 'github' && url.includes('gitee.com')) return 'gitee'
+  if (platform === 'github' && url.includes('gitlab.com')) return 'custom'
+  return platform
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -108,6 +123,7 @@ export function normalizeSettings(input: unknown, previous: SyncSettings, option
     repoUrl: previous.repoUrl,
     platform: previous.platform,
     authMode: previous.authMode,
+    username: previous.username ?? '',
     deviceId: previous.deviceId,
     branch: previous.branch,
     scope: { ...previous.scope },

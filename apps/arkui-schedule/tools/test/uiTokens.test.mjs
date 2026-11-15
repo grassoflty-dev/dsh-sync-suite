@@ -22,6 +22,15 @@ import {
 
 const INDEX = readFileSync(new URL('../../entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8')
 const PAGE_LAYOUT = readFileSync(new URL('../../entry/src/main/ets/components/PageLayout.ets', import.meta.url), 'utf8')
+const SETTINGS = readFileSync(new URL('../../entry/src/main/ets/pages/Settings.ets', import.meta.url), 'utf8')
+
+/** 去掉块注释与整行行注释：结构守卫只对「代码」生效，注释里允许写「已删除」之类的说明 */
+function stripComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+}
+
+const INDEX_CODE = stripComments(INDEX)
+const SETTINGS_CODE = stripComments(SETTINGS)
 
 // ---------------------------------------------------------------- 断点边界
 
@@ -128,8 +137,8 @@ test('Index 双栏骨架：左日期列（DateBlock/ModeTabs/新建）+ 右列�
   assert.match(body, /records\.length > 0/, '空态时左栏不再放第二个主操作')
 })
 
-test('宽屏视觉四条：页头不重复日期 / 空态居中 CTA / 列表最大 900vp / 左栏按钮 240vp', () => {
-  assert.match(INDEX, /const LIST_MAX_WIDTH: number = 900;/, '列表最大宽必须被常量约束')
+test('宽屏视觉四条：页头不重复日期 / 空态居中 CTA / 列表最大 720vp / 左栏按钮 240vp', () => {
+  assert.match(INDEX, /const LIST_MAX_WIDTH: number = 720;/, '列表最大宽必须被常量约束（720vp ≈ 45–50 字/行）')
   assert.match(INDEX, /const SIDEBAR_ACTION_WIDTH: number = 240;/, '左栏主操作固定 240vp')
   assert.match(INDEX, /\.constraintSize\(\{ maxWidth: LIST_MAX_WIDTH \}\)/, '列表要居中限宽')
   assert.match(INDEX, /this\.EmptyCta\(\)/, '空态右栏要有居中主操作')
@@ -138,11 +147,70 @@ test('宽屏视觉四条：页头不重复日期 / 空态居中 CTA / 列表最�
   assert.match(INDEX, /return this\.selectedDate === localDateKey\(new Date\(\)\) \? '今天' : '日程';/)
 })
 
+test('首页头改成明确动作：不再有「更多」/ActionSheet，头部两个动作齐全', () => {
+  assert.equal(/MoreSheet|this\.showMore/.test(INDEX), false, '首页不应再有「更多」底部面板');
+  assert.equal(/onMore:/.test(INDEX), false, '首页不应把菜单挂在 PageLayout 的 onMore 上');
+  assert.match(INDEX, /headerActionOne: this\.aiBusy \? '✨ 生成中…' : '✨ AI 汇总'/, '页头动作要带生成中态');
+  assert.match(INDEX, /headerActionTwo: '⚙ 设置'/);
+  assert.match(INDEX, /this\.onHeaderSummaryAction\(\)/, '页头动作用 onHeaderSummaryAction（有汇总开面板 / 无汇总生成）');
+  assert.match(INDEX, /router\.pushUrl\(\{ url: 'pages\/Settings' \}\)/, '设置动作要能进设置页');
+  assert.match(INDEX, /HOME_INCLUDE_OTHER_KEY/, '「含其他设备」必须走共享的 AppStorage 键');
+});
+
+test('今日汇总块：持久化数据源（read/换日期 re-read/generate 失败不清空）', () => {
+  const loadSummaryCalls = (INDEX_CODE.match(/this\.loadSummary\(\)/g) || []).length;
+  assert.ok(loadSummaryCalls >= 4, `初始加载 + 换日期/回今天/返回前台都要重读，实际 ${loadSummaryCalls} 处`);
+  assert.match(INDEX_CODE, /summaryStore\.ensureReady\(/, '初始化要与 scheduleStore 同款幂等 ready');
+  // 失败分支必须重新 read 旧汇总，不能用空值覆盖 UI
+  assert.match(INDEX_CODE, /this\.summaryError = describeError\(error\);\s*\n?\s*try \{\s*\n?\s*this\.applySummary\(summaryStore\.read\(this\.selectedDate\)\);/);
+});
+
+test('今日汇总块：是列表第一项，五态互斥，且与页头共用 aiBusy', () => {
+  assert.match(INDEX_CODE, /this\.SummaryCard\(\)/, '汇总块必须被渲染');
+  assert.match(INDEX_CODE, /✨ 今日汇总/);
+  assert.match(INDEX_CODE, /✨ 生成今日汇总/);
+  assert.match(INDEX_CODE, /今天还没有日程/, '无日程要有灰字提示');
+  assert.match(INDEX_CODE, /正在生成今日汇总…/, '生成中要有 loading 文案');
+  assert.match(INDEX_CODE, /更新于 \$\{this\.summaryUpdatedAt\}/);
+  assert.match(INDEX_CODE, /重新生成/);
+  assert.match(INDEX_CODE, /查看全部/, '要点超过 3 条要有「查看全部」');
+  assert.match(INDEX_CODE, /summaryStore\.read\(this\.selectedDate\)/, '汇总必须从持久化存储读取');
+  assert.match(INDEX_CODE, /summaryStore\.generate\(/, '生成必须走 summaryStore（内部保证失败不覆盖）');
+  assert.match(INDEX_CODE, /truncateSummaryForDisplay\(summary, SUMMARY_MAX_POINTS\)/, '块内最多展示 3 条要点');
+  assert.equal(/applySummaryFromAiText/.test(INDEX_CODE), false, '旧的「解析自由文本」通道应已退休');
+  // 与页头同源：生成中页头也显示 loading，两者不会矛盾
+  assert.match(INDEX_CODE, /headerActionOne: this\.aiBusy \? '✨ 生成中…' : '✨ AI 汇总'/);
+  const calls = (INDEX_CODE.match(/this\.generateSummary\(\)/g) || []).length;
+  assert.ok(calls >= 3, `汇总生成入口应有生成行/重试/重新生成，实际 ${calls} 处`);
+  // 空态文案只保留在汇总块里，不再有第二处 EmptyState/EmptyHint
+  assert.equal(/EmptyHint/.test(INDEX_CODE), false, '旧的空态文案 builder 应已删除');
+  assert.equal(/EmptyState/.test(INDEX_CODE), false, '首页不再直接用 EmptyState，空态由汇总块表达');
+});
+
+
+test('提醒功能已删除：首页与设置页不再有提醒入口/文案/调用', () => {
+  assert.equal(/createReminders|canRemind|isHarmonyOS/.test(INDEX_CODE), false, '首页不应再引用提醒能力');
+  assert.equal(/提醒/.test(INDEX_CODE), false, '首页代码里不应再出现「提醒」文案');
+  assert.equal(/提醒/.test(SETTINGS_CODE), false, '设置页代码里不应再出现「提醒」文案');
+  assert.equal(/PANEL_AGC/.test(SETTINGS_CODE), false, 'AGC 帮助面板应已移除');
+});
+
+
+test('设置页同步组：主行可见「含其他设备」开关与「立即同步」', () => {
+  assert.match(SETTINGS, /Toggle\(\{ type: ToggleType\.Switch, isOn: this\.includeOtherDevices \}\)/);
+  assert.match(SETTINGS, /AppStorage\.setOrCreate<boolean>\(HOME_INCLUDE_OTHER_KEY, isOn\)/);
+  assert.match(SETTINGS, /'立即同步'/);
+  assert.match(SETTINGS, /HOME_INCLUDE_OTHER_KEY/, '开关键必须来自 uiTokens，避免两处字号/键漂移');
+});
+
+
 test('PageLayout：onAreaChange + resolveBreakpoint + isLandscapeSize，且不把 Length 直接当 number', () => {
   assert.match(PAGE_LAYOUT, /\.onAreaChange\(/)
   assert.match(PAGE_LAYOUT, /resolveBreakpoint\(/)
   assert.match(PAGE_LAYOUT, /isLandscapeSize\(/)
   assert.match(PAGE_LAYOUT, /@State breakpoint: string/, '断点必须对外暴露为 @State')
+  assert.match(PAGE_LAYOUT, /headerActionOne: string/, '标题栏要支持明确的动作标签');
+  assert.match(PAGE_LAYOUT, /onHeaderActionTwo: \(\(\) => void\) \| null/, '第二个动作回调可为空');
   assert.equal(
     /area\.width as number/.test(PAGE_LAYOUT),
     false,

@@ -1,7 +1,4 @@
-// AI 载荷 / 提示词 / 结果回写 与 提醒计划 测试。
-//
-// 说明：`model/reminder.ts` 同样属于纯逻辑模型层，本文件一并覆盖（保持 tools/test 文件
-// 集合与契约 §3.5 一致）。
+// AI 载荷 / 提示词 / 结果回写测试。
 //
 // 前置：先构建纯逻辑层
 //   node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json
@@ -9,7 +6,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { applyAiResult, buildAiPayload, buildAiPrompt } from '../.build/model/aiPayload.js';
-import { MAX_REMINDER_COUNT, buildReminderPlan } from '../.build/model/reminder.js';
 
 function makeRecord(overrides = {}) {
   return {
@@ -126,54 +122,4 @@ test('applyAiResult：不继承原型链上的 id（防原型污染）', () => {
   const result = applyAiResult(records, structured, []);
   assert.equal(result[0].ai_structured, undefined);
   assert.equal(result[0].ai_processed, false);
-});
-
-// ---------------------------------------------------------------- buildReminderPlan
-
-test('buildReminderPlan：只取未来且未完成的记录，按时间升序', () => {
-  const now = '2026-11-14T12:00:00+08:00';
-  const records = [
-    makeRecord({ id: 'past', ts: '2026-11-14T09:00:00+08:00', done: false }),
-    makeRecord({ id: 'later', ts: '2026-11-14T18:00:00+08:00', done: false }),
-    makeRecord({ id: 'soon', ts: '2026-11-14T13:00:00+08:00', done: false }),
-    makeRecord({ id: 'done', ts: '2026-11-14T20:00:00+08:00', done: true }),
-    makeRecord({ id: 'now', ts: '2026-11-14T12:00:00+08:00', done: false })
-  ];
-  const plan = buildReminderPlan(records, now);
-  assert.deepEqual(
-    plan.map((item) => item.id),
-    ['soon', 'later']
-  );
-  assert.equal(plan[0].dateTime, '2026-11-14T13:00:00+08:00');
-  assert.equal(plan[0].title, '周会');
-});
-
-test('buildReminderPlan：默认与硬上限都是 30 条', () => {
-  assert.equal(MAX_REMINDER_COUNT, 30);
-  const now = '2026-11-14T00:00:00+08:00';
-  const records = [];
-  for (let i = 0; i < 50; i++) {
-    records.push(makeRecord({ id: `r-${i}`, ts: `2026-11-14T${String(1 + (i % 22)).padStart(2, '0')}:00:00+08:00` }));
-  }
-  assert.equal(buildReminderPlan(records, now).length, 30);
-  assert.equal(buildReminderPlan(records, now, 5).length, 5);
-  assert.equal(buildReminderPlan(records, now, 100).length, 30, '超过 30 的请求必须被截断');
-  assert.equal(buildReminderPlan(records, now, 0).length, 0);
-});
-
-test('buildReminderPlan：同 id 只提醒一次；非法 nowIso 抛错；无标题给默认名', () => {
-  const now = '2026-11-14T12:00:00+08:00';
-  const records = [
-    makeRecord({ id: 'dup', ts: '2026-11-14T15:00:00+08:00' }),
-    makeRecord({ id: 'dup', ts: '2026-11-14T16:00:00+08:00' }),
-    makeRecord({ id: 'blank', title: '  ', ts: '2026-11-14T17:00:00+08:00' })
-  ];
-  const plan = buildReminderPlan(records, now);
-  assert.deepEqual(
-    plan.map((item) => item.id),
-    ['dup', 'blank']
-  );
-  assert.equal(plan[1].title, '(未命名日程)');
-  assert.throws(() => buildReminderPlan(records, 'not-a-date'), /nowIso/);
-  assert.deepEqual(buildReminderPlan([makeRecord({ ts: '不是时间' })], now), []);
 });

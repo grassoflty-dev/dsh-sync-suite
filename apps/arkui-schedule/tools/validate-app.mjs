@@ -724,7 +724,7 @@ function isInsideDir(parent, child) {
 /**
  * 规则 8：`entry/src/main/ets/**` 是共享层（Android 构建的唯一输入），不得**静态** import
  * `entry/src/harmony/ets/**`。静态 import 会被 ArkTS 编译器解析并打包，等于把鸿蒙专属模块
- * 拖进 Android 产物（`@kit.CoreVisionKit` / `reminderAgentManager` 在 Android 侧不存在 → 编译失败）。
+ * 拖进 Android 产物（`@kit.CoreVisionKit` 等鸿蒙专属模块在 Android 侧不存在 → 编译失败）。
  *
  * 平台分层必须靠 `entry/build-profile.json5` 的 `targets[].source.sourceRoots`：
  * 鸿蒙 target = `./src/main` + `./src/harmony`（同名相对路径覆盖），Android target 只有 `./src/main`。

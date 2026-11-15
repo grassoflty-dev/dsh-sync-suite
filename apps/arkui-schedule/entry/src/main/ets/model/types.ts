@@ -69,7 +69,10 @@ export interface RegionBox {
  * 复制一条日程记录。
  *
  * ArkTS 不支持对象展开（`arkts-no-spread`），因此「基于旧记录改几个字段再追加一行」
- * 必须逐字段复制。这里显式列出全部字段：新增字段时编译器会提醒补全，避免漏拷贝。
+ * 必须逐字段复制。这里显式列出全部字段：新增字段时编译器会强制补全，避免漏拷贝。
+ *
+ * 未知字段（历史日志里已废弃的扩展字段）由 `model/jsonl` 原样透传：读路径只校验已知字段，
+ * 多出来的键既不报错也不丢弃。因此模型层不需要为已删除的功能保留任何字段。
  */
 export function cloneRecord(source: ScheduleRecord): ScheduleRecord {
   const copy: ScheduleRecord = {

@@ -69,6 +69,8 @@ struct Edit {
   @State ocrText: string = '';
   @State attachments: Attachment[] = [];
   @State handwritingAvailable: boolean = false;
+  /** 新建记录的手写草稿键（本页会话内只生成一次，退出再进才能恢复同一份草稿）。 */
+  private newDraftKey: string = '';
   @State ready: boolean = false;
   @State statusText: string = '';
   /** 断点由 `PageLayout` 计算，本页只做 compact / 非 compact 分支。 */
@@ -190,9 +192,31 @@ struct Edit {
       promptAction.showToast({ message: '当前平台不支持手写板' });
       return;
     }
-    router.pushUrl({ url: route }).catch((error: Error) => {
-      promptAction.showToast({ message: `打开手写板失败：${describeError(error)}` });
-    });
+    const draftKey: string = this.handwritingDraftKey();
+    AppStorage.setOrCreate<string>('handwriting.draftKey', draftKey);
+    // ArkTS 不允许未声明类型的对象字面量：与 Index/Detail 一样用 Record<string, string>
+    const params: Record<string, string> = { 'draftKey': draftKey };
+    router
+      .pushUrl({ url: route, params: params })
+      .catch((error: Error) => {
+        promptAction.showToast({ message: `打开手写板失败：${describeError(error)}` });
+      });
+  }
+
+  /**
+   * 手写板草稿键：编辑已有记录 = recordId；新建 = `new-<时间戳>`。
+   *
+   * 新建的键**在本页会话内只生成一次**并缓存：否则每次点「手写板」都会换一个新键，
+   * 「退出再进」就恢复不到刚才的手迹（用户明确要求退出后能接着改）。
+   */
+  private handwritingDraftKey(): string {
+    if (this.recordId.length > 0) {
+      return this.recordId;
+    }
+    if (this.newDraftKey.length === 0) {
+      this.newDraftKey = `new-${Date.now()}`;
+    }
+    return this.newDraftKey;
   }
 
   private save(): void {
