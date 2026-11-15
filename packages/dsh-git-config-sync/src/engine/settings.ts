@@ -150,7 +150,13 @@ export function normalizeSettings(input: unknown, previous: SyncSettings, option
   }
 
   next.platform = pickEnum(record.platform, PLATFORMS, 'platform', previous.platform)
+  next.platform = inferPlatform(next.repoUrl, next.platform)
   next.authMode = pickEnum(record.authMode, AUTH_MODES, 'authMode', previous.authMode)
+
+  if (record.username !== undefined) {
+    if (typeof record.username !== 'string') throw new SyncError('E_VALIDATION', 'username 必须是字符串')
+    next.username = record.username.trim()
+  }
 
   if (record.deviceId !== undefined) {
     if (typeof record.deviceId !== 'string') throw new SyncError('E_VALIDATION', 'deviceId 必须是字符串')

@@ -57,7 +57,7 @@ Key points:
 
 ```
 %USERPROFILE%\.dsh\git-config-sync\
-  settings.json            # repoUrl/platform/authMode/deviceId/branch/scope (no token)
+  settings.json            # repoUrl/platform/authMode/username/deviceId/branch/scope (no token)
   credentials.json         # { token }, mode 0600, current user only
   work\<repoHash>\         # working copy, repoHash = first 16 hex chars of sha256(repoUrl)
   plugins.to-install.json  # MERGE-only install plan
@@ -156,6 +156,25 @@ content merge. Device IDs must match `^[a-z0-9][a-z0-9-]{0,31}$`.
 
 Only metadata is synced (package name/version/source/enabled): **no code and no node_modules**.
 
+### 4.4 Gitee HTTPS auth: username + private token
+
+A GitHub PAT may be used with any non-empty username (the plugin defaults to `x-access-token`),
+but **Gitee is different**: its HTTPS rule is "**Gitee login name as username + private token as
+password**". Reusing `x-access-token` for Gitee only produces a 403/authentication failure hidden
+inside git's output.
+
+- With `Authentication = HTTPS`, the settings page shows a **Username** field (stored only in the
+  local `settings.json`, never in `credentials.json`):
+  - GitHub: may be empty → defaults to `x-access-token`;
+  - **Gitee: required** — your Gitee login name (not an email, not the repository name); put the
+    private token in "Access token";
+  - Custom / self-hosted: follow the host's requirement; may be empty.
+- When `platform = 'gitee'` and the username is empty, the Host fails before running git with
+  `E_VALIDATION`: "Gitee requires a username (Gitee login name); the private token is the password".
+- On save, a `gitee.com` URL left on the default GitHub platform is **corrected to Gitee and
+  reported in the notice bar**; `gitlab.com` becomes "Custom". An explicit Gitee/Custom choice is
+  never overridden.
+
 ## 5. Restore flow (fail-closed, four layers)
 
 ```
@@ -229,7 +248,7 @@ Suggested order:
 ## 8. Implementation and verification status
 
 - `src/client.js`: plain JS, passes `node --check`; the `en`/`zh` locales keep identical key sets
-  (151 keys), and the inline dictionaries are byte-identical to `locale/*.json`.
+  (158 keys), and the inline dictionaries are byte-identical to `locale/*.json`.
 - Rendering regression: `test/client-render.test.mjs` renders the settings panel with a
   React-semantics stub (children arrive through `props.children`) and asserts that inputs, selects,
   checkboxes, and action buttons survive.

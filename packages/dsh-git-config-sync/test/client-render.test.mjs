@@ -196,7 +196,7 @@ test('设置面板真实渲染出仓库表单、同步范围与操作按钮', as
 
   // Card/Field 的子节点必须真的渲染出来，而不是只剩标题。
   assert.equal(counts.select, 2, '平台与认证方式两个下拉框必须渲染')
-  assert.equal(counts.input, 8, '4 个文本/密码输入 + 4 个 scope 勾选框')
+  assert.equal(counts.input, 9, '5 个文本/密码输入（含用户名） + 4 个 scope 勾选框')
   assert.equal(inputs.filter((p) => p.type === 'checkbox').length, 4, '同步范围 4 个勾选框')
   assert.equal(inputs.filter((p) => p.type === 'password').length, 1, 'Token 必须是 password')
   assert.ok(counts.button >= 8, `操作按钮至少 8 个，实际 ${counts.button}`)
@@ -204,6 +204,7 @@ test('设置面板真实渲染出仓库表单、同步范围与操作按钮', as
   for (const key of [
     'repo.platform',
     'repo.auth',
+    'repo.username',
     'repo.url',
     'repo.device',
     'repo.branch',

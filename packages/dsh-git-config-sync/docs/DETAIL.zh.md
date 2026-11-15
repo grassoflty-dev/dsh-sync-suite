@@ -62,7 +62,7 @@ entry 数组，含 `!!js` 表达式与注释）、插件依赖清单、MCP 定�
 
 ```
 %USERPROFILE%\.dsh\git-config-sync\
-  settings.json            # repoUrl/platform/authMode/deviceId/branch/scope（无 token）
+  settings.json            # repoUrl/platform/authMode/username/deviceId/branch/scope（无 token）
   credentials.json         # { token }，0600，仅当前用户
   work\<repoHash>\         # 工作副本，repoHash = sha256(repoUrl) 前 16 位
   plugins.to-install.json  # MERGE-only 待安装计划
@@ -152,6 +152,21 @@ entry 数组，含 `!!js` 表达式与注释）、插件依赖清单、MCP 定�
 
 同步内容只有元数据（包名/版本/来源/启用状态），**不传代码、不传 node_modules**。
 
+### 4.4 Gitee HTTPS 认证：用户名 + 私人令牌
+
+GitHub 的 PAT 可以用任意非空用户名（本插件默认 `x-access-token`），但 **Gitee 不行**：
+Gitee 的 HTTPS 规则是「**Gitee 登录名作用户名 + 私人令牌作密码**」。把 `x-access-token`
+套到 Gitee 只会得到 403/认证失败，而且错误藏在 git 输出里，很难定位。
+
+- 设置页 `认证方式 = HTTPS` 时出现「用户名」字段（只存本机 `settings.json`，**不进** `credentials.json`）：
+  - GitHub：可留空 → 默认 `x-access-token`；
+  - **Gitee：必填 Gitee 登录名**（不是邮箱、不是仓库名），私人令牌填在「访问令牌」；
+  - 自定义 / 自建：按服务要求填写，可留空。
+- `platform='gitee'` 且用户名为空时，host 在真正执行 git 前直接报 `E_VALIDATION`：
+  「Gitee 需要填写用户名（Gitee 登录名），私人令牌只作密码」——不会静默用错用户名。
+- 保存设置时若仓库地址是 `gitee.com` 而平台仍是默认 GitHub，会**自动纠正为 Gitee 并在提示条说明**；
+  `gitlab.com` 地址纠正为「自定义」。用户明确选 Gitee / 自定义时不会被覆盖。
+
 ---
 
 ## 5. 恢复流程（fail-closed 四层）
@@ -224,7 +239,7 @@ entry 数组，含 `!!js` 表达式与注释）、插件依赖清单、MCP 定�
 
 ## 8. 实现与验证状态
 
-- `src/client.js`：纯 JS，`node --check` 通过；locale `en`/`zh` key 集合一致（151 个），
+- `src/client.js`：纯 JS，`node --check` 通过；locale `en`/`zh` key 集合一致（158 个），
   且内联字典与 `locale/*.json` 逐字一致；`meta.detail` 分别指向 `docs/DETAIL.zh.md` / `docs/DETAIL.md`。
 - 组件级验证：`test/client-render.test.mjs` 用**符合 React 语义的桩**（children 只走 `props.children`）
   渲染设置面板，断言输入框、下拉框、勾选框与操作按钮都真实产出；另有桩 `fetch` 的交互冒烟脚本

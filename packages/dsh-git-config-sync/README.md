@@ -71,7 +71,7 @@ dsh plugin --profile web remove dsh-git-config-sync
 
 | 区域 | 内容 |
 | --- | --- |
-| 仓库配置 | 平台（GitHub / Gitee / 自定义，仅影响地址提示）、仓库地址、认证方式（HTTPS Token / SSH）、设备标识、分支 |
+| 仓库配置 | 平台（GitHub / Gitee / 自定义，影响地址提示与 HTTPS 默认用户名）、仓库地址、认证方式（HTTPS Token / SSH）、用户名（HTTPS 用；Gitee 必填登录名）、设备标识、分支 |
 | 同步范围 | `cordis.patch.yml` 条目、provider 定义、插件清单（MERGE-only）、MCP，默认全选 |
 | 状态徽标 | 可达性、分支、本地提交数、仓库提交 sha、待上传 / 待下载数、冲突、最近提交（sha+message+time）、最近同步时间、状态错误 |
 | 操作 | 保存设置、测试连接、推送、拉取预览、执行覆盖（未预览或未勾选条目时禁用）、刷新状态 |
@@ -145,7 +145,7 @@ Body: { action, ...payload }
 `getState` 只读本地、不联网；`reachable` 三态（null=未探测，false=最近一次网络动作失败）。
 `applied[]` 的 `fileSha256` 是写后整文件 SHA-256，`blockSha256` 是单条 entry 文本 SHA-256。
 
-`settings` 字段：`{repoUrl, platform:'github'|'gitee'|'custom', authMode:'https'|'ssh', deviceId, branch, scope:{config,providers,plugins,mcp}, hasToken}`。
+`settings` 字段：`{repoUrl, platform:'github'|'gitee'|'custom', authMode:'https'|'ssh', username, deviceId, branch, scope:{config,providers,plugins,mcp}, hasToken}`。
 
 写入约束（host 侧强制，前端只是入口）：
 
@@ -160,6 +160,9 @@ Body: { action, ...payload }
 
 - **Token 只存本机**：`%USERPROFILE%\.dsh\git-config-sync\credentials.json`（0600），
   不写入补丁/快照/日志，也不出现在 git argv 里（HTTPS 走临时 `GIT_ASKPASS` 脚本 + 环境变量）。
+- **HTTPS 用户名按平台区分**：GitHub 可留空（默认 `x-access-token`），**Gitee 必填 Gitee 登录名**
+  （私人令牌只作密码；留空直接报 `E_VALIDATION`，不会静默用错用户名）。用户名只存 `settings.json`，
+  不进 `credentials.json`。
 - **密钥脱敏**：凡是 key 命中 `token|secret|password|apiKey|api_key|authorization|bearer`（不区分大小写）
   的字段，进入同步载荷前替换为 `__SECRET__`；界面会标「含脱敏密钥」。
 - **永不 force push**：远端分叉时先 `pull --rebase` 再推送，超过重试次数就报 `E_CONFLICT` 让人工处理。
