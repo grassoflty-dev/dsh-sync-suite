@@ -1,1 +1,1 @@
-{modelVersion:'26.0.0',dependencies:{},execution:{daemon:true,parallel:true,incremental:true,analyze:'normal',typeCheck:false},logging:{level:'info'},debugging:{stacktrace:false},nodeOptions:{maxOldSpaceSize:4096}}
+{modelVersion:'26.0.0',dependencies:{'@ohos/hvigor-ohos-arkui-x-plugin':'4.24.1',},execution:{daemon:true,parallel:true,incremental:true,analyze:'normal',typeCheck:false},logging:{level:'info'},debugging:{stacktrace:false},nodeOptions:{maxOldSpaceSize:4096}}

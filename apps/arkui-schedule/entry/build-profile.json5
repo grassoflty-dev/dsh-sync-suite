@@ -27,8 +27,7 @@
       "name": "default",
       "source": {
         "sourceRoots": [
-          "./src/main",
-          "./src/harmony"
+          "./src/main"
         ]
       }
     },
