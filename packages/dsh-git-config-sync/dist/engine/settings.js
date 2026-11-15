@@ -44,10 +44,26 @@ export function defaultSettings() {
         repoUrl: '',
         platform: 'github',
         authMode: 'https',
+        username: '',
         deviceId: defaultDeviceId(),
         branch: 'main',
         scope: { ...DEFAULT_SCOPE },
     };
+}
+/**
+ * 按仓库地址纠正明显不匹配的平台选择。
+ *
+ * 只纠正 `github`（默认值）：用户明确选 `custom`/`gitee` 时尊重原选择；
+ * 例如把 Gitee 地址留在默认 GitHub 平台会导致 HTTPS 用户名默认成
+ * `x-access-token`，认证必然失败。客户端保存时用同一规则并显示提示。
+ */
+export function inferPlatform(repoUrl, platform) {
+    const url = typeof repoUrl === 'string' ? repoUrl.toLowerCase() : '';
+    if (platform === 'github' && url.includes('gitee.com'))
+        return 'gitee';
+    if (platform === 'github' && url.includes('gitlab.com'))
+        return 'custom';
+    return platform;
 }
 function asRecord(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null;
@@ -97,6 +113,7 @@ export function normalizeSettings(input, previous, options = {}) {
         repoUrl: previous.repoUrl,
         platform: previous.platform,
         authMode: previous.authMode,
+        username: previous.username ?? '',
         deviceId: previous.deviceId,
         branch: previous.branch,
         scope: { ...previous.scope },
@@ -118,7 +135,13 @@ export function normalizeSettings(input, previous, options = {}) {
         next.repoUrl = repoUrl;
     }
     next.platform = pickEnum(record.platform, PLATFORMS, 'platform', previous.platform);
+    next.platform = inferPlatform(next.repoUrl, next.platform);
     next.authMode = pickEnum(record.authMode, AUTH_MODES, 'authMode', previous.authMode);
+    if (record.username !== undefined) {
+        if (typeof record.username !== 'string')
+            throw new SyncError('E_VALIDATION', 'username 必须是字符串');
+        next.username = record.username.trim();
+    }
     if (record.deviceId !== undefined) {
         if (typeof record.deviceId !== 'string')
             throw new SyncError('E_VALIDATION', 'deviceId 必须是字符串');

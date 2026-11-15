@@ -57,6 +57,8 @@ export function createRpcService(options = {}) {
             repoUrl: settings.repoUrl,
             branch: settings.branch,
             authMode: settings.authMode,
+            platform: settings.platform,
+            username: settings.username ?? '',
             token,
             allowLocalRepo: options.allowLocalRepo === true,
             ...(options.networkTimeoutMs !== undefined ? { networkTimeoutMs: options.networkTimeoutMs } : {}),

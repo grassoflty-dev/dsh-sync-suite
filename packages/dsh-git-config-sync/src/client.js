@@ -47,12 +47,17 @@ window.__ModuleLoader__.load({
 
       "repo.title": "仓库配置",
       "repo.platform": "平台",
-      "repo.platform.hint": "仅影响仓库地址提示与默认取值，不影响同步逻辑。",
+      "repo.platform.hint": "影响仓库地址提示与 HTTPS 默认用户名（Gitee 必填登录名）。",
       "repo.url": "仓库地址",
       "repo.url.hint.github": "示例：https://github.com/<owner>/<repo>.git",
       "repo.url.hint.gitee": "示例：https://gitee.com/<owner>/<repo>.git",
       "repo.url.hint.custom": "支持 https://、ssh://、git@host:path",
       "repo.auth": "认证方式",
+      "repo.username": "用户名",
+      "repo.username.hint": "仅 HTTPS 认证使用；只存本机 settings.json，不进凭据文件。",
+      "repo.username.hint.github": "可留空，默认 x-access-token（GitHub PAT 约定）。",
+      "repo.username.hint.gitee": "必填 Gitee 登录名；私人令牌只作密码。",
+      "repo.username.hint.custom": "按仓库服务要求填写，可留空。",
       "repo.device": "设备标识",
       "repo.device.hint": "只能用小写字母、数字与连字符，最长 32 位，例如 pc-a。",
       "repo.branch": "分支",
@@ -122,10 +127,12 @@ window.__ModuleLoader__.load({
       "error.badResponse": "服务返回了无法解析的响应。",
       "error.unauthorized": "未通过 DSH 鉴权（401/403）。",
       "error.unknown": "未知错误。",
+      "error.giteeUsername": "Gitee 需要填写用户名（Gitee 登录名）。私人令牌只作密码，不能代替用户名。",
       "error.retry": "重试",
       "error.dismiss": "关闭提示",
 
       "notice.saved": "设置已保存。",
+      "notice.platformInferred": "已按仓库地址把平台切换为「{platform}」。",
       "notice.testOk": "连接正常：{branch} @ {sha} {message}",
       "notice.pushed": "已推送：{branch} @ {commit}（{files} 个文件）",
       "notice.previewReady": "预览已生成，共 {count} 个条目。",
@@ -218,12 +225,17 @@ window.__ModuleLoader__.load({
 
       "repo.title": "Repository",
       "repo.platform": "Platform",
-      "repo.platform.hint": "Only affects the URL hint and placeholder, not the sync logic.",
+      "repo.platform.hint": "Affects the URL hint and the default HTTPS username (Gitee requires a login name).",
       "repo.url": "Repository URL",
       "repo.url.hint.github": "e.g. https://github.com/<owner>/<repo>.git",
       "repo.url.hint.gitee": "e.g. https://gitee.com/<owner>/<repo>.git",
       "repo.url.hint.custom": "Accepts https://, ssh:// and git@host:path",
       "repo.auth": "Authentication",
+      "repo.username": "Username",
+      "repo.username.hint": "Used only for HTTPS auth; stored in local settings.json, never in the credentials file.",
+      "repo.username.hint.github": "Optional; defaults to x-access-token (GitHub PAT convention).",
+      "repo.username.hint.gitee": "Required: your Gitee login name. The private token is the password.",
+      "repo.username.hint.custom": "Use what the repository host requires; may be left empty.",
       "repo.device": "Device ID",
       "repo.device.hint": "Lowercase letters, digits and hyphens only, up to 32 chars, e.g. pc-a.",
       "repo.branch": "Branch",
@@ -293,10 +305,12 @@ window.__ModuleLoader__.load({
       "error.badResponse": "Server returned an unparsable response.",
       "error.unauthorized": "DSH authorization rejected (401/403).",
       "error.unknown": "Unknown error.",
+      "error.giteeUsername": "Gitee requires a username (your Gitee login name). A private token is the password, not the username.",
       "error.retry": "Retry",
       "error.dismiss": "Dismiss",
 
       "notice.saved": "Settings saved.",
+      "notice.platformInferred": "Platform switched to \"{platform}\" based on the repository URL.",
       "notice.testOk": "Connected: {branch} @ {sha} {message}",
       "notice.pushed": "Pushed: {branch} @ {commit} ({files} files)",
       "notice.previewReady": "Preview ready: {count} entries.",
@@ -858,6 +872,7 @@ window.__ModuleLoader__.load({
         platform: 'github',
         repoUrl: '',
         authMode: 'https',
+        username: '',
         deviceId: '',
         branch: 'main',
         scope: { config: true, providers: true, plugins: true, mcp: true }
@@ -871,6 +886,7 @@ window.__ModuleLoader__.load({
         platform: src.platform === 'gitee' || src.platform === 'custom' ? src.platform : 'github',
         repoUrl: asText(src.repoUrl),
         authMode: src.authMode === 'ssh' ? 'ssh' : 'https',
+        username: asText(src.username),
         deviceId: asText(src.deviceId),
         branch: asText(src.branch) || 'main',
         scope: {
@@ -880,6 +896,27 @@ window.__ModuleLoader__.load({
           mcp: scope.mcp !== false
         }
       }
+    }
+
+    /**
+     * 平台推断：只纠正默认的 github（用户明确选 gitee/custom 时尊重原选择）。
+     * 与 host `engine/settings.ts` 的 inferPlatform 保持同一规则。
+     */
+    function inferPlatform(repoUrl, platform) {
+      const url = asText(repoUrl).toLowerCase()
+      if (platform === 'github' && url.indexOf('gitee.com') >= 0) return 'gitee'
+      if (platform === 'github' && url.indexOf('gitlab.com') >= 0) return 'custom'
+      return platform
+    }
+
+    function usernameHint(translate, platform) {
+      const specific =
+        platform === 'gitee'
+          ? translate('repo.username.hint.gitee')
+          : platform === 'custom'
+            ? translate('repo.username.hint.custom')
+            : translate('repo.username.hint.github')
+      return translate('repo.username.hint') + ' ' + specific
     }
 
     function urlPlaceholder(platform) {
@@ -1451,8 +1488,21 @@ window.__ModuleLoader__.load({
       }
 
       function doSave() {
+        const next = normalizeSettings(form)
+        const previousPlatform = next.platform
+        const inferred = inferPlatform(next.repoUrl, next.platform)
+        if (inferred !== next.platform) {
+          next.platform = inferred
+          setField('platform', inferred)
+        }
+        // Gitee 的 HTTPS 认证是「登录名 + 私人令牌作密码」，不能沿用 GitHub 的 x-access-token。
+        if (next.authMode === 'https' && next.platform === 'gitee' && next.username.trim() === '') {
+          setNotice('')
+          setError({ code: 'E_VALIDATION', message: tr('error.giteeUsername') })
+          return
+        }
         runTask('save', async function () {
-          const result = await rpcCall('saveSettings', { settings: normalizeSettings(form), token: token })
+          const result = await rpcCall('saveSettings', { settings: next, token: token })
           if (!alive.current) return
           if (!result.ok) {
             setError(localizeError(tr, result.error))
@@ -1462,7 +1512,11 @@ window.__ModuleLoader__.load({
           if (data.settings) setForm(normalizeSettings(data.settings))
           setHasToken(data.hasToken === undefined ? Boolean(data.settings && data.settings.hasToken) : Boolean(data.hasToken))
           setToken('')
-          setNotice(tr('notice.saved'))
+          const inferredNotice =
+            inferred !== previousPlatform
+              ? ' ' + tr('notice.platformInferred', { platform: tr('platform.' + inferred) })
+              : ''
+          setNotice(tr('notice.saved') + inferredNotice)
           await reloadState({ silent: true })
         })
       }
@@ -1761,6 +1815,20 @@ window.__ModuleLoader__.load({
                 }
               })
             ),
+            form.authMode === 'https'
+              ? h(
+                  Field,
+                  { label: tr('repo.username'), hint: usernameHint(tr, form.platform) },
+                  h(Input, {
+                    value: form.username,
+                    placeholder: form.platform === 'gitee' ? 'your-gitee-login' : 'x-access-token',
+                    disabled: anyBusy,
+                    onChange: function (value) {
+                      setField('username', value)
+                    }
+                  })
+                )
+              : null,
             h(
               Field,
               { label: tr('repo.url'), hint: urlHint(tr, form.platform) },

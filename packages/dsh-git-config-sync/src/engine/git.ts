@@ -15,7 +15,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { SyncError } from './errors.js'
-import type { HeadInfo } from './types.js'
+import type { HeadInfo, Platform } from './types.js'
 
 export interface GitRepoOptions {
   dir: string
@@ -23,6 +23,10 @@ export interface GitRepoOptions {
   branch: string
   authMode: 'https' | 'ssh'
   token?: string | null
+  /** 仓库平台：决定 HTTPS 用户名的默认值（Gitee 必须显式用户名）。 */
+  platform?: Platform
+  /** HTTPS 用户名；GitHub 可留空（默认 x-access-token），Gitee 必填登录名。 */
+  username?: string
   allowLocalRepo?: boolean
   env?: NodeJS.ProcessEnv
   /** 单次网络命令超时（毫秒），默认 8000（≤8s）。测试可注入更小值。 */
@@ -55,7 +59,8 @@ const IDENTITY_ARGS = ['-c', 'user.name=dsh-git-config-sync', '-c', 'user.email=
 
 /**
  * GIT_ASKPASS 脚本（POSIX）。token 从环境变量读取，脚本本身与 argv 都不含 token。
- * 用户名同样由环境变量提供（GitHub/Gitee 的 PAT 用任意非空用户名均可）。
+ * 用户名同样由环境变量提供：GitHub 可留空（默认 x-access-token），
+ * Gitee 必须是登录名（私人令牌只作密码）。
  */
 const ASKPASS_SH = [
   '#!/bin/sh',
@@ -209,11 +214,28 @@ function isAuthFailure(text: string): boolean {
   )
 }
 
+/**
+ * HTTPS askpass 用户名规则：
+ *   - 填了 username → 用它（Gitee 必须是登录名）；
+ *   - Gitee 留空 → 可读错误（私人令牌只作密码，不能当用户名）；
+ *   - GitHub / 自定义留空 → `x-access-token`（GitHub PAT 约定）。
+ */
+export function resolveAskpassUser(platform: Platform, username: string): string {
+  const trimmed = typeof username === 'string' ? username.trim() : ''
+  if (trimmed !== '') return trimmed
+  if (platform === 'gitee') {
+    throw new SyncError('E_VALIDATION', 'Gitee 需要填写用户名（Gitee 登录名），私人令牌只作密码')
+  }
+  return 'x-access-token'
+}
+
 export class GitRepo {
   readonly dir: string
   readonly repoUrl: string
   readonly branch: string
   readonly authMode: 'https' | 'ssh'
+  readonly platform: Platform
+  readonly username: string
 
   private readonly token: string | null
   private readonly allowLocalRepo: boolean
@@ -235,6 +257,8 @@ export class GitRepo {
     this.repoUrl = options.repoUrl.trim()
     this.branch = options.branch.trim()
     this.authMode = options.authMode
+    this.platform = options.platform ?? 'custom'
+    this.username = typeof options.username === 'string' ? options.username.trim() : ''
     this.token = options.token !== undefined && options.token !== null && options.token !== '' ? options.token : null
     this.allowLocalRepo = options.allowLocalRepo === true
     this.extraEnv = options.env ?? {}
@@ -273,11 +297,16 @@ export class GitRepo {
       GIT_TERMINAL_PROMPT: '0',
       GIT_MERGE_AUTOEDIT: 'no',
     }
+    // Gitee 的 HTTPS 规则是「用户名（登录名）+ 私人令牌作密码」；x-access-token 只适用于
+    // GitHub PAT，直接套用会让 Gitee 认证静默失败（用户只看到 git 的 403）。
+    if (this.authMode === 'https' && this.platform === 'gitee' && this.username === '') {
+      throw new SyncError('E_VALIDATION', 'Gitee 需要填写用户名（Gitee 登录名），私人令牌只作密码')
+    }
     if (this.usesAskpass()) {
       await this.ensureAskpass()
       env.GIT_ASKPASS = this.askpassPath ?? undefined
       env.DSH_GIT_SYNC_TOKEN = this.token ?? undefined
-      env.DSH_GIT_SYNC_USER = 'x-access-token'
+      env.DSH_GIT_SYNC_USER = resolveAskpassUser(this.platform, this.username)
       env.DSH_GIT_SYNC_NODE = process.execPath
       env.DSH_GIT_SYNC_ASKPASS_COUNTER = this.askpassCounter ?? undefined
       env.SSH_ASKPASS_REQUIRE = 'never'
