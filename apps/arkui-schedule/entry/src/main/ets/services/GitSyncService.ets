@@ -101,7 +101,7 @@ interface BridgeHttpResult {
 
 interface PendingRequest {
   resolve: (event: BridgeEvent) => void;
-  reject: (error: Error) => void;
+  reject: (error: Object) => void;
   timer: number;
 }
 
@@ -721,7 +721,7 @@ export class GitSyncService {
     const id: string = 'g' + Date.now().toString() + '-' + (++this.requestSeq).toString();
     const request: BridgeCallRequest = { id: id, op: op, args: args };
     const payload: string = JSON.stringify(request);
-    return new Promise<BridgeEvent>((resolve: (event: BridgeEvent) => void, reject: (error: Error) => void) => {
+    return new Promise<BridgeEvent>((resolve: (event: BridgeEvent) => void, reject: (error: Object) => void) => {
       const timer: number = setTimeout(() => {
         this.pending.delete(id);
         reject(

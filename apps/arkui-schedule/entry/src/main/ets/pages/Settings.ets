@@ -25,7 +25,6 @@ const SYNC_BRANCH: string = 'main';
 
 @Entry
 @Component
-@crossplatform
 struct Settings {
   @State deviceId: string = 'phone-a';
   @State author: string = '';
@@ -219,8 +218,15 @@ struct Settings {
       this.syncMessage = '请先填写仓库地址（https:// 或 git@ 形式）并保存';
       return;
     }
-    const labels: Record<string, string> = { pull: '拉取', push: '推送', status: '查询状态' };
-    const label = labels[action] === undefined ? action : labels[action];
+    // ArkTS 要求对象字面量有显式声明类型，这里用显式分支代替 Record 字面量
+    let label: string = action;
+    if (action === 'pull') {
+      label = '拉取';
+    } else if (action === 'push') {
+      label = '推送';
+    } else if (action === 'status') {
+      label = '查询状态';
+    }
     this.syncBusy = true;
     this.syncMessage = `正在${label}…`;
     try {
@@ -326,7 +332,7 @@ struct Settings {
           .onPageEnd(() => {
             this.onWebReady();
           })
-          .onError(() => {
+          .onErrorReceive(() => {
             if (!this.disposed) {
               this.syncMessage = '❌ 同步内核加载失败：rawfile/git/index.html 无法加载';
             }

@@ -33,7 +33,7 @@
 [CmdletBinding()]
 param(
   [ValidateRange(1, 64)][int]$Cores = 4,
-  [ValidateSet('BelowNormal', 'Idle')][string]$Priority = 'BelowNormal',
+  [ValidateSet('Normal', 'BelowNormal', 'Idle')][string]$Priority = 'BelowNormal',
   [string]$Product = 'default',
   [switch]$DryRun
 )
@@ -43,6 +43,18 @@ $projectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Pa
 $logDir = Join-Path $projectRoot '.build-logs'
 $deveco = if ($env:DEVECO_CLI_STUDIO_PATH) { $env:DEVECO_CLI_STUDIO_PATH } else { 'D:\A-DevEco\DevEco Studio' }
 $cli = 'C:\Users\GWL\Desktop\itwillclaude\.tmp\deveco-cli\node_modules\.bin\devecocli.cmd'
+
+# A killed build leaves .hvigor/.build-lock behind and every later build waits on it forever.
+# Remove it only when no hvigor process is alive (safe: nobody holds the lock).
+$lock = Join-Path $projectRoot '.hvigor\.build-lock'
+if (Test-Path $lock) {
+  $busy = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match 'hvigor' }
+  if (-not $busy) {
+    Remove-Item $lock -Force -ErrorAction SilentlyContinue
+    Write-Host "Removed stale .hvigor/.build-lock (no hvigor process alive)"
+  }
+}
 
 $logical = [Environment]::ProcessorCount
 if ($Cores -gt $logical) { $Cores = $logical }

@@ -3,10 +3,9 @@
   "dependencies": {
   },
   "execution": {
-    // 低占用模式：这台机器上并构建会让用户明显卡顿，因此默认关闭 daemon 与并行，
-    // 并限制 hvigor 守护进程的堆上限。需要更快构建时再临时打开。
-    "daemon": false,
-    "parallel": false,
+    // 机器空闲时用全速；需要边用电脑边构建时，改用 tools/build-harmony.ps1 的 -Cores/-Priority 限速。
+    "daemon": true,
+    "parallel": true,
     "incremental": true,
     "analyze": "normal",
     "typeCheck": false
@@ -18,6 +17,6 @@
     "stacktrace": false
   },
   "nodeOptions": {
-    "maxOldSpaceSize": 2048
+    "maxOldSpaceSize": 4096
   }
 }

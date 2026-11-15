@@ -9,7 +9,6 @@ import { recordDateKey } from '../model/jsonl';
 import type { ScheduleRecord } from '../model/types';
 
 @Component
-@crossplatform
 export struct RecordRow {
   /** 展示用的日程记录（父组件重新加载列表时整体替换，触发刷新）。 */
   @Prop record: ScheduleRecord = {

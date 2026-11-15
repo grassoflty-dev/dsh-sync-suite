@@ -44,7 +44,6 @@ function mergeAttachments(base: Attachment[], incoming: Attachment[]): Attachmen
 
 @Entry
 @Component
-@crossplatform
 struct Edit {
   @State recordId: string = '';
   @State title: string = '';

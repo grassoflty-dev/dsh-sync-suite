@@ -2,14 +2,9 @@
   "app": {
     "bundleName": "com.itwill.schedule",
     "vendor": "itwill",
-    "versionCode": 1000,
+    "versionCode": 1000000,
     "versionName": "1.0.0",
     "icon": "$media:icon",
-    "label": "$string:app_name",
-    "minAPIVersion": 12,
-    "targetAPIVersion": 12,
-    "apiReleaseType": "Release",
-    "debug": false,
-    "generateBuildHash": true
+    "label": "$string:app_name"
   }
 }

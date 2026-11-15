@@ -79,11 +79,34 @@ node tools/init-remote-repo.mjs --dir C:\Users\GWL\dsh-sync-repo
 # 按脚本输出把该目录推到你的私有仓库；插件设置里填同一个 repoUrl
 ```
 
-## 应用构建（需 DevEco Studio 5 + ArkUI-X 插件）
+## 应用构建（已实测：DevEco Studio 26.0.0.865 + HarmonyOS SDK 26.0.0）
 
-`apps/arkui-schedule` 是标准 DevEco 工程，本机未安装 DevEco SDK，**未做真机/模拟器构建验证**；
-`tools/validate-app.mjs` 负责静态一致性检查（JSON5、import 图、平台门控、`@crossplatform`、isomorphic-git 资源）。
-详细步骤与未验证项见 [`docs/VERIFICATION.md`](docs/VERIFICATION.md)。
+本机已用官方 IDE 工具链真实构建通过（HAP 未签名）：
+
+```powershell
+# 环境（DevEco 装在 D 盘；换路径时改这两个变量即可）
+$env:DEVECO_CLI_STUDIO_PATH = 'D:\A-DevEco\DevEco Studio'
+$env:DEVECO_SDK_HOME = 'D:\A-DevEco\DevEco Studio\sdk'
+
+# 构建（devecocli 来自官方 npm 包 @deveco/deveco-cli）
+cd apps\arkui-schedule
+devecocli build --product default        # => BUILD SUCCESSFUL，产物 entry/build/default/outputs/default/entry-default-unsigned.hap
+
+# 边用电脑边构建（限制 4/12 核 + BelowNormal）
+powershell -File .\tools\build-harmony.ps1 -Cores 4
+```
+
+两种构建模式（DevEco 26 的 schema 只接受 `runtimeOS: HarmonyOS | OpenHarmony`，所以 Android
+product 必须等 ArkUI-X 工具链）：
+
+```powershell
+node tools\set-build-mode.mjs --check          # 当前模式
+node tools\set-build-mode.mjs --mode harmony   # 默认：纯鸿蒙，无 Android product、无 @crossplatform
+node tools\set-build-mode.mjs --mode arkui-x   # ArkUI-X 双端：双 product + 给每个 struct 加回 @crossplatform
+```
+
+`tools/validate-app.mjs` 负责静态一致性检查（JSON5、import 图、平台门控、`@crossplatform` 与构建模式一致性、isomorphic-git 资源）。
+构建细节、真实报错与修复记录见 [`docs/VERIFICATION.md`](docs/VERIFICATION.md) §8。
 
 ## 目录
 

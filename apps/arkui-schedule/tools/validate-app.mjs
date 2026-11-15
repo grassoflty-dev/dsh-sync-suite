@@ -453,6 +453,16 @@ function ruleAndroidSafe(root, sourceFiles) {
 function ruleCrossplatform(root, sourceFiles) {
   const messages = [];
   const structRe = /\bstruct\s+[A-Za-z_$][A-Za-z0-9_$]*\s*\{/;
+  const crossRe = /@crossplatform\b/;
+  // 纯 DevEco/HarmonyOS 构建里 `@crossplatform` 是未定义标识符（实测编译报错），
+  // 只有装上 ArkUI-X 工具链、build-profile 里带 runtimeOS:"Android" 时才需要它。
+  const arkuiX = (() => {
+    try {
+      return /"runtimeOS"\s*:\s*"Android"/.test(readText(join(root, 'build-profile.json5')));
+    } catch {
+      return false;
+    }
+  })();
   let scanned = 0;
   for (const file of sourceFiles) {
     if (!file.endsWith('.ets')) {
@@ -463,11 +473,16 @@ function ruleCrossplatform(root, sourceFiles) {
     if (!structRe.test(content)) {
       continue;
     }
-    if (!/@crossplatform\b/.test(content)) {
-      messages.push(`${display(root, file)} 含 struct 但缺少 @crossplatform 注解`);
+    if (arkuiX && !crossRe.test(content)) {
+      messages.push(`${display(root, file)} 含 struct 但缺少 @crossplatform（ArkUI-X 模式必需）`);
+    } else if (!arkuiX && crossRe.test(content)) {
+      messages.push(
+        `${display(root, file)} 含 @crossplatform，但当前是纯 HarmonyOS 构建（该装饰器未定义，会编译失败）；` +
+          '改用 tools/set-build-mode.mjs --mode arkui-x'
+      );
     }
   }
-  return { messages, scanned };
+  return { messages, scanned, mode: arkuiX ? 'arkui-x' : 'harmony' };
 }
 
 // ---------------------------------------------------------------- 规则 6

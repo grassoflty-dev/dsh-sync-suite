@@ -46,3 +46,34 @@ export interface AiPayload {
   date: string;
   records: Array<{ id: string; ocr_time: string; text: string }>;
 }
+
+/**
+ * 复制一条日程记录。
+ *
+ * ArkTS 不支持对象展开（`arkts-no-spread`），因此「基于旧记录改几个字段再追加一行」
+ * 必须逐字段复制。这里显式列出全部字段：新增字段时编译器会提醒补全，避免漏拷贝。
+ */
+export function cloneRecord(source: ScheduleRecord): ScheduleRecord {
+  const copy: ScheduleRecord = {
+    id: source.id,
+    ts: source.ts,
+    title: source.title,
+    body: source.body,
+    author: source.author,
+    done: source.done,
+    ai_processed: source.ai_processed
+  };
+  if (source.ocr_text !== undefined) {
+    copy.ocr_text = source.ocr_text;
+  }
+  if (source.attachments !== undefined) {
+    copy.attachments = source.attachments;
+  }
+  if (source.ai_structured !== undefined) {
+    copy.ai_structured = source.ai_structured;
+  }
+  if (source.ocr_time !== undefined) {
+    copy.ocr_time = source.ocr_time;
+  }
+  return copy;
+}

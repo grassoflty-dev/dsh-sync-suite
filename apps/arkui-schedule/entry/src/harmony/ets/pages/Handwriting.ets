@@ -24,7 +24,6 @@ import { describeError } from '../services/scheduleStore';
 
 @Entry
 @Component
-@crossplatform
 struct Handwriting {
   /** 与手写板组件共享的分页状态（父页面用它拼截图 id、显示页码）。 */
   @State pagerState: HandwritingPagerState = new HandwritingPagerState();

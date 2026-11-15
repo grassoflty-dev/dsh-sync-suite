@@ -18,6 +18,7 @@ import { common } from '@kit.AbilityKit';
 import { localDateKey, nextTsSameDate, nowIso } from '../common/date';
 import { applyAiResult, buildAiPayload } from '../model/aiPayload';
 import type { AiPayload, ScheduleRecord } from '../model/types';
+import { cloneRecord } from '../model/types';
 import { isHarmonyOS } from '../common/platform';
 import { createReminders } from '../common/platformFeatures';
 import { describeError, scheduleStore } from '../services/scheduleStore';
@@ -43,7 +44,6 @@ function dateFromKey(key: string): Date {
 
 @Entry
 @Component
-@crossplatform
 struct Index {
   /** 当前查看的日期（今日待办模式）。 */
   @State selectedDate: string = localDateKey(new Date());
@@ -190,12 +190,10 @@ struct Index {
       this.reload();
       return;
     }
-    const next: ScheduleRecord = {
-      ...target,
-      // 保留原记录日期（不迁到当天），时刻严格大于原 ts，保证折叠取到新版本
-      ts: nextTsSameDate(target.ts),
-      done: done
-    };
+    const next: ScheduleRecord = cloneRecord(target);
+    // 保留原记录日期（不迁到当天），时刻严格大于原 ts，保证折叠取到新版本
+    next.ts = nextTsSameDate(target.ts);
+    next.done = done;
     try {
       scheduleStore.appendRecord(next);
     } catch (error) {

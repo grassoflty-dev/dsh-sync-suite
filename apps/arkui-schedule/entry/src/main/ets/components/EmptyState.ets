@@ -6,7 +6,6 @@
  */
 
 @Component
-@crossplatform
 export struct EmptyState {
   /** 主提示语。 */
   @Prop title: string = '暂无内容';

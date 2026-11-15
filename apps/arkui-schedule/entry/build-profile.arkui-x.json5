@@ -1,0 +1,49 @@
+// ArkUI-X 双端配置的 entry 侧（配合根目录 `build-profile.arkui-x.json5` 使用）。
+//
+// 启用方式：装好 ArkUI-X 后，把本文件复制为 `entry/build-profile.json5`。
+// HarmonyOS target = `src/main` + `src/harmony`；Android target = 仅 `src/main`
+// （手写/OCR/提醒代码物理上不进 Android 产物）。
+{
+  "apiType": "stageMode",
+  "buildOption": {
+    "arkOptions": {
+      "runtimeOnly": {
+        "sources": []
+      }
+    }
+  },
+  "buildOptionSet": [
+    {
+      "name": "release",
+      "arkOptions": {
+        "obfuscation": {
+          "ruleOptions": {
+            "enable": false,
+            "files": [
+              "./obfuscation-rules.txt"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "targets": [
+    {
+      "name": "default",
+      "source": {
+        "sourceRoots": [
+          "./src/main",
+          "./src/harmony"
+        ]
+      }
+    },
+    {
+      "name": "android",
+      "source": {
+        "sourceRoots": [
+          "./src/main"
+        ]
+      }
+    }
+  ]
+}

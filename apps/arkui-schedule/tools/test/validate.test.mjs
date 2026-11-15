@@ -38,7 +38,10 @@ function legalFiles() {
     'build-profile.json5': `{
   "app": {
     "signingConfigs": [],
-    "products": [{ "name": "default", "compatibleSdkVersion": 12 }]
+    "products": [
+      { "name": "default", "compatibleSdkVersion": 12, "runtimeOS": "HarmonyOS" },
+      { "name": "android", "compatibleSdkVersion": 12, "runtimeOS": "Android" }
+    ]
   },
   "modules": [{ "name": "entry", "srcPath": "./entry" }]
 }`,

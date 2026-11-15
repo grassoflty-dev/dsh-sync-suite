@@ -16,6 +16,7 @@ import { formatClock, nextTsSameDate, nowIso } from '../common/date';
 import { recordDateKey } from '../model/jsonl';
 import { buildAiPayload } from '../model/aiPayload';
 import type { Attachment, ScheduleRecord } from '../model/types';
+import { cloneRecord } from '../model/types';
 import { describeError, scheduleStore } from '../services/scheduleStore';
 import { settingsStore } from '../services/settingsStore';
 import { attachmentStore } from '../services/attachmentStore';
@@ -24,7 +25,6 @@ import { EmptyState } from '../components/EmptyState';
 
 @Entry
 @Component
-@crossplatform
 struct Detail {
   @State recordId: string = '';
   @State title: string = '';
@@ -112,12 +112,10 @@ struct Detail {
       return;
     }
     const text = this.aiText.trim();
-    const next: ScheduleRecord = {
-      ...base,
-      ts: nextTsSameDate(base.ts),
-      ai_structured: text,
-      ai_processed: true
-    };
+    const next: ScheduleRecord = cloneRecord(base);
+    next.ts = nextTsSameDate(base.ts);
+    next.ai_structured = text;
+    next.ai_processed = true;
     try {
       scheduleStore.appendRecord(next);
     } catch (error) {
@@ -148,7 +146,8 @@ struct Detail {
       return;
     }
     // buildAiPayload 只收 ai_processed:false 的记录；这里构造一份副本作为候选，不写回存储。
-    const candidate: ScheduleRecord = { ...base, ai_processed: false };
+    const candidate: ScheduleRecord = cloneRecord(base);
+    candidate.ai_processed = false;
     const payload = buildAiPayload(recordDateKey(candidate.ts), [candidate]);
     if (payload.records.length === 0) {
       promptAction.showToast({ message: '这条记录没有可整理的内容（正文与识别文本都为空）' });

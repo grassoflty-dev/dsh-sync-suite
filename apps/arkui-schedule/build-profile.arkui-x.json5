@@ -1,0 +1,67 @@
+// ArkUI-X 双端配置（HarmonyOS + Android）。
+//
+// 本机暂未安装 ArkUI-X 工具链，纯 DevEco 26 的 build-profile schema 只接受
+// runtimeOS: "HarmonyOS" | "OpenHarmony"，所以这份文件不会被自动加载。
+//
+// 启用方式（装好 ArkUI-X 后）：
+//   1. 备份当前 build-profile.json5；
+//   2. 把本文件复制为 build-profile.json5；
+//   3. 同时把 `entry/build-profile.arkui-x.json5` 复制为 `entry/build-profile.json5`；
+//   4. `powershell -File tools/build-harmony.ps1 -Product android` 构建 Android 分支。
+//
+// Android 分支的源码 = `src/main`（不含 `src/harmony`），因此手写/OCR/提醒代码
+// 物理上不进 Android 产物；共享层的 `common/platformFeatures.ts` 默认 fail-closed 为
+// Android 形态（手写/OCR 关闭、handwritingPageRoute() 返回空串）。
+{
+  "app": {
+    "signingConfigs": [],
+    "products": [
+      {
+        "name": "default",
+        "compatibleSdkVersion": "26.0.0",
+        "targetSdkVersion": "26.0.0",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      },
+      {
+        "name": "android",
+        "compatibleSdkVersion": "26.0.0",
+        "targetSdkVersion": "26.0.0",
+        "runtimeOS": "Android"
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        },
+        {
+          "name": "android",
+          "applyToProducts": [
+            "android"
+          ]
+        }
+      ]
+    }
+  ]
+}

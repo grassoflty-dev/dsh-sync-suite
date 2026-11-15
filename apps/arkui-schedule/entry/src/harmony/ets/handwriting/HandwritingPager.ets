@@ -80,7 +80,6 @@ export class HandwritingPagerState {
 }
 
 @Component
-@crossplatform
 export struct HandwritingPager {
   /** 与父页面共享的分页状态。 */
   @ObjectLink state: HandwritingPagerState;

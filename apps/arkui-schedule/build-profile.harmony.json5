@@ -1,0 +1,49 @@
+// 构建配置（本机已验证：DevEco Studio 26.0.0.865 + HarmonyOS SDK 26.0.0）。
+//
+// 说明（2026-11-15 实测）：
+// - 纯 DevEco 26 只接受 runtimeOS: "HarmonyOS" | "OpenHarmony"；`runtimeOS: "Android"`
+//   需要 ArkUI-X 工具链（本机未安装），因此 Android product 暂时从本文件移除，
+//   完整双端配置保存在 `build-profile.arkui-x.json5`，装上 ArkUI-X 后替换回来即可。
+// - 平台覆盖层：鸿蒙构建的源码 = `src/main` + `src/harmony`（同名相对路径以 harmony 为准），
+//   由 entry 的 `source.sourceRoots` 声明（见 entry/build-profile.json5）。
+{
+  "app": {
+    "signingConfigs": [],
+    "products": [
+      {
+        "name": "default",
+        "compatibleSdkVersion": "26.0.0",
+        "targetSdkVersion": "26.0.0",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

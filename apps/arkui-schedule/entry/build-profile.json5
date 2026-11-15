@@ -1,14 +1,12 @@
-// 平台装配（方案 b）：用 target 的 source.sourceRoots 区分构建输入，而不是单源码树 + 运行时判断。
+// 平台装配：用 target 的 source.sourceRoots 区分构建输入。
 //
 // 为什么不是「单源码树」：`pages/Handwriting.ets` 一旦登记进共享 `main_pages.json`，ArkTS 编译就会把它
 // 和静态 import 的 Canvas/OCR 模块带进 Android 产物；只靠动态 import() 也不行 —— ArkTS 编译器仍要解析
 // 模块路径，`@kit.CoreVisionKit` / `reminderAgentManager` 在 Android 侧不存在会直接编译失败。
-// 因此必须让鸿蒙 target 的输入 = `src/main` + `src/harmony`（同名相对路径 harmony 覆盖 main），
-// Android target 只有 `src/main`，Android 侧物理上拿不到 handwrite/OCR 代码。
 //
-// ⚠️ 未验证项：本机没有 DevEco Studio / hvigor，`source.sourceRoots` 是否被 DevEco 5 / ArkUI-X 的
-// hvigor-ohos-plugin 采纳**尚未实测**（见 `reports/platformfix.md` 的验证步骤）。运行时检测
-// （`common/platform.ts#detectPlatformFrom` + `devicePlatform.ets` 覆盖层）是第二道防线。
+// 当前状态（2026-11-15 实测）：本机只装了纯 DevEco 26（无 ArkUI-X），因此这里只保留 HarmonyOS target
+// （`src/main` + `src/harmony`，同名相对路径 harmony 覆盖 main）。Android target 的完整写法保存在
+// `entry/build-profile.arkui-x.json5`，装上 ArkUI-X 工具链后连同根 `build-profile.arkui-x.json5` 一起启用。
 {
   "apiType": "stageMode",
   "buildOption": {
@@ -42,15 +40,6 @@
         "sourceRoots": [
           "./src/main",
           "./src/harmony"
-        ]
-      }
-    },
-    {
-      // Android 构建：只有共享层，物理上不编译 handwrite/OCR/PixelMap 代码
-      "name": "android",
-      "source": {
-        "sourceRoots": [
-          "./src/main"
         ]
       }
     }

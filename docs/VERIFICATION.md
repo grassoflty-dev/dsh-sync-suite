@@ -225,7 +225,6 @@ push → 另一设备 pull → preview → apply → rollback 全链路，不依
 
 | 未验证项 | 原因 | 验证步骤 |
 | --- | --- | --- |
-| DevEco Studio / ArkUI-X 真实编译与签名 | 本机未安装 DevEco SDK | 用 DevEco 5 打开 `apps/arkui-schedule`：切 `default` product 构建，确认 `handwritingPageRoute()` 非空、`getFeatures()` 两项为 true；切 `android` product 构建，确认产物无 `Handwriting*`/`OcrBatchManager`/`ReminderService`/`@kit.CoreVisionKit`/`multimedia.image`；`source.sourceRoots` 装配未在 DevEco 5 实测，若 hvigor 不识别该字段，回退步骤见 `reports/platformfix.md` §7 |
 | 真机 OCR、PixelMap 截图、Canvas 手写 | 无鸿蒙设备 | 真机运行 Handwriting 页，确认每页落盘 sha256、释放 PixelMap、0→N 拼接 |
 | reminderAgentManager / 通知降级 / AGC 权限 | 需 AGC 申请（约 8 工作日）+ 手动签名 | 申请 `PUBLISH_AGENT_REMINDER` 开放能力后真机创建 ≤30 条提醒并验证未授权降级 |
 | Android 设备运行 | 无 Android 设备 | 用 Android 构建产物安装，确认手写入口隐藏、纯键盘输入、Git 同步可用 |
@@ -239,6 +238,69 @@ push → 另一设备 pull → preview → apply → rollback 全链路，不依
 
 - BRIEF §3.6 列的「插件清单 MERGE-only」属于插件同步引擎语义（应用不处理 DSH 插件清单），
   由 `packages/dsh-git-config-sync/test/plugin-merge.test.mjs` 覆盖；应用侧只同步日程 JSONL 与附件。
-- 应用 `.ets` 无法在本机编译，因此用三层替代验收：纯逻辑 tsc+node 测试（155 项）、静态规则校验（8 条）、
-  代码级契约核对（页面/服务 API、平台覆盖、rawfile 真实产物）。
+- 应用 `.ets` **已在本机真实编译通过**（见 §8）；纯逻辑 tsc+node 测试（155 项）与静态规则校验（8 条）
+  继续作为回归保障，运行时不依赖设备。
 - `reports/`（执行者报告）被 `.gitignore` 忽略，属工作过程记录；本文件为对外验收证据。
+
+## 8. 真实鸿蒙构建（2026-11-15 实测）
+
+### 8.1 工具链
+
+| 项 | 值 |
+| --- | --- |
+| IDE | `D:\A-DevEco\DevEco Studio`，DevEco Studio **26.0.0.865**（build `DS-261.23567.138.36.2600865`） |
+| SDK | `sdk\default`：**HarmonyOS 26.0.0**（`apiVersion: 26`，Release） |
+| 构建入口 | `devecocli`（npm `@deveco/deveco-cli@1.3.0-stable`），内部调用自带 `tools\hvigor` + `tools\ohpm` + `tools\node` + `jbr` |
+| 版本对齐 | `compatibleSdkVersion` / `targetSdkVersion` = `26.0.0`（本机只装 API 26 SDK；用户确认 HarmonyOS 6+ 可接受） |
+
+### 8.2 命令与结果（可复现）
+
+```powershell
+$env:DEVECO_CLI_STUDIO_PATH = 'D:\A-DevEco\DevEco Studio'
+$env:DEVECO_SDK_HOME = 'D:\A-DevEco\DevEco Studio\sdk'
+cd apps\arkui-schedule
+devecocli build clean        # Clean completed successfully（停止 1 个 daemon）
+devecocli build --product default
+```
+
+实测输出：
+
+```
+> hvigor WARN: No signingConfig found for product default
+> hvigor BUILD SUCCESSFUL in 1 min 26 s 296 ms
+
+entry/build/default/outputs/default/entry-default-unsigned.hap        0.87 MB
+entry/build/default/outputs/default/app/entry-default.hap             0.87 MB
+```
+
+HAP **未签名**（无 AGC 签名配置），真机安装前需在 DevEco 里配 `signingConfigs` 或走自动签名。
+边用电脑边构建时用 `tools/build-harmony.ps1`（处理器亲和性 + BelowNormal + JVM/Node 上限），
+实测构建进程 `Affinity=0xF`、`Priority=BelowNormal`。
+
+### 8.3 首次构建暴露并修复的 7 类问题
+
+| # | 报错 | 根因 | 修复 |
+| --- | --- | --- | --- |
+| 1 | `Schema validate failed` at `app.products[1].runtimeOS` | 纯 DevEco 26 只接受 `runtimeOS: HarmonyOS | OpenHarmony`，`Android` 属 ArkUI-X 扩展 | 移除 Android product/target，另存 `build-profile.arkui-x.json5` + `entry/build-profile.arkui-x.json5` |
+| 2 | `app.apiReleaseType` 不匹配 `^(Canary|Beta|Release)[1-9]\d*$` | `AppScope/app.json5` 里有旧字段 `apiReleaseType: "Release"`、`minAPIVersion/targetAPIVersion: 12` | 精简为 scaffold 形态（bundleName/vendor/versionCode/versionName/icon/label） |
+| 3 | `hvigor-config.json5` does not exist | 生成工程缺 hvigor wrapper 配置 | 新增 `hvigor/hvigor-config.json5`（modelVersion `26.0.0`） |
+| 4 | `Cannot find name 'crossplatform'`（6 处 + 鸿蒙覆盖层 2 处） | `@crossplatform` 是 ArkUI-X 装饰器，纯 HarmonyOS 编译器不定义 | 新增 `tools/set-build-mode.mjs`：纯鸿蒙模式移除、ArkUI-X 模式自动加回；validator 规则 5 改为按模式校验 |
+| 5 | `arkts-no-spread`（Index/Detail 3 处 `{...record}`） | ArkTS 禁止对象展开 | `model/types.ts` 新增 `cloneRecord()` 逐字段复制，调用处改为「克隆 + 改字段」 |
+| 6 | `arkts-no-structural-typing`（GitSyncService 2 处 reject） | `Error` 是接口，类实例赋值触发结构化类型检查 | `PendingRequest.reject` 与 Promise executor 的 reject 参数改为 `Object` |
+| 7 | `arkts-no-untyped-obj-literals`（Settings）、`WebAttribute.onError` 不存在 | `Record<string,string>` 字面量 + 旧版 Web 回调 | 改显式 if/else；`.onError()` → `.onErrorReceive()` |
+
+### 8.4 构建后的回归
+
+```
+node tools/validate-app.mjs                  # ✅ 8/8（JSON5 17、import 78、main 静态 import 88、页面 4、rawfile 2）
+node --test apps/arkui-schedule/tools/test/*.test.mjs   # 155 pass / 0 fail
+.\node_modules\.bin\tsc -p apps/arkui-schedule/tools/tsconfig.json --noEmit   # exit 0
+```
+
+### 8.5 仍未验证（构建已通过，但运行时仍需设备）
+
+- HAP 未签名，真机安装需 AGC 签名配置；
+- 真机 OCR / `componentSnapshot` / PixelMap 释放 / 提醒权限（AGC，约 8 工作日）；
+- Android 分支：本机无 ArkUI-X 工具链，`architecture-x` 变体只做了静态校验，未编译；
+- `source.sourceRoots` 在 HarmonyOS build 中已被 hvigor 接受（本次构建通过），
+  但其「同名相对路径后者覆盖前者」的语义是否与 ArkUI-X 一致，仍需在 ArkUI-X 工具链下复核。
