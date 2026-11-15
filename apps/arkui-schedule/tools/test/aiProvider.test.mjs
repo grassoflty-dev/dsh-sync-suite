@@ -16,6 +16,7 @@ const {
   chatCompletionsURL,
   defaultModelOf,
   findProvider,
+  hintForProvider,
   isValidBaseURL,
   modelsOf,
   normalizeBaseURL,
@@ -91,8 +92,8 @@ describe('AI_PROVIDERS：预设表', () => {
 
   test('keyHint：OpenCode 说明未实测，Codex 说明是 API Key 模式', () => {
     assert.match(findProvider('opencode-go').keyHint, /端点未实测/);
-    assert.match(findProvider('codex').keyHint, /OpenAI API key/);
-    assert.match(findProvider('codex').keyHint, /不支持 ChatGPT 订阅/);
+    assert.match(findProvider('codex').keyHint, /API Key 模式/);
+    assert.match(findProvider('codex').keyHint, /非 ChatGPT 订阅/);
   });
 
   test('每个源都有非空且唯一的模型 id', () => {
@@ -303,5 +304,56 @@ describe('deepseek 接入多源', () => {
 
   test('密钥只进 Authorization 头', () => {
     assert.match(DEEPSEEK, /'Authorization': `Bearer \$\{apiKey\}`/);
+  });
+});
+
+describe('Key 自助文案（keyHint）', () => {
+  test('四个源的引导文案逐字钉住', () => {
+    assert.deepEqual(
+      AI_PROVIDERS.map((preset) => [preset.id, preset.keyHint]),
+      [
+        ['deepseek', 'platform.deepseek.com → API keys 创建（sk- 开头），测试最稳'],
+        ['opencode-go', 'OpenCode Go 控制台取 key；端点未实测（标「实验」），失败先查 key 与地址'],
+        ['codex', 'platform.openai.com → API keys（API Key 模式，非 ChatGPT 订阅）'],
+        ['custom', '任意 OpenAI 兼容服务，填 …/v1 地址与 key']
+      ]
+    );
+  });
+
+  test('每条都是单行（直接显示在 Key 输入框下方）', () => {
+    for (const preset of AI_PROVIDERS) {
+      assert.equal(preset.keyHint.includes('\n'), false, `${preset.id} 的 keyHint 不是单行`);
+      assert.ok(preset.keyHint.length <= 60, `${preset.id} 的 keyHint 太长：${preset.keyHint.length}`);
+    }
+  });
+});
+
+describe('hintForProvider：失败后的下一步建议', () => {
+  test('常见错误各给一条可操作建议', () => {
+    assert.match(hintForProvider('deepseek', 401), /key 无效或过期/);
+    assert.match(hintForProvider('deepseek', 403), /账号无该模型权限/);
+    assert.match(hintForProvider('deepseek', 429), /限流/);
+    assert.match(hintForProvider('deepseek', 400), /模型名/);
+    assert.match(hintForProvider('deepseek', 422), /模型名/);
+    assert.match(hintForProvider('deepseek', 500), /服务端异常/);
+    assert.match(hintForProvider('deepseek', -1), /网络或端点不可达/);
+    assert.match(hintForProvider('deepseek', 0), /网络或端点不可达/);
+  });
+
+  test('成功与未知状态：成功返回空串', () => {
+    assert.equal(hintForProvider('deepseek', 200), '');
+    assert.match(hintForProvider('deepseek', 418), /检查源配置/);
+  });
+
+  test('404 按源区分（OpenCode Go 端点未实测）', () => {
+    assert.match(hintForProvider('opencode-go', 404), /OpenCode Go 端点未实测/);
+    assert.match(hintForProvider('custom', 404), /…\/v1/);
+    assert.match(hintForProvider('codex', 404), /模型名可能已变更/);
+  });
+
+  test('401 措辞按源自定义服务区分', () => {
+    assert.match(hintForProvider('custom', 401), /自定义服务的 key/);
+    assert.match(hintForProvider('deepseek', 401), /服务商控制台重新复制/);
+    assert.match(hintForProvider('nope', 401), /服务商控制台重新复制/);
   });
 });

@@ -50,8 +50,13 @@ import type { RegionBox } from '../model/types';
 
 /** 竖屏顶部工具条高度（vp）——定版要求 ≤48vp。 */
 const TOP_BAR_HEIGHT: number = 48;
-/** 横屏左侧 rail 宽度（vp）——定版要求 ≤56vp。 */
-const RAIL_WIDTH: number = 56;
+/**
+ * 横屏左侧 rail 宽度（vp）。
+ *
+ * 真机实测：56vp 时「手动框」被截成「手动」、「完成」显示成「...」、
+ * 步进器 −/+ 被挤出 rail。加宽到 72vp 后 3 字标签完整、步进器改竖向堆叠。
+ */
+const RAIL_WIDTH: number = 72;
 /** 工具条控件高度（vp）。 */
 const TOOL_HEIGHT: number = 40;
 /** 工具条控件最小宽度（vp）——定版要求 ≥44vp（徽标 + ▾ 不再被挤没）。 */
@@ -423,6 +428,12 @@ struct Handwriting {
 
   // ------------------------------------------------------------------ 工具条按钮（宽度随内容自适应）
 
+  /** 当前颜色名（颜色按钮的短标签：黑/红/蓝/绿/橙）。 */
+  private currentColorLabel(): string {
+    const index: number = PEN_COLORS.indexOf(this.pagerState.penColor);
+    return index >= 0 && index < COLOR_LABELS.length ? COLOR_LABELS[index] : '色';
+  }
+
   /** 当前笔刷中文名（笔形按钮的动态文案：钢笔 / 圆珠笔 / 铅笔 / 马克笔 / 荧光笔）。 */
   private currentBrushLabel(): string {
     return brushSpec(this.pagerState.brush).label;
@@ -501,7 +512,7 @@ struct Handwriting {
     })
   }
 
-  /** 颜色按钮：**「当前色块 20×20 + ▾」**。 */
+  /** 颜色按钮：**「当前色块 20×20 + 色名短标签 + ▾」**（横屏 rail 里也能看出当前颜色）。 */
   @Builder
   colorMenuButton() {
     Row({ space: 2 }) {
@@ -511,6 +522,13 @@ struct Handwriting {
         .borderRadius(RADIUS.sm)
         .backgroundColor(this.pagerState.penColor)
         .border({ width: 1, color: this.panel === PANEL_COLOR ? Color.White : '#DDDDDD' })
+      Text(this.currentColorLabel())
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === PANEL_COLOR ? Color.White : $r('app.color.text_primary'))
+        .margin({ left: 2 })
       Text('▾')
         .fontSize(FONT.caption)
         .lineHeight(LINE_HEIGHT.caption)
@@ -584,25 +602,13 @@ struct Handwriting {
   }
 
   /**
-   * 页码步进器 `− n/m +`（整体一个控件，`flexShrink(0)`）：
+   * 竖屏：页码步进器 `− n/m +`（横向一行，整体一个控件，`flexShrink(0)`）。
    * `−` 删当前页（两步确认）、`+` 在当前页之后插入空白页。
    */
   @Builder
   pageStepper() {
     Row() {
-      Text('−')
-        .width(STEPPER_BTN)
-        .height(TOOL_HEIGHT)
-        .fontSize(FONT.body)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .textAlign(TextAlign.Center)
-        // 禁用态只改色，不降透明度
-        .fontColor(this.pageCount > 1 ? $r('app.color.danger') : $r('app.color.text_secondary'))
-        .enabled(this.pageCount > 1)
-        .onClick(() => {
-          this.startDeletePage();
-        })
+      this.stepperMinus(STEPPER_BTN)
       Text(`${this.currentPage + 1}/${this.pageCount}`)
         .width(STEPPER_LABEL_W)
         .height(TOOL_HEIGHT)
@@ -612,18 +618,7 @@ struct Handwriting {
         .textOverflow({ overflow: TextOverflow.None })
         .textAlign(TextAlign.Center)
         .fontColor($r('app.color.text_primary'))
-      Text('+')
-        .width(STEPPER_BTN)
-        .height(TOOL_HEIGHT)
-        .fontSize(FONT.body)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .textAlign(TextAlign.Center)
-        .fontColor(this.pageCount < MAX_HANDWRITING_PAGES ? $r('app.color.brand') : $r('app.color.text_secondary'))
-        .enabled(this.pageCount < MAX_HANDWRITING_PAGES)
-        .onClick(() => {
-          this.insertPage();
-        })
+      this.stepperPlus(STEPPER_BTN)
     }
     .height(TOOL_HEIGHT)
     .constraintSize({ minWidth: STEPPER_BTN * 2 + STEPPER_LABEL_W })
@@ -632,13 +627,79 @@ struct Handwriting {
     .flexShrink(0)
   }
 
-  /** 「完成」：唯一主操作，实底品牌蓝 + 白字、不收缩；竖屏 minWidth 64vp，横屏拉满 rail 宽。 */
+  /**
+   * 横屏：页码步进器**纵向三行** `−` / `n/m` / `+`（真机缺陷：横向排被 56vp 的 rail 挤出去，
+   * `−` 和 `+` 直接看不见）。每行 40vp 高、宽撑满 rail。
+   */
+  @Builder
+  pageStepperVertical() {
+    Column() {
+      this.stepperMinus(STEPPER_BTN)
+      Text(`${this.currentPage + 1}/${this.pageCount}`)
+        .width('100%')
+        .height(TOOL_HEIGHT)
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .textAlign(TextAlign.Center)
+        .fontColor($r('app.color.text_primary'))
+      this.stepperPlus(STEPPER_BTN)
+    }
+    .width('100%')
+    .borderRadius(RADIUS.sm)
+    .backgroundColor('#F7F8FA')
+    .alignItems(HorizontalAlign.Center)
+    .flexShrink(0)
+  }
+
+  /** 步进器的 `−`（删页，两步确认；只剩 1 页时禁用，只改色不透明）。 */
+  @Builder
+  stepperMinus(width: number) {
+    Text('−')
+      .width(width)
+      .height(TOOL_HEIGHT)
+      .fontSize(FONT.body)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .textAlign(TextAlign.Center)
+      .fontColor(this.pageCount > 1 ? $r('app.color.danger') : $r('app.color.text_secondary'))
+      .enabled(this.pageCount > 1)
+      .onClick(() => {
+        this.startDeletePage();
+      })
+  }
+
+  /** 步进器的 `+`（在当前页之后插入；满 10 页禁用）。 */
+  @Builder
+  stepperPlus(width: number) {
+    Text('+')
+      .width(width)
+      .height(TOOL_HEIGHT)
+      .fontSize(FONT.body)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .textAlign(TextAlign.Center)
+      .fontColor(this.pageCount < MAX_HANDWRITING_PAGES ? $r('app.color.brand') : $r('app.color.text_secondary'))
+      .enabled(this.pageCount < MAX_HANDWRITING_PAGES)
+      .onClick(() => {
+        this.insertPage();
+      })
+  }
+
+  /**
+   * 「完成」：唯一主操作，实底品牌蓝 + 白字、不收缩。
+   *
+   * 真机缺陷：rail 里 56vp 宽时 Button 内部 padding 把 2 个字挤成「...」。
+   * 现在：竖屏 64vp、横屏 rail 宽 −4vp（72−4=68），并显式给 4vp 左右 padding，内容区 ≥50vp。
+   */
   @Builder
   finishButton(fullWidth: boolean) {
     Button(this.busy ? '识别中' : '完成')
       .height(TOOL_HEIGHT)
-      .width(fullWidth ? RAIL_WIDTH - SPACING.sm : FINISH_MIN_WIDTH)
-      .constraintSize({ minWidth: fullWidth ? RAIL_WIDTH - SPACING.sm : FINISH_MIN_WIDTH })
+      .width(fullWidth ? RAIL_WIDTH - SPACING.xs : FINISH_MIN_WIDTH)
+      .constraintSize({ minWidth: FINISH_MIN_WIDTH })
+      .padding({ left: SPACING.xs, right: SPACING.xs })
       .fontSize(FONT.caption)
       .backgroundColor($r('app.color.brand'))
       .fontColor(Color.White)
@@ -693,7 +754,8 @@ struct Handwriting {
       this.toolButton('手动框', HW_TOOL_SELECT)
       this.historyButton('undo', '↶', this.undoSteps > 0)
       this.historyButton('redo', '↷', this.redoAvailable)
-      this.pageStepper()
+      // 横屏：步进器纵向三行（横向排会被 56/72vp 的 rail 挤出去）
+      this.pageStepperVertical()
       Blank()
       this.finishButton(true)
     }

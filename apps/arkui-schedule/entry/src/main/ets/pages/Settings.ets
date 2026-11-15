@@ -55,6 +55,7 @@ import {
   DEFAULT_PROVIDER_ID,
   defaultModelOf,
   findProvider,
+  hintForProvider,
   isValidBaseURL,
   modelsOf
 } from '../model/aiProvider';
@@ -110,6 +111,8 @@ struct Settings {
   @State connectionText: string = '';
   @State connectionBusy: boolean = false;
   @State aiTestText: string = '';
+  /** 失败后的一行可操作建议（成功时为空，不占行）。 */
+  @State aiTestHint: string = '';
   @State aiTestBusy: boolean = false;
   /** 上次同步成功时刻（ISO，空串=从未同步；来自 preferences，跨启动保留）。 */
   @State lastSyncAt: string = '';
@@ -408,10 +411,12 @@ struct Settings {
     }
     if (this.aiKey.trim().length === 0) {
       this.aiTestText = '失败：请先填写 API Key';
+      this.aiTestHint = findProvider(this.aiProviderId).keyHint;
       return;
     }
     this.aiTestBusy = true;
     this.aiTestText = '正在测试…';
+    this.aiTestHint = '';
     try {
       const result: AiTestResult = await testAiConnection(
         this.aiKey,
@@ -423,14 +428,16 @@ struct Settings {
         return;
       }
       // 真实往返耗时由 testAiConnection 给出（未发出请求时为 0，此时不显示 ms）；
-      // 失败文案里已含源名与错误码，原样展示。
+      // 失败文案里已含源名与错误码，原样展示；再加一行「下一步做什么」。
       const tail: string = result.elapsedMs > 0 ? ` · ${result.elapsedMs}ms` : '';
       this.aiTestText = result.ok ? `成功${tail}` : `${result.message}${tail}`;
+      this.aiTestHint = result.ok ? '' : hintForProvider(this.aiProviderId, result.status);
     } catch (error) {
       if (this.disposed) {
         return;
       }
       this.aiTestText = `失败：${describeError(error)}`;
+      this.aiTestHint = hintForProvider(this.aiProviderId, 0);
     } finally {
       if (!this.disposed) {
         this.aiTestBusy = false;
@@ -979,6 +986,18 @@ struct Settings {
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
+
+      // 失败才出现的「下一步做什么」；成功时不占行
+      if (this.aiTestHint.length > 0) {
+        Text(this.aiTestHint)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+          .textAlign(TextAlign.Start)
+      }
 
       Row({ space: SPACING.sm }) {
         Text(this.advancedOpen ? '高级 ▾' : '高级 ▸')
