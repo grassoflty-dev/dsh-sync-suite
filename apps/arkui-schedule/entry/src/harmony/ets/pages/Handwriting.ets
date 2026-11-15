@@ -85,10 +85,15 @@ const RAIL_ITEM_HEIGHT: number = 44;
  */
 const RAIL_GAP: number = 2;
 /**
- * 分页区的单元格宽度（vp）：`[−|+]`、`[n/m]`、`[‹|›]` 三个单元格都是 72vp 宽，
- * 两半各 ≈35.5vp（≥32vp 点击区），中间 1vp 分割线。
+ * 分页区的单元格宽度（vp）。
+ *
+ * - 横屏 rail：`CELL_WIDTH = 72`，与 rail 里其它控件等宽；
+ * - 竖屏顶部条：`CELL_W_COMPACT = 36vp`（≈85px @2.375，每个格 ≈84px），三个单元格 + 间距共 116vp，
+ *   给横向 Scroll 留出 ≈420vp 放 7 个工具按钮（实测够用，不会把分页组挤出屏幕）。
+ *   单元格内部两半等分，每半 ≈41px 宽（> 34px 验收线）。
  */
 const CELL_WIDTH: number = 72;
+const CELL_W_COMPACT: number = 36;
 /** 横屏 rail 底色（比画布浅一点，与内容区分开；不用投影）。 */
 const RAIL_BG: string = '#F7F9FB';
 /** 工具条控件高度（vp）。 */
@@ -919,16 +924,18 @@ struct Handwriting {
    * ```
    * [ − | + ]   [ 3/5 ]   [ ‹ | › ]
    * ```
-   * 竖屏放在顶部条里（横向一行）；横屏放在 rail 里（纵向堆叠，每个单元格宽度都是 72vp）。
+   * 竖屏：放在**顶部条**里、**横向 Scroll 之外**（固定显示，宽度取紧凑档 `CELL_W_COMPACT = 36vp ≈84px`），
+   * 这样不会被 Scroll 边缘裁掉；
+   * 横屏：放在 rail 里纵向堆叠，宽度取 `CELL_WIDTH`（72vp，与 rail 其它控件等宽）。
    */
   @Builder
   pageStepper() {
     Row({ space: SPACING.xs }) {
-      this.insertDeleteCell()
-      this.pageLabelCell()
-      this.prevNextCell()
+      this.insertDeleteCell(CELL_W_COMPACT)
+      this.pageLabelCell(CELL_W_COMPACT)
+      this.prevNextCell(CELL_W_COMPACT)
     }
-    .height(TOOL_HEIGHT)
+    .height(RAIL_ITEM_HEIGHT)
     .flexShrink(0)
   }
 
@@ -944,11 +951,11 @@ struct Handwriting {
 
   /** `[−|+]` 单元格：左半删当前页（两次确认）、右半在当前页之后插页，各自独立禁用。 */
   @Builder
-  insertDeleteCell() {
+  insertDeleteCell(width: number) {
     Row() {
       Text('−')
         .layoutWeight(1)
-        .height(TOOL_HEIGHT)
+        .height(RAIL_ITEM_HEIGHT)
         .fontSize(FONT.body)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
@@ -964,11 +971,11 @@ struct Handwriting {
         .vertical(true)
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
-        .height(TOOL_HEIGHT)
+        .height(RAIL_ITEM_HEIGHT)
 
       Text('+')
         .layoutWeight(1)
-        .height(TOOL_HEIGHT)
+        .height(RAIL_ITEM_HEIGHT)
         .fontSize(FONT.body)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
@@ -979,8 +986,8 @@ struct Handwriting {
           this.insertPage();
         })
     }
-    .width(CELL_WIDTH)
-    .height(TOOL_HEIGHT)
+    .width(width)
+    .height(RAIL_ITEM_HEIGHT)
     .borderRadius(RADIUS.sm)
     .backgroundColor('#F7F8FA')
     .clip(true)
@@ -989,11 +996,11 @@ struct Handwriting {
 
   /** `[n/m]` 单元格：只读页码。 */
   @Builder
-  pageLabelCell() {
+  pageLabelCell(width: number) {
     Row() {
       Text(`${this.pageIndex() + 1}/${this.pageTotal()}`)
         .width('100%')
-        .height(TOOL_HEIGHT)
+        .height(RAIL_ITEM_HEIGHT)
         .fontSize(FONT.caption)
         .lineHeight(LINE_HEIGHT.caption)
         .maxLines(1)
@@ -1001,8 +1008,8 @@ struct Handwriting {
         .textAlign(TextAlign.Center)
         .fontColor($r('app.color.text_primary'))
     }
-    .width(CELL_WIDTH)
-    .height(TOOL_HEIGHT)
+    .width(width)
+    .height(RAIL_ITEM_HEIGHT)
     .borderRadius(RADIUS.sm)
     .backgroundColor('#F7F8FA')
     .clip(true)
@@ -1011,11 +1018,11 @@ struct Handwriting {
 
   /** `[‹|›]` 单元格：左半上一页（首页禁用）、右半下一页（末页禁用）。 */
   @Builder
-  prevNextCell() {
+  prevNextCell(width: number) {
     Row() {
       Text('‹')
         .layoutWeight(1)
-        .height(TOOL_HEIGHT)
+        .height(RAIL_ITEM_HEIGHT)
         .fontSize(FONT.body)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
@@ -1030,11 +1037,11 @@ struct Handwriting {
         .vertical(true)
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
-        .height(TOOL_HEIGHT)
+        .height(RAIL_ITEM_HEIGHT)
 
       Text('›')
         .layoutWeight(1)
-        .height(TOOL_HEIGHT)
+        .height(RAIL_ITEM_HEIGHT)
         .fontSize(FONT.body)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
@@ -1045,8 +1052,8 @@ struct Handwriting {
           this.goNextPage();
         })
     }
-    .width(CELL_WIDTH)
-    .height(TOOL_HEIGHT)
+    .width(width)
+    .height(RAIL_ITEM_HEIGHT)
     .borderRadius(RADIUS.sm)
     .backgroundColor('#F7F8FA')
     .clip(true)
@@ -1103,7 +1110,15 @@ struct Handwriting {
       })
   }
 
-  /** 竖屏：顶部单行工具条（48vp，`‹` + 9 个控件；溢出时该行横向滚动、不换行不加高）。 */
+  /**
+   * 竖屏：顶部单行工具条（48vp）——**四段固定布局，分页组不参与横向滚动**：
+   *
+   * ```
+   * [‹ 退出] [Scroll: 钢笔▾ 3.5▾ 黑▾ 橡皮 手动框 ↶ ↷] [ [−|+] [1/1] [‹|›] ] [完成]
+   * ```
+   * 之前分页组塞在 Scroll 里，真机上 `‹` 被 Scroll 边缘裁成 20px、`›` 完全不可见；
+   * 现在三个单元格固定在 `完成` 左侧，只有中间那 7 个工具按钮横向滚动。
+   */
   @Builder
   topBar() {
     Row({ space: SPACING.xs }) {
@@ -1118,7 +1133,6 @@ struct Handwriting {
           this.toolButton('手动框', HW_TOOL_SELECT)
           this.historyButton('undo', '↶', this.pagerState.undoSteps > 0)
           this.historyButton('redo', '↷', this.pagerState.redoAvailable)
-          this.pageStepper()
         }
         .height(TOOL_HEIGHT)
         .alignItems(VerticalAlign.Center)
@@ -1128,6 +1142,9 @@ struct Handwriting {
       .layoutWeight(1)
       .height(TOOL_HEIGHT)
       .align(Alignment.Start)
+
+      // 分页三单元格：Scroll 之外、完成左侧，固定可见
+      this.pageStepper()
 
       this.finishButton()
     }
@@ -1170,9 +1187,9 @@ struct Handwriting {
         this.railHistoryButton('undo', '↶', this.pagerState.undoSteps > 0)
         this.railHistoryButton('redo', '↷', this.pagerState.redoAvailable)
         // 分页三单元格：宽度同为 72vp（CELL_WIDTH == RAIL_WIDTH），与上面按钮等宽
-        this.insertDeleteCell()
-        this.pageLabelCell()
-        this.prevNextCell()
+        this.insertDeleteCell(CELL_WIDTH)
+        this.pageLabelCell(CELL_WIDTH)
+        this.prevNextCell(CELL_WIDTH)
         Blank()
         this.railFinishButton()
       }
