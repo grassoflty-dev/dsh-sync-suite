@@ -80,6 +80,14 @@ if ($DryRun) {
 }
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+
+# Platform overlay: entry's `targets[].source.sourceRoots` does NOT apply to the entry module
+# (hvigor only honors it for HAR/HSP dependencies), so `src/harmony/**` would never be compiled
+# and the HAP would silently ship without the handwriting page. tools/overlay.mjs copies the
+# harmony tree over src/main/ and records a reversible manifest; it is restored after the build.
+$overlay = Join-Path $projectRoot 'tools\overlay.mjs'
+& node $overlay apply
+if ($LASTEXITCODE -ne 0) { throw "overlay apply failed (exit $LASTEXITCODE)" }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $log = Join-Path $logDir "build-$stamp.log"
 
@@ -130,4 +138,19 @@ Write-Host ""
 Write-Host "Exit code: $code"
 Write-Host "Log: $log"
 Get-Content $log -Tail 30 -ErrorAction SilentlyContinue
+
+# Always restore the shared tree, even when the build failed.
+& node $overlay restore
+
+if ($code -eq 0) {
+  # BUILD SUCCESSFUL is not delivery: assert the artifacts actually contain the feature.
+  Write-Host ""
+  Write-Host "== verify HAP contents =="
+  & node (Join-Path $projectRoot 'tools\verify-hap.mjs')
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "HAP content verification failed (exit $LASTEXITCODE)" -ForegroundColor Red
+    exit $LASTEXITCODE
+  }
+}
+
 exit $code

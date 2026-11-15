@@ -6,7 +6,8 @@
  * - 分页识别结果 0→N 一次性拼接、空页跳过；
  * - 表格/公式不做整页结构化，统一降级为 `STRUCTURED_PLACEHOLDER` 占位符 + 原始截图兜底。
  */
-import type { Attachment } from './types';
+import type { Attachment, RegionBox } from './types';
+import { regionsToPlaceholders } from './regions';
 
 /** 公式/图表在 AI 结构化文本中的占位符（原文仍可从 OCR 与截图查看）。 */
 export const STRUCTURED_PLACEHOLDER = '[公式/图表: 查看手迹]';
@@ -96,6 +97,38 @@ function isComplexLine(trimmed: string): boolean {
     ASCII_TABLE_RE.test(trimmed) ||
     TABLE_PIPE_RE.test(trimmed)
   );
+}
+
+/**
+ * 按页拼正文：
+ * - 文字页 = `replaceComplexBlocks(该页文本).trim()`，空串跳过（不产生空行）；
+ * - 随后**追加该页的区域占位符**（`[图表/公式: 查看手迹 · 第N页·区域M]`，按 y 升序、区域序号 1 起，
+ *   见 `regions.ts`）——框内内容不参与 OCR，正文只留占位符指向原图；
+ * - 页间用单个 `'\n'` 连接；全空返回 `''`。
+ *
+ * `pageTexts` 与页一一对齐（页数以此为准）；`pageRegions` 短于 `pageTexts` 或缺省时，
+ * 该页按「无区域」处理（多出的 `pageRegions` 会被忽略）。
+ */
+export function composePageBody(pageTexts: string[], pageRegions: RegionBox[][]): string {
+  const texts: string[] = Array.isArray(pageTexts) ? pageTexts : [];
+  const regionsByPage: RegionBox[][] = Array.isArray(pageRegions) ? pageRegions : [];
+  const parts: string[] = [];
+  for (let pageIndex = 0; pageIndex < texts.length; pageIndex++) {
+    const raw: string = texts[pageIndex];
+    const text: string = replaceComplexBlocks(typeof raw === 'string' ? raw : '').trim();
+    if (text.length > 0) {
+      parts.push(text);
+    }
+    let pageBoxes: RegionBox[] = [];
+    if (pageIndex < regionsByPage.length && Array.isArray(regionsByPage[pageIndex])) {
+      pageBoxes = regionsByPage[pageIndex];
+    }
+    const placeholders: string[] = regionsToPlaceholders(pageIndex, pageBoxes);
+    for (let index = 0; index < placeholders.length; index++) {
+      parts.push(placeholders[index]);
+    }
+  }
+  return parts.join('\n');
 }
 
 /**

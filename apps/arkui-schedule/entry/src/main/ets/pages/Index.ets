@@ -1,12 +1,15 @@
 /**
- * 主页：日期选择 + 今日待办/全部未完成切换 + 列表（左勾选 / 中标题+时间 / 右 📎 手迹）
- * + 底部「新建 / AI 汇总 / 同步 / 提醒」。
+ * 主页：日期条 + 今日待办/全部未完成 + 列表（左勾选 / 中标题+时间 / 右手迹）+ 「新建」主操作
+ * + 「更多」面板（AI 汇总 / 同步 / 提醒 / 含其他设备）。
  *
- * 契约：BRIEF §3.5、`docs/CONTRACT.md` §3.4。
+ * 契约：BRIEF §3.5、`docs/CONTRACT.md` §3.4。**行为完全不变**，只重排 UI（`docs/UI-DESIGN.md`）：
  * - 勾选完成 = `appendRecord` 追加一条同 id 新记录（ts=nowIso()），绝不改写历史行；
  * - 「AI 汇总」读当天 `ai_processed:false` 的记录，允许逐条取消勾选；
  * - 「同步」进入设置页并自动触发拉取（Web 版 Git 内核只挂在设置页，见 services/GitSyncService.ets）；
  * - 「提醒」入口只在 HarmonyOS 侧显示，实际由平台覆盖文件调用 ReminderService。
+ *
+ * 布局：断点由 `PageLayout` 统一计算（`onAreaChange` + 方向），本页只做一处粗粒度分支
+ * `breakpoint === 'compact'`：紧凑屏单列（日期条在上面），宽屏/横屏双栏（左日期条、右列表）。
  *
  * 每日 AI 汇总为**手动触发**（BRIEF §3.4）：不做定时汇总。原因：鸿蒙侧 `setInterval` 在应用
  * 退到后台后会被系统回收，纯 TS 定时器无法保证按时触发；真要做定时汇总，必须申请长时任务
@@ -24,8 +27,10 @@ import { createReminders } from '../common/platformFeatures';
 import { describeError, scheduleStore } from '../services/scheduleStore';
 import { settingsStore } from '../services/settingsStore';
 import { deviceTimeZone, summarize } from '../services/deepseek';
-import { RecordRow } from '../components/RecordRow';
 import { EmptyState } from '../components/EmptyState';
+import { PageLayout } from '../components/PageLayout';
+import { RecordRow } from '../components/RecordRow';
+import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN, sidebarWidth } from '../common/uiTokens';
 
 /** `YYYY-MM-DD` → 本地 Date（避免 `new Date('2026-11-14')` 按 UTC 解析造成偏移）。 */
 function dateFromKey(key: string): Date {
@@ -41,6 +46,9 @@ function dateFromKey(key: string): Date {
   }
   return new Date(year, month - 1, day);
 }
+
+/** 主操作按钮高度（> `TOUCH_MIN`，唯一强调色块）。 */
+const PRIMARY_HEIGHT: number = 48;
 
 @Entry
 @Component
@@ -58,6 +66,13 @@ struct Index {
   @State statusText: string = '';
   @State ready: boolean = false;
   @State canRemind: boolean = false;
+
+  /** 断点（由 `PageLayout` 回调同步，页面只按 compact / 非 compact 分支）。 */
+  @State breakpoint: string = 'compact';
+  /** 内容区宽度（vp），宽屏下算侧栏宽度。 */
+  @State contentWidth: number = 0;
+  /** 「更多」面板是否展开。 */
+  @State showMore: boolean = false;
 
   // AI 汇总面板状态
   @State showAiPanel: boolean = false;
@@ -136,8 +151,15 @@ struct Index {
     }
   }
 
-  private countDoneText(): string {
+  /** 标题：今日待办显示日期，全部未完成显示模式名。 */
+  private pageTitle(): string {
     return this.showAllPending ? '全部未完成' : this.selectedDate;
+  }
+
+  /** 星期几（辅助信息，跟着日期走）。 */
+  private weekdayLabel(): string {
+    const names: string[] = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    return names[dateFromKey(this.selectedDate).getDay()];
   }
 
   private shiftDate(delta: number): void {
@@ -328,48 +350,61 @@ struct Index {
 
   // ------------------------------------------------------------------ UI
 
+  /** 日期条：‹ 日期/星期 › + 今天（三处点击区都 ≥ 40vp）；展开时内嵌 DatePicker。 */
   @Builder
-  DateBar() {
-    Column({ space: 8 }) {
-      Row({ space: 8 }) {
-        Button('‹')
-          .type(ButtonType.Circle)
-          .width(36)
-          .height(36)
-          .backgroundColor('#E8F1FF')
+  DateBlock() {
+    Column({ space: SPACING.sm }) {
+      Row({ space: SPACING.sm }) {
+        Text('‹')
+          .fontSize(FONT.title)
+          .lineHeight(LINE_HEIGHT.title)
           .fontColor($r('app.color.brand'))
+          .width(TOUCH_MIN)
+          .height(TOUCH_MIN)
+          .textAlign(TextAlign.Center)
           .onClick(() => this.shiftDate(-1))
 
-        Column({ space: 2 }) {
+        Column({ space: SPACING.xs }) {
           Text(this.selectedDate)
-            .fontSize(18)
-            .fontWeight(FontWeight.Bold)
+            .fontSize(FONT.body)
+            .lineHeight(LINE_HEIGHT.body)
+            .fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.text_primary'))
-          Text('点击选择日期')
-            .fontSize(11)
+            .width('100%')
+            .textAlign(TextAlign.Start)
+          Text(this.weekdayLabel())
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
             .fontColor($r('app.color.text_secondary'))
+            .width('100%')
+            .textAlign(TextAlign.Start)
         }
         .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
         .onClick(() => {
           this.showDatePicker = !this.showDatePicker;
         })
 
-        Button('›')
-          .type(ButtonType.Circle)
-          .width(36)
-          .height(36)
-          .backgroundColor('#E8F1FF')
+        Text('今天')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.brand'))
-          .onClick(() => this.shiftDate(1))
-
-        Button('今天')
-          .height(36)
-          .fontSize(13)
-          .backgroundColor($r('app.color.brand'))
-          .fontColor(Color.White)
+          .height(TOUCH_MIN)
+          .padding({ left: SPACING.md, right: SPACING.md })
+          .textAlign(TextAlign.Center)
           .onClick(() => this.goToday())
+
+        Text('›')
+          .fontSize(FONT.title)
+          .lineHeight(LINE_HEIGHT.title)
+          .fontColor($r('app.color.brand'))
+          .width(TOUCH_MIN)
+          .height(TOUCH_MIN)
+          .textAlign(TextAlign.Center)
+          .onClick(() => this.shiftDate(1))
       }
       .width('100%')
+      .alignItems(VerticalAlign.Center)
 
       if (this.showDatePicker) {
         DatePicker({
@@ -388,58 +423,62 @@ struct Index {
     .width('100%')
   }
 
+  /** 模式分段控件：两段各 40vp 高（选中 = 强调色实底）。 */
   @Builder
   ModeTabs() {
-    Row({ space: 8 }) {
+    Row({ space: SPACING.sm }) {
       Text('今日待办')
-        .fontSize(14)
-        .fontColor(this.showAllPending ? $r('app.color.text_secondary') : Color.White)
-        .backgroundColor(this.showAllPending ? Color.White : $r('app.color.brand'))
-        .borderRadius(16)
-        .padding({ left: 14, right: 14, top: 6, bottom: 6 })
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor(this.showAllPending ? $r('app.color.text_secondary') : $r('app.color.brand'))
+        .backgroundColor(this.showAllPending ? $r('app.color.page_background') : $r('app.color.brand_soft'))
+        .height(TOUCH_MIN)
+        .layoutWeight(1)
+        .textAlign(TextAlign.Center)
         .onClick(() => {
           this.showAllPending = false;
           this.reload();
         })
       Text('全部未完成')
-        .fontSize(14)
-        .fontColor(this.showAllPending ? Color.White : $r('app.color.text_secondary'))
-        .backgroundColor(this.showAllPending ? $r('app.color.brand') : Color.White)
-        .borderRadius(16)
-        .padding({ left: 14, right: 14, top: 6, bottom: 6 })
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor(this.showAllPending ? $r('app.color.brand') : $r('app.color.text_secondary'))
+        .backgroundColor(this.showAllPending ? $r('app.color.brand_soft') : $r('app.color.page_background'))
+        .height(TOUCH_MIN)
+        .layoutWeight(1)
+        .textAlign(TextAlign.Center)
         .onClick(() => {
           this.showAllPending = true;
           this.showDatePicker = false;
           this.reload();
         })
-      Blank()
-      Text(this.includeOtherDevices ? '含其他设备' : '仅本机')
-        .fontSize(13)
-        .fontColor(this.includeOtherDevices ? Color.White : $r('app.color.text_secondary'))
-        .backgroundColor(this.includeOtherDevices ? $r('app.color.brand') : Color.White)
-        .borderRadius(14)
-        .padding({ left: 12, right: 12, top: 5, bottom: 5 })
-        .onClick(() => {
-          this.includeOtherDevices = !this.includeOtherDevices;
-          this.reload();
-        })
-      Text(this.countDoneText())
-        .fontSize(12)
-        .fontColor($r('app.color.text_secondary'))
     }
     .width('100%')
   }
 
+  /** 唯一主操作：新建（强调色实底，全宽 48vp）。 */
+  @Builder
+  PrimaryAction() {
+    Button('新建')
+      .width('100%')
+      .height(PRIMARY_HEIGHT)
+      .fontSize(FONT.body)
+      .backgroundColor($r('app.color.brand'))
+      .fontColor($r('app.color.text_inverse'))
+      .borderRadius(RADIUS.sm)
+      .onClick(() => this.openNew())
+  }
+
+  /** 列表（行自带 1vp 分割线，因此 List space 为 0）。 */
   @Builder
   RecordList() {
     if (this.records.length === 0) {
       EmptyState({
         title: this.showAllPending ? '没有未完成的日程' : '这一天还没有日程',
-        hint: this.showAllPending ? '切换回「今日待办」看看当天安排' : '点击底部「新建」记录一条，或切换日期',
-        icon: '📅'
+        hint: this.showAllPending ? '切换回「今日待办」看看当天安排' : '点「新建」记录一条，或切换日期'
       })
     } else {
-      List({ space: 8 }) {
+      List() {
         ForEach(
           this.records,
           (item: ScheduleRecord) => {
@@ -464,48 +503,203 @@ struct Index {
     }
   }
 
+  /** 紧凑屏：日期条 → 模式 → 列表 → 新建（单列自上而下）。 */
+  @Builder
+  CompactBody() {
+    Column({ space: SPACING.md }) {
+      this.DateBlock()
+      this.ModeTabs()
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+      this.RecordList()
+      this.PrimaryAction()
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  /** 宽屏/横屏：左日期列（日期条 + 模式 + 新建）+ 右列表。 */
+  @Builder
+  WideBody() {
+    Row({ space: SPACING.lg }) {
+      Column({ space: SPACING.md }) {
+        this.DateBlock()
+        this.ModeTabs()
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+        this.PrimaryAction()
+      }
+      .width(sidebarWidth(this.contentWidth))
+      .height('100%')
+      .alignItems(HorizontalAlign.Start)
+
+      Divider()
+        .vertical(true)
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+        .height('100%')
+
+      Column() {
+        this.RecordList()
+      }
+      .layoutWeight(1)
+      .height('100%')
+    }
+    .width('100%')
+    .height('100%')
+    .alignItems(VerticalAlign.Top)
+  }
+
+  /** 「更多」底部面板：次要操作全部收在这里，每行 48vp。 */
+  @Builder
+  MoreSheet() {
+    Column() {
+      Row() {
+        Text('更多')
+          .fontSize(FONT.body)
+          .lineHeight(LINE_HEIGHT.body)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.text_primary'))
+        Blank()
+        Text('关闭')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .height(TOUCH_MIN)
+          .padding({ left: SPACING.md, right: SPACING.md })
+          .textAlign(TextAlign.Center)
+          .onClick(() => {
+            this.showMore = false;
+          })
+      }
+      .width('100%')
+
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+
+      Text('AI 汇总（今日记录）')
+        .fontSize(FONT.body)
+        .lineHeight(LINE_HEIGHT.body)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .height(PRIMARY_HEIGHT)
+        .textAlign(TextAlign.Start)
+        .onClick(() => {
+          this.showMore = false;
+          this.openAiPanel();
+        })
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+
+      Text('同步（拉取远端）')
+        .fontSize(FONT.body)
+        .lineHeight(LINE_HEIGHT.body)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .height(PRIMARY_HEIGHT)
+        .textAlign(TextAlign.Start)
+        .onClick(() => {
+          this.showMore = false;
+          this.openSync();
+        })
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+
+      if (this.canRemind) {
+        Text('创建提醒')
+          .fontSize(FONT.body)
+          .lineHeight(LINE_HEIGHT.body)
+          .fontColor($r('app.color.text_primary'))
+          .width('100%')
+          .height(PRIMARY_HEIGHT)
+          .textAlign(TextAlign.Start)
+          .onClick(() => {
+            this.showMore = false;
+            this.createRemindersNow();
+          })
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+      }
+
+      Text(this.includeOtherDevices ? '只看本机（当前含其他设备）' : '含其他设备（只读）')
+        .fontSize(FONT.body)
+        .lineHeight(LINE_HEIGHT.body)
+        .fontColor(this.includeOtherDevices ? $r('app.color.brand') : $r('app.color.text_primary'))
+        .width('100%')
+        .height(PRIMARY_HEIGHT)
+        .textAlign(TextAlign.Start)
+        .onClick(() => {
+          this.includeOtherDevices = !this.includeOtherDevices;
+          this.showMore = false;
+          this.reload();
+        })
+    }
+    .width('100%')
+    .padding(SPACING.lg)
+    .backgroundColor($r('app.color.surface'))
+    .borderRadius({ topLeft: RADIUS.md, topRight: RADIUS.md })
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  /** AI 汇总候选面板（保留逐条勾选与全选/全不选）。 */
   @Builder
   AiPanel() {
-    Column({ space: 10 }) {
+    Column({ space: SPACING.md }) {
       Row() {
         Text('AI 汇总（可取消勾选）')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
+          .fontSize(FONT.body)
+          .lineHeight(LINE_HEIGHT.body)
+          .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.text_primary'))
         Blank()
         Text(this.aiSelected.length === this.aiCandidates.length ? '全不选' : '全选')
-          .fontSize(13)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.brand'))
+          .height(TOUCH_MIN)
+          .padding({ left: SPACING.md, right: SPACING.md })
+          .textAlign(TextAlign.Center)
           .onClick(() => this.selectAllAi())
       }
       .width('100%')
 
       Text(`${this.aiPanelDate} · 已选 ${this.aiSelected.length} / ${this.aiCandidates.length} 条`)
-        .fontSize(12)
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
         .fontColor($r('app.color.text_secondary'))
         .width('100%')
 
-      List({ space: 6 }) {
+      List({ space: SPACING.sm }) {
         ForEach(
           this.aiCandidates,
           (item: ScheduleRecord) => {
             ListItem() {
-              Row({ space: 8 }) {
+              Row({ space: SPACING.sm }) {
                 Checkbox({ name: `ai-${item.id}` })
                   .select(this.isAiSelected(item.id))
                   .selectedColor($r('app.color.brand'))
+                  .width(TOUCH_MIN)
+                  .height(TOUCH_MIN)
                   .onChange(() => {
                     this.toggleAi(item.id);
                   })
-                Column({ space: 2 }) {
+                Column({ space: SPACING.xs }) {
                   Text(item.title.length > 0 ? item.title : '(未命名日程)')
-                    .fontSize(14)
+                    .fontSize(FONT.body)
+                    .lineHeight(LINE_HEIGHT.body)
                     .fontColor($r('app.color.text_primary'))
                     .maxLines(1)
                     .textOverflow({ overflow: TextOverflow.Ellipsis })
                     .width('100%')
                   Text(item.body.length > 0 ? item.body : '（无正文，将使用原始识别文本）')
-                    .fontSize(11)
+                    .fontSize(FONT.caption)
+                    .lineHeight(LINE_HEIGHT.caption)
                     .fontColor($r('app.color.text_secondary'))
                     .maxLines(1)
                     .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -515,28 +709,34 @@ struct Index {
                 .alignItems(HorizontalAlign.Start)
               }
               .width('100%')
-              .padding({ top: 4, bottom: 4 })
+              .padding({ top: SPACING.xs, bottom: SPACING.xs })
             }
           },
           (item: ScheduleRecord) => `${item.id}|${this.isAiSelected(item.id) ? '1' : '0'}`
         )
       }
       .width('100%')
-      .height(220)
+      .layoutWeight(1)
       .scrollBar(BarState.Auto)
 
-      Row({ space: 10 }) {
+      Row({ space: SPACING.sm }) {
         Button('取消')
           .layoutWeight(1)
-          .backgroundColor('#EEF1F4')
-          .fontColor($r('app.color.text_primary'))
+          .height(PRIMARY_HEIGHT)
+          .fontSize(FONT.body)
+          .backgroundColor(Color.Transparent)
+          .fontColor($r('app.color.text_secondary'))
+          .borderRadius(RADIUS.sm)
           .onClick(() => {
             this.showAiPanel = false;
           })
         Button(this.aiBusy ? '整理中…' : '开始汇总')
           .layoutWeight(1)
+          .height(PRIMARY_HEIGHT)
+          .fontSize(FONT.body)
           .backgroundColor($r('app.color.brand'))
-          .fontColor(Color.White)
+          .fontColor($r('app.color.text_inverse'))
+          .borderRadius(RADIUS.sm)
           .enabled(!this.aiBusy)
           .onClick(() => {
             this.runAi();
@@ -546,116 +746,106 @@ struct Index {
 
       if (this.aiBusy) {
         Text('正在调用 DeepSeek，请稍候…')
-          .fontSize(12)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.brand'))
       }
     }
     .width('92%')
-    .padding(16)
-    .backgroundColor(Color.White)
-    .borderRadius(16)
-    .shadow({ radius: 24, color: '#22000000', offsetY: 8 })
+    .height('70%')
+    .padding(SPACING.lg)
+    .backgroundColor($r('app.color.surface'))
+    .borderRadius(RADIUS.md)
   }
 
+  /** AI 结果面板。 */
   @Builder
   AiResultPanel() {
-    Column({ space: 10 }) {
+    Column({ space: SPACING.md }) {
       Row() {
         Text('AI 整理结果')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
+          .fontSize(FONT.body)
+          .lineHeight(LINE_HEIGHT.body)
+          .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.text_primary'))
         Blank()
         Text('关闭')
-          .fontSize(13)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.brand'))
+          .height(TOUCH_MIN)
+          .padding({ left: SPACING.md, right: SPACING.md })
+          .textAlign(TextAlign.Center)
           .onClick(() => {
             this.aiResultVisible = false;
           })
       }
       .width('100%')
+
       Scroll() {
         Text(this.aiResultText)
-          .fontSize(13)
+          .fontSize(FONT.body)
+          .lineHeight(LINE_HEIGHT.body)
           .fontColor($r('app.color.text_primary'))
           .width('100%')
           .textAlign(TextAlign.Start)
-          .lineHeight(20)
       }
       .layoutWeight(1)
       .width('100%')
+
       Text('结果已写入各条记录的 ai_structured，原始识别文本 ocr_text 保持不变')
-        .fontSize(11)
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
         .fontColor($r('app.color.text_secondary'))
         .width('100%')
     }
     .width('92%')
     .height('70%')
-    .padding(16)
-    .backgroundColor(Color.White)
-    .borderRadius(16)
+    .padding(SPACING.lg)
+    .backgroundColor($r('app.color.surface'))
+    .borderRadius(RADIUS.md)
   }
 
   build() {
     Stack({ alignContent: Alignment.Center }) {
-      Column({ space: 12 }) {
-        this.DateBar()
-        this.ModeTabs()
-        this.RecordList()
-
-        Text(this.statusText)
-          .fontSize(12)
-          .fontColor($r('app.color.text_secondary'))
-          .width('100%')
-
-        Row({ space: 8 }) {
-          Button('新建')
-            .layoutWeight(1)
-            .height(44)
-            .backgroundColor($r('app.color.brand'))
-            .fontColor(Color.White)
-            .onClick(() => this.openNew())
-          Button('AI 汇总')
-            .layoutWeight(1)
-            .height(44)
-            .backgroundColor('#E8F1FF')
-            .fontColor($r('app.color.brand'))
-            .onClick(() => this.openAiPanel())
-          Button('同步')
-            .layoutWeight(1)
-            .height(44)
-            .backgroundColor('#E8F1FF')
-            .fontColor($r('app.color.brand'))
-            .onClick(() => this.openSync())
-          if (this.canRemind) {
-            Button('提醒')
-              .layoutWeight(1)
-              .height(44)
-              .backgroundColor('#E8F1FF')
-              .fontColor($r('app.color.brand'))
-              .onClick(() => {
-                this.createRemindersNow();
-              })
-          }
+      PageLayout({
+        title: this.pageTitle(),
+        subtitle: this.statusText,
+        onMore: () => {
+          this.showMore = true;
+        },
+        onBreakpointChange: (breakpoint: string, widthVp: number) => {
+          this.breakpoint = breakpoint;
+          this.contentWidth = widthVp;
         }
-        .width('100%')
+      }) {
+        if (this.breakpoint === 'compact') {
+          this.CompactBody()
+        } else {
+          this.WideBody()
+        }
       }
-      .width('100%')
-      .height('100%')
-      .padding(12)
-      .backgroundColor($r('app.color.page_background'))
 
-      if (this.showAiPanel || this.aiResultVisible) {
+      if (this.showAiPanel || this.aiResultVisible || this.showMore) {
         Column()
           .width('100%')
           .height('100%')
-          .backgroundColor('#66000000')
+          .backgroundColor($r('app.color.scrim'))
           .onClick(() => {
             if (!this.aiBusy) {
               this.showAiPanel = false;
               this.aiResultVisible = false;
+              this.showMore = false;
             }
           })
+      }
+      if (this.showMore) {
+        Column() {
+          Blank()
+          this.MoreSheet()
+        }
+        .width('100%')
+        .height('100%')
       }
       if (this.showAiPanel) {
         this.AiPanel()

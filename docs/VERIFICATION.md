@@ -618,3 +618,79 @@ devecocli ui layout --device 6MFBB25C27205131 --format json --mode simplified
 - **faultlog 目录无权限**：`/data/log/faultlog/faultlogger/` 在本机 shell 下 `Permission denied`，崩溃判定依赖 hilog 与进程存活；
 - **未做多设备 / 多分辨率验证**：只测了 `MLR-AL00` 一台（2560×1600 平板），手机形态与其它分辨率未验证；
 - `apps/arkui-schedule/tools/install-device.ps1` 本次**未使用**（安装走的是直接 `hdc install`），其行为未验证。
+
+## 11. 手写板功能与产物级验收（2026-11-15 实测）
+
+### 11.1 团队须知：为什么「源码测试全绿 + BUILD SUCCESSFUL」但产物缺功能
+
+这是本轮最重要的教训，**验收口径的失误**，必须记住：
+
+| 环节 | 当时看到的 | 实际情况 |
+| --- | --- | --- |
+| `node --test` | 218→306 全绿 | 测的是 `src/main` 的纯逻辑，**没测产物内容** |
+| `hvigor` 输出 | `BUILD SUCCESSFUL` | 只代表编译了 `aceModuleRoot` 里的东西 |
+| 解包 HAP | —— | `main_pages.json` **只有 4 页**（无 `pages/Handwriting`），`modules.abc` 里 `Handwriting`/`hw-page-`/`PageBook`/`OcrBatch` 命中 **0** |
+
+两个原因叠加：
+
+1. **`.arkui-x/arkui-x-config.json5` 里的 `{crossplatform:true}`**：它会让 hvigor 判定这是 ArkUI-X 工程，
+   进入 crossplatform 模式 —— `aceModuleRoot` 固定 `entry/src/main/ets`、`@kit.CoreVisionKit` 被
+   `can't support crossplatform application` 拦下、**`src/harmony/**` 整棵不参与编译**。
+2. **`entry/build-profile.json5` 的 `targets[].source.sourceRoots` 对 entry 模块不生效**：
+   查 hvigor 插件源码（`src/utils/source-roots-utils.js`）可见它只用于**依赖的 HAR/HSP**，
+   对 entry 自己的 ets 源根无效。之前"构建接受了这个字段"只是没报错，不代表生效。
+
+=> 结论：**构建通过 ≠ 交付通过**。任何"鸿蒙专属代码"必须以产物内容为准。
+
+### 11.2 修复：文件级覆盖 + 交叉平台开关 + 产物断言
+
+| 机制 | 文件 | 说明 |
+| --- | --- | --- |
+| 覆盖层 | `apps/arkui-schedule/tools/overlay.mjs` | `apply`：把 `entry/src/harmony/**` 按相对路径复制到 `entry/src/main/**`（被覆盖的写进 `.platform-overlay/backup/`、新建的记账）；`restore`：逐字节还原并删除新建文件。**可逆、不污染工作区** |
+| 交叉平台开关 | `tools/set-build-mode.mjs` | harmony 模式把 `.arkui-x/arkui-x-config.json5` 改名 `.harmony-off`（并去掉 `local.properties` 的 `arkui-x.dir`）；arkui-x 模式再放回 |
+| 产物断言 | `tools/verify-hap.mjs` | 自带 ZIP 解析（无依赖）。鸿蒙：`main_pages.json` 必须含 `pages/Handwriting`，`modules.abc` 必须含 `Handwriting`/`hw-page-`/`PageBook`/`OcrBatch`，且含 Pen Kit 或 OCR 符号；APK：上述符号必须 **0 次** |
+| 流水线 | `tools/build-harmony.ps1` | `apply overlay → devecocli build → restore overlay → verify-hap`；构建失败也会 restore |
+
+实测输出（2026-11-15 15:14）：
+
+```
+> hvigor BUILD SUCCESSFUL in 26 s 996 ms
+已还原：删除 5 个新建文件、写回 3 个备份文件
+
+== verify HAP contents ==
+产物：…\entry-default-unsigned.hap（1267692 B，13 个条目，模式 harmony）
+  ✓ main_pages.json 含 pages/Handwriting（108 B）
+  ✓ modules.abc 含 Handwriting（16 次）
+  ✓ modules.abc 含 hw-page-（1 次）
+  ✓ modules.abc 含 PageBook（2 次）
+  ✓ modules.abc 含 OcrBatch（7 次）
+  ✓ 含手写/OCR 能力痕迹（Pen Kit 3 次 / OCR 3 次）
+✓ 产物验收通过
+```
+
+顺带修掉的真编译错误：`platformFeatures.ts` 里从 `.ts` import `.ets`（`ReminderService`）被 ArkTS 禁止
+（`Importing ArkTS files in JS and TS files is forbidden`）→ 两棵树里都改名为 `platformFeatures.ets`。
+
+### 11.3 手写板功能（本轮实装）
+
+| 能力 | 实现要点 | 纯逻辑（Node 可测） |
+| --- | --- | --- |
+| 可选分页（默认 1 页，上限 10） | `PageBook`：页序 → 画布槽位映射，删中间页后其余页笔迹跟随；`HandwritingPagerState` 用扁平字段同步给 ArkUI | `model/pageBook.ts`（16 用例） |
+| 页条 | 画布上方页码块 + 「＋」，当前页高亮，点页码跳页 | — |
+| 框选（框内不 OCR） | overlay 是笔迹 Canvas 的**兄弟节点**（截图只截 `hw-page-<slot>`，框/手柄/× 不进图）；归一化坐标 0..1 → `fillRect` 填白 | `model/regions.ts`（17 用例） |
+| 两阶段识别 | 阶段 A 逐页截图落盘 `attachments/<sha256>.png`（**先全部落盘**）→ 阶段 B 有框页 `release → maskPage → 二次截图 → recognize`，无框页直接识别 | `model/pageCapture.ts`（22 用例） |
+| 正文拼接 | `composePageBody`：每页文字（`replaceComplexBlocks` 降级表格公式）+ 该页占位符 `[图表/公式: 查看手迹 · 第N页·区域K]`（按 y 升序） | `model/attachments.ts` |
+| 笔工具 | 5 笔刷（钢笔/圆珠笔/铅笔/马克笔/荧光笔）+ 5 档粗细（2/3.5/5/7/10）+ 5 色 + 橡皮（`destination-out`，宽度×4）+ 撤销/重做（按页、≥20 步） | `model/brush.ts`（25 用例）、`model/strokeHistory.ts`（14 用例） |
+| 唯一完成入口 | 底部 **「完成（统一识别）」**，无"翻页即识别"路径；`ocr_text` 只保留遮罩图识别文本，正文另加占位符 | — |
+
+测试总数：`node --test` **306 pass / 0 fail**（原 218 + 88 新增），`validate-app.mjs` 8/8。
+
+### 11.4 仍未验证 / 已知取舍
+
+- **真机手势与渲染未验**（验证时平板处于锁屏 PIN 界面，`aa start` 报 `10106102`）：落笔、铅笔抖动、
+  钢笔速度调制、橡皮擦除观感、框选手势命中、`componentSnapshot` 是否真的不含 overlay、填白后重绘是否够一帧；
+- 马克笔/荧光笔是**逐段描边**，半透明笔刷在接缝处会重复叠加偏深（取舍：不每帧整页重绘）；
+- 「一笔成形」（停顿 600ms 判定直线/矩形/圆）只留 `TODO`，未实现；
+- `StrokeHistory` 没有 `redoDepth`，「重做」只有可用/不可用，没有步数；
+- 填白是**破坏性**的（抹掉框内笔迹），依赖"阶段 A 已先落盘原图"这一顺序保证；取消整批时不会恢复画布。
+

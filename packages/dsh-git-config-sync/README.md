@@ -11,32 +11,47 @@ DSH（DeepSeek Harness）配置同步插件：把本机 `profiles/web` 的配置
 
 ### 1.1 本地目录安装（开发/自用，无需构建）
 
-仓库内已提交 `dist/`，可直接把本目录链接进 profile：
+推荐在 DSH Web GUI 的 **Plugins → Add plugin** 选择本地目录：
+
+```
+C:\Users\GWL\Desktop\itwillclaude\dsh-sync-suite\packages\dsh-git-config-sync
+```
+
+等价 CLI（若环境允许）：
 
 ```powershell
 # 在 dsh-sync-suite 仓库根执行
 dsh plugin --profile web add link:C:\Users\GWL\Desktop\itwillclaude\dsh-sync-suite\packages\dsh-git-config-sync
 ```
 
-> 本仓库的工具链**不会**自动改 `~/.dsh/profiles/**`。如果你的 DSH 装有 `dsh-safe-launch`，
-> 请优先通过它的安全启动器端点安装（它会先做兼容性启动测试）：
+前置检查：链接安装不会执行构建，`dist/index.js` 与 `dist/client.js` 必须已在仓库里
+（`Test-Path packages\dsh-git-config-sync\dist\client.js` 为 `True`）；缺失时设置页不会出现。
+安装侧不需要 `pnpm build`，也不需要联网安装运行时依赖（插件只用 `node:` 内置模块与系统 `git`）。
+
+> **安全启动器不接受本地目录**：`dsh-safe-launch` 只接受 npm 包名或 `github:<owner>/<repo>`
+> （与仓库根 README「插件安装」② 一致）。本地目录请用上面的 GUI/CLI 链接安装，不要把
+> `link:` 传给 `/dsh-safe-launch/install-plugin`。
 >
-> ```powershell
-> Invoke-RestMethod -Method Post -Uri http://127.0.0.1:3080/dsh-safe-launch/install-plugin `
->   -ContentType 'application/json' `
->   -Body (@{ source = 'link:C:\Users\GWL\Desktop\itwillclaude\dsh-sync-suite\packages\dsh-git-config-sync' } | ConvertTo-Json)
-> ```
->
-> 安装完成后重启 DSH（或刷新 Web GUI），设置页会出现「配置同步」分区。
+> 安装完成后刷新 Web GUI：新 bundle 通常经 HMR 生效；**替换/升级已安装的包后需要重启 DSH**，
+> 才能加载新的客户端模块。设置页会出现「设置 → 配置同步」分区（`id: git-config-sync`，`order: 70`）。
 
 ### 1.2 打包后安装（分发给其他机器）
 
 ```powershell
 cd packages\dsh-git-config-sync
-npm pack                       # 生成 dsh-git-config-sync-<version>.tgz
-dsh plugin --profile web add link:<解压或安装路径>
-# 或安装 tarball：
-# dsh plugin --profile web add C:\path\to\dsh-git-config-sync-0.1.0.tgz
+npm pack                        # 生成 dsh-git-config-sync-1.0.0.tgz（版本见 package.json）
+# 把 tgz 拷到目标机器后安装：
+dsh plugin --profile web add C:\path\to\dsh-git-config-sync-1.0.0.tgz
+# 或解压后链接该目录：
+# dsh plugin --profile web add link:C:\path\to\dsh-git-config-sync
+```
+
+发布到 npm / GitHub 后可走安全启动器（它只接受包名或 `github:<owner>/<repo>`，不接受本地目录/tarball）：
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:3080/dsh-safe-launch/install-plugin `
+  -ContentType 'application/json' -Body '{"source":"github:<owner>/<repo>"}'
+# npm 来源：-Body '{"source":"dsh-git-config-sync"}'
 ```
 
 `dist/` 已随仓库提交，安装侧不需要 `pnpm build`，也不需要联网安装运行时依赖
@@ -71,6 +86,27 @@ dsh plugin --profile web remove dsh-git-config-sync
 - patch 文件**按 entry id 逐条合并**，保留文件头注释、条目内 `!!js`、缩进与键顺序，不做 YAML 反序列化再序列化。
 - 远端条目的同名 secret 字段在快照里被替换为 `__SECRET__`；恢复时用本地同名字段回填，本地没有则跳过并标记「需本地填写」。
 - 插件清单只同步元数据（包名/版本/来源/启用状态），**不下载代码、不删本地独有插件、不降级**。
+
+### 2.1 `insert:` 多行块限制（重要）
+
+`cordis.patch.yml` 里的 `insert:` 条目在同步时按**整块**处理：块内第一个 `id` 作为条目 key，
+合并/覆盖时整块文本替换。因此：
+
+- **一个 `insert:` 块只放一行插件**（推荐），否则同块里的其他插件无法跨设备独立勾选/回滚；
+- **不要在 `insert:` 列表里再嵌套 `insert:`**：加载器只认 patch 顶层的 `insert`，嵌套行会被当成未知字段；
+- 插件不会自动改写你的 profile 结构（只做块级文本替换）；`preview` 会展示整块文本，
+  发现整块替换时请保留本地版本，或手动拆分该块后再同步。
+
+正确写法：
+
+```yaml
+- insert:
+    - id: plugin-a
+      name: 'plugin-a'
+- insert:
+    - id: plugin-b
+      name: 'plugin-b'
+```
 
 ---
 
@@ -143,11 +179,12 @@ Body: { action, ...payload }
 packages/dsh-git-config-sync/
   package.json          # dsh.client / dsh.bundle.patch / exports
   cordis.patch.yml      # bundle patch
-  dist/                 # 构建产物（index.js / client.js）
+  dist/                 # 构建产物（index.js / client.js，已提交，安装侧无需构建）
   src/client.js         # 本 README 描述的 Web GUI 设置页（纯 JS，无需构建）
   locale/{en,zh}.json   # 插件元信息与全部 UI 文案（key 集合必须一致）
-  icon.svg              # 原创图标
-  docs/DETAIL.md        # 中文详情页：架构 / 数据目录 / 恢复流程 / 风险边界 / 排错
+  icon.svg              # 原创图标（64×64 SVG）
+  docs/DETAIL.md        # 英文详情页：架构 / 数据目录 / 恢复流程 / 风险边界 / 排错
+  docs/DETAIL.zh.md     # 中文详情页
 ```
 
 ---
@@ -161,16 +198,23 @@ node --check packages/dsh-git-config-sync/src/client.js
 # locale 一致性：en/zh key 集合必须完全相同，且必须含 meta.title/description/detail
 node -e "const fs=require('fs');const e=JSON.parse(fs.readFileSync('packages/dsh-git-config-sync/locale/en.json','utf8'));const z=JSON.parse(fs.readFileSync('packages/dsh-git-config-sync/locale/zh.json','utf8'));const a=Object.keys(e).sort().join(','),b=Object.keys(z).sort().join(',');if(a!==b){console.error('KEY MISMATCH');process.exit(1)};console.log('locale keys equal:',Object.keys(e).length)"
 
-# host 侧单元/集成测试（在仓库根）
-pnpm build
-node --test packages/dsh-git-config-sync/test
+# host 侧单元/集成测试（在仓库根；Node 24 不支持目录形式，必须用 glob）
+node --test "packages/dsh-git-config-sync/test/*.test.mjs"
+# 全仓：
+node --test
+
+# 改了 src/*.ts 才需要重新生成 dist/（纯 client.js 改动只需同步 dist/client.js）：
+node node_modules/typescript/bin/tsc -p packages/dsh-git-config-sync/tsconfig.json
+node packages/dsh-git-config-sync/scripts/build.mjs   # tsc + 拷贝 src/client.js → dist/client.js
 ```
 
 ---
 
 ## 7. 已知限制
 
-- 真实 Web GUI 挂载需在装有该插件的 DSH 实例中人工确认（本仓库的自动测试只做模块级/组件级验证）。
+- 真实 Web GUI 挂载需在装有该插件的 DSH 实例中人工确认（本仓库的自动测试包含模块级与桩 React 的组件级渲染验证，不做真实浏览器视觉验证）。
+- `meta.detail` 指向 `locale/en.json` → `docs/DETAIL.md`、`locale/zh.json` → `docs/DETAIL.zh.md`；
+  两份文档都必须随包发布（`package.json` 的 `files` 含 `docs`），缺失会让插件详情页显示加载失败。
 - `preview` 缓存是内存态、单实例单 previewId：重新预览会让上一个 previewId 失效，`apply` 会返回
   `E_NOT_FOUND` 并在界面上提示「请重新预览」。
 - 插件清单的 `install` 只写 `plugins.to-install.json`，实际安装仍需你在 DSH 中手动完成。
