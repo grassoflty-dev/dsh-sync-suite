@@ -39,7 +39,7 @@
 | 13 | Detail | 主操作数 | **3**：`编辑`34vp（:268）、`AI 结构化`（:339）、`保存`30vp（:329） | 1（编辑） | AI 结构化收进「更多」；AI 文本保存只在编辑态出现 |
 | 14 | Detail | 字号层级 | **8 档**：10/11/12/13/14/18/20/26 | 3 档 | 10fp 哈希列表删除；26fp 返回改 40×40 图标 |
 | 15 | Detail | 信息密度 | 每页还会渲染 `#pageIndex sha256 name`（10fp，:230-243）——用户读不懂的技术串 | 删除 | 只在「更多 → 附件信息」里可选展示 |
-| 16 | Settings | 卡片/按钮数 | **5 个白卡片面板**（:557/655/706/789/946）+ **7 个按钮**（同步区 4 个并排 :580-622） | 分组列表 + 1 主操作 | 分组=同步/AI/外观/关于；同步只留「拉取」主操作，推送/状态/重试进「更多」 |
+| 16 | Settings | 卡片/按钮数 | **5 个白卡片面板**（:557/655/706/789/946）+ **7 个按钮**（同步区 4 个并排 :580-622） | 3 组 × ≤4 行 + 1 主操作/组 | 组=`同步(Git)`/`AI`/`关于`；组内 1 主操作（同步/测试），推送·状态·重试·测试连接进组头「更多」→ 见 §4.1 |
 | 17 | Settings | 字号层级 | **6 档**：11/12/13/14/15/18；11fp 小字 **10 处** | 3 档 | 说明文字统一 `FONT.caption` |
 | 18 | Settings | 触控目标 | **4 个 chip ≈29vp**：`GitHub`/`Gitee`（:736-753）、`HTTPS(PAT)`/`SSH`（:766-784） | ≥40vp | `height(TOUCH_MIN)` |
 | 19 | Settings | 重复文案 | **3 条同义隐私说明**（:894-899、:962-967、:1012-1018） | 1 条 | 合并进「关于」分组 |
@@ -138,19 +138,51 @@ Edit 紧凑                      Edit 宽屏/横屏            Detail 紧凑 / �
 ```
 
 ```
-Settings 紧凑（分组列表 + 内联小字）      Settings 宽屏/横屏（两列分组）
-┌ ‹ 设置                ┐              ┌ ‹ 设置                        ┐
-│ 同步    [拉取] 更多    │              │ 同步          │ AI            │
-│ ──────────────────── │              │ ──────────── │ ───────────── │
-│ AI      Key …        │              │ 外观/关于      │ 平台信息       │
-│ ──────────────────── │              │ ──────────── │ ───────────── │
-│ 外观    跟随系统       │              └──────────────┴───────────────┘
-│ ──────────────────── │              主操作：分组内首个动作；其余进「更多」
-│ 关于    版本/隐私/AGC │
-└──────────────────────┘
+Settings 紧凑（3 组 × ≤4 行，长说明收进 ?）    Settings 宽屏/横屏（两组并排）
+┌ ‹ 设置                       ┐            ┌ ‹ 设置                          ┐
+│ 同步 (Git)           更多(…)  │            │ 同步 (Git)      │ AI             │
+│ 仓库地址  [________________]  │            │ 仓库地址        │ 服务 [DeepSeek] │
+│ token     [****************]  │            │ token           │ 模型 [chat]     │
+│ 设备标识/作者名 [____]/[____] │            │ 设备…/作者…     │ Key [****]      │
+│ [      立即同步      ]  状态1行│            │ [立即同步]      │ [测试]  结果1行  │
+│ ──────────────────────────── │            │ ─────────────── │ ───────────────│
+│ AI                            │            │ 关于                           │
+│ 服务 [DeepSeek ▾]  模型 [▾]   │            │ 版本 / 平台 / 隐私(?) / 权限(?) │
+│ Key [********]  [测试] 结果1行 │            └─────────────────┴────────────────┘
+│ 高级 ▸（折叠：baseURL/超时/重试）│            主操作：同步组=立即同步、AI 组=测试
+│ ──────────────────────────── │            其余动作（推送/状态/重试/测试连接/
+│ 关于                          │            平台/认证方式）在组头「更多」弹层
+│ 版本 · 平台 · 隐私(?) · 权限(?)│
+└──────────────────────────────┘
 ```
 
-## 5. 旋转支持与手写板坐标系（只报告，不改 A 的文件）
+### 4.1 设置页行级契约（3 组 × ≤4 行）
+
+| 组 | 行 1 | 行 2 | 行 3 | 行 4 | 组头「更多」 |
+| --- | --- | --- | --- | --- | --- |
+| 同步 (Git) | 仓库地址 | token（密码框） | 设备标识 + 作者名（同一行两列） | `立即同步` 主按钮 + 1 行状态（超长 → `?`） | 推送 / 查看状态 / 重试上次 / 测试连接 / 平台(GitHub·Gitee) / 认证(HTTPS·SSH) |
+| AI | 服务（下拉） | 模型（下拉，随服务联动） | API Key（密码框） | `测试` + 1 行结果 | 高级（默认折叠）：baseURL / 超时 / 重试；服务=`custom` 时自动展开 baseURL |
+| 关于 | 版本 | 平台信息（一行：平台·手写·OCR） | 隐私说明 `?` | 提醒权限/AGC `?` | — |
+
+**长说明一律 `?` 图标 → 一次性弹层**（`CustomDialog` 或 `Stack` 浮层），不再整段常驻（现 8 行 AGC 长文 + 3 条隐私说明都收进去）。
+
+**实现约束（动工前必须满足）**
+1. `tools/test/settingsStorePairing.test.mjs` 对 `pages/Settings.ets` 的**源码文本**有硬断言，以下片段必须逐字保留，否则测试红（不是我能改的文件）：
+   `const repoEmpty: boolean = this.repoUrl.trim().length === 0;`、
+   `const repoError: string = repoEmpty || repoCheck.ok ? '' : repoCheck.error;`、
+   `repoUrl: repoEmpty ? '' : repoCheck.url,`、
+   `Text(describeLastSync(this.lastSyncAt, nowIso()))`、
+   `if (this.lastSyncError.length > 0) { Text(\`上次错误：${this.lastSyncError}\`)`、
+   `if (canRetrySync(this.lastSyncAction, this.syncBusy)) {` + `this.runAction(this.lastSyncAction);`、
+   `this.aiModel = settings.aiModel;`、`aiModel: this.aiModel,`、两处 `validateRepoUrl(this.repoUrl)` 及其 `syncMessage`/`connectionText` 赋值。
+   → 分组只是**重排 builder**，上述逻辑方法体与那两段文案保持原样即可（「重试」按钮与「上次错误」文案保留在同步组内）。
+2. AI 组要接执行者 C2 的 `model/aiProvider.ts`（`AI_PROVIDERS` / `modelsOf` / `defaultModelOf` / `resolveModel` / `normalizeBaseURL`）
+   与 `settingsStore` 新增字段（`aiProviderId` / `aiBaseURL` / `cachedProviderId` / `cachedBaseURL`）。**该模块当前不存在**
+   （`entry/src/main/ets/model/` 只有 `aiPayload.ts` / `aiRequest.ts`），此刻 import 会让 `validate` 规则 2（相对 import 可解析）直接失败，
+   因此设置页重构排在 C2 落地之后。
+3. 深色模式与 token 一律复用 §3 的令牌；不得新增配置项。
+
+
 
 1. **方向开关**：`entry/src/main/module.json5` 的 EntryAbility 增加 `"orientation": "auto_rotation"`（唯一字段改动）。
    若真机被平板策略限制为仅竖屏，回落 `auto_rotation_restricted`，并**如实记录**（本轮未验证：设备锁屏 + 需重新构建）。
