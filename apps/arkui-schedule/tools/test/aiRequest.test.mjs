@@ -70,12 +70,12 @@ describe('buildAiRequest：URL 与请求体构造', () => {
     );
   });
 
-  test('连通性测试的最小请求：prompt=ping、max_tokens=1', () => {
+  test('连通性测试的最小请求：prompt=ping、max_tokens=8', () => {
     const request = buildAiRequest(DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL, AI_PROBE_PROMPT, AI_PROBE_MAX_TOKENS);
     const body = JSON.parse(request.body);
-    assert.equal(AI_PROBE_MAX_TOKENS, 1);
+    assert.equal(AI_PROBE_MAX_TOKENS, 8);
     assert.equal(body.messages[0].content, 'ping');
-    assert.equal(body.max_tokens, 1);
+    assert.equal(body.max_tokens, 8);
   });
 
   test('可选 system 消息排在第一，user 在后', () => {
@@ -100,7 +100,7 @@ describe('buildAiRequest：URL 与请求体构造', () => {
 describe('classifyAiError：HTTP 状态 → 中文文案', () => {
   test('401 密钥无效 / 402 余额不足 / 403 无权限 / 404 接口不存在', () => {
     assert.match(classifyAiError(401, ''), /密钥无效/);
-    assert.match(classifyAiError(401, ''), /HTTP 401/);
+    assert.match(classifyAiError(401, ''), /AI 服务 401/);
     assert.match(classifyAiError(401, ''), /设置页/);
     assert.match(classifyAiError(402, ''), /余额不足/);
     assert.match(classifyAiError(403, ''), /无访问权限/);
@@ -109,10 +109,10 @@ describe('classifyAiError：HTTP 状态 → 中文文案', () => {
 
   test('429 限流与 5xx 服务端错误', () => {
     assert.match(classifyAiError(429, ''), /请求过于频繁|额度超限/);
-    assert.match(classifyAiError(429, ''), /HTTP 429/);
+    assert.match(classifyAiError(429, ''), /AI 服务 429/);
     for (const status of [500, 502, 503, 504]) {
       assert.match(classifyAiError(status, ''), /服务端错误/);
-      assert.match(classifyAiError(status, ''), new RegExp(`HTTP ${status}`));
+      assert.match(classifyAiError(status, ''), new RegExp(`AI 服务 ${status}`));
     }
   });
 
@@ -127,7 +127,7 @@ describe('classifyAiError：HTTP 状态 → 中文文案', () => {
     assert.equal(classifyAiError(200, ''), '');
     assert.match(classifyAiError(400, ''), /请求无效/);
     assert.match(classifyAiError(422, ''), /参数错误/);
-    assert.match(classifyAiError(418, ''), /HTTP 418/);
+    assert.match(classifyAiError(418, ''), /AI 服务 418/);
   });
 
   test('响应体里的 error.message 会被提取，非 JSON 则截断原文', () => {
@@ -137,6 +137,25 @@ describe('classifyAiError：HTTP 状态 → 中文文案', () => {
     const banner = classifyAiError(503, long);
     assert.ok(banner.length < long.length + 40, '过长的响应体必须截断');
     assert.match(banner, /…/);
+  });
+
+  test('默认文案是中性的「AI 服务」，不含任何服务商名', () => {
+    for (const status of [400, 401, 402, 403, 404, 422, 429, 418, 500, 503]) {
+      const text = classifyAiError(status, '');
+      assert.equal(text.includes('DeepSeek'), false, `HTTP ${status} 仍写着 DeepSeek`);
+      assert.match(text, /^AI 服务/, `HTTP ${status} 少了中性前缀`);
+    }
+    for (const status of [AI_STATUS_NETWORK, AI_STATUS_TIMEOUT]) {
+      assert.equal(classifyAiError(status, '').includes('DeepSeek'), false);
+    }
+    assert.equal(describeAiTestResult(false, 429, 'deepseek-chat', '').includes('DeepSeek'), false);
+  });
+
+  test('providerLabel 覆盖源名，空白回退中性前缀', () => {
+    assert.match(classifyAiError(401, '', 'OpenCode Go'), /^OpenCode Go 401：密钥无效/);
+    assert.match(classifyAiError(503, '', 'Codex API'), /^Codex API 503：服务端错误/);
+    assert.match(classifyAiError(AI_STATUS_NETWORK, '', 'DeepSeek 官方'), /^DeepSeek 官方 网络异常/);
+    assert.match(classifyAiError(429, '', '   '), /^AI 服务 429/);
   });
 });
 
@@ -209,7 +228,7 @@ describe('describeAiTestResult：设置页「测试 AI 连通性」文案', () =
       describeAiTestResult(false, 401, 'deepseek-chat', '密钥无效（HTTP 401）：DeepSeek API Key 不正确'),
       '失败：密钥无效（HTTP 401）：DeepSeek API Key 不正确'
     );
-    assert.match(describeAiTestResult(false, 429, 'deepseek-chat', ''), /^失败：.*HTTP 429/);
+    assert.match(describeAiTestResult(false, 429, 'deepseek-chat', ''), /^失败：.*AI 服务 429/);
     assert.match(describeAiTestResult(false, AI_STATUS_TIMEOUT, '', ''), /^失败：.*请求超时/);
     assert.match(describeAiTestResult(true, 200, '', ''), /deepseek-chat/, '空模型名回退默认值');
   });

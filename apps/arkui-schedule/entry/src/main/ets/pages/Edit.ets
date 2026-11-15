@@ -1,13 +1,15 @@
 /**
- * 编辑页：四字段（标题 / 正文 / 记录者 / 完成情况）。
+ * 编辑页：标题 / 正文 / 记录者 / 完成情况 + 手写板入口（仅鸿蒙）+ 附件预览。
  *
- * 契约：BRIEF §3.2、§3.5、`docs/CONTRACT.md` §3.4。
+ * 契约：BRIEF §3.2、§3.5、`docs/CONTRACT.md` §3.4。逻辑未改：
  * - 标题、记录者用 `TextInput`（系统全局手写输入对 Input 默认生效）；
  * - 正文用 `TextArea`，手写板入口仅在 `getFeatures().handwriting` 为真时显示，
  *   返回后从 `AppStorage['handwriting.result']` 读取识别文本并**立即清除**该键；
  * - 保存 = 追加一条记录：新 id 用 `newRecordId()`；编辑已有记录时保留原 id、写入新 ts；
- * - 原记录的 `ocr_text` / `attachments` / `ocr_time` 一并保留，正文或标题变更后
- *   置 `ai_processed:false` 等待重新 AI 整理（旧 `ai_structured` 不再展示，避免误导）。
+ * - 原记录的 `ocr_text` / `attachments` / `ocr_time` 一并保留，正文或标题变更后置
+ *   `ai_processed:false` 等待重新 AI 整理。
+ *
+ * 布局：竖屏表单自上而下、底部单一「保存」；横屏左表单 / 右手写与附件预览。
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
@@ -17,8 +19,22 @@ import { handwritingPageRoute } from '../common/platformFeatures';
 import type { Attachment, ScheduleRecord } from '../model/types';
 import { newRecordId, scheduleStore, describeError } from '../services/scheduleStore';
 import { settingsStore } from '../services/settingsStore';
-import { parseAttachmentList } from '../services/attachmentStore';
+import { attachmentStore, parseAttachmentList } from '../services/attachmentStore';
 import { EmptyState } from '../components/EmptyState';
+import { PageLayout } from '../components/PageLayout';
+import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
+
+/** 输入框高度（≥ TOUCH_MIN，留出点击余量）。 */
+const INPUT_HEIGHT: number = 44;
+
+/** 正文输入区高度：表单在独立 Scroll 里，固定高度即可（横屏不会再顶出屏幕）。 */
+const BODY_HEIGHT: number = 200;
+
+/** 主操作按钮高度。 */
+const PRIMARY_HEIGHT: number = 48;
+
+/** 附件缩略图边长。 */
+const THUMB: number = 96;
 
 /** 按 sha256 合并两批附件（去重、按 pageIndex 升序）。 */
 function mergeAttachments(base: Attachment[], incoming: Attachment[]): Attachment[] {
@@ -55,6 +71,8 @@ struct Edit {
   @State handwritingAvailable: boolean = false;
   @State ready: boolean = false;
   @State statusText: string = '';
+  /** 断点由 `PageLayout` 计算，本页只做 compact / 非 compact 分支。 */
+  @State breakpoint: string = 'compact';
 
   // 原记录快照（保存时决定是否保留 AI 结果 / 识别时间）
   private originalTitle: string = '';
@@ -222,160 +240,347 @@ struct Edit {
     router.back();
   }
 
-  build() {
-    Column() {
-      Row({ space: 8 }) {
-        Text('‹')
-          .fontSize(26)
-          .fontColor($r('app.color.text_primary'))
-          .padding({ left: 4, right: 4 })
-          .onClick(() => {
-            router.back();
-          })
-        Text(this.recordId.length > 0 ? '编辑日程' : '新建日程')
-          .fontSize(18)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_primary'))
-          .layoutWeight(1)
-        Button('保存')
-          .height(36)
-          .backgroundColor($r('app.color.brand'))
-          .fontColor(Color.White)
-          .onClick(() => this.save())
+  // ------------------------------------------------------------------ UI
+
+  @Builder
+  FieldLabel(text: string) {
+    Text(text)
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .fontColor($r('app.color.text_secondary'))
+      .width('100%')
+      .textAlign(TextAlign.Start)
+  }
+
+  /** 手写板入口（仅鸿蒙，`getFeatures().handwriting` 门控）。 */
+  @Builder
+  WritingEntry() {
+    if (this.handwritingAvailable) {
+      Text('手写板')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor($r('app.color.brand'))
+        .height(TOUCH_MIN)
+        .padding({ left: SPACING.md, right: SPACING.md })
+        .textAlign(TextAlign.Center)
+        .onClick(() => this.openWritingBoard())
+    }
+  }
+
+  @Builder
+  TitleField() {
+    Column({ space: SPACING.xs }) {
+      this.FieldLabel('标题')
+      TextInput({ text: this.title, placeholder: '例如：周三项目周会' })
+        .width('100%')
+        .height(INPUT_HEIGHT)
+        .fontSize(FONT.body)
+        .backgroundColor($r('app.color.page_background'))
+        .borderRadius(RADIUS.none)
+        .padding({ left: 0, right: 0 })
+        .onChange((value: string) => {
+          this.title = value;
+        })
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  BodyField() {
+    Column({ space: SPACING.xs }) {
+      Row({ space: SPACING.sm }) {
+        // 这一行不能用 FieldLabel（它 width('100%') 会把右侧手写入口挤出屏幕）
+        Text('正文')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+        Blank()
+        this.WritingEntry()
       }
       .width('100%')
-      .padding({ left: 12, right: 12, top: 12, bottom: 8 })
+      .alignItems(VerticalAlign.Center)
 
-      Scroll() {
-        Column({ space: 10 }) {
-          Text('标题')
-            .fontSize(13)
-            .fontColor($r('app.color.text_secondary'))
-            .width('100%')
-            .textAlign(TextAlign.Start)
-          TextInput({ text: this.title, placeholder: '例如：周三项目周会' })
-            .width('100%')
-            .height(44)
-            .backgroundColor(Color.White)
-            .borderRadius(10)
-            .onChange((value: string) => {
-              this.title = value;
-            })
+      TextArea({ text: this.body, placeholder: '记录内容；手写识别结果会追加到这里' })
+        .width('100%')
+        .height(BODY_HEIGHT)
+        .fontSize(FONT.body)
+        .backgroundColor($r('app.color.page_background'))
+        .borderRadius(RADIUS.none)
+        .padding({ left: 0, right: 0 })
+        .onChange((value: string) => {
+          this.body = value;
+        })
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
 
-          Row() {
-            Text('正文')
-              .fontSize(13)
-              .fontColor($r('app.color.text_secondary'))
-            Blank()
-            if (this.handwritingAvailable) {
-              Text('✍️ 手写板')
-                .fontSize(13)
-                .fontColor($r('app.color.brand'))
-                .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-                .backgroundColor('#E8F1FF')
-                .borderRadius(8)
-                .onClick(() => this.openWritingBoard())
-            }
-          }
-          .width('100%')
+  @Builder
+  AuthorField() {
+    Column({ space: SPACING.xs }) {
+      this.FieldLabel('记录者')
+      TextInput({ text: this.author, placeholder: '记录者姓名' })
+        .width('100%')
+        .height(INPUT_HEIGHT)
+        .fontSize(FONT.body)
+        .backgroundColor($r('app.color.page_background'))
+        .borderRadius(RADIUS.none)
+        .padding({ left: 0, right: 0 })
+        .onChange((value: string) => {
+          this.author = value;
+        })
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
 
-          TextArea({ text: this.body, placeholder: '记录内容；手写识别结果会追加到这里' })
-            .width('100%')
-            .height(220)
-            .backgroundColor(Color.White)
-            .borderRadius(10)
-            .onChange((value: string) => {
-              this.body = value;
-            })
+  @Builder
+  DoneRow() {
+    Row({ space: SPACING.sm }) {
+      Text('完成情况')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor($r('app.color.text_secondary'))
+      Blank()
+      Text(this.done ? '已完成' : '未完成')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor($r('app.color.text_primary'))
+      Toggle({ type: ToggleType.Switch, isOn: this.done })
+        .selectedColor($r('app.color.brand'))
+        .onChange((isOn: boolean) => {
+          this.done = isOn;
+        })
+    }
+    .width('100%')
+    .height(TOUCH_MIN + SPACING.sm)
+    .alignItems(VerticalAlign.Center)
+  }
 
-          if (this.attachments.length > 0) {
-            Row({ space: 6 }) {
-              Text(`📎 已附加 ${this.attachments.length} 页手迹`)
-                .fontSize(12)
-                .fontColor($r('app.color.brand'))
-              if (this.ocrText.length > 0) {
-                Text('（原始识别文本只读保存，可在详情页查看）')
-                  .fontSize(11)
+  /** 附件缩略图（右侧预览 / 竖屏在表单末尾）。 */
+  @Builder
+  AttachmentPreview() {
+    Column({ space: SPACING.sm }) {
+      Text(`手迹附件（${this.attachments.length} 页）`)
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+      List({ space: SPACING.sm }) {
+        ForEach(
+          this.attachments,
+          (item: Attachment) => {
+            ListItem() {
+              Column({ space: SPACING.xs }) {
+                Image(attachmentStore.attachmentUri(item.sha256))
+                  .width(THUMB)
+                  .height(THUMB)
+                  .borderRadius(RADIUS.none)
+                  .objectFit(ImageFit.Cover)
+                  .backgroundColor($r('app.color.page_background'))
+                Text(`第 ${item.pageIndex + 1} 页`)
+                  .fontSize(FONT.caption)
+                  .lineHeight(LINE_HEIGHT.caption)
                   .fontColor($r('app.color.text_secondary'))
-                  .layoutWeight(1)
               }
             }
-            .width('100%')
-          }
+          },
+          (item: Attachment) => `${item.sha256}|${item.pageIndex}`
+        )
+      }
+      .listDirection(Axis.Horizontal)
+      .height(THUMB + 40)
+      .width('100%')
+      .scrollBar(BarState.Off)
 
-          Text('记录者')
-            .fontSize(13)
-            .fontColor($r('app.color.text_secondary'))
-            .width('100%')
-            .textAlign(TextAlign.Start)
-          TextInput({ text: this.author, placeholder: '记录者姓名' })
-            .width('100%')
-            .height(44)
-            .backgroundColor(Color.White)
-            .borderRadius(10)
-            .onChange((value: string) => {
-              this.author = value;
-            })
-
-          Row() {
-            Text('完成情况')
-              .fontSize(13)
-              .fontColor($r('app.color.text_secondary'))
-            Blank()
-            Text(this.done ? '已完成' : '未完成')
-              .fontSize(13)
-              .fontColor($r('app.color.text_primary'))
-              .margin({ right: 8 })
-            Toggle({ type: ToggleType.Switch, isOn: this.done })
-              .selectedColor($r('app.color.brand'))
-              .onChange((isOn: boolean) => {
-                this.done = isOn;
-              })
-          }
+      if (this.ocrText.length > 0) {
+        Text('原始识别文本已保存（只读），可在详情页查看。')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
-          .height(48)
-          .padding({ left: 8, right: 8 })
-          .backgroundColor(Color.White)
-          .borderRadius(10)
+          .textAlign(TextAlign.Start)
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
 
-          if (this.contentChanged()) {
-            Text('标题或正文变更后需要重新执行「AI 汇总」，因此本次保存会重置 AI 处理标记。')
-              .fontSize(11)
-              .fontColor($r('app.color.text_secondary'))
-              .width('100%')
-              .textAlign(TextAlign.Start)
-          }
+  @Builder
+  SaveButton() {
+    Button(this.recordId.length > 0 ? '保存修改' : '保存日程')
+      .width('100%')
+      .height(PRIMARY_HEIGHT)
+      .fontSize(FONT.body)
+      .backgroundColor($r('app.color.brand'))
+      .fontColor($r('app.color.text_inverse'))
+      .borderRadius(RADIUS.sm)
+      .onClick(() => this.save())
+  }
 
-          if (!this.ready) {
-            EmptyState({
-              title: '正在准备存储…',
-              hint: this.statusText.length > 0 ? this.statusText : '首次进入会创建 devices/<设备标识>/ 目录',
-              icon: '⏳'
-            })
-          } else if (this.statusText.length > 0) {
-            Text(this.statusText)
-              .fontSize(12)
-              .fontColor('#D94838')
-              .width('100%')
+  /** 表单主体（两种断点共用）。 */
+  @Builder
+  FormBody() {
+    Column({ space: SPACING.lg }) {
+      this.TitleField()
+      this.BodyField()
+      this.AuthorField()
+      this.DoneRow()
+
+      if (this.contentChanged()) {
+        Text('标题或正文变更后需要重新「AI 汇总」：本次保存会重置 AI 处理标记。')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+      }
+
+      if (!this.ready) {
+        EmptyState({
+          title: '正在准备存储…',
+          hint: this.statusText.length > 0 ? this.statusText : '首次进入会创建 devices/<设备标识>/ 目录'
+        })
+      } else if (this.statusText.length > 0) {
+        Text(this.statusText)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.danger'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  /** 紧凑屏：表单 → 附件 → 保存（单列）。 */
+  @Builder
+  CompactBody() {
+    Column({ space: SPACING.md }) {
+      Scroll() {
+        Column({ space: SPACING.lg }) {
+          this.FormBody()
+          if (this.attachments.length > 0) {
+            Divider()
+              .strokeWidth(DIVIDER)
+              .color($r('app.color.divider'))
+            this.AttachmentPreview()
           }
         }
         .width('100%')
-        .padding({ left: 12, right: 12, bottom: 24 })
+        .alignItems(HorizontalAlign.Start)
+        .padding({ bottom: SPACING.xl })
       }
       .layoutWeight(1)
       .width('100%')
+      .scrollBar(BarState.Off)
       .align(Alignment.TopStart)
 
-      Button(this.recordId.length > 0 ? '保存修改' : '保存日程')
-        .width('92%')
-        .height(46)
-        .margin({ top: 8, bottom: 12 })
-        .backgroundColor($r('app.color.brand'))
-        .fontColor(Color.White)
-        .onClick(() => this.save())
+      this.SaveButton()
     }
     .width('100%')
     .height('100%')
-    .backgroundColor($r('app.color.page_background'))
+  }
+
+  /** 宽屏/横屏：左表单（底部保存）/ 右手写与附件预览。 */
+  @Builder
+  WideBody() {
+    Row({ space: SPACING.xl }) {
+      Column({ space: SPACING.md }) {
+        Scroll() {
+          Column() {
+            this.FormBody()
+          }
+          .width('100%')
+          .padding({ bottom: SPACING.xl })
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .scrollBar(BarState.Off)
+        .align(Alignment.TopStart)
+        this.SaveButton()
+      }
+      .layoutWeight(1)
+      .height('100%')
+
+      Divider()
+        .vertical(true)
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+        .height('100%')
+
+      Column({ space: SPACING.md }) {
+        Row({ space: SPACING.sm }) {
+          Text('手写与附件')
+            .fontSize(FONT.body)
+            .lineHeight(LINE_HEIGHT.body)
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.text_primary'))
+            .layoutWeight(1)
+            .textAlign(TextAlign.Start)
+          this.WritingEntry()
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+
+        if (this.attachments.length > 0) {
+          this.AttachmentPreview()
+        } else {
+          Text('还没有手迹附件。在鸿蒙上手写并「完成」后，页面会回到这里。')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.text_secondary'))
+            .width('100%')
+            .textAlign(TextAlign.Start)
+        }
+      }
+      .layoutWeight(1)
+      .height('100%')
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .height('100%')
+    .alignItems(VerticalAlign.Top)
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.TopStart }) {
+      PageLayout({
+        title: this.recordId.length > 0 ? '编辑日程' : '新建日程',
+        subtitle: this.recordId.length > 0 ? '修改后会追加一条新记录' : '保存后追加到今天的日程',
+        onBack: () => {
+          router.back();
+        },
+        onBreakpointChange: (breakpoint: string) => {
+          this.breakpoint = breakpoint;
+        }
+      }) {
+        if (this.breakpoint === 'compact') {
+          this.CompactBody()
+        } else {
+          this.WideBody()
+        }
+      }
+    }
+    .width('100%')
+    .height('100%')
   }
 }

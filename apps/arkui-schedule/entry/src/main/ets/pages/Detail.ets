@@ -1,14 +1,15 @@
 /**
- * 详情页：AI 结构化（可编辑保存）+ 原始 OCR 只读 + 手迹截图缩略/全屏 + 附件哈希列表。
+ * 详情页：正文 + AI 结构化（可编辑保存）+ 原始 OCR 只读 + 手迹截图缩略/全屏。
  *
  * 契约：BRIEF §3.2（`ocr_text` 保留原始识别结果不被覆盖）、§3.5、`docs/CONTRACT.md` §3.4。
  *
  * 说明：
  * - 截图预览用沙箱文件 URI 交给 `Image()`。共享层禁止引用 `@kit.ImageKit` / PixelMap
- *   （validate 规则 4），因此这里不解码像素；`attachmentStore.readAttachment()` 仍提供
- *   `ArrayBuffer` 供后续校验使用。
+ *   （validate 规则 4），因此这里不解码像素。
  * - 保存 AI 文本时**不改变记录日期**：ts 取「原日期 + 当前时钟」，保证记录留在原
  *   `YYYY-MM-DD.jsonl`，同时 ts 严格变大让 `foldById` 稳定取新值。
+ * - 布局：竖屏正文+附件自上而下；横屏左正文/AI、右附件与元信息。附件哈希等排障信息
+ *   收进「更多」，不再常驻。
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
@@ -22,6 +23,17 @@ import { settingsStore } from '../services/settingsStore';
 import { attachmentStore } from '../services/attachmentStore';
 import { deviceTimeZone, summarize } from '../services/deepseek';
 import { EmptyState } from '../components/EmptyState';
+import { PageLayout } from '../components/PageLayout';
+import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
+
+/** 主操作按钮高度。 */
+const PRIMARY_HEIGHT: number = 48;
+
+/** 附件缩略图边长。 */
+const THUMB: number = 96;
+
+/** AI 文本编辑框高度。 */
+const AI_TEXT_HEIGHT: number = 160;
 
 @Entry
 @Component
@@ -40,6 +52,10 @@ struct Detail {
   @State ready: boolean = false;
   @State aiBusy: boolean = false;
   @State loaded: boolean = false;
+  /** 断点由 `PageLayout` 计算，本页只做 compact / 非 compact 分支。 */
+  @State breakpoint: string = 'compact';
+  /** 「更多」弹层：`''` | `more` | `files`。 */
+  @State panel: string = '';
   /** 折叠后的原始记录（保存时以此为底板）。 */
   private raw: ScheduleRecord | null = null;
 
@@ -142,7 +158,7 @@ struct Detail {
       return;
     }
     if (aiKey.trim().length === 0) {
-      promptAction.showToast({ message: '请先在设置页填写 DeepSeek API Key', duration: 4000 });
+      promptAction.showToast({ message: '请先在设置页填写 AI Key', duration: 4000 });
       return;
     }
     // buildAiPayload 只收 ai_processed:false 的记录；这里构造一份副本作为候选，不写回存储。
@@ -157,7 +173,7 @@ struct Detail {
     try {
       const text = await summarize(payload, aiKey, nowIso(), deviceTimeZone());
       this.aiText = text;
-      promptAction.showToast({ message: 'AI 结果已填入，点击「保存」写入记录', duration: 4000 });
+      promptAction.showToast({ message: 'AI 结果已填入，点「保存」写入记录', duration: 4000 });
     } catch (error) {
       promptAction.showToast({ message: describeError(error), duration: 5000 });
     } finally {
@@ -191,31 +207,144 @@ struct Detail {
     return parts.join(' · ');
   }
 
+  // ------------------------------------------------------------------ UI
+
   @Builder
-  AttachmentStrip() {
-    Column({ space: 8 }) {
-      Text(`手迹附件（${this.attachments.length} 页，点击查看大图）`)
-        .fontSize(13)
+  FieldLabel(text: string) {
+    Text(text)
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .fontColor($r('app.color.text_secondary'))
+      .width('100%')
+      .textAlign(TextAlign.Start)
+  }
+
+  /** 正文块（含记录标题）。 */
+  @Builder
+  BodyBlock() {
+    Column({ space: SPACING.sm }) {
+      Text(this.title.length > 0 ? this.title : '(未命名日程)')
+        .fontSize(FONT.title)
+        .lineHeight(LINE_HEIGHT.title)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+
+      Text(this.body.length > 0 ? this.body : '（空）')
+        .fontSize(FONT.body)
+        .lineHeight(LINE_HEIGHT.body)
+        .fontColor(this.body.length > 0 ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+        .copyOption(CopyOptions.LocalDevice)
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  /** AI 结构化块：可编辑 + 条件出现的「保存」（次要动作，不做主按钮）。 */
+  @Builder
+  AiBlock() {
+    Column({ space: SPACING.sm }) {
+      Row({ space: SPACING.sm }) {
+        Text('AI 结构化')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .layoutWeight(1)
+          .textAlign(TextAlign.Start)
+        if (this.aiText.trim().length > 0) {
+          Text(this.aiBusy ? '保存中…' : '保存')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.brand'))
+            .height(TOUCH_MIN)
+            .padding({ left: SPACING.md, right: SPACING.md })
+            .textAlign(TextAlign.Center)
+            .onClick(() => this.saveAiText())
+        }
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      if (this.aiText.trim().length === 0) {
+        Text(this.aiBusy ? '正在整理…' : '尚未生成。可从右上「更多」运行 AI 整理，生成后可编辑并保存。')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+      } else {
+        TextArea({ text: this.aiText, placeholder: 'AI 结构化结果' })
+          .width('100%')
+          .height(AI_TEXT_HEIGHT)
+          .fontSize(FONT.body)
+          .backgroundColor($r('app.color.page_background'))
+          .borderRadius(RADIUS.none)
+          .padding({ left: 0, right: 0 })
+          .onChange((value: string) => {
+            this.aiText = value;
+          })
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  /** 原始识别文本（只读，永不覆盖）。 */
+  @Builder
+  OcrBlock() {
+    Column({ space: SPACING.sm }) {
+      Text('原始识别文本（只读）')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
         .fontColor($r('app.color.text_secondary'))
         .width('100%')
         .textAlign(TextAlign.Start)
-      List({ space: 8 }) {
+      Text(this.ocrText.length > 0 ? this.ocrText : '（这条记录没有手写识别原文）')
+        .fontSize(FONT.body)
+        .lineHeight(LINE_HEIGHT.body)
+        .fontColor(this.ocrText.length > 0 ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+        .copyOption(CopyOptions.LocalDevice)
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  /** 手迹附件缩略图（点击全屏）。 */
+  @Builder
+  AttachmentStrip() {
+    Column({ space: SPACING.sm }) {
+      Text(`手迹附件（${this.attachments.length} 页）`)
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+      List({ space: SPACING.sm }) {
         ForEach(
           this.attachments,
           (item: Attachment) => {
             ListItem() {
-              Column({ space: 4 }) {
+              Column({ space: SPACING.xs }) {
                 Image(attachmentStore.attachmentUri(item.sha256))
-                  .width(96)
-                  .height(96)
-                  .borderRadius(8)
+                  .width(THUMB)
+                  .height(THUMB)
+                  .borderRadius(RADIUS.none)
                   .objectFit(ImageFit.Cover)
-                  .backgroundColor('#EEF1F4')
+                  .backgroundColor($r('app.color.page_background'))
                   .onClick(() => {
                     this.previewSha = item.sha256;
                   })
                 Text(`第 ${item.pageIndex + 1} 页`)
-                  .fontSize(11)
+                  .fontSize(FONT.caption)
+                  .lineHeight(LINE_HEIGHT.caption)
                   .fontColor($r('app.color.text_secondary'))
               }
             }
@@ -224,188 +353,297 @@ struct Detail {
         )
       }
       .listDirection(Axis.Horizontal)
-      .height(130)
+      .height(THUMB + 40)
       .width('100%')
-
-      Column({ space: 2 }) {
-        ForEach(
-          this.attachments,
-          (item: Attachment) => {
-            Text(`#${item.pageIndex}  ${item.sha256}  ${item.name}`)
-              .fontSize(10)
-              .fontColor($r('app.color.text_secondary'))
-              .width('100%')
-              .textAlign(TextAlign.Start)
-              .copyOption(CopyOptions.LocalDevice)
-          },
-          (item: Attachment) => `sha-${item.sha256}|${item.pageIndex}`
-        )
-      }
-      .width('100%')
+      .scrollBar(BarState.Off)
     }
     .width('100%')
-    .padding(12)
-    .backgroundColor(Color.White)
-    .borderRadius(12)
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  EditButton() {
+    Button('编辑')
+      .width('100%')
+      .height(PRIMARY_HEIGHT)
+      .fontSize(FONT.body)
+      .backgroundColor($r('app.color.brand'))
+      .fontColor($r('app.color.text_inverse'))
+      .borderRadius(RADIUS.sm)
+      .onClick(() => this.openEdit())
+  }
+
+  /** 紧凑屏：正文 → AI → 原始识别 → 附件 → 编辑。 */
+  @Builder
+  CompactBody() {
+    Column({ space: SPACING.md }) {
+      Scroll() {
+        Column({ space: SPACING.lg }) {
+          if (!this.ready || !this.loaded) {
+            EmptyState({
+              title: this.ready ? '没有找到这条记录' : '正在准备存储…',
+              hint: this.statusText.length > 0 ? this.statusText : '首次进入会创建 devices/<设备标识>/ 目录'
+            })
+          } else {
+            this.BodyBlock()
+            Divider()
+              .strokeWidth(DIVIDER)
+              .color($r('app.color.divider'))
+            this.AiBlock()
+            Divider()
+              .strokeWidth(DIVIDER)
+              .color($r('app.color.divider'))
+            this.OcrBlock()
+            if (this.attachments.length > 0) {
+              Divider()
+                .strokeWidth(DIVIDER)
+                .color($r('app.color.divider'))
+              this.AttachmentStrip()
+            }
+            if (this.statusText.length > 0) {
+              Text(this.statusText)
+                .fontSize(FONT.caption)
+                .lineHeight(LINE_HEIGHT.caption)
+                .fontColor($r('app.color.danger'))
+                .width('100%')
+                .textAlign(TextAlign.Start)
+            }
+          }
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding({ bottom: SPACING.xl })
+      }
+      .layoutWeight(1)
+      .width('100%')
+      .scrollBar(BarState.Off)
+      .align(Alignment.TopStart)
+
+      if (this.loaded) {
+        this.EditButton()
+      }
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  /** 宽屏/横屏：左正文 + AI + 原始识别；右附件 + 元信息；左下编辑。 */
+  @Builder
+  WideBody() {
+    Row({ space: SPACING.xl }) {
+      Column({ space: SPACING.md }) {
+        Scroll() {
+          Column({ space: SPACING.lg }) {
+            if (!this.ready || !this.loaded) {
+              EmptyState({
+                title: this.ready ? '没有找到这条记录' : '正在准备存储…',
+                hint: this.statusText.length > 0 ? this.statusText : '首次进入会创建 devices/<设备标识>/ 目录'
+              })
+            } else {
+              this.BodyBlock()
+              Divider()
+                .strokeWidth(DIVIDER)
+                .color($r('app.color.divider'))
+              this.AiBlock()
+            }
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding({ bottom: SPACING.xl })
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .scrollBar(BarState.Off)
+        .align(Alignment.TopStart)
+        if (this.loaded) {
+          this.EditButton()
+        }
+      }
+      .layoutWeight(1)
+      .height('100%')
+
+      Divider()
+        .vertical(true)
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+        .height('100%')
+
+      Column({ space: SPACING.md }) {
+        Scroll() {
+          Column({ space: SPACING.lg }) {
+            if (this.attachments.length > 0) {
+              this.AttachmentStrip()
+              Divider()
+                .strokeWidth(DIVIDER)
+                .color($r('app.color.divider'))
+            }
+            this.FieldLabel('元信息')
+            this.OcrBlock()
+            if (this.statusText.length > 0) {
+              Text(this.statusText)
+                .fontSize(FONT.caption)
+                .lineHeight(LINE_HEIGHT.caption)
+                .fontColor($r('app.color.danger'))
+                .width('100%')
+                .textAlign(TextAlign.Start)
+            }
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding({ bottom: SPACING.xl })
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .scrollBar(BarState.Off)
+        .align(Alignment.TopStart)
+      }
+      .layoutWeight(1)
+      .height('100%')
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .height('100%')
+    .alignItems(VerticalAlign.Top)
+  }
+
+  /** 「更多」：AI 整理 + 附件排障信息（哈希），不再常驻页面。 */
+  @Builder
+  MoreSheet() {
+    Column({ space: SPACING.md }) {
+      Row() {
+        Text('更多')
+          .fontSize(FONT.body)
+          .lineHeight(LINE_HEIGHT.body)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.text_primary'))
+          .layoutWeight(1)
+          .textAlign(TextAlign.Start)
+        Text('关闭')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .height(TOUCH_MIN)
+          .padding({ left: SPACING.md, right: SPACING.md })
+          .textAlign(TextAlign.Center)
+          .onClick(() => {
+            this.panel = '';
+          })
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+
+      Text(this.aiBusy ? '正在整理…' : '用 AI 整理这条记录')
+        .fontSize(FONT.body)
+        .lineHeight(LINE_HEIGHT.body)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .height(48)
+        .textAlign(TextAlign.Start)
+        .enabled(!this.aiBusy)
+        .onClick(() => {
+          this.panel = '';
+          this.runAiForRecord();
+        })
+
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+
+      Text('附件信息（哈希）')
+        .fontSize(FONT.body)
+        .lineHeight(LINE_HEIGHT.body)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .height(48)
+        .textAlign(TextAlign.Start)
+        .onClick(() => {
+          this.panel = 'files';
+        })
+
+      if (this.panel === 'files') {
+        if (this.attachments.length === 0) {
+          Text('没有附件')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.text_secondary'))
+            .width('100%')
+        } else {
+          Scroll() {
+            Column({ space: SPACING.xs }) {
+              ForEach(
+                this.attachments,
+                (item: Attachment) => {
+                  Text(`#${item.pageIndex}  ${item.sha256}  ${item.name}`)
+                    .fontSize(FONT.caption)
+                    .lineHeight(LINE_HEIGHT.caption)
+                    .fontColor($r('app.color.text_secondary'))
+                    .width('100%')
+                    .textAlign(TextAlign.Start)
+                    .maxLines(2)
+                    .copyOption(CopyOptions.LocalDevice)
+                },
+                (item: Attachment) => `sha-${item.sha256}|${item.pageIndex}`
+              )
+            }
+            .width('100%')
+          }
+          .width('100%')
+          .height(180)
+          .scrollBar(BarState.Auto)
+        }
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
   }
 
   build() {
     Stack({ alignContent: Alignment.Center }) {
-      Column() {
-        Row({ space: 8 }) {
-          Text('‹')
-            .fontSize(26)
-            .fontColor($r('app.color.text_primary'))
-            .padding({ left: 4, right: 4 })
-            .onClick(() => {
-              router.back();
-            })
-          Text('日程详情')
-            .fontSize(18)
-            .fontWeight(FontWeight.Bold)
-            .fontColor($r('app.color.text_primary'))
-            .layoutWeight(1)
-          Button('编辑')
-            .height(34)
-            .backgroundColor('#E8F1FF')
-            .fontColor($r('app.color.brand'))
-            .onClick(() => this.openEdit())
+      PageLayout({
+        title: '日程详情',
+        subtitle: this.metaLine(),
+        onBack: () => {
+          router.back();
+        },
+        onMore: () => {
+          this.panel = this.panel.length > 0 ? '' : 'more';
+        },
+        onBreakpointChange: (breakpoint: string) => {
+          this.breakpoint = breakpoint;
         }
-        .width('100%')
-        .padding({ left: 12, right: 12, top: 12, bottom: 8 })
+      }) {
+        if (this.breakpoint === 'compact') {
+          this.CompactBody()
+        } else {
+          this.WideBody()
+        }
+      }
 
-        Scroll() {
-          Column({ space: 12 }) {
-            if (!this.ready || !this.loaded) {
-              EmptyState({
-                title: this.ready ? '没有找到这条记录' : '正在准备存储…',
-                hint: this.statusText.length > 0 ? this.statusText : '首次进入会创建 devices/<设备标识>/ 目录',
-                icon: '🔍'
-              })
-            } else {
-              Column({ space: 6 }) {
-                Text(this.title.length > 0 ? this.title : '(未命名日程)')
-                  .fontSize(20)
-                  .fontWeight(FontWeight.Bold)
-                  .fontColor($r('app.color.text_primary'))
-                  .width('100%')
-                  .textAlign(TextAlign.Start)
-                Text(this.metaLine())
-                  .fontSize(12)
-                  .fontColor($r('app.color.text_secondary'))
-                  .width('100%')
-                  .textAlign(TextAlign.Start)
-              }
-              .width('100%')
-              .padding(12)
-              .backgroundColor(Color.White)
-              .borderRadius(12)
-
-              Column({ space: 6 }) {
-                Text('正文')
-                  .fontSize(13)
-                  .fontColor($r('app.color.text_secondary'))
-                  .width('100%')
-                  .textAlign(TextAlign.Start)
-                Text(this.body.length > 0 ? this.body : '（空）')
-                  .fontSize(14)
-                  .fontColor($r('app.color.text_primary'))
-                  .width('100%')
-                  .textAlign(TextAlign.Start)
-                  .copyOption(CopyOptions.LocalDevice)
-              }
-              .width('100%')
-              .padding(12)
-              .backgroundColor(Color.White)
-              .borderRadius(12)
-
-              Column({ space: 8 }) {
-                Row() {
-                  Text('AI 结构化（可编辑）')
-                    .fontSize(13)
-                    .fontColor($r('app.color.text_secondary'))
-                  Blank()
-                  if (this.aiText.trim().length > 0) {
-                    Button('保存')
-                      .height(30)
-                      .backgroundColor($r('app.color.brand'))
-                      .fontColor(Color.White)
-                      .onClick(() => this.saveAiText())
-                  }
-                }
-                .width('100%')
-
-                if (this.aiText.trim().length === 0) {
-                  Button(this.aiBusy ? '正在整理…' : 'AI 结构化')
-                    .width('100%')
-                    .height(40)
-                    .backgroundColor('#E8F1FF')
-                    .fontColor($r('app.color.brand'))
-                    .enabled(!this.aiBusy)
-                    .onClick(() => {
-                      this.runAiForRecord();
-                    })
-                  Text('尚未生成 AI 结构化内容；生成后可在上方编辑并保存。')
-                    .fontSize(11)
-                    .fontColor($r('app.color.text_secondary'))
-                    .width('100%')
-                    .textAlign(TextAlign.Start)
-                } else {
-                  TextArea({ text: this.aiText, placeholder: 'AI 结构化结果' })
-                    .width('100%')
-                    .height(180)
-                    .backgroundColor('#F7F9FB')
-                    .borderRadius(10)
-                    .onChange((value: string) => {
-                      this.aiText = value;
-                    })
-                }
-              }
-              .width('100%')
-              .padding(12)
-              .backgroundColor(Color.White)
-              .borderRadius(12)
-
-              Column({ space: 6 }) {
-                Text('原始识别文本 ocr_text（只读，永不覆盖）')
-                  .fontSize(13)
-                  .fontColor($r('app.color.text_secondary'))
-                  .width('100%')
-                  .textAlign(TextAlign.Start)
-                Text(this.ocrText.length > 0 ? this.ocrText : '（这条记录没有手写识别原文）')
-                  .fontSize(13)
-                  .fontColor($r('app.color.text_primary'))
-                  .width('100%')
-                  .textAlign(TextAlign.Start)
-                  .copyOption(CopyOptions.LocalDevice)
-              }
-              .width('100%')
-              .padding(12)
-              .backgroundColor(Color.White)
-              .borderRadius(12)
-
-              if (this.attachments.length > 0) {
-                this.AttachmentStrip()
-              }
-
-              if (this.statusText.length > 0) {
-                Text(this.statusText)
-                  .fontSize(12)
-                  .fontColor('#D94838')
-                  .width('100%')
-              }
-            }
+      if (this.panel.length > 0) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor($r('app.color.scrim'))
+          .onClick(() => {
+            this.panel = '';
+          })
+        Column() {
+          Blank()
+          Column() {
+            this.MoreSheet()
           }
           .width('100%')
-          .padding({ left: 12, right: 12, bottom: 24 })
+          .padding(SPACING.lg)
+          .backgroundColor($r('app.color.surface'))
+          .borderRadius({ topLeft: RADIUS.md, topRight: RADIUS.md })
         }
-        .layoutWeight(1)
         .width('100%')
-        .align(Alignment.TopStart)
+        .height('100%')
       }
-      .width('100%')
-      .height('100%')
-      .backgroundColor($r('app.color.page_background'))
 
       if (this.previewSha.length > 0) {
         Column() {
@@ -414,14 +652,15 @@ struct Detail {
             .height('82%')
             .objectFit(ImageFit.Contain)
           Text('点击任意位置关闭')
-            .fontSize(12)
-            .fontColor('#CCFFFFFF')
-            .margin({ top: 12 })
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.text_inverse'))
+            .margin({ top: SPACING.md })
         }
         .width('100%')
         .height('100%')
         .justifyContent(FlexAlign.Center)
-        .backgroundColor('#000000')
+        .backgroundColor($r('app.color.preview_background'))
         .onClick(() => {
           this.previewSha = '';
         })
