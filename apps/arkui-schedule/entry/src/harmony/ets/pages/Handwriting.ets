@@ -64,6 +64,8 @@ const STEPPER_LABEL_W: number = 56;
 const FINISH_MIN_WIDTH: number = 64;
 /** 二级面板每行高度（vp）。 */
 const MENU_ROW_HEIGHT: number = 44;
+/** 二级面板每项最小宽度（vp）——用户定版 ≥140。 */
+const MENU_MIN_WIDTH: number = 140;
 /** 面板里粗细圆点的直径（与 `PEN_WIDTHS` 一一对应，定版 4/7/10/13/16）。 */
 const SIZE_DOTS: number[] = [4, 7, 10, 13, 16];
 /** 面板里颜色块的边长（vp）。 */
@@ -167,13 +169,14 @@ struct Handwriting {
     this.confirmStage = CONFIRM_NONE;
     const next: string = this.panel === name ? '' : name;
     this.panel = next;
-    // 真机自证：Popup/自定义浮层不一定出现在 `ui layout` 里，用 hilog 记开合
-    console.info(`[hw] panel open=${next.length === 0 ? 'none' : next}`);
+    // 真机自证（Popup/自定义浮层不一定出现在 `ui layout` 里）：
+    // hilog | grep '[hw] menu=' 就能看到「点了哪个菜单、开还是关」
+    console.info(`[hw] menu=${name} open=${next.length === 0 ? 0 : 1} panel=${next.length === 0 ? 'none' : next}`);
   }
 
   private closeOverlays(): void {
     if (this.panel.length > 0) {
-      console.info('[hw] panel open=none');
+      console.info('[hw] menu=none open=0');
     }
     this.panel = '';
     this.confirmStage = CONFIRM_NONE;
@@ -182,19 +185,19 @@ struct Handwriting {
   private pickBrush(kind: BrushKind): void {
     this.pagerState.setBrush(kind);
     this.panel = '';
-    console.info(`[hw] panel open=none brush=${kind}`);
+    console.info(`[hw] menu=none open=0 pick=brush:${kind} label=${brushSpec(kind).label}`);
   }
 
   private pickWidth(width: number): void {
     this.pagerState.setPenWidth(width);
     this.panel = '';
-    console.info(`[hw] panel open=none penWidth=${width}`);
+    console.info(`[hw] menu=none open=0 pick=size:${width}`);
   }
 
   private pickColor(color: string): void {
     this.pagerState.setPenColor(color);
     this.panel = '';
-    console.info(`[hw] panel open=none penColor=${color}`);
+    console.info(`[hw] menu=none open=0 pick=color:${color}`);
   }
 
   /** 橡皮 / 手动框：点一下进该模式，**再点一次回到画笔**（定版语义），与画笔互斥。 */
@@ -418,41 +421,111 @@ struct Handwriting {
     .height(18)
   }
 
-  /** 按面板/工具类型挑图标。 */
-  @Builder
-  toolbarIcon(kind: string) {
-    if (kind === PANEL_SIZE) {
-      this.sizeIcon()
-    } else if (kind === PANEL_COLOR) {
-      this.colorIcon()
-    } else {
-      this.brushIcon(this.pagerState.brush)
-    }
+  // ------------------------------------------------------------------ 工具条按钮（宽度随内容自适应）
+
+  /** 当前笔刷中文名（笔形按钮的动态文案：钢笔 / 圆珠笔 / 铅笔 / 马克笔 / 荧光笔）。 */
+  private currentBrushLabel(): string {
+    return brushSpec(this.pagerState.brush).label;
   }
 
-  // ------------------------------------------------------------------ 工具条按钮
+  /** 当前粗细档对应的圆点直径（按钮与菜单共用，保证「看到的粗细 = 选中的档位」）。 */
+  private currentDotSize(): number {
+    const index: number = PEN_WIDTHS.indexOf(this.pagerState.penWidth);
+    return index >= 0 && index < SIZE_DOTS.length ? SIZE_DOTS[index] : SIZE_DOTS[2];
+  }
 
-  /** 图标 + ▾ 的菜单按钮（笔形 / 粗细 / 颜色）。 */
+  /**
+   * 笔形按钮：**「当前笔刷名 + ▾」**（动态文案，不再是固定单字）。
+   *
+   * 宽度规则（用户定版）：**按内容自适应**——只给 `minWidth(44)`，不给固定 `width`，
+   * 内容宽 = 文字 + 16vp padding，`钢笔` 两字 14fp ≈ 28 + 箭头 ≈ 10 + 16 ≈ 54vp 完整可见。
+   */
   @Builder
-  iconMenuButton(kind: string, panelName: string) {
+  brushMenuButton() {
     Row({ space: 2 }) {
-      this.toolbarIcon(kind)
+      Text(this.currentBrushLabel())
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === PANEL_BRUSH ? Color.White : $r('app.color.text_primary'))
       Text('▾')
         .fontSize(FONT.caption)
         .lineHeight(LINE_HEIGHT.caption)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === panelName ? Color.White : $r('app.color.text_secondary'))
+        .fontColor(this.panel === PANEL_BRUSH ? Color.White : $r('app.color.text_secondary'))
     }
-    .justifyContent(FlexAlign.Center)
-    .constraintSize({ minWidth: TOOL_MIN_WIDTH })
     .height(TOOL_HEIGHT)
-    .padding({ left: SPACING.xs, right: SPACING.xs })
+    .constraintSize({ minWidth: TOOL_MIN_WIDTH })
+    .padding({ left: SPACING.sm, right: SPACING.sm })
     .borderRadius(RADIUS.sm)
-    .backgroundColor(this.panel === panelName ? $r('app.color.brand') : '#F1F3F5')
+    .backgroundColor(this.panel === PANEL_BRUSH ? $r('app.color.brand') : '#F1F3F5')
     .flexShrink(0)
     .onClick(() => {
-      this.togglePanel(panelName);
+      this.togglePanel(PANEL_BRUSH);
+    })
+  }
+
+  /** 粗细按钮：**「当前档位圆点 + 数值 + ▾」**（数值让 `ui layout` 能断言到具体档位）。 */
+  @Builder
+  sizeMenuButton() {
+    Row({ space: 2 }) {
+      Text('')
+        .width(this.currentDotSize())
+        .height(this.currentDotSize())
+        .borderRadius(this.currentDotSize() / 2)
+        .backgroundColor(this.panel === PANEL_SIZE ? Color.White : $r('app.color.text_primary'))
+      Text(`${this.pagerState.penWidth}`)
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === PANEL_SIZE ? Color.White : $r('app.color.text_primary'))
+        .margin({ left: 2 })
+      Text('▾')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === PANEL_SIZE ? Color.White : $r('app.color.text_secondary'))
+    }
+    .height(TOOL_HEIGHT)
+    .constraintSize({ minWidth: TOOL_MIN_WIDTH })
+    .padding({ left: SPACING.sm, right: SPACING.sm })
+    .borderRadius(RADIUS.sm)
+    .backgroundColor(this.panel === PANEL_SIZE ? $r('app.color.brand') : '#F1F3F5')
+    .flexShrink(0)
+    .onClick(() => {
+      this.togglePanel(PANEL_SIZE);
+    })
+  }
+
+  /** 颜色按钮：**「当前色块 20×20 + ▾」**。 */
+  @Builder
+  colorMenuButton() {
+    Row({ space: 2 }) {
+      Text('')
+        .width(20)
+        .height(20)
+        .borderRadius(RADIUS.sm)
+        .backgroundColor(this.pagerState.penColor)
+        .border({ width: 1, color: this.panel === PANEL_COLOR ? Color.White : '#DDDDDD' })
+      Text('▾')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === PANEL_COLOR ? Color.White : $r('app.color.text_secondary'))
+    }
+    .height(TOOL_HEIGHT)
+    .constraintSize({ minWidth: TOOL_MIN_WIDTH })
+    .padding({ left: SPACING.sm, right: SPACING.sm })
+    .borderRadius(RADIUS.sm)
+    .backgroundColor(this.panel === PANEL_COLOR ? $r('app.color.brand') : '#F1F3F5')
+    .flexShrink(0)
+    .onClick(() => {
+      this.togglePanel(PANEL_COLOR);
     })
   }
 
@@ -465,7 +538,7 @@ struct Handwriting {
     Text(label)
       .height(TOOL_HEIGHT)
       .constraintSize({ minWidth: TOOL_MIN_WIDTH })
-      .padding({ left: SPACING.xs, right: SPACING.xs })
+      .padding({ left: SPACING.sm, right: SPACING.sm })
       .fontSize(FONT.caption)
       .lineHeight(LINE_HEIGHT.caption)
       .maxLines(1)
@@ -487,7 +560,10 @@ struct Handwriting {
     Text(label)
       .height(TOOL_HEIGHT)
       .constraintSize({ minWidth: TOOL_MIN_WIDTH })
+      .padding({ left: SPACING.sm, right: SPACING.sm })
       .fontSize(FONT.body)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
       .textAlign(TextAlign.Center)
       .borderRadius(RADIUS.sm)
       .backgroundColor('#EEF1F4')
@@ -518,6 +594,8 @@ struct Handwriting {
         .width(STEPPER_BTN)
         .height(TOOL_HEIGHT)
         .fontSize(FONT.body)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
         .textAlign(TextAlign.Center)
         // 禁用态只改色，不降透明度
         .fontColor(this.pageCount > 1 ? $r('app.color.danger') : $r('app.color.text_secondary'))
@@ -538,6 +616,8 @@ struct Handwriting {
         .width(STEPPER_BTN)
         .height(TOOL_HEIGHT)
         .fontSize(FONT.body)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
         .textAlign(TextAlign.Center)
         .fontColor(this.pageCount < MAX_HANDWRITING_PAGES ? $r('app.color.brand') : $r('app.color.text_secondary'))
         .enabled(this.pageCount < MAX_HANDWRITING_PAGES)
@@ -552,17 +632,14 @@ struct Handwriting {
     .flexShrink(0)
   }
 
-  /** 「完成」：唯一主操作，实底品牌蓝 + 白字、`minWidth 64vp`、不收缩。 */
+  /** 「完成」：唯一主操作，实底品牌蓝 + 白字、不收缩；竖屏 minWidth 64vp，横屏拉满 rail 宽。 */
   @Builder
   finishButton(fullWidth: boolean) {
     Button(this.busy ? '识别中' : '完成')
       .height(TOOL_HEIGHT)
-      .width(fullWidth ? RAIL_WIDTH - SPACING.sm : undefined)
-      .constraintSize({ minWidth: FINISH_MIN_WIDTH })
+      .width(fullWidth ? RAIL_WIDTH - SPACING.sm : FINISH_MIN_WIDTH)
+      .constraintSize({ minWidth: fullWidth ? RAIL_WIDTH - SPACING.sm : FINISH_MIN_WIDTH })
       .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.None })
       .backgroundColor($r('app.color.brand'))
       .fontColor(Color.White)
       .enabled(!this.busy)
@@ -578,9 +655,9 @@ struct Handwriting {
     Row({ space: SPACING.xs }) {
       Scroll() {
         Row({ space: SPACING.xs }) {
-          this.iconMenuButton(PANEL_BRUSH, PANEL_BRUSH)
-          this.iconMenuButton(PANEL_SIZE, PANEL_SIZE)
-          this.iconMenuButton(PANEL_COLOR, PANEL_COLOR)
+          this.brushMenuButton()
+          this.sizeMenuButton()
+          this.colorMenuButton()
           this.toolButton('橡皮', HW_TOOL_ERASER)
           this.toolButton('手动框', HW_TOOL_SELECT)
           this.historyButton('undo', '↶', this.undoSteps > 0)
@@ -609,9 +686,9 @@ struct Handwriting {
   @Builder
   railBar() {
     Column({ space: SPACING.xs }) {
-      this.iconMenuButton(PANEL_BRUSH, PANEL_BRUSH)
-      this.iconMenuButton(PANEL_SIZE, PANEL_SIZE)
-      this.iconMenuButton(PANEL_COLOR, PANEL_COLOR)
+      this.brushMenuButton()
+      this.sizeMenuButton()
+      this.colorMenuButton()
       this.toolButton('橡皮', HW_TOOL_ERASER)
       this.toolButton('手动框', HW_TOOL_SELECT)
       this.historyButton('undo', '↶', this.undoSteps > 0)
@@ -680,6 +757,8 @@ struct Handwriting {
               if (this.pagerState.brush === spec.kind && this.pagerState.tool === HW_TOOL_BRUSH) {
                 Text('✓')
                   .fontSize(FONT.caption)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.None })
                   .fontColor($r('app.color.brand'))
               }
             }
@@ -706,7 +785,7 @@ struct Handwriting {
                 .height(SIZE_DOTS[index])
                 .borderRadius(SIZE_DOTS[index] / 2)
                 .backgroundColor($r('app.color.text_primary'))
-              Text(`${width}`)
+              Text(`${width} vp`)
                 .fontSize(FONT.caption)
                 .lineHeight(LINE_HEIGHT.caption)
                 .maxLines(1)
@@ -717,6 +796,8 @@ struct Handwriting {
               if (this.pagerState.penWidth === width) {
                 Text('✓')
                   .fontSize(FONT.caption)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.None })
                   .fontColor($r('app.color.brand'))
               }
             }
@@ -755,6 +836,8 @@ struct Handwriting {
               if (this.pagerState.penColor === color) {
                 Text('✓')
                   .fontSize(FONT.caption)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.None })
                   .fontColor($r('app.color.brand'))
               }
             }
@@ -770,6 +853,7 @@ struct Handwriting {
         )
       }
     }
+    .constraintSize({ minWidth: MENU_MIN_WIDTH })
     .width(this.panelWidth())
     .padding({ top: SPACING.xs, bottom: SPACING.xs })
     .borderRadius(RADIUS.md)
