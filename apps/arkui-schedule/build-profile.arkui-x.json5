@@ -1,17 +1,11 @@
-// ArkUI-X 双端配置（HarmonyOS + Android）。
+// 构建配置（本机已验证：DevEco Studio 26.0.0.865 + HarmonyOS SDK 26.0.0）。
 //
-// 本机暂未安装 ArkUI-X 工具链，纯 DevEco 26 的 build-profile schema 只接受
-// runtimeOS: "HarmonyOS" | "OpenHarmony"，所以这份文件不会被自动加载。
-//
-// 启用方式（装好 ArkUI-X 后）：
-//   1. 备份当前 build-profile.json5；
-//   2. 把本文件复制为 build-profile.json5；
-//   3. 同时把 `entry/build-profile.arkui-x.json5` 复制为 `entry/build-profile.json5`；
-//   4. `powershell -File tools/build-harmony.ps1 -Product android` 构建 Android 分支。
-//
-// Android 分支的源码 = `src/main`（不含 `src/harmony`），因此手写/OCR/提醒代码
-// 物理上不进 Android 产物；共享层的 `common/platformFeatures.ts` 默认 fail-closed 为
-// Android 形态（手写/OCR 关闭、handwritingPageRoute() 返回空串）。
+// 说明（2026-11-15 实测）：
+// - 纯 DevEco 26 只接受 runtimeOS: "HarmonyOS" | "OpenHarmony"；`runtimeOS: "Android"`
+//   需要 ArkUI-X 工具链（本机未安装），因此 Android product 暂时从本文件移除，
+//   完整双端配置保存在 `build-profile.arkui-x.json5`，装上 ArkUI-X 后替换回来即可。
+// - 平台覆盖层：鸿蒙构建的源码 = `src/main` + `src/harmony`（同名相对路径以 harmony 为准），
+//   由 entry 的 `source.sourceRoots` 声明（见 entry/build-profile.json5）。
 {
   "app": {
     "signingConfigs": [],
@@ -27,12 +21,6 @@
             "useNormalizedOHMUrl": true
           }
         }
-      },
-      {
-        "name": "android",
-        "compatibleSdkVersion": "26.0.0",
-        "targetSdkVersion": "26.0.0",
-        "runtimeOS": "Android"
       }
     ],
     "buildModeSet": [
@@ -53,12 +41,6 @@
           "name": "default",
           "applyToProducts": [
             "default"
-          ]
-        },
-        {
-          "name": "android",
-          "applyToProducts": [
-            "android"
           ]
         }
       ]

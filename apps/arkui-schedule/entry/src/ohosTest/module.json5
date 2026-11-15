@@ -1,0 +1,13 @@
+{
+  "module": {
+    "name": "entry_test",
+    "type": "feature",
+    "description": "ArkUI-X instrumentation test module",
+    "deviceTypes": [
+      "phone",
+      "tablet"
+    ],
+    "deliveryWithInstall": true,
+    "installationFree": false
+  }
+}

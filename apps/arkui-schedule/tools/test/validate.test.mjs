@@ -100,7 +100,6 @@ export default class EntryAbility extends UIAbility {
 
 @Entry
 @Component
-@crossplatform
 export struct Index {
   build() {
     Column() {
@@ -110,7 +109,6 @@ export struct Index {
 }`,
     'entry/src/main/ets/pages/Edit.ets': `@Entry
 @Component
-@crossplatform
 export struct Edit {
   build() {
     Column() {
@@ -119,7 +117,6 @@ export struct Edit {
 }`,
     'entry/src/harmony/ets/pages/Handwriting.ets': `@Entry
 @Component
-@crossplatform
 export struct Handwriting {
   build() {
     Column() {
@@ -205,7 +202,6 @@ test('validate：规则 2 —— 断链 import', (t) => {
 
 @Entry
 @Component
-@crossplatform
 export struct Index {
   build() {
   }
@@ -294,7 +290,6 @@ test('validate：规则 3 —— 页面文件存在但未登记到 main_pages.js
     (files) => {
       files['entry/src/main/ets/pages/Detail.ets'] = `@Entry
 @Component
-@crossplatform
 export struct Detail {
   build() {
   }
@@ -333,12 +328,13 @@ export const pager = HandwritingPager;
   );
 });
 
-test('validate：规则 5 —— 含 struct 的 .ets 缺 @crossplatform', (t) => {
+test('validate：规则 5 —— .ets 里出现 @crossplatform 即失败（ArkUI-X 26 不认识该装饰器）', (t) => {
   expectFailure(
     t,
     (files) => {
       files['entry/src/main/ets/pages/Edit.ets'] = `@Entry
 @Component
+@crossplatform
 export struct Edit {
   build() {
   }

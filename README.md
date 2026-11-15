@@ -96,17 +96,27 @@ devecocli build --product default        # => BUILD SUCCESSFUL，产物 entry/bu
 powershell -File .\tools\build-harmony.ps1 -Cores 4
 ```
 
-两种构建模式（DevEco 26 的 schema 只接受 `runtimeOS: HarmonyOS | OpenHarmony`，所以 Android
-product 必须等 ArkUI-X 工具链）：
+两种构建模式（同一份 ArkTS 源码，产物不同）：
 
 ```powershell
 node tools\set-build-mode.mjs --check          # 当前模式
-node tools\set-build-mode.mjs --mode harmony   # 默认：纯鸿蒙，无 Android product、无 @crossplatform
-node tools\set-build-mode.mjs --mode arkui-x   # ArkUI-X 双端：双 product + 给每个 struct 加回 @crossplatform
+node tools\set-build-mode.mjs --mode harmony   # 鸿蒙 HAP：entry = src/main + src/harmony
+node tools\set-build-mode.mjs --mode arkui-x   # 安卓 APK：entry = src/main（无手写/OCR）
 ```
 
-`tools/validate-app.mjs` 负责静态一致性检查（JSON5、import 图、平台门控、`@crossplatform` 与构建模式一致性、isomorphic-git 资源）。
-构建细节、真实报错与修复记录见 [`docs/VERIFICATION.md`](docs/VERIFICATION.md) §8。
+**安卓 APK（ArkUI-X，已实测）**：
+
+```powershell
+$sdk = "$env:LOCALAPPDATA\ArkUI-X\Sdk\26.0.0\arkui-x"       # DevEco 插件下载的 ArkUI-X SDK 26.0.0.28
+$env:PATH = "$sdk\toolchains\bin;D:\A-DevEco\DevEco Studio\tools\node;$env:PATH"
+$env:JAVA_HOME = 'D:\jdk17\jdk-17'                           # Gradle 8.4 不能用 DevEco 自带 JDK 25
+$env:ANDROID_HOME = 'D:\android-sdk'
+node tools\set-build-mode.mjs --mode arkui-x
+ace build apk --debug     # => BUILD SUCCESSFUL，产物 .arkui-x/android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+已产出：`dist-android/arkui-schedule-android-debug.apk`（50.84 MB，含 ArkUI-X 运行库，无手写/OCR 代码）。
+详细步骤、踩坑与证据见 [`docs/VERIFICATION.md`](docs/VERIFICATION.md) §8（鸿蒙）、§9（安卓）。
 
 ## 目录
 
