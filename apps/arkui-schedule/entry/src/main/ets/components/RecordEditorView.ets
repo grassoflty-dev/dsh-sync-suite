@@ -89,7 +89,7 @@ export struct RecordEditorView {
 
   /** 页面从手写板返回时触发回填。 */
   onRefreshTick(): void {
-    this.applyPendingHandwriting();
+    this.applyPendingInkResult();
   }
 
   private async bootstrap(): Promise<void> {
@@ -147,7 +147,7 @@ export struct RecordEditorView {
   }
 
   /** 手写板回填：正文、原始识别文本、截图附件三路数据（读后立即清空键）。 */
-  private applyPendingHandwriting(): void {
+  private applyPendingInkResult(): void {
     const text = AppStorage.get<string>('handwriting.result');
     if (text !== undefined && text.length > 0) {
       this.body = this.body.length > 0 ? `${this.body}\n${text}` : text;
