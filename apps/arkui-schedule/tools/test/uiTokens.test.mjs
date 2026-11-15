@@ -14,6 +14,7 @@ import {
   isCompact,
   isLandscapeSize,
   isWide,
+  masterPaneWidth,
   minWidthFor,
   resolveBreakpoint,
   sidebarWidth,
@@ -23,6 +24,10 @@ import {
 const INDEX = readFileSync(new URL('../../entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8')
 const PAGE_LAYOUT = readFileSync(new URL('../../entry/src/main/ets/components/PageLayout.ets', import.meta.url), 'utf8')
 const SETTINGS = readFileSync(new URL('../../entry/src/main/ets/pages/Settings.ets', import.meta.url), 'utf8')
+const DETAIL_PAGE = readFileSync(new URL('../../entry/src/main/ets/pages/Detail.ets', import.meta.url), 'utf8')
+const EDIT_PAGE = readFileSync(new URL('../../entry/src/main/ets/pages/Edit.ets', import.meta.url), 'utf8')
+const DETAIL_VIEW = readFileSync(new URL('../../entry/src/main/ets/components/RecordDetailView.ets', import.meta.url), 'utf8')
+const EDITOR_VIEW = readFileSync(new URL('../../entry/src/main/ets/components/RecordEditorView.ets', import.meta.url), 'utf8')
 
 /** 去掉块注释与整行行注释：结构守卫只对「代码」生效，注释里允许写「已删除」之类的说明 */
 function stripComments(source) {
@@ -122,7 +127,7 @@ test('Index 只按 breakpoint === compact 分支，且单列/双栏两套骨架�
   assert.match(INDEX, /if \(this\.breakpoint === 'compact'\) \{/, 'Index 必须只做一处粗粒度分支')
   assert.match(INDEX, /this\.CompactBody\(\)/)
   assert.match(INDEX, /this\.WideBody\(\)/)
-  assert.match(INDEX, /sidebarWidth\(this\.contentWidth\)/, '双栏侧栏宽度必须走令牌函数')
+  assert.match(INDEX, /masterPaneWidth\(this\.contentWidth\)/, '主从布局主栏宽度必须走令牌函数（360–420vp）')
   assert.match(INDEX, /onBreakpointChange:/, 'Index 必须接 PageLayout 的断点回调')
 })
 
@@ -130,18 +135,23 @@ test('Index 双栏骨架：左日期列（DateBlock/ModeTabs/新建）+ 右列�
   const start = INDEX.indexOf('WideBody() {')
   assert.notEqual(start, -1)
   const body = INDEX.slice(start, INDEX.indexOf('\n  }', start))
-  for (const piece of ['this.DateBlock()', 'this.ModeTabs()', 'this.SidebarAction()', 'this.WideList()']) {
+  for (const piece of ['this.DateBlock()', 'this.ModeTabs()', 'this.SidebarAction()', 'this.RecordList()']) {
     assert.ok(body.includes(piece), `WideBody 缺少 ${piece}`)
   }
   assert.match(body, /\.vertical\(true\)/, '两栏之间必须有竖分割线')
-  assert.match(body, /records\.length > 0/, '空态时左栏不再放第二个主操作')
+  assert.match(INDEX, /this\.RightPane\(\)/, '右栏必须渲染主从详情/编辑');
+  assert.match(INDEX, /paneMode === 'editor'[\s\S]{0,120}RecordEditorView\(/, '编辑模式渲染 RecordEditorView');
+  assert.match(INDEX, /RecordDetailView\(\{[\s\S]{0,160}recordId: this\.paneMode === 'detail' \? this\.selectedId : ''/, '详情/空态共用 RecordDetailView');
 })
 
 test('宽屏视觉四条：页头不重复日期 / 空态居中 CTA / 列表最大 720vp / 左栏按钮 240vp', () => {
   assert.match(INDEX, /const LIST_MAX_WIDTH: number = 720;/, '列表最大宽必须被常量约束（720vp ≈ 45–50 字/行）')
   assert.match(INDEX, /const SIDEBAR_ACTION_WIDTH: number = 240;/, '左栏主操作固定 240vp')
   assert.match(INDEX, /\.constraintSize\(\{ maxWidth: LIST_MAX_WIDTH \}\)/, '列表要居中限宽')
-  assert.match(INDEX, /this\.EmptyCta\(\)/, '空态右栏要有居中主操作')
+  assert.match(INDEX_CODE, /RecordRow\(\{[\s\S]{0,160}selected: this\.selectedId === item\.id/, '选中行要高亮')
+  assert.match(INDEX_CODE, /showDialog\(/, '未保存冲突要弹确认框')
+  assert.match(INDEX_CODE, /放弃当前编辑/, '冲突提示文案')
+  assert.match(DETAIL_VIEW, /从左侧选一条日程查看/, '右栏空态文案在详情组件里')
   assert.match(INDEX, /subtitle: this\.subtitleText\(\)/, '页头副标题走 subtitleText()（空态不重复）')
   assert.equal(/return this\.showAllPending \? '全部未完成' : this\.selectedDate;/.test(INDEX), false, '页头不能直接显示日期')
   assert.match(INDEX, /return this\.selectedDate === localDateKey\(new Date\(\)\) \? '今天' : '日程';/)
@@ -334,4 +344,38 @@ test('sidebarWidth 结果永远不超过内容宽度（不产生横向溢出）'
     assert.ok(side <= width, `${width}vp 的屏幕侧栏 ${side}vp 不应更宽`)
     assert.ok(side > 0)
   }
+})
+
+test('masterPaneWidth：主栏夹在 360–420vp，窄屏退回屏幕宽', () => {
+  assert.equal(masterPaneWidth(1280), 420, '1/3=427 应夹到 420 上限')
+  assert.equal(masterPaneWidth(1080), 360, '1/3=360 正好下限')
+  assert.equal(masterPaneWidth(900), 360, '1/3=300 应抬到 360 下限')
+  assert.equal(masterPaneWidth(1200), 400, '1/3=400 保持在区间内')
+  assert.equal(masterPaneWidth(320), 320, '屏幕比下限还窄时不要超出屏幕')
+  assert.equal(masterPaneWidth(0), 360, '非法宽度回落 360')
+  assert.equal(masterPaneWidth(Number.NaN), 360)
+})
+
+test('Detail / Edit 已改成薄壳：只做路由参数 + 复用组件，不再自带业务逻辑', () => {
+  assert.match(DETAIL_PAGE, /RecordDetailView\(\{/)
+  assert.match(EDIT_PAGE, /RecordEditorView\(\{/)
+  for (const heavy of ['appendRecord', 'cloneRecord', 'attachmentStore']) {
+    assert.equal(new RegExp(heavy).test(DETAIL_PAGE), false, `Detail.ets 不应再自带 ${heavy}`)
+    assert.equal(new RegExp(heavy).test(EDIT_PAGE), false, `Edit.ets 不应再自带 ${heavy}`)
+  }
+  assert.equal(/summarize\(/.test(DETAIL_PAGE), false, 'Detail.ets 不应再直接调摘要')
+})
+
+test('两个可复用视图：入参与回调齐全，手写回填走 refreshTick + @Watch', () => {
+  assert.match(DETAIL_VIEW, /@Prop recordId: string/)
+  assert.match(DETAIL_VIEW, /@Prop refreshTick: number/)
+  assert.match(DETAIL_VIEW, /onEdit: \(\(\) => void\) \| null/)
+  assert.match(DETAIL_VIEW, /onAi: \(\(\) => void\) \| null/)
+  assert.match(DETAIL_VIEW, /onDelete: \(\(\) => void\) \| null/)
+  assert.match(EDITOR_VIEW, /onSaved: \(record: ScheduleRecord\) => void/)
+  assert.match(EDITOR_VIEW, /onCancel: \(\(\) => void\) \| null/)
+  assert.match(EDITOR_VIEW, /onDirtyChange: \(\(dirty: boolean\) => void\) \| null/)
+  assert.match(EDITOR_VIEW, /@Watch\('refreshTick'\)/)
+  assert.match(EDITOR_VIEW, /AppStorage\.setOrCreate<string>\('handwriting\.result', ''\)/, '回填后必须清键')
+  assert.match(EDITOR_VIEW, /handwritingPageRoute\(\)/, '手写板入口两种容器都可用')
 })

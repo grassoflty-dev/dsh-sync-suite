@@ -188,6 +188,29 @@ export function sidebarWidth(contentWidthVp: number): number {
   return third;
 }
 
+/**
+ * 主从布局里「主栏」（列表栏）的宽度：夹在 360–420vp。
+ *
+ * 与 `sidebarWidth` 的区别：`sidebarWidth` 是「内容宽 1/3，夹 280–420」（旧的两栏列表页用），
+ * 主从布局要保证列表放得下两条 meta 信息，下限抬到 360。屏幕本身更窄时退回屏幕宽。
+ */
+export function masterPaneWidth(contentWidthVp: number): number {
+  if (!Number.isFinite(contentWidthVp) || contentWidthVp <= 0) {
+    return 360;
+  }
+  if (contentWidthVp <= 360) {
+    return contentWidthVp;
+  }
+  const third = Math.round(contentWidthVp / 3);
+  if (third < 360) {
+    return 360;
+  }
+  if (third > 420) {
+    return 420;
+  }
+  return third;
+}
+
 /** 可点击元素的实际高度是否需要补足到 `TOUCH_MIN`，返回需要补的 padding（vp，0 表示不用补）。 */
 export function touchPadding(heightVp: number): number {
   const diff = TOUCH_MIN - heightVp;

@@ -113,9 +113,13 @@ const SWATCH: number = 28;
 /** 颜色名（与 `PEN_COLORS` 顺序一一对应）。 */
 const COLOR_LABELS: string[] = ['黑', '红', '蓝', '绿', '橙'];
 /** 二级面板标识。 */
-const PANEL_BRUSH: string = 'brush';
-const PANEL_SIZE: string = 'size';
+/** 「笔迹设置」面板：笔形 + 粗细合在一个浮层里（用户需求：合并成一个二级菜单）。 */
+const PANEL_INK: string = 'ink';
 const PANEL_COLOR: string = 'color';
+/** 笔迹设置面板最小宽度（vp）——用户定版 ≥260（三段：笔形 / 粗细 / 颜色）。 */
+const INK_PANEL_MIN_WIDTH: number = 260;
+/** 笔迹设置面板里 chip / 档位格的触控高度（vp）——定版 ≥40。 */
+const CHIP_HEIGHT: number = 40;
 /** 首次引导存储（不建设置项，只存一个布尔标记）。 */
 const TIP_STORE: string = 'handwriting';
 const TIP_KEY: string = 'handwriting.tipShown';
@@ -479,20 +483,25 @@ struct Handwriting {
 
   private pickBrush(kind: BrushKind): void {
     this.pagerState.setBrush(kind);
-    this.panel = '';
-    console.info(`[hw] menu=none open=0 pick=brush:${kind} label=${brushSpec(kind).label}`);
+    // 点选项**不关面板**（用户要连续调：笔形→粗细→颜色）；点面板外由 scrim 关闭
+    console.info(
+      `[hw] ink brush=${kind} label=${brushSpec(kind).label} width=${this.pagerState.penWidth}` +
+        ` color=${this.pagerState.penColor} panel=open`
+    );
   }
 
   private pickWidth(width: number): void {
     this.pagerState.setPenWidth(width);
-    this.panel = '';
-    console.info(`[hw] menu=none open=0 pick=size:${width}`);
+    console.info(
+      `[hw] ink brush=${this.pagerState.brush} width=${width} color=${this.pagerState.penColor} panel=open`
+    );
   }
 
   private pickColor(color: string): void {
     this.pagerState.setPenColor(color);
-    this.panel = '';
-    console.info(`[hw] menu=none open=0 pick=color:${color}`);
+    console.info(
+      `[hw] ink brush=${this.pagerState.brush} width=${this.pagerState.penWidth} color=${color} panel=open`
+    );
   }
 
   /** 橡皮 / 手动框：点一下进该模式，**再点一次回到画笔**（定版语义），与画笔互斥。 */
@@ -745,7 +754,17 @@ struct Handwriting {
 
   // ------------------------------------------------------------------ 工具条按钮（宽度随内容自适应）
 
-  /** 当前颜色名（颜色按钮的短标签：黑/红/蓝/绿/橙）。 */
+  /**
+   * 「笔迹设置」按钮上的状态文案：`钢笔 · 3.5`。
+   *
+   * 用户允许「太长可缩成 `钢笔`」；这里取 `笔刷名 · 档位`，面板里再给完整信息。
+   */
+  private inkSummary(): string {
+    // 三段合并后按钮文案：笔刷 · 档位 · 色名（例：`钢笔 · 3.5 · 黑`）
+    return `${this.currentBrushLabel()} · ${this.pagerState.penWidth} · ${this.currentColorLabel()}`;
+  }
+
+  /** 当前颜色名（颜色面板里显示；按钮上只写「颜色」+ 色块）。 */
   private currentColorLabel(): string {
     const index: number = PEN_COLORS.indexOf(this.pagerState.penColor);
     return index >= 0 && index < COLOR_LABELS.length ? COLOR_LABELS[index] : '色';
@@ -763,104 +782,43 @@ struct Handwriting {
   }
 
   /**
-   * 笔形按钮：**「当前笔刷名 + ▾」**（动态文案，不再是固定单字）。
+   * 「笔迹设置」按钮（笔形 + 粗细合并后的入口）。
    *
-   * 宽度规则（用户定版）：**按内容自适应**——只给 `minWidth(44)`，不给固定 `width`，
-   * 内容宽 = 文字 + 16vp padding，`钢笔` 两字 14fp ≈ 28 + 箭头 ≈ 10 + 16 ≈ 54vp 完整可见。
+   * 文案显示当前状态：`钢笔 · 3.5`（太长时用户可只看笔刷名，见 `inkSummary()`）。
+   * 宽度按内容自适应：只给 `minWidth(44)` + 左右 8vp padding，`flexShrink(0)` 不压缩。
    */
   @Builder
   brushMenuButton() {
     Row({ space: 2 }) {
-      Text(this.currentBrushLabel())
+      Text(this.inkSummary())
         .fontSize(FONT.caption)
         .lineHeight(LINE_HEIGHT.caption)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_BRUSH ? Color.White : $r('app.color.text_primary'))
-      Text('▾')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_BRUSH ? Color.White : $r('app.color.text_secondary'))
-    }
-    .height(TOOL_HEIGHT)
-    .constraintSize({ minWidth: TOOL_MIN_WIDTH })
-    .padding({ left: SPACING.sm, right: SPACING.sm })
-    .borderRadius(RADIUS.sm)
-    .backgroundColor(this.panel === PANEL_BRUSH ? $r('app.color.brand') : '#F1F3F5')
-    .flexShrink(0)
-    .onClick(() => {
-      this.togglePanel(PANEL_BRUSH);
-    })
-  }
-
-  /** 粗细按钮：**「当前档位圆点 + 数值 + ▾」**（数值让 `ui layout` 能断言到具体档位）。 */
-  @Builder
-  sizeMenuButton() {
-    Row({ space: 2 }) {
+        .fontColor(this.panel === PANEL_INK ? Color.White : $r('app.color.text_primary'))
+      // 12×12 当前色块：即使文案收缩成「钢笔 · 3.5」也能看出颜色
       Text('')
-        .width(this.currentDotSize())
-        .height(this.currentDotSize())
-        .borderRadius(this.currentDotSize() / 2)
-        .backgroundColor(this.panel === PANEL_SIZE ? Color.White : $r('app.color.text_primary'))
-      Text(`${this.pagerState.penWidth}`)
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_SIZE ? Color.White : $r('app.color.text_primary'))
-        .margin({ left: 2 })
-      Text('▾')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_SIZE ? Color.White : $r('app.color.text_secondary'))
-    }
-    .height(TOOL_HEIGHT)
-    .constraintSize({ minWidth: TOOL_MIN_WIDTH })
-    .padding({ left: SPACING.sm, right: SPACING.sm })
-    .borderRadius(RADIUS.sm)
-    .backgroundColor(this.panel === PANEL_SIZE ? $r('app.color.brand') : '#F1F3F5')
-    .flexShrink(0)
-    .onClick(() => {
-      this.togglePanel(PANEL_SIZE);
-    })
-  }
-
-  /** 颜色按钮：**「当前色块 20×20 + 色名短标签 + ▾」**（横屏 rail 里也能看出当前颜色）。 */
-  @Builder
-  colorMenuButton() {
-    Row({ space: 2 }) {
-      Text('')
-        .width(20)
-        .height(20)
-        .borderRadius(RADIUS.sm)
+        .width(12)
+        .height(12)
+        .borderRadius(3)
         .backgroundColor(this.pagerState.penColor)
-        .border({ width: 1, color: this.panel === PANEL_COLOR ? Color.White : '#DDDDDD' })
-      Text(this.currentColorLabel())
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_COLOR ? Color.White : $r('app.color.text_primary'))
+        .border({ width: 1, color: this.panel === PANEL_INK ? Color.White : '#DDDDDD' })
         .margin({ left: 2 })
       Text('▾')
         .fontSize(FONT.caption)
         .lineHeight(LINE_HEIGHT.caption)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_COLOR ? Color.White : $r('app.color.text_secondary'))
+        .fontColor(this.panel === PANEL_INK ? Color.White : $r('app.color.text_secondary'))
     }
     .height(TOOL_HEIGHT)
     .constraintSize({ minWidth: TOOL_MIN_WIDTH })
     .padding({ left: SPACING.sm, right: SPACING.sm })
     .borderRadius(RADIUS.sm)
-    .backgroundColor(this.panel === PANEL_COLOR ? $r('app.color.brand') : '#F1F3F5')
+    .backgroundColor(this.panel === PANEL_INK ? $r('app.color.brand') : '#F1F3F5')
     .flexShrink(0)
     .onClick(() => {
-      this.togglePanel(PANEL_COLOR);
+      this.togglePanel(PANEL_INK);
     })
   }
 
@@ -1124,11 +1082,11 @@ struct Handwriting {
     Row({ space: SPACING.xs }) {
       this.exitButton()
 
+      // 「笔迹设置」：笔形/粗细/颜色三合一入口，固定在 Scroll 之外（主操作，不被滚走）
+      this.brushMenuButton()
+
       Scroll() {
         Row({ space: SPACING.xs }) {
-          this.brushMenuButton()
-          this.sizeMenuButton()
-          this.colorMenuButton()
           this.toolButton('橡皮', HW_TOOL_ERASER)
           this.toolButton('手动框', HW_TOOL_SELECT)
           this.historyButton('undo', '↶', this.pagerState.undoSteps > 0)
@@ -1180,8 +1138,6 @@ struct Handwriting {
         // 横屏专用一套按钮：**统一 72vp 宽（100%）+ 高 44vp（退出 40）+ 同圆角/同底色**
         this.railExitButton()
         this.railBrushButton()
-        this.railSizeButton()
-        this.railColorButton()
         this.railToolButton('橡皮', HW_TOOL_ERASER)
         this.railToolButton('手动框', HW_TOOL_SELECT)
         this.railHistoryButton('undo', '↶', this.pagerState.undoSteps > 0)
@@ -1233,98 +1189,41 @@ struct Handwriting {
       })
   }
 
-  /** rail 笔形按钮：宽 100%（=72vp）、高 44vp、内容水平居中。 */
+  /** rail「笔迹设置」按钮：宽 100%（=72vp）、高 44vp、内容居中，文案带 笔形·档位·色名 + 12×12 色块。 */
   @Builder
   railBrushButton() {
     Row({ space: 2 }) {
-      Text(this.currentBrushLabel())
+      Text(this.inkSummary())
         .fontSize(FONT.caption)
         .lineHeight(LINE_HEIGHT.caption)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_BRUSH ? Color.White : $r('app.color.text_primary'))
-      Text('▾')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_BRUSH ? Color.White : $r('app.color.text_secondary'))
-    }
-    .justifyContent(FlexAlign.Center)
-    .width('100%')
-    .height(RAIL_ITEM_HEIGHT)
-    .borderRadius(RADIUS.sm)
-    .backgroundColor(this.panel === PANEL_BRUSH ? $r('app.color.brand') : '#F1F3F5')
-    .onClick(() => {
-      this.togglePanel(PANEL_BRUSH);
-    })
-  }
-
-  @Builder
-  railSizeButton() {
-    Row({ space: 2 }) {
+        .fontColor(this.panel === PANEL_INK ? Color.White : $r('app.color.text_primary'))
       Text('')
-        .width(this.currentDotSize())
-        .height(this.currentDotSize())
-        .borderRadius(this.currentDotSize() / 2)
-        .backgroundColor(this.panel === PANEL_SIZE ? Color.White : $r('app.color.text_primary'))
-      Text(`${this.pagerState.penWidth}`)
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_SIZE ? Color.White : $r('app.color.text_primary'))
-        .margin({ left: 2 })
-      Text('▾')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_SIZE ? Color.White : $r('app.color.text_secondary'))
-    }
-    .justifyContent(FlexAlign.Center)
-    .width('100%')
-    .height(RAIL_ITEM_HEIGHT)
-    .borderRadius(RADIUS.sm)
-    .backgroundColor(this.panel === PANEL_SIZE ? $r('app.color.brand') : '#F1F3F5')
-    .onClick(() => {
-      this.togglePanel(PANEL_SIZE);
-    })
-  }
-
-  @Builder
-  railColorButton() {
-    Row({ space: 2 }) {
-      Text('')
-        .width(20)
-        .height(20)
-        .borderRadius(RADIUS.sm)
+        .width(12)
+        .height(12)
+        .borderRadius(3)
         .backgroundColor(this.pagerState.penColor)
-        .border({ width: 1, color: this.panel === PANEL_COLOR ? Color.White : '#DDDDDD' })
-      Text(this.currentColorLabel())
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_COLOR ? Color.White : $r('app.color.text_primary'))
+        .border({ width: 1, color: this.panel === PANEL_INK ? Color.White : '#DDDDDD' })
         .margin({ left: 2 })
       Text('▾')
         .fontSize(FONT.caption)
         .lineHeight(LINE_HEIGHT.caption)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_COLOR ? Color.White : $r('app.color.text_secondary'))
+        .fontColor(this.panel === PANEL_INK ? Color.White : $r('app.color.text_secondary'))
     }
     .justifyContent(FlexAlign.Center)
     .width('100%')
     .height(RAIL_ITEM_HEIGHT)
     .borderRadius(RADIUS.sm)
-    .backgroundColor(this.panel === PANEL_COLOR ? $r('app.color.brand') : '#F1F3F5')
+    .backgroundColor(this.panel === PANEL_INK ? $r('app.color.brand') : '#F1F3F5')
     .onClick(() => {
-      this.togglePanel(PANEL_COLOR);
+      this.togglePanel(PANEL_INK);
     })
   }
 
+  /** rail 的橡皮 / 手动框：与竖屏语义一致（再点回画笔），尺寸统一。 */
   /** rail 的橡皮 / 手动框：与竖屏语义一致（再点回画笔），尺寸统一。 */
   @Builder
   railToolButton(label: string, tool: string) {
@@ -1399,8 +1298,8 @@ struct Handwriting {
 
   private panelTop(): number {
     if (this.landscape) {
-      // rail 里第 1~3 个按钮对应笔形/粗细/颜色（rail 控件统一 44vp 高）
-      const index: number = this.panel === PANEL_BRUSH ? 0 : (this.panel === PANEL_SIZE ? 1 : 2);
+      // rail 里第 1 个按钮是「笔迹设置」、第 2 个是「颜色」（rail 控件统一 44vp 高）
+      const index: number = this.panel === PANEL_INK ? 0 : 1;
       return SPACING.sm + index * (RAIL_ITEM_HEIGHT + SPACING.xs);
     }
     return TOP_BAR_HEIGHT + DIVIDER + SPACING.xs;
@@ -1408,11 +1307,8 @@ struct Handwriting {
 
   /** 面板宽度（按内容给足，避免文字被截断）。 */
   private panelWidth(): number {
-    if (this.panel === PANEL_BRUSH) {
-      return 176;
-    }
-    if (this.panel === PANEL_SIZE) {
-      return 140;
+    if (this.panel === PANEL_INK) {
+      return INK_PANEL_MIN_WIDTH + 2 * SPACING.sm;
     }
     return 156;
   }
@@ -1422,81 +1318,188 @@ struct Handwriting {
     return selected ? '#E8F1FF' : Color.Transparent;
   }
 
-  /** 二级面板：竖向列表（行高 44vp），笔形 / 粗细 / 颜色各一套。 */
+  /**
+   * 二级面板：**「笔迹设置」= 笔形 + 粗细两段**（用户需求：合并成一个二级菜单）；
+   * 另一套是「颜色」。
+   *
+   * 结构：标题 → `笔形` 小标题 + 5 个 chip（可换行）→ 1vp 分割线 → `粗细` 小标题 + 5 个档位格。
+   * 选任一项立即生效并关面板（`pickBrush`/`pickWidth` 内部已 `panel = ''`）。
+   */
   @Builder
   overlayPanel() {
-    Column() {
-      if (this.panel === PANEL_BRUSH) {
-        ForEach(
-          BRUSHES,
-          (spec: BrushSpec) => {
-            Row() {
-              this.brushIcon(spec.kind)
-              Text(spec.label)
-                .fontSize(FONT.caption)
-                .lineHeight(LINE_HEIGHT.caption)
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.None })
-                .fontColor($r('app.color.text_primary'))
-                .margin({ left: SPACING.sm })
-              Blank()
-              if (this.pagerState.brush === spec.kind && this.pagerState.tool === HW_TOOL_BRUSH) {
-                Text('✓')
+    Column({ space: SPACING.xs }) {
+      if (this.panel === PANEL_INK) {
+        Text('笔迹设置')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.None })
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_secondary'))
+
+        // ---- 段 1：笔形（5 个 chip，窄屏自动换行）
+        Text('笔形')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.None })
+          .fontColor($r('app.color.text_secondary'))
+        Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+          ForEach(
+            BRUSHES,
+            (spec: BrushSpec) => {
+              Row({ space: 4 }) {
+                if (this.pagerState.brush === spec.kind && this.pagerState.tool === HW_TOOL_BRUSH) {
+                  Text('✓')
+                    .fontSize(FONT.caption)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.None })
+                    .fontColor($r('app.color.brand'))
+                }
+                Text(spec.label)
                   .fontSize(FONT.caption)
+                  .lineHeight(LINE_HEIGHT.caption)
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.None })
-                  .fontColor($r('app.color.brand'))
+                  .fontColor(
+                    this.pagerState.brush === spec.kind && this.pagerState.tool === HW_TOOL_BRUSH
+                      ? $r('app.color.brand')
+                      : $r('app.color.text_primary')
+                  )
               }
-            }
-            .width('100%')
-            .height(MENU_ROW_HEIGHT)
-            .padding({ left: SPACING.sm, right: SPACING.sm })
-            .backgroundColor(
-              this.rowBackground(this.pagerState.brush === spec.kind && this.pagerState.tool === HW_TOOL_BRUSH)
-            )
-            .onClick(() => {
-              this.pickBrush(spec.kind);
-            })
-          },
-          (spec: BrushSpec) => `panel-brush-${spec.kind}`
-        )
-      } else if (this.panel === PANEL_SIZE) {
-        ForEach(
-          PEN_WIDTHS,
-          (width: number, index: number) => {
-            Row() {
-              // 用户反馈「5 个选项空白」：圆点必须显式给宽高/圆角/颜色
-              Text('')
-                .width(SIZE_DOTS[index])
-                .height(SIZE_DOTS[index])
-                .borderRadius(SIZE_DOTS[index] / 2)
-                .backgroundColor($r('app.color.text_primary'))
-              Text(`${width} vp`)
-                .fontSize(FONT.caption)
-                .lineHeight(LINE_HEIGHT.caption)
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.None })
-                .fontColor($r('app.color.text_primary'))
-                .margin({ left: SPACING.sm })
-              Blank()
-              if (this.pagerState.penWidth === width) {
-                Text('✓')
+              .height(CHIP_HEIGHT)
+              .constraintSize({ minWidth: 56 })
+              .padding({ left: SPACING.sm, right: SPACING.sm })
+              .margin({ right: SPACING.xs, bottom: SPACING.xs })
+              .borderRadius(RADIUS.sm)
+              .backgroundColor(
+                this.pagerState.brush === spec.kind && this.pagerState.tool === HW_TOOL_BRUSH ? '#E8F1FF' : '#F5F6F8'
+              )
+              .border({
+                width: this.pagerState.brush === spec.kind && this.pagerState.tool === HW_TOOL_BRUSH ? 1.5 : 0,
+                color: $r('app.color.brand')
+              })
+              .onClick(() => {
+                this.pickBrush(spec.kind);
+              })
+            },
+            (spec: BrushSpec) => `ink-brush-${spec.kind}`
+          )
+        }
+        .width('100%')
+
+        // ---- 两段之间的 1vp 分割线
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+          .width('100%')
+
+        // ---- 段 2：粗细（圆点 + 数值，5 档等分，选中加粗描边 + 数值高亮）
+        Text('粗细')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.None })
+          .fontColor($r('app.color.text_secondary'))
+        Row() {
+          ForEach(
+            PEN_WIDTHS,
+            (width: number, index: number) => {
+              Row({ space: 2 }) {
+                // 圆点必须显式给宽高/圆角/颜色（用户曾反馈「5 个选项空白」）
+                Text('')
+                  .width(SIZE_DOTS[index])
+                  .height(SIZE_DOTS[index])
+                  .borderRadius(SIZE_DOTS[index] / 2)
+                  .backgroundColor(
+                    this.pagerState.penWidth === width
+                      ? $r('app.color.brand')
+                      : $r('app.color.text_primary')
+                  )
+                Text(`${width}`)
                   .fontSize(FONT.caption)
+                  .lineHeight(LINE_HEIGHT.caption)
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.None })
-                  .fontColor($r('app.color.brand'))
+                  .fontColor(
+                    this.pagerState.penWidth === width
+                      ? $r('app.color.brand')
+                      : $r('app.color.text_primary')
+                  )
+                  .fontWeight(this.pagerState.penWidth === width ? FontWeight.Bold : FontWeight.Normal)
               }
-            }
-            .width('100%')
-            .height(MENU_ROW_HEIGHT)
-            .padding({ left: SPACING.sm, right: SPACING.sm })
-            .backgroundColor(this.rowBackground(this.pagerState.penWidth === width))
-            .onClick(() => {
-              this.pickWidth(width);
-            })
-          },
-          (width: number) => `panel-size-${width}`
-        )
+              .layoutWeight(1)
+              .height(CHIP_HEIGHT)
+              .justifyContent(FlexAlign.Center)
+              .borderRadius(RADIUS.sm)
+              .backgroundColor(this.pagerState.penWidth === width ? '#E8F1FF' : Color.Transparent)
+              .border({
+                width: this.pagerState.penWidth === width ? 1.5 : 0,
+                color: $r('app.color.brand')
+              })
+              .onClick(() => {
+                this.pickWidth(width);
+              })
+            },
+            (width: number) => `ink-size-${width}`
+          )
+        }
+        .width('100%')
+        .height(CHIP_HEIGHT)
+
+        // ---- 两段之间的 1vp 分割线（粗细 → 颜色）
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+          .width('100%')
+
+        // ---- 段 3：颜色（色块 + 色名，5 个等分，选中加描边）
+        Text('颜色')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.None })
+          .fontColor($r('app.color.text_secondary'))
+        Row() {
+          ForEach(
+            PEN_COLORS,
+            (color: string, index: number) => {
+              Row({ space: 4 }) {
+                Text('')
+                  .width(20)
+                  .height(20)
+                  .borderRadius(RADIUS.sm)
+                  .backgroundColor(color)
+                  .border({
+                    width: this.pagerState.penColor === color ? 2 : 1,
+                    color: this.pagerState.penColor === color ? $r('app.color.brand') : '#DDDDDD'
+                  })
+                Text(COLOR_LABELS[index])
+                  .fontSize(FONT.caption)
+                  .lineHeight(LINE_HEIGHT.caption)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.None })
+                  .fontColor(
+                    this.pagerState.penColor === color
+                      ? $r('app.color.brand')
+                      : $r('app.color.text_primary')
+                  )
+                  .fontWeight(this.pagerState.penColor === color ? FontWeight.Bold : FontWeight.Normal)
+              }
+              .layoutWeight(1)
+              .height(CHIP_HEIGHT)
+              .justifyContent(FlexAlign.Center)
+              .borderRadius(RADIUS.sm)
+              .backgroundColor(this.pagerState.penColor === color ? '#E8F1FF' : Color.Transparent)
+              .onClick(() => {
+                this.pickColor(color);
+              })
+            },
+            (color: string) => `ink-color-${color}`
+          )
+        }
+        .width('100%')
+        .height(CHIP_HEIGHT)
       } else {
         ForEach(
           PEN_COLORS,
