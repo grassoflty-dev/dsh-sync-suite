@@ -5,3 +5,11 @@ apps/arkui-schedule/tools/.build/
 *.log
 .DS_Store
 Thumbs.db
+
+# HarmonyOS 构建产物与日志（DevEco/hvigor）
+apps/arkui-schedule/.hvigor/
+apps/arkui-schedule/.build-logs/
+apps/arkui-schedule/oh_modules/
+apps/arkui-schedule/build/
+apps/arkui-schedule/entry/build/
+
