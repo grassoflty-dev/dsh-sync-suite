@@ -6,6 +6,7 @@
 // 覆盖：往返解析 / 幂等（同记录两次 changed=false）/ done 翻转 / 同 id 多次折叠 /
 //       漂移检测（缺、多、状态错）/ 首次全量重建 / 30 天窗口外的记录不进期望集。
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { describe, test } from 'node:test';
 
@@ -41,6 +42,7 @@ const {
   foldOpenByid,
   isEntryInWindow,
   isOpenEntryOpen,
+  mergeDeviceIndexes,
   mergeIndexForRebuild,
   openIds,
   parseOpenIndex,
@@ -377,5 +379,162 @@ describe('自愈：首次全量重建、30 天窗口、重建合并', () => {
     const merged = mergeIndexForRebuild(buildIndexFromRecords(records), maintained, '2026-10-17');
     assert.equal(merged.length, 1, '重建折叠成单条当前状态');
     assert.equal(merged[0].openedAt, CLOSED);
+  });
+});
+
+describe('索引脏数据自愈：多一条 / 少一条', () => {
+  const windowStart = reconcileWindowStart(30, new Date(2026, 10, 15));
+
+  test('索引多一条（记录已不存在）→ 报「多」，重建后与真实记录一致', () => {
+    const expected = buildIndexFromRecords([makeRecord({ id: 'a' }), makeRecord({ id: 'b', ts: LATER })]);
+    const ghost = makeEntry({ id: 'ghost', ts: `${DAY}T07:00:00+08:00`, openedAt: `${DAY}T07:00:00+08:00` });
+    const actual = expected.concat([ghost]);
+
+    const diff = diffIndex(expected, actual);
+    assert.equal(diff.drift, true);
+    assert.deepEqual(diff.extra, ['ghost'], '实际多出来的 id 必须报出来');
+    assert.deepEqual(diff.missing, []);
+    assert.deepEqual(diff.items.map((item) => item.kind), ['extra']);
+
+    const merged = mergeIndexForRebuild(expected, actual, windowStart);
+    assert.deepEqual(merged.map((entry) => entry.id).sort(), ['a', 'b'], '脏条目在重建时被丢掉');
+    assert.equal(diffIndex(expected, merged).drift, false, '重建后与真实数据一致');
+    assert.equal(openIds(merged).includes('ghost'), false, '幽灵条目不得出现在未完成集合里');
+  });
+
+  test('索引少一条（实际缺项）→ 报「缺」，重建后补齐', () => {
+    const expected = buildIndexFromRecords([makeRecord({ id: 'a' }), makeRecord({ id: 'b', ts: LATER })]);
+    const actual = expected.filter((entry) => entry.id !== 'b');
+
+    const diff = diffIndex(expected, actual);
+    assert.equal(diff.drift, true);
+    assert.deepEqual(diff.missing, ['b']);
+    assert.deepEqual(diff.extra, []);
+
+    const merged = mergeIndexForRebuild(expected, actual, windowStart);
+    assert.deepEqual(merged.map((entry) => entry.id).sort(), ['a', 'b'], '缺的条目在重建时补回');
+    assert.equal(diffIndex(expected, merged).drift, false);
+    assert.deepEqual(openIds(merged).sort(), ['a', 'b']);
+  });
+});
+
+describe('跨设备合并：两台设备的「全部未完成」', () => {
+  const dayBefore = '2026-11-14';
+  const earlier = `${dayBefore}T08:00:00+08:00`;
+
+  test('两台设备的未完成集合正确：已完成的不出现，按 ts 升序，重复调用结果稳定', () => {
+    const phoneA = {
+      deviceId: 'phone-a',
+      entries: [
+        makeEntry({ id: 'a1', ts: TS, openedAt: TS }),
+        makeEntry({ id: 'a2', ts: LATER, openedAt: TS, closedAt: LATER })
+      ]
+    };
+    const phoneB = {
+      deviceId: 'phone-b',
+      entries: [makeEntry({ id: 'b1', date: dayBefore, ts: earlier, openedAt: earlier })]
+    };
+
+    const merged = mergeDeviceIndexes([phoneA, phoneB]);
+    assert.deepEqual(
+      merged.map((item) => `${item.deviceId}:${item.entry.id}`),
+      ['phone-b:b1', 'phone-a:a1'],
+      'ts 升序；已完成（a2）不出现；设备归属正确'
+    );
+    assert.equal(
+      new Set(merged.map((item) => item.entry.id)).size,
+      merged.length,
+      '跨设备合并后没有重复 id'
+    );
+    assert.deepEqual(
+      mergeDeviceIndexes([phoneB, phoneA]),
+      merged,
+      '输入顺序不同但输出完全一致（排序稳定）'
+    );
+    assert.deepEqual(mergeDeviceIndexes([]), []);
+    assert.deepEqual(mergeDeviceIndexes([{ deviceId: 'x', entries: [] }]), []);
+  });
+
+  test('同一 id 出现在两台设备目录（手工拷贝）→ 只留一条，取 ts 较晚者', () => {
+    const merged = mergeDeviceIndexes([
+      { deviceId: 'phone-a', entries: [makeEntry({ id: 'dup', ts: TS, openedAt: TS })] },
+      { deviceId: 'phone-b', entries: [makeEntry({ id: 'dup', ts: LATER, openedAt: LATER })] }
+    ]);
+    assert.equal(merged.length, 1, '同 id 不得重复');
+    assert.equal(merged[0].deviceId, 'phone-b', '较晚 ts 的那条所属设备胜出');
+    assert.equal(merged[0].entry.ts, LATER);
+  });
+
+  test('缺失设备索引 → 内存重建结果等价于文件索引（不落盘）', () => {
+    // 该设备只有分片、没有 open.jsonl：store 走 memoryRebuild → buildIndexFromRecords
+    const legacyRecords = [
+      makeRecord({ id: 'n1', ts: TS }),
+      makeRecord({ id: 'n2', ts: `${DAY}T10:00:00+08:00`, done: true })
+    ];
+    const memoryIndex = buildIndexFromRecords(legacyRecords);
+    assert.deepEqual(openIds(memoryIndex), ['n1'], '内存重建同样只把未完成算进来');
+    assert.equal(
+      diffIndex(memoryIndex, maintain([], legacyRecords)).drift,
+      false,
+      '内存重建与「按文件增量维护」得到同一状态，跨设备视图不会因此抖动'
+    );
+
+    const merged = mergeDeviceIndexes([
+      { deviceId: 'phone-a', entries: [] },
+      { deviceId: 'phone-legacy', entries: memoryIndex }
+    ]);
+    assert.deepEqual(
+      merged.map((item) => `${item.deviceId}:${item.entry.id}`),
+      ['phone-legacy:n1'],
+      '缺索引的设备靠内存重建照样进「全部未完成」，已完成的 n2 不出现'
+    );
+  });
+});
+
+describe('跨设备只读约束（源码级）', () => {
+  const STORE = readFileSync(new URL('../../entry/src/main/ets/services/openIndexStore.ets', import.meta.url), 'utf8');
+
+  /** 去掉整行注释（`//`、`*`、`/*`、`/**` 开头），只看代码行。 */
+  function codeLines(source) {
+    return source
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !/^(\/\/|\*|\/\*)/.test(line));
+  }
+
+  test('所有 fs 写调用都落在本机目录：路径里不出现 devicesRoot / 其他设备路径', () => {
+    let writes = 0;
+    for (const line of codeLines(STORE)) {
+      if (!/fs\.(writeSync|renameSync|unlinkSync|openSync|mkdirSync|copyFileSync|createStreamSync)/.test(line)) {
+        continue;
+      }
+      if (/OpenMode\.READ_ONLY/.test(line)) {
+        continue; // 只读打开不算写
+      }
+      writes++;
+      assert.equal(
+        /devicesRoot|deviceIndexPath|deviceSchedulesDir|otherDevice/.test(line),
+        false,
+        `写操作落在别的设备目录上：${line}`
+      );
+    }
+    assert.ok(writes >= 3, `写调用点数量异常（${writes}）：期望 append/替换/建目录都在本机路径上`);
+  });
+
+  test('缺索引的设备走内存重建并打 [idx] rebuild-memory 日志（不写回）', () => {
+    assert.match(STORE, /\[idx\] rebuild-memory device=\$\{deviceId\} count=\$\{pending\}/);
+    assert.match(STORE, /private memoryRebuild\(deviceId: string\)/);
+    assert.match(
+      STORE,
+      /if \(this\.fileExists\(path\)\)[\s\S]{0,400}?return this\.memoryRebuild\(deviceId\)/,
+      '其他设备没有 open.jsonl 时进入内存重建'
+    );
+    assert.match(STORE, /this\.memoryIndexCache\.set\(deviceId, snapshot\)/, '内存结果只进缓存');
+    assert.equal(
+      /memoryRebuild\(deviceId\)[\s\S]{0,600}?(replaceEntries|appendEntry)\(/.test(STORE),
+      false,
+      '内存重建路径不得调用任何写盘方法'
+    );
+    assert.match(STORE, /mergeDeviceIndexes\(snapshots\)/, '跨设备「全部未完成」走合并函数');
   });
 });

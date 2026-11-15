@@ -114,6 +114,8 @@ struct Index {
   @State editorDirty: boolean = false;
   /** 右栏子组件重读触发器（保存/取消/手写板返回后 +1）。 */
   @State paneTick: number = 0;
+  /** 右栏下拉刷新状态（与左栏的 `refreshing` 各管各的，互不干扰）。 */
+  @State paneRefreshing: boolean = false;
 
   // AI 汇总面板状态
   @State showAiPanel: boolean = false;
@@ -216,19 +218,9 @@ struct Index {
     }
     try {
       if (this.showAllPending) {
-        // 数据源：单设备走「未完成索引」（devices/<id>/open.jsonl），不再每次扫全部分片；
-        // 「含其他设备」时跨设备折叠没有索引可用，仍按老路读全部设备分片（只读）。
-        let pending: ScheduleRecord[] = [];
-        if (this.includeOtherDevices) {
-          const all = scheduleStore.readAllDevices();
-          for (const record of all) {
-            if (record.done !== true) {
-              pending.push(record);
-            }
-          }
-        } else {
-          pending = openIndexStore.pendingRecords();
-        }
+        // 数据源：每台设备读自己的 open.jsonl（N 台设备 = N 个小文件）；某台设备缺索引时
+        // 在内存里用它的分片重建，绝不写别人的设备目录（契约：每台设备只写自己的目录）。
+        const pending: ScheduleRecord[] = openIndexStore.pendingRecords(this.includeOtherDevices);
         this.records = pending;
         this.statusText = pending.length === 0 ? '所有日程都已完成' : `共 ${pending.length} 条未完成（跨全部日期${this.includeOtherDevices ? '与全部设备' : ''}）`;
       } else {
@@ -1016,39 +1008,59 @@ struct Index {
     }
   }
 
-  /** 宽屏/横屏右栏：三态（空 / 详情 / 编辑），内容限宽 720vp 居中便于阅读。 */
+  /** 宽屏/横屏右栏：三态（空 / 详情 / 编辑），内容限宽 720vp 居中便于阅读；支持下拉刷新。 */
   @Builder
   RightPane() {
-    Column() {
-      if (this.paneMode === 'editor') {
-        RecordEditorView({
-          recordId: this.editorRecordId,
-          defaultDate: this.selectedDate,
-          refreshTick: this.paneTick,
-          onSaved: (record: ScheduleRecord) => {
-            this.onEditorSaved(record);
-          },
-          onCancel: () => {
-            this.onEditorCancel();
-          },
-          onDirtyChange: (dirty: boolean) => {
-            this.editorDirty = dirty;
-          }
-        })
-      } else {
-        RecordDetailView({
-          recordId: this.paneMode === 'detail' ? this.selectedId : '',
-          refreshTick: this.paneTick,
-          onEdit: () => {
-            this.startEditSelected();
-          }
-        })
+    Refresh({ refreshing: $$this.paneRefreshing }) {
+      Column() {
+        if (this.paneMode === 'editor') {
+          RecordEditorView({
+            recordId: this.editorRecordId,
+            defaultDate: this.selectedDate,
+            refreshTick: this.paneTick,
+            onSaved: (record: ScheduleRecord) => {
+              this.onEditorSaved(record);
+            },
+            onCancel: () => {
+              this.onEditorCancel();
+            },
+            onDirtyChange: (dirty: boolean) => {
+              this.editorDirty = dirty;
+            }
+          })
+        } else {
+          RecordDetailView({
+            recordId: this.paneMode === 'detail' ? this.selectedId : '',
+            refreshTick: this.paneTick,
+            onEdit: () => {
+              this.startEditSelected();
+            }
+          })
+        }
       }
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: LIST_MAX_WIDTH })
+      .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
     .height('100%')
-    .constraintSize({ maxWidth: LIST_MAX_WIDTH })
-    .alignItems(HorizontalAlign.Start)
+    .onRefreshing(() => {
+      this.paneRefreshing = true;
+      this.onPullRefresh()
+        .then(() => {
+          // 编辑态且有未保存内容：不推进 paneTick，否则子组件重读会把草稿冲掉
+          if (this.paneMode === 'editor' && this.editorDirty) {
+            promptAction.showToast({ message: '列表已刷新；右栏有未保存内容，保持原样', duration: 3000 });
+          } else {
+            this.paneTick = this.paneTick + 1;
+          }
+          this.paneRefreshing = false;
+        })
+        .catch(() => {
+          this.paneRefreshing = false;
+        });
+    })
   }
 
   /** 紧凑屏：日期条 → 模式 → 今日汇总块（列表第一项）→ 列表 → 新建。 */

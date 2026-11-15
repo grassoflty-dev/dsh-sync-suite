@@ -4,7 +4,9 @@
  * - 与日程同目录树（随 git 一起同步），但**不进 `schedules/*.jsonl`**：索引是派生数据；
  * - 追加写（维护）+ 原子替换写（自愈重建），写失败只 `console.info('[idx] ...')`，绝不让日程保存失败；
  * - 目录/设备标识全部复用 `scheduleStore`（`ensureReady` / `deviceRoot` / `getDeviceId`），不另起一套；
- * - 纯逻辑（编解码、折叠、对账）在 `model/openIndex.ts`，本文件只管字节与时机。
+ * - 纯逻辑（编解码、折叠、对账、跨设备合并）在 `model/openIndex.ts`，本文件只管字节与时机；
+ * - **只写本机目录**（`docs/DATA-CONTRACT.md` §1「每台设备只写自己的目录」）：
+ *   其他设备的 `devices/<id>/open.jsonl` 只读，缺失时用它的日程分片在**内存里**重建，绝不写回。
  *
  * 契约：`docs/DATA-CONTRACT.md` §3（日程 JSONL）的**派生索引**，目录与「只追加」语义与日程一致；
  * 本文件不新增跨设备互通格式，索引仅本机设备目录内自用。
@@ -13,18 +15,20 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import {
   RECONCILE_DAYS,
   applyRecordToIndex,
+  buildIndexFromRecords,
   diffIndex,
   encodeOpenEntry,
   expectedIndexForWindow,
   foldOpenByid,
   isEntryInWindow,
   isOpenEntryOpen,
+  mergeDeviceIndexes,
   mergeIndexForRebuild,
   parseOpenIndex,
   reconcileWindowStart
 } from '../model/openIndex';
-import type { OpenEntry, OpenIndexDiff } from '../model/openIndex';
-import { sortRecords } from '../model/jsonl';
+import type { DeviceOpenIndex, MergedOpenEntry, OpenEntry, OpenIndexDiff } from '../model/openIndex';
+import { foldById, parseJsonl, sortRecords } from '../model/jsonl';
 import type { ScheduleRecord } from '../model/types';
 import { describeError, scheduleStore } from './scheduleStore';
 
@@ -34,6 +38,12 @@ const OPEN_INDEX_FILE_NAME: string = 'open.jsonl';
 const TMP_SUFFIX: string = '.tmp';
 /** 两次自愈的最小间隔（毫秒）：避免每次列表刷新都去扫 30 个分片。 */
 const RECONCILE_MIN_INTERVAL_MS: number = 15000;
+/** 其他设备缺索引时「内存重建」结果的有效期（毫秒）：避免每次刷新都重读对方全部分片。 */
+const MEMORY_INDEX_TTL_MS: number = 15000;
+/** 分片目录名（与 `scheduleStore` 内部一致；其他设备目录只能自己拼路径读）。 */
+const SCHEDULES_DIR_NAME: string = 'schedules';
+/** 分片文件后缀。 */
+const JSONL_SUFFIX: string = '.jsonl';
 /** 分片日期名合法性（`listDates()` 只按后缀筛，脏文件名要挡掉）。 */
 const DATE_KEY_RE: RegExp = /^\d{4}-\d{2}-\d{2}$/;
 const NEW_LINE_BYTE: number = 0x0a;
@@ -48,6 +58,12 @@ export interface OpenIndexReconcileResult {
   written: number;
   /** 失败原因（空串 = 没有失败）。 */
   error: string;
+}
+
+/** 其他设备缺 `open.jsonl` 时的内存索引缓存项。 */
+interface MemoryIndex {
+  at: number;
+  entries: OpenEntry[];
 }
 
 /** 「什么都没做」的统一返回值（未就绪 / 被节流 / 无漂移）。 */
@@ -69,6 +85,8 @@ function pickRecord(records: ScheduleRecord[], id: string): ScheduleRecord | nul
 export class OpenIndexStore {
   /** 上次自愈时间（毫秒；0 = 本次进程还没跑过）。 */
   private lastReconcileAt: number = 0;
+  /** 其他设备缺 `open.jsonl` 时的内存重建结果（key=deviceId；本机永远走文件）。 */
+  private memoryIndexCache: Map<string, MemoryIndex> = new Map<string, MemoryIndex>();
 
   /** 初始化（幂等）：完全复用 `scheduleStore` 的 ready / deviceId 状态。 */
   async ensureReady(context: object): Promise<void> {
@@ -255,74 +273,226 @@ export class OpenIndexStore {
   }
 
   /**
-   * 「全部未完成」的数据源：按索引里的 id 取记录。
+   * 「全部未完成」的数据源（按索引里的 id 取记录）。
    *
-   * 读取顺序（尽量少读文件）：
-   * 1. 按条目 `date` 分组，每个分片只读一次（`readDay` 已折叠排序）；
-   * 2. 分片里找不到的 id（归属日期异常/记录被挪走）→ 用本设备全量记录兜底一次；
-   * 3. 记录若已被别的设备标记完成（`done:true`），这里过滤掉 —— 索引只是线索，记录才是真相。
+   * - `includeOtherDevices=false`（默认）：只读本机 `devices/<本机>/open.jsonl`；
+   * - `true`：每台设备读**它自己**的 `open.jsonl` —— N 台设备只有 N 个小文件；
+   *   某台设备缺索引时用它的日程分片在**内存里**重建（`[idx] rebuild-memory device=...`），
+   *   **不写回别人的目录**（契约：每台设备只写自己的目录）。
    *
-   * 返回值按 ts 升序，与原「扫全部分片」的顺序一致，列表展示不跳。
+   * 取记录顺序（尽量少读文件）：条目按 (设备, 日期) 分组 → 每个分片只读一次 →
+   * 分片里找不到的 id 用该设备的全量记录兜底一次；记录 `done:true` 一律过滤（记录才是真相）。
+   * 返回按 ts 升序（跨设备同 id 只留一条），列表展示不跳。
    */
-  pendingRecords(): ScheduleRecord[] {
+  pendingRecords(includeOtherDevices: boolean = false): ScheduleRecord[] {
     if (!scheduleStore.isReady()) {
       return [];
     }
-    // 读索引前顺手自愈（节流）：切到「全部未完成」时拿到的是最新索引
+    // 读索引前顺手自愈（节流；只动本机索引文件，别人的目录不碰）
     this.reconcileIfDue();
-    const open = this.pendingEntries();
-    if (open.length === 0) {
+    const snapshots: DeviceOpenIndex[] = [];
+    for (const deviceId of this.devicesForQuery(includeOtherDevices)) {
+      const snapshot: DeviceOpenIndex = { deviceId: deviceId, entries: this.entriesForDevice(deviceId) };
+      snapshots.push(snapshot);
+    }
+    const merged: MergedOpenEntry[] = mergeDeviceIndexes(snapshots);
+    if (merged.length === 0) {
       return [];
     }
-    const byDate = new Map<string, string[]>();
-    const unresolved: string[] = [];
-    for (const entry of open) {
-      if (!DATE_KEY_RE.test(entry.date)) {
-        unresolved.push(entry.id);
-        continue;
-      }
-      let ids = byDate.get(entry.date);
-      if (ids === undefined) {
-        ids = [];
-        byDate.set(entry.date, ids);
-      }
-      ids.push(entry.id);
-    }
-    const found: ScheduleRecord[] = [];
-    byDate.forEach((ids: string[], date: string) => {
-      let dayRecords: ScheduleRecord[] = [];
-      try {
-        dayRecords = scheduleStore.readDay(date);
-      } catch (error) {
-        console.info(`[idx] 读分片失败（${date}）：${describeError(error)}`);
-      }
-      for (const id of ids) {
-        const record = pickRecord(dayRecords, id);
-        if (record === null) {
-          unresolved.push(id);
-        } else if (record.done !== true) {
-          found.push(record);
-        }
-      }
-    });
-    if (unresolved.length > 0) {
-      let all: ScheduleRecord[] = [];
-      try {
-        all = scheduleStore.readAll();
-      } catch (error) {
-        console.info(`[idx] 全量兜底读取失败：${describeError(error)}`);
-      }
-      for (const id of unresolved) {
-        const record = pickRecord(all, id);
-        if (record !== null && record.done !== true) {
-          found.push(record);
-        }
-      }
-    }
-    return sortRecords(found);
+    return this.resolveRecords(merged);
   }
 
   // ------------------------------------------------------------------ 内部实现
+
+  /** 要查询的设备列表：默认只有本机；跨设备时 = 磁盘上所有合法设备目录（本机必在其中）。 */
+  private devicesForQuery(includeOtherDevices: boolean): string[] {
+    const own = scheduleStore.getDeviceId();
+    const devices: string[] = [];
+    if (!includeOtherDevices) {
+      devices.push(own);
+      return devices;
+    }
+    let listed: string[] = [];
+    try {
+      listed = scheduleStore.listDeviceIds();
+    } catch (error) {
+      console.info(`[idx] 列出设备目录失败：${describeError(error)}`);
+    }
+    let hasOwn = false;
+    for (const deviceId of listed) {
+      if (deviceId === own) {
+        hasOwn = true;
+      }
+      devices.push(deviceId);
+    }
+    if (!hasOwn) {
+      devices.push(own);
+    }
+    return devices;
+  }
+
+  /** 其他设备的索引路径 —— 只读（本机索引用 `indexPath()`）。 */
+  private deviceIndexPath(deviceId: string): string {
+    return `${scheduleStore.devicesRoot()}/${deviceId}/${OPEN_INDEX_FILE_NAME}`;
+  }
+
+  /**
+   * 取某台设备的索引条目。
+   *
+   * 本机：`open.jsonl`（已自愈）；其他设备：只读它的 `open.jsonl`，**文件缺失**时在内存里
+   * 用它的日程分片重建（带 15s 缓存 + `[idx] rebuild-memory device=<id> count=N` 日志），绝不写回。
+   */
+  private entriesForDevice(deviceId: string): OpenEntry[] {
+    if (deviceId === scheduleStore.getDeviceId()) {
+      return this.readEntries();
+    }
+    const path = this.deviceIndexPath(deviceId);
+    if (this.fileExists(path)) {
+      const parsed = parseOpenIndex(this.readText(path));
+      if (parsed.errors.length > 0) {
+        console.info(`[idx] 设备 ${deviceId} 的索引有 ${parsed.errors.length} 行坏行（已跳过）`);
+      }
+      return foldOpenByid(parsed.entries);
+    }
+    return this.memoryRebuild(deviceId);
+  }
+
+  /**
+   * 其他设备缺索引时的**内存重建**（只读该设备分片，不写任何文件）。
+   *
+   * 读它的**全部分片**而不是只读最近 30 天：这类设备多半是旧版本，漏掉老分片会让
+   * 它很早创建、至今未完成的条目从「全部未完成」里消失。
+   */
+  private memoryRebuild(deviceId: string): OpenEntry[] {
+    const now = Date.now();
+    const cached = this.memoryIndexCache.get(deviceId);
+    if (cached !== undefined && now - cached.at < MEMORY_INDEX_TTL_MS) {
+      return cached.entries;
+    }
+    const rebuilt = buildIndexFromRecords(this.readDeviceRecords(deviceId));
+    let pending = 0;
+    for (const entry of rebuilt) {
+      if (isOpenEntryOpen(entry)) {
+        pending++;
+      }
+    }
+    console.info(`[idx] rebuild-memory device=${deviceId} count=${pending}`);
+    const snapshot: MemoryIndex = { at: now, entries: rebuilt };
+    this.memoryIndexCache.set(deviceId, snapshot);
+    return rebuilt;
+  }
+
+  /** 把合并后的条目解析成记录：每个 (设备, 日期) 分片只读一次。 */
+  private resolveRecords(merged: MergedOpenEntry[]): ScheduleRecord[] {
+    const dayCache = new Map<string, ScheduleRecord[]>();
+    const unresolved: MergedOpenEntry[] = [];
+    const byId = new Map<string, ScheduleRecord>();
+    for (const item of merged) {
+      const date = item.entry.date;
+      if (!DATE_KEY_RE.test(date)) {
+        unresolved.push(item);
+        continue;
+      }
+      const key = `${item.deviceId}/${date}`;
+      let dayRecords = dayCache.get(key);
+      if (dayRecords === undefined) {
+        dayRecords = this.readDayRecords(item.deviceId, date);
+        dayCache.set(key, dayRecords);
+      }
+      const record = pickRecord(dayRecords, item.entry.id);
+      if (record === null) {
+        unresolved.push(item);
+      } else if (record.done !== true) {
+        byId.set(record.id, record);
+      }
+    }
+    if (unresolved.length > 0) {
+      // 兜底：归属日期异常 / 记录被挪走 → 用该设备全量记录再查一次（每台设备最多一次）
+      const allCache = new Map<string, ScheduleRecord[]>();
+      for (const item of unresolved) {
+        let all = allCache.get(item.deviceId);
+        if (all === undefined) {
+          all = this.readAllRecords(item.deviceId);
+          allCache.set(item.deviceId, all);
+        }
+        const record = pickRecord(all, item.entry.id);
+        if (record !== null && record.done !== true) {
+          byId.set(record.id, record);
+        }
+      }
+    }
+    return sortRecords(Array.from(byId.values()));
+  }
+
+  /** 读某台设备某天的记录（本机走 `scheduleStore.readDay`，其他设备只读分片文件）。 */
+  private readDayRecords(deviceId: string, date: string): ScheduleRecord[] {
+    if (deviceId === scheduleStore.getDeviceId()) {
+      try {
+        return scheduleStore.readDay(date);
+      } catch (error) {
+        console.info(`[idx] 读分片失败（${deviceId}/${date}）：${describeError(error)}`);
+        return [];
+      }
+    }
+    return this.readRecordsFile(`${this.deviceSchedulesDir(deviceId)}/${date}${JSONL_SUFFIX}`, `${deviceId}/${date}`);
+  }
+
+  /** 读某台设备的全部记录（本机走 `scheduleStore.readAll`，其他设备读它的全部分片）。 */
+  private readAllRecords(deviceId: string): ScheduleRecord[] {
+    if (deviceId === scheduleStore.getDeviceId()) {
+      try {
+        return scheduleStore.readAll();
+      } catch (error) {
+        console.info(`[idx] 全量兜底读取失败（${deviceId}）：${describeError(error)}`);
+        return [];
+      }
+    }
+    return this.readDeviceRecords(deviceId);
+  }
+
+  /** 只读：其他设备的全部分片记录（未排序，交给 `buildIndexFromRecords` 按 ts 处理）。 */
+  private readDeviceRecords(deviceId: string): ScheduleRecord[] {
+    const dir = this.deviceSchedulesDir(deviceId);
+    const records: ScheduleRecord[] = [];
+    let names: string[] = [];
+    try {
+      names = fs.listFileSync(dir);
+    } catch (error) {
+      console.info(`[idx] 列出设备分片失败（${deviceId}）：${describeError(error)}`);
+      return records;
+    }
+    for (const name of names) {
+      if (!name.endsWith(JSONL_SUFFIX)) {
+        continue;
+      }
+      const date = name.slice(0, name.length - JSONL_SUFFIX.length);
+      if (!DATE_KEY_RE.test(date)) {
+        continue;
+      }
+      for (const record of this.readRecordsFile(`${dir}/${name}`, `${deviceId}/${date}`)) {
+        records.push(record);
+      }
+    }
+    return records;
+  }
+
+  /** 其他设备的分片目录（只读拼接，不创建、不写入）。 */
+  private deviceSchedulesDir(deviceId: string): string {
+    return `${scheduleStore.devicesRoot()}/${deviceId}/${SCHEDULES_DIR_NAME}`;
+  }
+
+  /** 读一个分片文件并折叠（只读，失败只记日志）。 */
+  private readRecordsFile(path: string, label: string): ScheduleRecord[] {
+    try {
+      if (!this.fileExists(path)) {
+        return [];
+      }
+      return sortRecords(foldById(parseJsonl(fs.readTextSync(path)).records));
+    } catch (error) {
+      console.info(`[idx] 读分片失败（${label}）：${describeError(error)}`);
+      return [];
+    }
+  }
 
   /** 读最近窗口内的分片记录（只读本机设备目录）。 */
   private readRecentRecords(windowStart: string): ScheduleRecord[] {

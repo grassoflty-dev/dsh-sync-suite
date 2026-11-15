@@ -495,3 +495,58 @@ export function mergeIndexForRebuild(expected: OpenEntry[], actual: OpenEntry[],
   }
   return sortOpenEntries(Array.from(merged.values()));
 }
+
+// ---------------------------------------------------------------- 跨设备合并
+
+/** 一台设备的索引快照（`deviceId` + 原始条目，可以是文件读出来的，也可以是内存重建的）。 */
+export interface DeviceOpenIndex {
+  deviceId: string;
+  entries: OpenEntry[];
+}
+
+/** 跨设备合并后的一条待办：条目 + 它所属的设备目录（记录要去这个目录里取）。 */
+export interface MergedOpenEntry {
+  deviceId: string;
+  entry: OpenEntry;
+}
+
+/**
+ * 跨设备合并「未完成」：
+ * - 每台设备先各自折叠（同设备同 id 取 ts 较晚者），只保留仍未完成的；
+ * - 不同设备的目录互不重叠，同 id 理论上不会重复；真重复（手工拷贝目录）时取 ts 较晚的一条，
+ *   因此**输出无重复 id**；
+ * - 排序稳定：ts 升序 → deviceId → id，同一输入任意次数结果一致（列表不抖）。
+ *
+ * 注意：这里只做内存合并，不落盘 —— 其他设备的 `open.jsonl` 属于别人的目录（契约：每台设备只写
+ * 自己的目录），缺失时调用方用 `buildIndexFromRecords()` 在内存里重建即可。
+ */
+export function mergeDeviceIndexes(indexes: DeviceOpenIndex[]): MergedOpenEntry[] {
+  const byId = new Map<string, MergedOpenEntry>();
+  for (const device of indexes) {
+    for (const entry of foldOpenByid(device.entries)) {
+      if (!isOpenEntryOpen(entry)) {
+        continue;
+      }
+      const existing = byId.get(entry.id);
+      if (existing === undefined || compareTs(entry.ts, existing.entry.ts) > 0) {
+        byId.set(entry.id, { deviceId: device.deviceId, entry: entry });
+      }
+    }
+  }
+  const merged = Array.from(byId.values());
+  merged.sort((left: MergedOpenEntry, right: MergedOpenEntry) => {
+    const delta = compareTs(left.entry.ts, right.entry.ts);
+    if (delta !== 0) {
+      return delta;
+    }
+    if (left.deviceId !== right.deviceId) {
+      return left.deviceId < right.deviceId ? -1 : 1;
+    }
+    if (left.entry.id === right.entry.id) {
+      return 0;
+    }
+    return left.entry.id < right.entry.id ? -1 : 1;
+  });
+  return merged;
+}
+

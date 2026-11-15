@@ -101,7 +101,7 @@ Index 紧凑(竖屏)                        Index 宽屏/横屏
 └───────────────────────────┘        └─────────────┴─────────────┘
 页头动作 = ✨ AI 汇总（有汇总→打开面板；无→生成；生成中显示「✨ 生成中…」）/ ⚙ 设置；首页无「更多」与 ActionSheet。**列表第一项 = 今日汇总块**（数据源 = `summaryStore.read(date)` 持久化，`devices/<id>/summaries/<date>.json`）：标题 1 行 + 要点 ≤3（`truncateSummaryForDisplay`）+ 「更新于 HH:MM · 重新生成」；无汇总→「✨ 生成今日汇总」；今日无日程→灰字（无按钮）；失败→一行错误 + 重试（`summaryStore.generate` 保证不覆盖旧文件，失败后重新 `read()` 继续显示旧汇总）；`aboutToAppear`/换日期/回今天/回前台都重新 `read()`
 ```
-- **主从门槛 = 内容宽 ≥ 840vp**（`isMasterDetailWidth`）：竖屏平板 673vp、手机 360–430vp 一律**单列**、不渲染右栏；左右主从时左栏（`masterPaneWidth` **360–420vp**）= 日期条 + 模式 + 今日汇总块 + 列表 + 「新建」（240vp 左对齐）；右栏 = **三态**（空 / 详情 / 编辑），内容限宽 **720vp 居中**便于阅读。点行切右栏、点「新建」右栏直接变编辑表单（不跳二级页）；选中行 = `brand_soft` 底 + **2vp 品牌竖条**；编辑有未保存内容时切行先弹「放弃当前编辑？」。详情/编辑复用 `components/RecordDetailView.ets` / `RecordEditorView.ets`（`Detail.ets`/`Edit.ets` 已退化为薄壳），避免两套 UI 漂移。
+- **主从门槛 = 内容宽 ≥ 840vp**（`isMasterDetailWidth`）：竖屏平板 673vp、手机 360–430vp 一律**单列**、不渲染右栏；左右主从时左栏（`masterPaneWidth` **360–420vp**）= 日期条 + 模式 + 今日汇总块 + 列表 + 「新建」（240vp 左对齐）；右栏 = **三态**（空 / 详情 / 编辑），内容限宽 **720vp 居中**便于阅读。点行切右栏、点「新建」右栏直接变编辑表单（不跳二级页）；选中行 = `brand_soft` 底 + **2vp 品牌竖条**；编辑有未保存内容时切行先弹「放弃当前编辑？」。详情/编辑复用 `components/RecordDetailView.ets` / `RecordEditorView.ets`（`Detail.ets`/`Edit.ets` 已退化为薄壳），避免两套 UI 漂移。右栏同样支持**下拉刷新**（`Refresh` + `paneRefreshing`，复用左栏 `onPullRefresh()` 的 pull→reload→loadSummary）；编辑态有未保存内容时**不推进 `paneTick`**（宁可右栏不重读，也不冲掉草稿），只刷新左栏与汇总并 toast 说明。
 
 | 页 | 区块 | compact（竖屏） | medium / expanded（横屏·宽屏） | 主操作 |
 | --- | --- | --- | --- | --- |
