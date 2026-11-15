@@ -186,7 +186,12 @@ describe('手写板工具条：宽度自适应与不截断', () => {
     assert.ok(/\.backgroundColor\(\$r\('app\.color\.brand'\)\)/.test(body), '完成必须品牌蓝实底');
     assert.ok(/\.fontColor\(Color\.White\)/.test(body), '完成必须白字');
     assert.ok(/\.flexShrink\(0\)/.test(body), '完成不得被压缩');
-    assert.ok(/constraintSize\(\{ minWidth: .*FINISH_MIN_WIDTH.* \}\)/.test(body), '完成竖屏最小宽 ≥64');
+    assert.ok(/constraintSize\(\{ minWidth: FINISH_MIN_WIDTH \}\)/.test(body), '完成最小宽必须 ≥64');
+    assert.ok(
+      /\.width\(fullWidth \? RAIL_WIDTH - SPACING\.xs : FINISH_MIN_WIDTH\)/.test(body),
+      '横屏宽 = rail 宽 −4（72−4=68 ≥64），竖屏 = 64'
+    );
+    assert.ok(/\.padding\(\{ left: SPACING\.xs, right: SPACING\.xs \}\)/.test(body), '完成必须收窄内部 padding，否则 2 字会被挤成 ...');
   });
 
   test('工具条顺序 = 笔形/粗细/颜色/橡皮/手动框/撤销/重做/步进器/完成', () => {
@@ -216,5 +221,77 @@ describe('手写板工具条：宽度自适应与不截断', () => {
     for (const marker of ['[hw] menu=none open=0', '[hw] tool=', '[hw] delete confirm stage=', '[hw] page insert', '[hw] page deleted']) {
       assert.ok(source.includes(marker), `缺少日志标记 ${marker}`);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 横屏 rail（真机 2560×1600 实测）：56vp 太窄 → 「手动框」截成「手动」、「完成」变「...」、
+// 步进器 `−`/`+` 被挤出 rail。定版：rail 72vp、步进器纵向三行、颜色加色名、完成 ≥64。
+// ---------------------------------------------------------------------------
+
+describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () => {
+  test('rail 宽度 ≥72vp，「手动框」「橡皮」等 3 字控件才放得下', () => {
+    const rail = Number(/const RAIL_WIDTH: number = (\d+);/.exec(code)?.[1]);
+    assert.ok(rail >= 72, `RAIL_WIDTH 必须 ≥72，实际 ${rail}`);
+  });
+
+  test('横屏步进器是纵向三行（− / n/m / +），不再是横向 Row', () => {
+    const bar = builderBody('railBar');
+    assert.ok(/this\.pageStepperVertical\(\)/.test(bar), 'railBar 必须用纵向步进器');
+    assert.equal(/this\.pageStepper\(\)/.test(bar), false, 'railBar 不得再用横向步进器');
+
+    const vertical = builderBody('pageStepperVertical');
+    assert.ok(/Column\(\)\s*\{/.test(vertical), '纵向步进器必须是 Column');
+    assert.ok(/\.width\('100%'\)/.test(vertical), '纵向步进器必须撑满 rail 宽');
+    assert.ok(/this\.stepperMinus\(/.test(vertical), '纵向步进器含 −');
+    assert.ok(/this\.stepperPlus\(/.test(vertical), '纵向步进器含 +');
+    // 三行各 40vp 高：minus/plus 各一处 + 中间 n/m 一处
+    assert.equal((vertical.match(/\.height\(TOOL_HEIGHT\)/g) ?? []).length, 1, '中间 n/m 行必须 40vp 高');
+    assert.ok(/stepperMinus\(width: number\)[\s\S]*?\.height\(TOOL_HEIGHT\)/.test(code), '− 行必须 40vp 高');
+    assert.ok(/stepperPlus\(width: number\)[\s\S]*?\.height\(TOOL_HEIGHT\)/.test(code), '+ 行必须 40vp 高');
+  });
+
+  test('竖屏仍是横向 `− n/m +`（不能被横屏改动带跑）', () => {
+    const bar = builderBody('topBar');
+    assert.ok(/this\.pageStepper\(\)/.test(bar), 'topBar 必须用横向步进器');
+    const horizontal = builderBody('pageStepper');
+    assert.ok(/Row\(\)\s*\{/.test(horizontal), '横向步进器必须是 Row');
+    assert.ok(/\.constraintSize\(\{ minWidth: STEPPER_BTN \* 2 \+ STEPPER_LABEL_W \}\)/.test(horizontal), '横向步进器最小宽 136');
+  });
+
+  test('rail 内每个控件宽 ≥44vp 且 flexShrink(0)（真机挤掉控件的回归）', () => {
+    const controls = ['brushMenuButton', 'sizeMenuButton', 'colorMenuButton', 'toolButton', 'historyButton', 'finishButton'];
+    for (const name of controls) {
+      const body = builderBody(name);
+      assert.ok(/\.flexShrink\(0\)/.test(body), `${name} 缺少 flexShrink(0)`);
+      assert.ok(/constraintSize\(\{ minWidth: (TOOL_MIN_WIDTH|FINISH_MIN_WIDTH) \}\)/.test(body), `${name} 缺少 minWidth ≥44`);
+    }
+    // 纵向步进器：宽撑满 rail（=RAIL_WIDTH≥72），不需要 minWidth
+    assert.ok(/\.width\('100%'\)/.test(builderBody('pageStepperVertical')), '步进器必须撑满 rail 宽');
+  });
+
+  test('关键文案是完整字符串（布局里必须能读到）', () => {
+    assert.ok(source.includes("'手动框'"), '源码必须含完整「手动框」');
+    assert.ok(source.includes("'橡皮'"), '源码必须含「橡皮」');
+    assert.ok(source.includes("'完成'"), '源码必须含「完成」');
+    assert.ok(source.includes("Text('−')"), '源码必须含步进器「−」');
+    assert.ok(source.includes("Text('+')"), '源码必须含步进器「+」');
+    assert.ok(/Text\(`\$\{this\.currentPage \+ 1\}\/\$\{this\.pageCount\}`\)/.test(code), '源码必须含 `n/m` 页码文案');
+  });
+
+  test('横屏 rail 高度核算：控件 + 间距 + 完成 ≤ 屏高 674vp（2560×1600 @2.375）', () => {
+    const toolHeight = Number(/const TOOL_HEIGHT: number = (\d+);/.exec(code)?.[1]);
+    const gap = 4; // SPACING.xs
+    const spacing = 8; // SPACING.sm，rail 上下 padding
+    // 7 个 40vp 控件 + 步进器 3 行 + 完成 + 9 个间隙 + 上下 padding
+    const total = toolHeight * 7 + toolHeight * 3 + toolHeight + gap * 9 + spacing * 2;
+    assert.ok(total <= 674, `rail 内容总高 ${total}vp 超过横屏可用高度 674vp`);
+  });
+
+  test('颜色按钮带当前色名短标签（黑/红/蓝/绿/橙）', () => {
+    const body = builderBody('colorMenuButton');
+    assert.ok(/Text\(this\.currentColorLabel\(\)\)/.test(body), '颜色按钮必须显示当前色名');
+    assert.ok(/COLOR_LABELS: string\[\] = \['黑', '红', '蓝', '绿', '橙'\]/.test(code), '色名表必须是 黑/红/蓝/绿/橙');
+    assert.ok(/\.width\(20\)/.test(body) && /\.height\(20\)/.test(body), '色块必须 20×20');
   });
 });

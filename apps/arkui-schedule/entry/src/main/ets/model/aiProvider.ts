@@ -21,7 +21,7 @@ export interface AiProviderPreset {
   label: string;
   baseURL: string;
   models: AiModelOption[];
-  /** 一行提示：去哪拿 key / 用什么形态的凭据。 */
+  /** 一行自助引导：去哪拿 key / 用什么形态的凭据（直接显示在 Key 输入框下方）。 */
   keyHint: string;
   /** 实验源：端点尚未实测，界面应弱化提示，不当成稳定能力宣传。 */
   experimental?: boolean;
@@ -37,7 +37,7 @@ export const AI_PROVIDERS: AiProviderPreset[] = [
       { id: 'deepseek-chat', label: 'DeepSeek Chat' },
       { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner' }
     ],
-    keyHint: 'platform.deepseek.com 的 API key（sk- 开头）'
+    keyHint: 'platform.deepseek.com → API keys 创建（sk- 开头），测试最稳'
   },
   {
     id: 'opencode-go',
@@ -47,7 +47,7 @@ export const AI_PROVIDERS: AiProviderPreset[] = [
       { id: 'deepseek-v4.1-flash', label: 'DeepSeek V4.1 Flash' },
       { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' }
     ],
-    keyHint: '端点未实测，失败请检查 key 与地址',
+    keyHint: 'OpenCode Go 控制台取 key；端点未实测（标「实验」），失败先查 key 与地址',
     experimental: true
   },
   {
@@ -59,14 +59,14 @@ export const AI_PROVIDERS: AiProviderPreset[] = [
       { id: 'gpt-5-codex', label: 'GPT-5 Codex' },
       { id: 'gpt-5.1', label: 'GPT-5.1' }
     ],
-    keyHint: 'OpenAI API key（platform.openai.com），不支持 ChatGPT 订阅登录'
+    keyHint: 'platform.openai.com → API keys（API Key 模式，非 ChatGPT 订阅）'
   },
   {
     id: 'custom',
     label: '自定义（OpenAI 兼容）',
     baseURL: '',
     models: [{ id: 'custom-model', label: '自定义模型' }],
-    keyHint: '填 OpenAI 兼容接口地址（…/v1）与密钥'
+    keyHint: '任意 OpenAI 兼容服务，填 …/v1 地址与 key'
   }
 ];
 
@@ -175,4 +175,50 @@ export function chatCompletionsURL(baseURL: string): string {
     return base;
   }
   return `${base}${CHAT_COMPLETIONS_PATH}`;
+}
+
+/**
+ * 失败后的一行可操作建议（空串 = 成功，无需提示）。
+ *
+ * `status` 与 `aiRequest.classifyAiError` 同源：HTTP 状态码，或伪状态码 `-1`（超时）/`0`（网络失败）。
+ * 这里只说「下一步做什么」，不复述错误码——原因由 `classifyAiError` 的文案负责。
+ */
+export function hintForProvider(providerId: string, status: number): string {
+  const preset: AiProviderPreset = findProvider(providerId);
+  if (status === 200) {
+    return '';
+  }
+  if (status === -1) {
+    return '网络或端点不可达（超时），请检查网络/代理';
+  }
+  if (status === 0) {
+    return '网络或端点不可达，请检查网络/代理与防火墙';
+  }
+  if (status === 401) {
+    return preset.id === CUSTOM_PROVIDER_ID
+      ? 'key 无效或过期，请核对自定义服务的 key'
+      : 'key 无效或过期，请到服务商控制台重新复制';
+  }
+  if (status === 403) {
+    return '账号无该模型权限，请换模型或检查套餐';
+  }
+  if (status === 404) {
+    if (preset.id === 'opencode-go') {
+      return '端点可能已变更（OpenCode Go 端点未实测），请核对地址';
+    }
+    if (preset.id === CUSTOM_PROVIDER_ID) {
+      return '端点地址可能不对，请检查 …/v1 路径';
+    }
+    return '端点或模型名可能已变更，可手改模型名再试';
+  }
+  if (status === 429) {
+    return '限流，请稍后再试';
+  }
+  if (status === 400 || status === 422) {
+    return '模型名或参数不被接受，可手改模型名再试';
+  }
+  if (status >= 500) {
+    return '服务商服务端异常，请稍后再试';
+  }
+  return '请求失败，请检查源配置后重试';
 }

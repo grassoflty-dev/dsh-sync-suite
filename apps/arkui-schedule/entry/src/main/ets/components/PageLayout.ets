@@ -46,11 +46,26 @@ export struct PageLayout {
     return this.breakpoint === 'compact' ? SPACING.lg : SPACING.xl;
   }
 
+  /**
+   * `Area.width/height` 的静态类型是 `Length`（number 或字符串），直接 `as number` 遇到字符串会得到 0
+   * → 断点永远停在 `compact`，横屏就不会出两栏。这里显式转换，非数字一律 0（fail-closed 到单列）。
+   */
+  private toVp(value: Length): number {
+    if (typeof value === 'number') {
+      return Number.isFinite(value) && value > 0 ? value : 0;
+    }
+    if (typeof value === 'string') {
+      const parsed: number = Number(value);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    }
+    return 0;
+  }
+
   /** 面积变化 → 重算断点（只在断点真的变了时才 setState，避免布局回路）。 */
   private applyArea(area: Area): void {
-    const width: number = area.width as number;
-    const height: number = area.height as number;
-    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0) {
+    const width: number = this.toVp(area.width);
+    const height: number = this.toVp(area.height);
+    if (width <= 0 || height <= 0) {
       return;
     }
     if (this.contentWidth !== width) {
