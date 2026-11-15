@@ -20,3 +20,9 @@ apps/arkui-schedule/.arkui-x/android/.gradle/
 apps/arkui-schedule/.arkui-x/*/arkui-x/
 apps/arkui-schedule/dist-android/*.apk
 
+
+# 生成物：ArkUI-X 运行库资产与 IDE 本地配置
+apps/arkui-schedule/.arkui-x/**/assets/arkui-x/
+apps/arkui-schedule/.idea/
+apps/arkui-schedule/oh-package-lock.json5
+
