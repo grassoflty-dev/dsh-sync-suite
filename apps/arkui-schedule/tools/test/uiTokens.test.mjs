@@ -375,7 +375,9 @@ test('两个可复用视图：入参与回调齐全，手写回填走 refreshTic
   assert.match(EDITOR_VIEW, /onSaved: \(record: ScheduleRecord\) => void/)
   assert.match(EDITOR_VIEW, /onCancel: \(\(\) => void\) \| null/)
   assert.match(EDITOR_VIEW, /onDirtyChange: \(\(dirty: boolean\) => void\) \| null/)
-  assert.match(EDITOR_VIEW, /@Watch\('refreshTick'\)/)
+  // ArkTS 要求 @Watch 挂在属性声明上（不能装饰方法），断言正确形态。
+  assert.match(EDITOR_VIEW, /@Prop @Watch\('onRefreshTick'\) refreshTick: number/)
+  assert.equal(/@Watch\('refreshTick'\)\s*\n\s*onRefreshTick/.test(EDITOR_VIEW), false, '@Watch 不能装饰方法')
   assert.match(EDITOR_VIEW, /AppStorage\.setOrCreate<string>\('handwriting\.result', ''\)/, '回填后必须清键')
   assert.match(EDITOR_VIEW, /handwritingPageRoute\(\)/, '手写板入口两种容器都可用')
 })
