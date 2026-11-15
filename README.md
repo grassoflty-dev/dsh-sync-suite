@@ -118,6 +118,44 @@ ace build apk --debug     # => BUILD SUCCESSFUL，产物 .arkui-x/android/app/bu
 已产出：`dist-android/arkui-schedule-android-debug.apk`（50.84 MB，含 ArkUI-X 运行库，无手写/OCR 代码）。
 详细步骤、踩坑与证据见 [`docs/VERIFICATION.md`](docs/VERIFICATION.md) §8（鸿蒙）、§9（安卓）。
 
+**鸿蒙真机安装（已实测：MLR-AL00 / API 26）**：
+
+```powershell
+# 前置：AGC 里已有应用 + 调试证书 + 已登记设备 UDID + 调试 Profile
+# （没有的话 devecocli 会报 DEVICE_MISSING，见 docs/VERIFICATION.md §10.2）
+
+cd apps\arkui-schedule
+
+# 1) 构建（产出未签名 HAP）
+powershell -File tools\build-harmony.ps1 -Cores 4     # => entry\build\default\outputs\default\entry-default-unsigned.hap
+
+# 2) 签名（二选一）
+#    a. 自动签名：devecocli 从 AGC 取材料，写 signingConfigs + %USERPROFILE%\.ohos\config\
+#       产物是 entry-default-signed.hap
+devecocli signature generate --product default --force
+#    b. 离线签名：仓库内 signing/ 材料 + 明文口令，不改 build-profile.json5
+#       （hvigor 只认 DevEco 加密口令，明文会报 00303116，所以走离线脚本）
+#       产物是 entry-default-unsigned-signed.hap
+powershell -File tools\sign-hap.ps1
+
+# 3) 安装（换了签名身份要先 uninstall，否则 install sign info inconsistent）
+hdc -t 6MFBB25C27205131 install -r entry\build\default\outputs\default\entry-default-unsigned-signed.hap
+
+# 4) 启动
+hdc -t 6MFBB25C27205131 shell aa start -a EntryAbility -b com.itwill.schedule
+
+# 5) 看日志（hilog 无 jscrash 即视为启动正常；hdc install 失败时退出码仍为 0，要看输出文本）
+hdc -t 6MFBB25C27205131 shell hilog -r
+hdc -t 6MFBB25C27205131 shell aa start -a EntryAbility -b com.itwill.schedule
+hdc -t 6MFBB25C27205131 shell hilog -x
+```
+
+已产出：`apps/arkui-schedule/dist-harmony/arkui-schedule-harmony-debug-signed.hap`（953,791 B，调试签名，
+只能装到 AGC 已登记 UDID 的 `MLR-AL00`；HAP 与 APK 一样属构建产物，按 `.gitignore` 不入库）。
+
+签名材料在 `apps/arkui-schedule/signing/`，证书/Profile 与设备 UDID 绑定，细节与踩坑见
+[`docs/VERIFICATION.md`](docs/VERIFICATION.md) §10。
+
 ## 目录
 
 ```
