@@ -27,3 +27,4 @@ apps/arkui-schedule/.idea/
 apps/arkui-schedule/oh-package-lock.json5
 
 apps/arkui-schedule/dist-harmony/*.hap
+.tmp/
