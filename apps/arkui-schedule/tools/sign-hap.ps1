@@ -29,11 +29,13 @@ param(
   [string]$StorePass = 'itwill123',
   [string]$KeyPass = 'itwill123',
   [int]$CompatibleVersion = 26,
-  [switch]$SkipVerify
+  [switch]$SkipVerify,
+  [switch]$Deliver
 )
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$deliverDir = Join-Path $projectRoot 'dist-harmony'
 $signingDir = Join-Path $projectRoot 'signing'
 $deveco = if ($env:DEVECO_CLI_STUDIO_PATH) { $env:DEVECO_CLI_STUDIO_PATH } else { 'D:\A-DevEco\DevEco Studio' }
 $java = if ($env:JAVA_HOME) { Join-Path $env:JAVA_HOME 'bin\java.exe' } else { 'D:\jdk17\jdk-17\bin\java.exe' }
@@ -106,3 +108,15 @@ if ($verifyExit -ne 0) { throw "verify-app failed (exit $verifyExit)" }
 Write-Host ""
 Write-Host "Install with:"
 Write-Host ("  hdc -t <serial> install -r `"{0}`"" -f $signed.FullName)
+
+if ($Deliver) {
+  # 交付纪律：签名包必须落到 dist-harmony 并打印 SHA256，避免「只装机、不留档」。
+  if (-not (Test-Path $deliverDir)) { New-Item -ItemType Directory -Force -Path $deliverDir | Out-Null }
+  $target = Join-Path $deliverDir 'arkui-schedule-harmony-debug-signed.hap'
+  Copy-Item $signed.FullName $target -Force
+  $hash = (Get-FileHash $target -Algorithm SHA256).Hash
+  $size = (Get-Item $target).Length
+  Write-Host ""
+  Write-Host "Delivered:"
+  Write-Host ("  {0}  {1} B  SHA256={2}" -f $target, $size, $hash)
+}

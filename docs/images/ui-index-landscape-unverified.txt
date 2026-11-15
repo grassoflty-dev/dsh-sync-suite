@@ -1,0 +1,5 @@
+﻿该文件不是横屏布局证据。
+
+原因：本机工具链无法旋转设备屏幕——uitest uiInput 没有 rotate 子命令、设备上没有 wm、devecocli ui window 只能 list。
+这是「尝试 uitest uiInput rotate（命令无效）后」的截图，内容与 ui-index-portrait.jpeg 完全相同（1600x2560 竖屏）。
+真横屏验收需要：用户打开系统自动旋转后物理横屏，或新包 orientation: auto_rotation 生效后由用户旋转。
