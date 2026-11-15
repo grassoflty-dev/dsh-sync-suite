@@ -304,3 +304,76 @@ node --test apps/arkui-schedule/tools/test/*.test.mjs   # 155 pass / 0 fail
 - Android 分支：本机无 ArkUI-X 工具链，`architecture-x` 变体只做了静态校验，未编译；
 - `source.sourceRoots` 在 HarmonyOS build 中已被 hvigor 接受（本次构建通过），
   但其「同名相对路径后者覆盖前者」的语义是否与 ArkUI-X 一致，仍需在 ArkUI-X 工具链下复核。
+
+## 9. Android APK 真实构建（2026-11-15 实测）
+
+### 9.1 工具链（全部本机安装并验证）
+
+| 组件 | 位置 / 版本 |
+| --- | --- |
+| DevEco Studio | `D:\A-DevEco\DevEco Studio` 26.0.0.865 |
+| ArkUI-X SDK | `%LOCALAPPDATA%\ArkUI-X\Sdk\26.0.0\arkui-x`，**26.0.0.28 (Beta2)**（DevEco 插件下载） |
+| ACE Tools | 同上 `toolchains\bin\ace.cmd`（`ace config` 已配置 SDK/JDK/Node/ohpm 路径） |
+| Android SDK | `D:\android-sdk`：platform-tools、platforms android-33/34、build-tools 30.0.3/34.0.0 |
+| Gradle | wrapper 8.4（`repo.huaweicloud.com`）+ 本机 8.7 备用 |
+| JDK | **Temurin 17.0.21**（`D:\jdk17\jdk-17`）——DevEco 自带 JBR 是 **JDK 25**，Gradle 8.4 无法运行（`Unsupported class file major version 69`） |
+
+### 9.2 命令与结果（可复现）
+
+```powershell
+$sdk = "$env:LOCALAPPDATA\ArkUI-X\Sdk\26.0.0\arkui-x"
+$env:PATH = "$sdk\toolchains\bin;D:\A-DevEco\DevEco Studio\tools\node;$env:PATH"
+$env:JAVA_HOME = 'D:\jdk17\jdk-17'
+$env:ANDROID_HOME = 'D:\android-sdk'
+
+cd apps\arkui-schedule
+node tools\set-build-mode.mjs --mode arkui-x   # entry 只编 src/main（无手写/OCR）
+ace build apk --debug
+```
+
+实测输出：
+
+```
+Use ArkUI-X SDK, Version 26.0.0.28
+> Task :app:assembleDebug
+BUILD SUCCESSFUL in 1m 44s
+31 actionable tasks: 31 executed
+APK file built successfully.
+```
+
+产物：
+
+```
+apps/arkui-schedule/dist-android/arkui-schedule-android-debug.apk   50.84 MB
+  = .arkui-x/android/app/build/outputs/apk/debug/app-debug.apk
+  ArkUI-X 运行库：lib/arm64-v8a/libarkui_android.so 等 20+ 个 .so + classes.dex 557 KB
+  含 Handwriting / OcrBatch / reminderAgent 的条目：0（Android 分支物理上不含这些代码）
+```
+
+### 9.3 打通 Android 构建时修掉的问题
+
+| # | 现象 | 根因 | 处理 |
+| --- | --- | --- | --- |
+| 1 | `ace modify` 交互式命令在无 stdin 时崩溃 | readline 被关闭 | 新增 `tools/ace-driver.cjs`，用管道喂 `2`（Android 平台） |
+| 2 | `must be equal to one of the allowed values` at `products[1].runtimeOS` | ArkUI-X 的 hvigor 仍按 HarmonyOS schema 校验 | 根 profile 只保留 HarmonyOS product；Android 差异只放在 entry 的 `sourceRoots` |
+| 3 | `Cannot find name 'crossplatform'` | ArkUI-X 26 的 ets-loader 不认该装饰器（文档里的 `@crossplatform` 只是 API 能力标签） | 两种模式都清除该装饰器，validator 规则 5 改为「出现即失败」 |
+| 4 | `The module target 'ohosTest' is not found` | `ace build apk` 无条件编译 ohosTest | entry profile 增加 `ohosTest` target + `entry/src/ohosTest/module.json5` + 最小 `List.test.ets` |
+| 5 | `@ohos/hypium` 无法解析 | 测试模块依赖缺失 | `oh-package.json5` devDependencies 增加 `@ohos/hypium 1.0.25` |
+| 6 | ACE 打包 ENOENT：`.arkui-x/ios/.../pkgContextInfo.json` | ACE 的复制逻辑对 iOS 目录不 mkdir | 预建 `.arkui-x/ios/arkui-x/{entry,entry_test}` |
+| 7 | Gradle 启动失败 `Unsupported class file major version 69` | DevEco JBR 是 JDK 25，Gradle 8.4 不支持 | 安装 Temurin 17，`JAVA_HOME` 指向它，`ace config --java-sdk` 同步 |
+
+### 9.4 双产物与模式切换
+
+| 产物 | 构建模式 | 命令 | 结果 |
+| --- | --- | --- | --- |
+| HarmonyOS HAP | `--mode harmony`（entry = main + harmony） | `devecocli build --product default` | `entry-default-unsigned.hap` 0.87 MB，BUILD SUCCESSFUL |
+| Android APK | `--mode arkui-x`（entry = main only） | `ace build apk --debug` | `app-debug.apk` 50.84 MB，BUILD SUCCESSFUL |
+
+`tools/set-build-mode.mjs` 会同时切换：根/entry 的 build-profile、两个 hvigorfile（内置任务 ↔ ArkUI-X 任务）、
+hvigor 插件依赖，并清理/保留 `@crossplatform`。
+
+### 9.5 仍未验证
+
+- APK **未在 Android 真机/模拟器上安装运行**（本机无 Android 设备；`adb devices` 为空）；
+- 手写/OCR 在 Android 上不存在的结论来自「源码隔离 + APK 内容扫描」，未做运行时点击验证；
+- HarmonyOS HAP 仍未签名（需 AGC 证书/profile，等设备连接后由 `tools/install-device.ps1` 生成）。

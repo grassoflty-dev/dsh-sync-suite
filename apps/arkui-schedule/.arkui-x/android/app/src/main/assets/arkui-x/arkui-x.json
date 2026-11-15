@@ -1,0 +1,11 @@
+{
+  "apiVersion": "26",
+  "displayName": "ArkUI-X",
+  "meta": {
+    "metaVersion": "1.0.2"
+  },
+  "path": "arkui-x",
+  "platformVersion": "26.0.0",
+  "releaseType": "Beta2",
+  "version": "26.0.0.28"
+}

@@ -65,64 +65,46 @@ test('detectPlatformFrom：两个证据冲突时以鸿蒙为准（任一证据�
 
 // ---------------------------------------------------------------- 构建装配（方案 b）
 
-test('build-profile（entry）：HarmonyOS target = main + harmony；Android target 在 ArkUI-X 变体里', () => {
+test('build-profile（entry）：HarmonyOS = main + harmony；ArkUI-X = 只有 main', () => {
   const doc = readJson5('entry/build-profile.json5');
   assert.ok(Array.isArray(doc.targets), 'entry/build-profile.json5 必须有 targets 数组');
-
-  const byName = new Map(doc.targets.map((target) => [target.name, target]));
-  const harmonyTarget = byName.get('default');
-  assert.ok(harmonyTarget !== undefined, '缺少 harmony（default）target —— 鸿蒙构建会落回 Android 默认实现');
+  const harmonyTarget = doc.targets.find((target) => target.name === 'default');
+  assert.ok(harmonyTarget !== undefined, '缺少 default target');
   assert.deepEqual(harmonyTarget.source.sourceRoots, ['./src/main', './src/harmony']);
 
-  // 纯 DevEco 26 拒绝 runtimeOS:"Android"，所以 Android target 只在 ArkUI-X 变体文件里
+  // ArkUI-X/Android 变体：源码只有 main，手写/OCR 物理上不参与编译
   const arkuiX = readJson5('entry/build-profile.arkui-x.json5');
-  const arkuiXTargets = new Map(arkuiX.targets.map((target) => [target.name, target]));
-  assert.ok(arkuiXTargets.get('android') !== undefined, 'ArkUI-X 变体缺少 android target');
-  assert.deepEqual(arkuiXTargets.get('android').source.sourceRoots, ['./src/main']);
+  const androidTarget = arkuiX.targets.find((target) => target.name === 'default');
+  assert.ok(androidTarget !== undefined, 'ArkUI-X 变体缺少 default target');
+  assert.deepEqual(androidTarget.source.sourceRoots, ['./src/main']);
 });
 
-test('build-profile（root）：每个 module.target 映射到同名 product，且 target 名在 entry 里存在', () => {
-  const rootDoc = readJson5('build-profile.json5');
-  const entryDoc = readJson5('entry/build-profile.json5');
-  const entryTargets = new Set(entryDoc.targets.map((target) => target.name));
-  const products = new Set(rootDoc.app.products.map((product) => product.name));
-
-  const entryModule = rootDoc.modules.find((item) => item.name === 'entry');
-  assert.ok(entryModule !== undefined, '根 build-profile.json5 缺少 entry module');
-
-  const seen = new Set();
-  for (const target of entryModule.targets) {
-    assert.ok(entryTargets.has(target.name), `module.target ${target.name} 在 entry/build-profile.json5 里不存在`);
-    for (const product of target.applyToProducts) {
-      assert.ok(products.has(product), `applyToProducts 里的 ${product} 不是已定义的 product`);
+test('build-profile（root）：target 与 product 一一对应，且两套 profile 都只有 HarmonyOS product', () => {
+  for (const file of ['build-profile.json5', 'build-profile.arkui-x.json5']) {
+    const rootDoc = readJson5(file);
+    const entryDoc = readJson5(file === 'build-profile.json5' ? 'entry/build-profile.json5' : 'entry/build-profile.arkui-x.json5');
+    const entryTargets = new Set(entryDoc.targets.map((target) => target.name));
+    const products = new Set(rootDoc.app.products.map((product) => product.name));
+    const entryModule = rootDoc.modules.find((item) => item.name === 'entry');
+    assert.ok(entryModule !== undefined, file + ' 缺少 entry module');
+    for (const target of entryModule.targets) {
+      assert.ok(entryTargets.has(target.name), file + ' 的 module.target ' + target.name + ' 在 entry 里不存在');
+      for (const product of target.applyToProducts) {
+        assert.ok(products.has(product), 'applyToProducts 里的 ' + product + ' 不是已定义的 product');
+      }
     }
-    seen.add(target.name);
-  }
-  assert.ok(seen.has('default'), 'module.targets 缺少 default');
-
-  // ArkUI-X 变体：android product 必须走 android target（不能复用鸿蒙装配）
-  const arkuiXRoot = readJson5('build-profile.arkui-x.json5');
-  const arkuiXEntry = readJson5('entry/build-profile.arkui-x.json5');
-  const arkuiXEntryTargets = new Set(arkuiXEntry.targets.map((target) => target.name));
-  const arkuiXProducts = new Set(arkuiXRoot.app.products.map((product) => product.name));
-  const arkuiXModule = arkuiXRoot.modules.find((item) => item.name === 'entry');
-  const arkuiXSeen = new Set();
-  for (const target of arkuiXModule.targets) {
-    assert.ok(arkuiXEntryTargets.has(target.name), `ArkUI-X module.target ${target.name} 在 entry 变体里不存在`);
-    for (const product of target.applyToProducts) {
-      assert.ok(arkuiXProducts.has(product), `ArkUI-X applyToProducts 里的 ${product} 不是已定义的 product`);
+    // ArkUI-X 的 hvigor 仍按 HarmonyOS schema 校验，不允许 runtimeOS:"Android"
+    for (const product of rootDoc.app.products) {
+      assert.equal(product.runtimeOS, 'HarmonyOS', file + ' 只能声明 HarmonyOS product');
     }
-    arkuiXSeen.add(target.name);
   }
-  assert.ok(arkuiXSeen.has('android'), 'ArkUI-X module.targets 缺少 android —— android product 会复用鸿蒙装配');
 });
 
-test('build-profile（root）：android product 走 android target，鸿蒙 product 走 default target（ArkUI-X 变体）', () => {
-  const rootDoc = readJson5('build-profile.arkui-x.json5');
-  const entryModule = rootDoc.modules.find((item) => item.name === 'entry');
-  const mapping = new Map(entryModule.targets.map((target) => [target.name, target.applyToProducts]));
-  assert.deepEqual(mapping.get('default'), ['default']);
-  assert.deepEqual(mapping.get('android'), ['android']);
+test('ohosTest target 在 entry 里存在（ArkUI-X/ace 构建需要）', () => {
+  for (const file of ['entry/build-profile.json5', 'entry/build-profile.arkui-x.json5']) {
+    const doc = readJson5(file);
+    assert.ok(doc.targets.some((target) => target.name === 'ohosTest'), file + ' 缺少 ohosTest target');
+  }
 });
 
 // ---------------------------------------------------------------- 共享层装配逻辑（静态断言）

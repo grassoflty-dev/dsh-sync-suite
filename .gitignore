@@ -13,3 +13,10 @@ apps/arkui-schedule/oh_modules/
 apps/arkui-schedule/build/
 apps/arkui-schedule/entry/build/
 
+
+# ArkUI-X / Android 构建产物
+apps/arkui-schedule/.arkui-x/**/build/
+apps/arkui-schedule/.arkui-x/android/.gradle/
+apps/arkui-schedule/.arkui-x/*/arkui-x/
+apps/arkui-schedule/dist-android/*.apk
+
