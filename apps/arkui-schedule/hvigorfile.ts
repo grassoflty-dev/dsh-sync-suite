@@ -1,6 +1,6 @@
-import { AppTasksForArkUIX } from '@ohos/hvigor-ohos-arkui-x-plugin';
+import { appTasks } from '@ohos/hvigor-ohos-plugin';
 
 export default {
-  system: AppTasksForArkUIX,
+  system: appTasks,
   plugins: []
 }
