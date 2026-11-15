@@ -10,8 +10,8 @@
     "products": [
       {
         "name": "default",
-        "compatibleSdkVersion": 12,
-        "targetSdkVersion": 12,
+        "compatibleSdkVersion": "26.0.0",
+        "targetSdkVersion": "26.0.0",
         "runtimeOS": "HarmonyOS",
         "buildOption": {
           "strictMode": {
@@ -22,8 +22,8 @@
       },
       {
         "name": "android",
-        "compatibleSdkVersion": 12,
-        "targetSdkVersion": 12,
+        "compatibleSdkVersion": "26.0.0",
+        "targetSdkVersion": "26.0.0",
         "runtimeOS": "Android"
       }
     ],
