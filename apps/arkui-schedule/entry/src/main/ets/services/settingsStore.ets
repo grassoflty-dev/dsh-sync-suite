@@ -1,5 +1,5 @@
 /**
- * 本机设置存储（设备标识 / 仓库地址 / token / AI key / 作者名 / 平台 / 认证方式 / AI 模型）。
+ * 本机设置存储（设备标识 / 仓库地址 / token / AI 源与模型 / 作者名 / 平台 / 认证方式）。
  *
  * 落盘方式：`@kit.ArkData` 的 `preferences`（值不外泄，不进 Git 同步载荷）。
  * 设备标识同时决定日程目录 `git-repo/devices/<deviceId>/`，因此必须匹配
@@ -10,6 +10,12 @@
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { DEFAULT_AI_MODEL } from '../model/aiRequest';
+import {
+  CUSTOM_PROVIDER_ID,
+  findProvider,
+  normalizeBaseURL,
+  resolveModel as resolveAiModel
+} from '../model/aiProvider';
 import { AUTH_HTTPS, PLATFORM_GITHUB, normalizeAuthMode, normalizePlatform } from '../model/settingsForm';
 import { normalizeSyncAction } from '../model/syncError';
 
@@ -27,10 +33,14 @@ export interface ScheduleSettings {
   repoUrl: string;
   /** HTTPS 访问 token（仅存本机）。 */
   token: string;
-  /** DeepSeek API key（仅存本机）。 */
+  /** AI 密钥（仅存本机；与源解耦，换源可继续用）。 */
   aiKey: string;
-  /** DeepSeek 模型名，默认 `deepseek-chat`。 */
+  /** AI 源 id：`deepseek` | `opencode-go` | `codex` | `custom`（未知/空回退默认源）。 */
+  aiProviderId: string;
+  /** 模型名，空值与未知值在读取时归一到该源默认模型。 */
   aiModel: string;
+  /** 自定义源的接口基地址；预设源忽略此值（用预设地址）。 */
+  aiBaseURL: string;
   /** 作者名，写入日程记录的 author 字段。 */
   author: string;
   /** 托管平台：`github` | `gitee`（只影响提示文案与示例）。 */
@@ -58,7 +68,9 @@ export interface SettingsPatch {
   repoUrl?: string;
   token?: string;
   aiKey?: string;
+  aiProviderId?: string;
   aiModel?: string;
+  aiBaseURL?: string;
   author?: string;
   gitPlatform?: string;
   authMode?: string;
@@ -69,7 +81,9 @@ const KEY_DEVICE_ID: string = 'deviceId';
 const KEY_REPO_URL: string = 'repoUrl';
 const KEY_TOKEN: string = 'token';
 const KEY_AI_KEY: string = 'aiKey';
+const KEY_AI_PROVIDER_ID: string = 'aiProviderId';
 const KEY_AI_MODEL: string = 'aiModel';
+const KEY_AI_BASE_URL: string = 'aiBaseURL';
 const KEY_AUTHOR: string = 'author';
 const KEY_GIT_PLATFORM: string = 'gitPlatform';
 const KEY_AUTH_MODE: string = 'authMode';
@@ -87,6 +101,18 @@ export function normalizeDeviceId(value: string): string {
 export function normalizeAiModel(value: string): string {
   const text = typeof value === 'string' ? value.trim() : '';
   return text.length > 0 ? text : DEFAULT_AI_MODEL;
+}
+
+/**
+ * 归一接口基地址：预设源恒用预设地址（预设升级后旧设置自动跟上，用户不必手改），
+ * 自定义源才用用户填写的值。
+ */
+export function aiBaseURLFor(providerId: string, rawBaseURL: string): string {
+  const preset = findProvider(providerId);
+  if (preset.id !== CUSTOM_PROVIDER_ID) {
+    return preset.baseURL;
+  }
+  return normalizeBaseURL(typeof rawBaseURL === 'string' ? rawBaseURL : '');
 }
 
 /** 读取 preferences 里的字符串值（非字符串按默认值处理）。 */
@@ -117,19 +143,26 @@ export class SettingsStore {
     const repoUrl = readString(await prefs.get(KEY_REPO_URL, ''), '');
     const token = readString(await prefs.get(KEY_TOKEN, ''), '');
     const aiKey = readString(await prefs.get(KEY_AI_KEY, ''), '');
+    // 迁移：旧版本只存了 aiKey。providerId 为空即旧数据 → findProvider 回退默认源 deepseek，
+    // 模型为空 → deepseek-chat，地址 → 该源预设地址（三个字段一起补齐，不留半套配置）。
+    const aiProviderIdRaw = readString(await prefs.get(KEY_AI_PROVIDER_ID, ''), '');
     const aiModel = readString(await prefs.get(KEY_AI_MODEL, DEFAULT_AI_MODEL), DEFAULT_AI_MODEL);
+    const aiBaseURLRaw = readString(await prefs.get(KEY_AI_BASE_URL, ''), '');
     const author = readString(await prefs.get(KEY_AUTHOR, ''), '');
     const gitPlatform = readString(await prefs.get(KEY_GIT_PLATFORM, PLATFORM_GITHUB), PLATFORM_GITHUB);
     const authMode = readString(await prefs.get(KEY_AUTH_MODE, AUTH_HTTPS), AUTH_HTTPS);
     const lastSyncAt = readString(await prefs.get(KEY_LAST_SYNC_AT, ''), '');
     const lastSyncError = readString(await prefs.get(KEY_LAST_SYNC_ERROR, ''), '');
     const lastSyncAction = readString(await prefs.get(KEY_LAST_SYNC_ACTION, ''), '');
+    const aiProviderId: string = findProvider(aiProviderIdRaw).id;
     const settings: ScheduleSettings = {
       deviceId: normalizeDeviceId(deviceId),
       repoUrl: repoUrl,
       token: token,
       aiKey: aiKey,
-      aiModel: normalizeAiModel(aiModel),
+      aiProviderId: aiProviderId,
+      aiModel: resolveAiModel(aiProviderId, normalizeAiModel(aiModel)),
+      aiBaseURL: aiBaseURLFor(aiProviderId, aiBaseURLRaw),
       author: author,
       gitPlatform: normalizePlatform(gitPlatform),
       authMode: normalizeAuthMode(authMode),
@@ -154,6 +187,22 @@ export class SettingsStore {
     return this.cache.aiModel.trim();
   }
 
+  /** 缓存里的 AI 源 id（未加载过返回空串），供 services/deepseek 兜底选源。 */
+  cachedProviderId(): string {
+    if (this.cache === null) {
+      return '';
+    }
+    return this.cache.aiProviderId.trim();
+  }
+
+  /** 缓存里的接口基地址（未加载过返回空串），供 services/deepseek 兜底取地址。 */
+  cachedBaseURL(): string {
+    if (this.cache === null) {
+      return '';
+    }
+    return this.cache.aiBaseURL.trim();
+  }
+
   /** 部分更新并立即 flush 到磁盘，返回更新后的完整设置。 */
   async save(patch: SettingsPatch, context?: object): Promise<ScheduleSettings> {
     if (context !== undefined && this.prefs === null) {
@@ -161,12 +210,16 @@ export class SettingsStore {
     }
     const prefs = this.requirePrefs();
     const current = await this.load();
+    const nextProviderId: string =
+      patch.aiProviderId === undefined ? current.aiProviderId : findProvider(patch.aiProviderId).id;
     const next: ScheduleSettings = {
       deviceId: patch.deviceId === undefined ? current.deviceId : normalizeDeviceId(patch.deviceId),
       repoUrl: patch.repoUrl === undefined ? current.repoUrl : patch.repoUrl.trim(),
       token: patch.token === undefined ? current.token : patch.token.trim(),
       aiKey: patch.aiKey === undefined ? current.aiKey : patch.aiKey.trim(),
-      aiModel: patch.aiModel === undefined ? current.aiModel : normalizeAiModel(patch.aiModel),
+      aiProviderId: nextProviderId,
+      aiModel: resolveAiModel(nextProviderId, patch.aiModel === undefined ? current.aiModel : patch.aiModel),
+      aiBaseURL: aiBaseURLFor(nextProviderId, patch.aiBaseURL === undefined ? current.aiBaseURL : patch.aiBaseURL),
       author: patch.author === undefined ? current.author : patch.author.trim(),
       gitPlatform: patch.gitPlatform === undefined ? current.gitPlatform : normalizePlatform(patch.gitPlatform),
       authMode: patch.authMode === undefined ? current.authMode : normalizeAuthMode(patch.authMode),
@@ -178,7 +231,9 @@ export class SettingsStore {
     await prefs.put(KEY_REPO_URL, next.repoUrl);
     await prefs.put(KEY_TOKEN, next.token);
     await prefs.put(KEY_AI_KEY, next.aiKey);
+    await prefs.put(KEY_AI_PROVIDER_ID, next.aiProviderId);
     await prefs.put(KEY_AI_MODEL, next.aiModel);
+    await prefs.put(KEY_AI_BASE_URL, next.aiBaseURL);
     await prefs.put(KEY_AUTHOR, next.author);
     await prefs.put(KEY_GIT_PLATFORM, next.gitPlatform);
     await prefs.put(KEY_AUTH_MODE, next.authMode);
@@ -207,7 +262,9 @@ export class SettingsStore {
       repoUrl: current.repoUrl,
       token: current.token,
       aiKey: current.aiKey,
+      aiProviderId: current.aiProviderId,
       aiModel: current.aiModel,
+      aiBaseURL: current.aiBaseURL,
       author: current.author,
       gitPlatform: current.gitPlatform,
       authMode: current.authMode,
