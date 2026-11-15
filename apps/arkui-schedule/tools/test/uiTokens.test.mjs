@@ -368,7 +368,7 @@ test('Detail / Edit 已改成薄壳：只做路由参数 + 复用组件，不再
 
 test('两个可复用视图：入参与回调齐全，手写回填走 refreshTick + @Watch', () => {
   assert.match(DETAIL_VIEW, /@Prop recordId: string/)
-  assert.match(DETAIL_VIEW, /@Prop refreshTick: number/)
+  assert.match(DETAIL_VIEW, /@Prop( @Watch\('onRefreshTick'\))? refreshTick: number/)
   assert.match(DETAIL_VIEW, /onEdit: \(\(\) => void\) \| null/)
   assert.match(DETAIL_VIEW, /onAi: \(\(\) => void\) \| null/)
   assert.match(DETAIL_VIEW, /onDelete: \(\(\) => void\) \| null/)
