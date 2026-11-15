@@ -299,7 +299,7 @@ node --test apps/arkui-schedule/tools/test/*.test.mjs   # 155 pass / 0 fail
 
 ### 8.5 仍未验证（构建已通过，但运行时仍需设备）
 
-- HAP 未签名，真机安装需 AGC 签名配置；
+- ~~HAP 未签名，真机安装需 AGC 签名配置~~ → 已在 §10 打通（签名 HAP 已装到 `MLR-AL00` 并启动）；
 - 真机 OCR / `componentSnapshot` / PixelMap 释放 / 提醒权限（AGC，约 8 工作日）；
 - Android 分支：本机无 ArkUI-X 工具链，`architecture-x` 变体只做了静态校验，未编译；
 - `source.sourceRoots` 在 HarmonyOS build 中已被 hvigor 接受（本次构建通过），
@@ -376,4 +376,245 @@ hvigor 插件依赖，并清理/保留 `@crossplatform`。
 
 - APK **未在 Android 真机/模拟器上安装运行**（本机无 Android 设备；`adb devices` 为空）；
 - 手写/OCR 在 Android 上不存在的结论来自「源码隔离 + APK 内容扫描」，未做运行时点击验证；
-- HarmonyOS HAP 仍未签名（需 AGC 证书/profile，等设备连接后由 `tools/install-device.ps1` 生成）。
+- ~~HarmonyOS HAP 仍未签名（需 AGC 证书/profile，等设备连接后由 `tools/install-device.ps1` 生成）~~
+  → 已在 §10 完成签名 + 真机安装 + hilog/UI 验证。
+
+## 10. 签名与真机安装（2026-11-15 实测）
+
+§8 留下「HAP 未签名、无设备」的尾巴，本节把它补齐：**签名 → 构建 → 安装 → 启动 → hilog → UI 节点** 全链路已在真机上跑通。
+
+### 10.1 工具链与设备
+
+| 项 | 值 |
+| --- | --- |
+| IDE | `D:\A-DevEco\DevEco Studio`，DevEco Studio **26.0.0.865** |
+| HarmonyOS SDK | `D:\A-DevEco\DevEco Studio\sdk\default`（API **26**） |
+| hdc | `...\sdk\default\openharmony\toolchains\hdc.exe`（Ver **3.2.0f**） |
+| 签名工具 | `...\sdk\default\openharmony\toolchains\lib\hap-sign-tool.jar` |
+| JDK | `D:\jdk17\jdk-17`（Temurin **17.0.21**；不能用 DevEco 自带 JDK 25） |
+| 构建/签名入口 | `C:\Users\GWL\Desktop\itwillclaude\.tmp\deveco-cli\node_modules\.bin\devecocli.cmd` |
+| 华为账号 | `行走的49W 丁浩然`（主账号，已认证），developer-id / team `70086000166631503` |
+
+实测连接的设备：
+
+| 项 | 值 |
+| --- | --- |
+| serial | `6MFBB25C27205131` |
+| 型号 | MatePad Mini 悦读版 `MLR-AL00` |
+| 系统 | `const.ohos.apiversion=26`，`const.ohos.fullname=OpenHarmony-7.0.0.111` |
+| UDID | `A2DCA977DA029D56868CBA60A01A698B677DB1BA1101B5499A43999D8B6CC07E` |
+
+### 10.2 失败起点：DEVICE_MISSING 与真正根因
+
+第一次尝试是让 CLI 全自动生成签名（期望它自己建 Profile）：
+
+```powershell
+devecocli signature generate --product default --force
+```
+
+实测失败：
+
+```
+[DEBUG] [EnvCheck] Scenario 4 Device check: no cloud devices found, falling back to local hdc
+[DEBUG] [EnvCheck] Scenario 4 Device check: local device found but not an emulator
+[Debug] FAIL: DEVICE_MISSING "Unable to create the profile file due to missing devices..."
+```
+
+真正根因**不在设备侧**：AGC 团队下既没有 HarmonyOS 应用、也没有登记过设备。
+`devecocli` 只读 AGC、不写 AGC，因此它无法替你创建应用、证书和 Profile，自然「找不到设备」。
+设备本身、hdc 授权、开发者模式当时都是正常的（hdc 能连上、能装包）。
+
+结论：**签名材料必须先在 AGC 网页侧备齐**，CLI 只负责在材料齐备后签发本地密钥与配置。
+
+### 10.3 AGC 手工申请四步
+
+先在 [AppGallery Connect](https://developer.huawei.com/consumer/cn/service/josp/agc/index.html) 手工完成四件事，对象如下：
+
+| 对象 | 标识 / 值 |
+| --- | --- |
+| 应用 | `itwill schedule`，包名 `com.itwill.schedule`，支持设备「手机 + 平板」，所属项目 `itwill-schedule` |
+| appId | `6917621854545473037` |
+| projectId | `101653523865711182` |
+| 调试证书 | `itwill-debug-cert`（类型「调试证书」，状态生效，失效 **2027-11-15**），由 `signing/itwill-debug.csr` 上传签发 |
+| 设备 | `MLR-AL00`（类型「平板」，注册时间 2026-11-15 13:01:59） |
+| 调试 Profile | `itwill-debug-profile`（类型「调试」，provisionId `2084126670842794816`，uuid `5657b004-aa48-45c2-b598-bedaf8aa0379`） |
+
+四个步骤（顺序不能乱：证书要绑应用，Profile 要绑证书 + 设备）：
+
+1. **建应用**：项目 `itwill-schedule` → 添加 HarmonyOS 应用，包名 `com.itwill.schedule`，支持设备勾选手机 + 平板。
+2. **传 CSR 签证书**：`证书、APP ID 和 Profile` → 证书 → 新增「调试证书」，上传 `apps/arkui-schedule/signing/itwill-debug.csr`，
+   签发得到 `itwill-debug-cert`（下载为 `itwill-debug.cer`）。
+3. **登记设备 UDID**：设备管理 → 添加设备，填 §10.1 表里的 UDID，设备形态选「平板」。
+4. **建调试 Profile**：Profile → 新增「调试」，选上面签好的证书、勾选刚登记的设备，得到 `itwill-debug-profile`（下载为 `itwill-debug.p7b`）。
+
+实测遇到的两个 AGC 页面细节：
+
+- **①「类型」下拉里没有「调试设备」**。新版设备页只有 手机 / 平板 / PC / 2in1 / 运动手表 / 智能手表 / 智慧屏 / 路由器，
+  按设备**形态**选「平板」即可，这样它才会出现在调试 Profile 的设备勾选列表里。
+- **② Profile 行的「下载」按钮抓不到文件**。它的实现是 `window.open(OBS 签名直链)`，常规下载监听收不到；
+  需要从页面 XHR 里取直链（`provision/refresh` → `cfs/file_service/v1/download/object/url`）再自己下载。
+
+### 10.4 登记设备后自动签名恢复可用
+
+AGC 四步做完后，**同一条命令原样重跑即成功**，不需要改任何参数：
+
+```powershell
+devecocli signature generate --product default --force
+```
+
+实测输出：
+
+```
+Start generating p12
+Start generating csr
+Start generating certificate
+Start generating profile
+Signing config written to C:\Users\GWL\Desktop\itwillclaude\dsh-sync-suite\apps\arkui-schedule\build-profile.json5
+Signature generation completed successfully.
+```
+
+它会：
+
+- 在 `%USERPROFILE%\.ohos\config\` 下生成 `default_arkui-schedule_*.{p12,cer,p7b}`；
+- 把 `signingConfigs` 写进 `apps/arkui-schedule/build-profile.json5`；
+- 之后 `devecocli build` / `hvigor` 就会自动签出 `entry-default-signed.hap`（实测 953,680 B）。
+
+⚠️ **它签发的证书与 `signing/itwill-debug.cer` 不是同一张**（实测两者 cer 的 SHA256 不同）。
+两条身份线并存会引出 §10.7 的 `install sign info inconsistent`。
+
+### 10.5 hvigor 只接受加密密码 → 离线签名脚本
+
+自动签名把机器相关的加密串写进了 `build-profile.json5`，不适合提交。手工换成明文密码再构建，直接失败：
+
+```
+> hvigor ERROR: Failed :entry:default@SignHap
+00303116 Configuration Error
+Error Message: The length of the storePassword or keyPassword field in the signature configuration is less than 32. At file: ...\apps\arkui-schedule\build-profile.json5
+```
+
+结论：hvigor 的 `SignHap` 只认 DevEco **加密后**的密码串（64 位 hex），明文不可用。
+因此仓库里的 `build-profile.json5` 保持 `"signingConfigs": []`（不提交机器相关的加密串），
+签名改由离线脚本 `apps/arkui-schedule/tools/sign-hap.ps1` 完成：直接用 SDK 的 `hap-sign-tool.jar` +
+明文密码 + 仓库内 `signing/` 材料，绕开 hvigor。
+
+脚本参数（`apps/arkui-schedule/tools/sign-hap.ps1`）：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-Hap` | `entry\build\default\outputs\default\entry-default-unsigned.hap` | 待签名的未签名 HAP |
+| `-Out` | 输入名 + `-signed.hap` | 输出路径 |
+| `-KeyAlias` | `debugkey` | p12 别名 |
+| `-StorePass` / `-KeyPass` | `<已脱敏>` | 明文口令（与 `signing/README.md` 一致） |
+| `-CompatibleVersion` | `26` | 与 API 26 对齐 |
+| `-SkipVerify` | 关 | 跳过 `verify-app` 校验 |
+
+### 10.6 构建 / 签名 / 安装 / 启动命令与输出
+
+```powershell
+cd apps\arkui-schedule
+
+# 1) 构建（限制 4 核 + BelowNormal，边用电脑边构建）
+powershell -File tools\build-harmony.ps1 -Cores 4
+
+# 2) 离线签名 + 自校验
+powershell -File tools\sign-hap.ps1
+
+# 3) 安装（覆盖安装；注意 §10.7 的坑）
+hdc -t 6MFBB25C27205131 install -r entry\build\default\outputs\default\entry-default-unsigned-signed.hap
+
+# 4) 启动
+hdc -t 6MFBB25C27205131 shell aa start -a EntryAbility -b com.itwill.schedule
+```
+
+实测输出：
+
+```
+# 构建
+> BUILD SUCCESSFUL in 10 s 310 ms（42 tasks）
+entry\build\default\outputs\default\entry-default-unsigned.hap   912,422 B
+
+# 签名
+sign-app success
+signed HAP: entry-default-unsigned-signed.hap (953,791 bytes)
+
+# 校验（sign-hap.ps1 内自动执行 verify-app）
+Digest verify result: true, DigestAlgorithm: SHA-256
+verify permission sign success
+verify: Verify success
+verify-app success（exit 0）
+
+# 安装
+msg:install bundle successfully.
+
+# 启动
+start ability successfully.
+```
+
+### 10.7 两个安装坑
+
+| # | 现象 | 根因 | 处理 |
+| --- | --- | --- | --- |
+| 1 | `msg:error: failed to install bundle. code:9568332 error: install sign info inconsistent.` | 设备上已装的是 `devecocli` 自动签发身份签的包，与 `signing/itwill-debug.cer` 不是同一张证书 | 先 `hdc -t 6MFBB25C27205131 uninstall com.itwill.schedule` 再装，实测成功 |
+| 2 | `hdc install` 失败时退出码仍为 `0`（`$LASTEXITCODE=0`） | hdc 的 CLI 行为：失败只体现在输出文本 | **必须看输出文本**（`install bundle successfully`）判断成败，不能只看退出码 |
+
+### 10.8 hilog 15 秒观察结论
+
+冷启动观察命令（实测）：
+
+```powershell
+hdc -t 6MFBB25C27205131 shell aa force-stop com.itwill.schedule
+hdc -t 6MFBB25C27205131 shell hilog -r          # 清缓冲
+hdc -t 6MFBB25C27205131 shell aa start -a EntryAbility -b com.itwill.schedule
+# 等 15 秒
+hdc -t 6MFBB25C27205131 shell hilog -x > hilog-final.txt
+```
+
+结论：
+
+- 采集 **1722 行**日志；`jscrash|appfreeze|Fatal|SIGSEGV|SIGABRT` 命中 **0**；
+- 15 秒后进程 `com.itwill.schedule` **仍存活**（PID 26968）；
+- 应用侧 **31 条 E 级**日志全部是框架噪声，不构成崩溃证据：
+  `CODE_SIGN [XpmIoctl] Ioctl cmd ... failed: Invalid argument (ignore)`、
+  `WMS SetWindowType: permission denied!`、
+  `ArkCompiler PandaFileSnapshotInterfaces::ReadCrossBundleHspInfo failed`、
+  `data_share_manager_impl RegisterClientDeathObserver failed`、
+  `Ace LoadThemeFont: Failed to load font default.ttf`、
+  `AceAppBar read abc file success!`（这条虽是 E 级，语义是成功）；
+- 日志里另有 2 条 `OnProcessDied`（`com.huawei.hmos.clouddrive`），与本应用无关；
+- `/data/log/faultlog/faultlogger/` 在本机 shell 下 `Permission denied`，取不到 faultlogger 文件，
+  因此本节的判据是「hilog 无 jscrash / appfreeze + 进程存活」，**不是** faultlog 为空。
+
+### 10.9 UI 实证
+
+设备锁屏时 `devecocli ui layout` 只能拿到锁屏节点（`ScreenLockRootComponent`），必须先唤醒并解锁：
+
+```powershell
+hdc -t 6MFBB25C27205131 shell power-shell wakeup
+hdc -t 6MFBB25C27205131 shell "uitest uiInput swipe 1280 1400 1280 300 300"
+```
+
+然后再取节点树：
+
+```powershell
+devecocli ui layout --device 6MFBB25C27205131 --format json --mode simplified
+```
+
+实测拿到 2560×1600 的真实页面节点，文本为：`2026-11-15`、`点击选择日期`、`今天`、`今日待办`、
+`全部未完成`、`仅本机`、`这一天还没有日程`、`点击底部「新建」记录一条，或切换日期`，
+按钮 `新建` / `AI 汇总` / `同步`。
+
+截图（`hdc shell snapshot_display -f /data/local/tmp/itwill.jpeg` + `hdc file recv` 取回）：
+
+![鸿蒙真机运行截图（2560×1600）](images/harmony-device-run-2026-11-15.jpeg)
+
+文件：`docs/images/harmony-device-run-2026-11-15.jpeg`，2560×1600，107,467 B。
+
+### 10.10 仍未验证与边界
+
+- **release 证书未做**：本节全部基于「调试证书 + 调试 Profile」，只能装到已登记 UDID 的设备上；
+- **调试身份不可上架**：`itwill-debug.cer` / `itwill-debug.p7b` 是调试用途，不能用于应用市场发布；
+- **换设备要重新登记**：Profile 绑定 UDID，换一台设备必须回 AGC 重新登记 UDID 并重建调试 Profile，否则安装失败；
+- **有效期**：调试证书与 Profile 均到 **2027-11-15**，到期需重签并同步更新仓库内 `signing/`；
+- **faultlog 目录无权限**：`/data/log/faultlog/faultlogger/` 在本机 shell 下 `Permission denied`，崩溃判定依赖 hilog 与进程存活；
+- **未做多设备 / 多分辨率验证**：只测了 `MLR-AL00` 一台（2560×1600 平板），手机形态与其它分辨率未验证；
+- `apps/arkui-schedule/tools/install-device.ps1` 本次**未使用**（安装走的是直接 `hdc install`），其行为未验证。
