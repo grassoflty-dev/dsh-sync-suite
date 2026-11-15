@@ -16,15 +16,19 @@
       plugins.json         # { plugins: [{ name, version, source, enabled }] }
       mcp.json             # { entries: [{ id, text }] }
       manifest.json        # { deviceId, time, scopes, dshVersion, files:[{name,sha256,bytes}] }
+      schedules/2026-11-15.jsonl   # 电脑端日程（bridge 工具写）
     pc-b/                  # 同上
-    phone-a/
-      schedules/2026-11-14.jsonl
-      attachments/<sha256>.png
+    phone-a/               # 平板（App 写）
+      schedules/2026-11-15.jsonl
+      summaries/2026-11-15.json    # 当日 AI 汇总（每天一个）
+      open.jsonl                   # 未完成索引（见 §5）
+      attachments/2026-11-15.zip   # 按天打包的手迹附件（见 §6）
 ```
 
 - 每台设备**只写自己的目录**；读取其他目录用 `git fetch`/`pull` 后只读展示。
 - 文件缺失视为空；`manifest.json` 是快照的权威索引（sha256 用于传输校验，不做内容合并）。
 - 快照目录名 `deviceId` 必须匹配 `^[a-z0-9][a-z0-9-]{0,31}$`。
+- **两类数据同仓**：电脑端只写 `devices/<pcId>/schedules/`（由 bridge 工具写），平板只写 `devices/<tabletId>/schedules|summaries|attachments|open.jsonl`；两边 `deviceId` 必须不同。
 
 ## 2. 插件同步载荷
 
@@ -132,6 +136,29 @@
 错误码：`E_VALIDATION`、`E_CONFIRM_REQUIRED`、`E_UNKNOWN_ACTION`、`E_NOT_FOUND`、`E_GIT`、`E_AUTH`、
 `E_CONFLICT`、`E_SHA_MISMATCH`、`E_IO`。
 
+## 4bis. 未完成索引 `open.jsonl`（App 写）
+
+`devices/<deviceId>/open.jsonl`，每行一条（追加语义，同 id 取 `ts` 最新）：
+
+```json
+{"id":"<record id>","date":"2026-11-15","ts":"2026-11-15T09:30:00+08:00","openedAt":"…","closedAt":"…"}
+```
+
+- `closedAt` 缺省/空 = 仍未完成；`done:true` 的记录写入 `closedAt`，再次取消完成则**开新会话**（更新 `openedAt`）；
+- `ts` 用于与日程记录折叠（同 id 取最新）；`date` 用于定位分片；
+- 索引是**派生数据**：写入失败不影响日程保存；启动 / pull 后对**最近 30 天**分片重算期望值，仅在漂移时重建（`[idx] rebuilt drift=N`）；
+- 「全部未完成」读索引；`含其他设备` 模式仍读全部设备分片（跨设备无索引）。
+
+## 4ter. 附件按天 zip（App 写）
+
+- 手迹截图 → **JPEG q60、最长边 ≤1440px**；
+- 源图落本机 `<filesDir>/attachments-src/<sha256>.jpg`（**不进仓库**）；
+- 同步前按记录日期打包 `devices/<deviceId>/attachments/<YYYY-MM-DD>.zip`，条目名 `page-<pageIndex>-<sha8>.jpg`；**仓库里只有 zip，没有散图**；
+- JSONL 的 `attachments` 元素：`{sha256, name, pageIndex, archive:"2026-11-15.zip", entry:"page-1-1a2b3c4d.jpg"}`；
+- 旧数据（无 `archive`）仍按散图 `<sha256>.png` 读，**不迁移**；
+- 解压缓存：`<filesDir>/cache/attachments/<sha256>.jpg`，命中不重复解压；
+- zip 由 WebView 桥里的 **JSZip 3.10.1**（MIT，`rawfile/git/jszip.min.js`）实现，**两端通用**（`@ohos.zlib` 在 ArkUI-X 安卓侧不可用）。
+
 ## 5. 状态目录（本机，不进 repo）
 
 ```
@@ -147,5 +174,6 @@
 
 ## 6. 应用侧 Git 布局
 
-手机只写 `devices/<自己>/schedules/*.jsonl` 与 `attachments/*.png`，提交推送到同一远端；
-其它设备目录只读。冲突策略：设备目录互不重叠，不需要 merge；同 id 记录按 ts 折叠。
+手机只写 `devices/<自己>/schedules/*.jsonl`、`summaries/*.json`、`open.jsonl` 与 `attachments/<date>.zip`，提交推送到同一远端；
+其它设备目录只读。冲突策略：设备目录互不重叠，不需要 merge；同 id 记录按 ts 折叠；同日汇总按 `generatedAt` 取新。
+电脑端由 `dsh-git-config-sync` 的 `schedule_*` 工具只写 `devices/<pcId>/schedules/`（见 `docs/SCHEDULE-BRIDGE.md`）。

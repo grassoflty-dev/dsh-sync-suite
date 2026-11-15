@@ -11,8 +11,7 @@
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
-import { nextTsSameDate, nowIso } from '../common/date';
-import { getFeatures } from '../common/features';
+import { nextTsSameDate, nowIso, localDateKey } from '../common/date';import { getFeatures } from '../common/features';
 import { handwritingPageRoute } from '../common/platformFeatures';
 import type { Attachment, ScheduleRecord } from '../model/types';
 import { newRecordId, scheduleStore, describeError } from '../services/scheduleStore';
@@ -24,6 +23,23 @@ const INPUT_HEIGHT: number = 44;
 const BODY_HEIGHT: number = 200;
 const PRIMARY_HEIGHT: number = 48;
 const THUMB: number = 88;
+
+/**
+ * 编辑草稿的 AppStorage 键（只存内存）。
+ *
+ * 用途：主从布局在旋转/切回单列时右栏会被卸载，编辑内容不能静默丢失——卸载前写草稿，
+ * 下次挂载且 `recordId` 相同时恢复，恢复后立即清键。不是持久化配置，重启即失效。
+ */
+const DRAFT_KEY: string = 'editor.draft';
+
+/** 草稿结构（显式接口，ArkTS 不接受匿名对象字面量做 JSON.parse 的类型）。 */
+interface EditorDraft {
+  recordId: string;
+  title: string;
+  body: string;
+  author: string;
+  done: boolean;
+}
 
 /** 按 sha256 合并两批附件（去重、按 pageIndex 升序）。 */
 function mergeAttachments(base: Attachment[], incoming: Attachment[]): Attachment[] {
@@ -87,6 +103,46 @@ export struct RecordEditorView {
     this.bootstrap();
   }
 
+  /** 卸载时（旋转到单列 / 切走）把未保存内容写进草稿，避免静默丢失。 */
+  aboutToDisappear(): void {
+    if (!this.isDirty()) {
+      AppStorage.setOrCreate<string>(DRAFT_KEY, '');
+      return;
+    }
+    const draft: EditorDraft = {
+      recordId: this.recordId,
+      title: this.title,
+      body: this.body,
+      author: this.author,
+      done: this.done
+    };
+    AppStorage.setOrCreate<string>(DRAFT_KEY, JSON.stringify(draft));
+  }
+
+  /** 挂载时恢复同一条记录的草稿（读后立即清键）。 */
+  private restoreDraft(): boolean {
+    const raw = AppStorage.get<string>(DRAFT_KEY);
+    if (raw === undefined || raw.length === 0) {
+      return false;
+    }
+    AppStorage.setOrCreate<string>(DRAFT_KEY, '');
+    try {
+      const draft = JSON.parse(raw) as EditorDraft;
+      if (draft === null || draft.recordId !== this.recordId) {
+        return false;
+      }
+      this.title = draft.title !== undefined ? draft.title : this.title;
+      this.body = draft.body !== undefined ? draft.body : this.body;
+      if (draft.author !== undefined && draft.author.length > 0) {
+        this.author = draft.author;
+      }
+      this.done = draft.done === true;
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
   /** 页面从手写板返回时触发回填。 */
   onRefreshTick(): void {
     this.applyPendingInkResult();
@@ -112,6 +168,8 @@ export struct RecordEditorView {
       } else {
         this.loaded = true;
       }
+      // 有草稿（同一条记录）就优先用草稿，覆盖刚读到的记录字段
+      this.restoreDraft();
     } catch (error) {
       this.ready = false;
       this.statusText = `初始化失败：${describeError(error)}`;
@@ -202,7 +260,10 @@ export struct RecordEditorView {
       promptAction.showToast({ message: '当前平台不支持手写板' });
       return;
     }
-    router.pushUrl({ url: route }).catch((error: Error) => {
+    // 记录日期透传给手写板：决定附件打哪一天的 zip（`attachments/<YYYY-MM-DD>.zip`）
+    const dateParam: string = this.defaultDate.length === 10 ? this.defaultDate : localDateKey(new Date());
+    const params: Record<string, string> = { 'date': dateParam };
+    router.pushUrl({ url: route, params: params }).catch((error: Error) => {
       promptAction.showToast({ message: `打开手写板失败：${describeError(error)}` });
     });
   }

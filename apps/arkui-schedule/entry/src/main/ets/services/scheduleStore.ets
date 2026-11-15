@@ -28,6 +28,14 @@ const NEW_LINE_BYTE: number = 0x0a;
 /** 设备目录名合法性（与 DATA-CONTRACT §1 一致）。 */
 const DEVICE_ID_RE: RegExp = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
+/**
+ * 日程追加成功后的「派生索引维护」钩子（由 `services/openIndexStore.ets` 注册）。
+ *
+ * 为什么用钩子而不是直接 import：`openIndexStore` 依赖本模块（目录/设备标识），
+ * 本模块再反过来 import 它会形成循环依赖；钩子把依赖方向固定成单向。
+ */
+export type RecordAppendHook = (record: ScheduleRecord) => void;
+
 /** 把异常转成可展示的中文文本。 */
 export function describeError(error: object): string {
   if (error instanceof Error) {
@@ -53,6 +61,8 @@ export class ScheduleStore {
   private filesDir: string = '';
   private deviceId: string = DEFAULT_DEVICE_ID;
   private ready: boolean = false;
+  /** 派生索引维护钩子（`null` = 未注册；`openIndexStore` 在模块加载时注册）。 */
+  private appendHook: RecordAppendHook | null = null;
 
   /** 初始化存储（幂等）：取 filesDir、读取设置里的设备标识、创建目录。 */
   async ensureReady(context: object): Promise<void> {
@@ -85,6 +95,11 @@ export class ScheduleStore {
     if (this.ready) {
       this.ensureDirsSync();
     }
+  }
+
+  /** 注册 / 清除派生索引维护钩子（`null` = 清除；主要用于测试与解耦）。 */
+  setAppendHook(hook: RecordAppendHook | null): void {
+    this.appendHook = hook;
   }
 
   /** 设备根目录：`<filesDir>/git-repo/devices/<deviceId>/`。 */
@@ -300,6 +315,8 @@ export class ScheduleStore {
     } catch (error) {
       throw new Error(`写入日程失败（${path}）：${describeError(error)}`);
     }
+    // 日程已经落盘，之后才维护派生索引；索引失败不得回滚/打断保存
+    this.notifyAppend(record);
   }
 
   /** 确认目录存在（幂等）。 */
@@ -312,6 +329,24 @@ export class ScheduleStore {
   private requireReady(): void {
     if (!this.ready) {
       throw new Error('日程存储尚未初始化：请先调用 scheduleStore.ensureReady(context)');
+    }
+  }
+
+  /**
+   * 通知派生索引维护（`services/openIndexStore.ets`）。
+   *
+   * 索引是派生数据：这里**吞掉**一切异常，任何索引问题都不允许让已经写成功的日程保存变成失败。
+   * 日志由钩子自己打（`[idx] ...`，见 `credentialHygiene` 测试：服务层的 console/hilog 有白名单约束），
+   * 最迟由下次自愈重建补上。
+   */
+  private notifyAppend(record: ScheduleRecord): void {
+    if (this.appendHook === null) {
+      return;
+    }
+    try {
+      this.appendHook(record);
+    } catch {
+      // 故意静默：钩子内部已负责记录 [idx] 日志；这里只保证不外抛
     }
   }
 

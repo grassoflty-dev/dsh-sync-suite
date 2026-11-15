@@ -111,6 +111,51 @@ interface PendingRequest {
   timer: number;
 }
 
+/** 写入 zip 的一个条目（`data` 由调用方分块成 base64，每块 ≤256KB 文本）。 */
+export interface ZipEntryInput {
+  name: string;
+  chunks: string[];
+}
+
+/** zip 条目信息（`size` 是解压后字节数）。 */
+export interface ZipEntryInfo {
+  name: string;
+  size: number;
+}
+
+/** `zipUpsert` 的返回。 */
+export interface ZipUpsertResult {
+  archivePath: string;
+  bytes: number;
+  entries: ZipEntryInfo[];
+}
+
+/** 桥调用的请求形状（显式接口：ArkTS 禁止内联对象类型）。 */
+interface ZipUpsertRequest {
+  archivePath: string;
+  entries: ZipEntryInput[];
+}
+
+interface ZipListRequest {
+  archivePath: string;
+}
+
+interface ZipReadRequest {
+  archivePath: string;
+  entryName: string;
+}
+
+interface ZipListPayload {
+  archivePath: string;
+  entries: ZipEntryInfo[];
+}
+
+interface ZipReadPayload {
+  name: string;
+  size: number;
+  chunks: string[];
+}
+
 interface StatPayload {
   mode: number;
   size: number;
@@ -353,7 +398,22 @@ export class GitSyncService {
 
   constructor(controller: webview.WebviewController) {
     this.controller = controller;
+    // 自注册：附件按天 zip 需要桥能力，但鸿蒙只允许页面里创建 Web 控制器，
+    // 所以 unify 到「最后创建的那个实例」，供 attachmentStore 取用（未打开设置页时为 null）。
+    GitSyncService.activeService = this;
   }
+
+  /** 当前可用的同步服务（没有则 null：附件走本地散图，zip 能力不可用）。 */
+  static active(): GitSyncService | null {
+    return GitSyncService.activeService;
+  }
+
+  /** base64 编码（供 attachmentStore 把 JPEG 分块传给桥）。 */
+  static encodeBase64(bytes: Uint8Array): string {
+    return GitSyncService.base64().encodeToStringSync(bytes);
+  }
+
+  private static activeService: GitSyncService | null = null;
 
   /** 预置应用文件目录（设置页在 bootstrap 时用 `context.filesDir` 调用）。 */
   static setFilesDir(filesDir: string): void {
@@ -392,6 +452,91 @@ export class GitSyncService {
 
   getConfig(): GitSyncConfig {
     return this.config;
+  }
+
+  // -------------------------------------------------------------- 附件按天 zip（JSZip 在桥里）
+
+  /**
+   * 把若干条目写进（或合并进）一个 zip：`zipUpsert(archivePath, entries)`。
+   *
+   * 桥里用 JSZip（两端 WebView 都有），本方法只负责分块 base64 与错误归一。
+   */
+  async zipUpsert(archivePath: string, entries: ZipEntryInput[]): Promise<ZipUpsertResult> {
+    const payload: ZipUpsertRequest = { archivePath: archivePath, entries: entries };
+    const data: ZipUpsertResult = await this.callBridgeJson<ZipUpsertResult>('zipUpsert', payload);
+    return data;
+  }
+
+  /** 列出 zip 条目（包不存在 → 空数组）。 */
+  async zipList(archivePath: string): Promise<ZipEntryInfo[]> {
+    const payload: ZipListRequest = { archivePath: archivePath };
+    const data: ZipListPayload = await this.callBridgeJson<ZipListPayload>('zipList', payload);
+    return data.entries === undefined ? [] : data.entries;
+  }
+
+  /** 读一个 zip 条目（不存在 → null）。分块 base64 在这里拼回字节。 */
+  async zipRead(archivePath: string, entryName: string): Promise<Uint8Array | null> {
+    const payload: ZipReadRequest = { archivePath: archivePath, entryName: entryName };
+    const data: ZipReadPayload = await this.callBridgeJson<ZipReadPayload>('zipRead', payload);
+    const chunks: string[] = data.chunks === undefined ? [] : data.chunks;
+    if (chunks.length === 0) {
+      return null;
+    }
+    const parts: Uint8Array[] = [];
+    let total: number = 0;
+    for (let index = 0; index < chunks.length; index++) {
+      const bytes: Uint8Array = GitSyncService.base64().decodeSync(chunks[index]);
+      parts.push(bytes);
+      total += bytes.length;
+    }
+    const merged: Uint8Array = new Uint8Array(total);
+    let offset: number = 0;
+    for (let index = 0; index < parts.length; index++) {
+      merged.set(parts[index], offset);
+      offset += parts[index].length;
+    }
+    return merged;
+  }
+
+  /**
+   * 通用桥调用（args 是任意 JSON 对象，不像 `callBridge` 只接受字符串表）。
+   *
+   * 复用同一套 `pending` 机制与超时：失败一律抛 `SyncError`。
+   */
+  private callBridgeJson<T>(op: string, args: Object): Promise<T> {
+    const id: string = 'g' + Date.now().toString() + '-' + (++this.requestSeq).toString();
+    const payload: string = JSON.stringify({ id: id, op: op, args: args });
+    return new Promise<T>((resolve: (value: T) => void, reject: (error: Object) => void) => {
+      const timer: number = setTimeout(() => {
+        this.pending.delete(id);
+        reject(
+          new SyncError(
+            'E_GIT',
+            '同步超时（' + (REQUEST_TIMEOUT_MS / 1000).toString() + ' 秒）：Web 页面可能未就绪或网络不可用'
+          )
+        );
+      }, REQUEST_TIMEOUT_MS);
+      const pending: PendingRequest = {
+        resolve: (event: BridgeEvent) => {
+          if (event.ok === true) {
+            resolve(event.data as T);
+          } else {
+            const failure: BridgeEventError | undefined = event.error;
+            const code: string =
+              failure === undefined || failure.code === undefined || failure.code.length === 0
+                ? 'E_GIT'
+                : failure.code;
+            const text: string =
+              failure === undefined || failure.message === undefined ? '桥调用失败' : failure.message;
+            reject(new SyncError(code, text));
+          }
+        },
+        reject: reject,
+        timer: timer
+      };
+      this.pending.set(id, pending);
+      this.runScript('window.DshGitBridge && window.DshGitBridge.call(' + JSON.stringify(payload) + ')');
+    });
   }
 
   // -------------------------------------------------------------- 对外操作
@@ -467,6 +612,27 @@ export class GitSyncService {
       return result;
     } catch (error) {
       return failed('推送失败', error as Object);
+    }
+  }
+
+  /**
+   * 启动 / 回前台时的**静默 pull**（B 段同步时机）。
+   *
+   * 约定：
+   * - 未配置仓库（`repoUrl` 为空）→ 直接返回「跳过」，**不报错**（用户还没配）；
+   * - 失败只返回 `ok:false` 的结果（调用方 toast 一句即可），**绝不抛异常、不阻塞 UI**；
+   * - 无定时器 / 无后台任务，只在显式调用点跑一次（Index 启动、回前台、下拉刷新）。
+   */
+  async pullOnStartup(): Promise<GitSyncResult> {
+    if (this.config.repoUrl.trim().length === 0) {
+      return { ok: true, message: '未配置同步仓库，跳过自动拉取' };
+    }
+    try {
+      // 说明：services 层**禁止任何 console/hilog**（credentialHygiene 测试硬性检查），
+      // 因此这里不打日志，成败信息通过返回的 message 交给调用方展示。
+      return await this.pull();
+    } catch (error) {
+      return failed('自动拉取失败', error as Object);
     }
   }
 

@@ -5,14 +5,24 @@
  * 本文件禁止 import 鸿蒙 SDK 运行时 / 页面组件 / services 层 —— 模型层必须能在 Node 下直接运行。
  */
 
-/** 手写板每页截图在 `attachments/` 下的引用。 */
+/**
+ * 手写板每页截图在 `attachments/` 下的引用。
+ *
+ * 2026-11 起改为「**JPEG 压缩 + 按天 zip**」：
+ * - 新数据带 `archive` + `entry`，图片在 `attachments/<YYYY-MM-DD>.zip` 里的 `page-<页>-<sha8>.jpg`；
+ * - 旧数据**没有** `archive`（只有 `sha256`/`name`），仍按散图 `attachments/<name>` 读取，不迁移、不报错。
+ */
 export interface Attachment {
   /** 截图内容的 SHA-256（小写十六进制，64 字符），即文件名主体。 */
   sha256: string;
-  /** 实际文件名，形如 `<sha256>.png`。 */
+  /** 实际文件名（旧数据是 `<sha256>.png`；新数据是 zip 内的条目名）。 */
   name: string;
   /** 第几页，0 起。 */
   pageIndex: number;
+  /** 按天打包的 zip 文件名（如 `2026-11-15.zip`）；旧数据没有这个字段 → 走散图路径。 */
+  archive?: string;
+  /** zip 内条目名（如 `page-1-1a2b3c4d.jpg`）；与 `archive` 同时出现。 */
+  entry?: string;
 }
 
 /**

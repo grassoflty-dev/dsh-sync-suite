@@ -1,4 +1,4 @@
-// 附件命名 / 分页拼接 / 表格公式占位符 / 区域占位符测试。
+﻿// 附件命名 / 分页拼接 / 表格公式占位符 / 区域占位符测试。
 //
 // 前置：先构建纯逻辑层
 //   node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json
@@ -31,6 +31,16 @@ const {
   STRUCTURED_PLACEHOLDER,
   attachmentFileName,
   buildAttachmentRefs,
+  buildArchivedAttachmentRefs,
+  dayArchiveName,
+  zipEntryName,
+  parseZipEntryName,
+  isLegacyAttachment,
+  isDayArchiveName,
+  parseAttachmentList,
+  jpegFileName,
+  ATTACHMENT_JPEG_QUALITY,
+  ATTACHMENT_MAX_SIDE,
   composePageBody,
   concatPageTexts,
   replaceComplexBlocks
@@ -187,4 +197,107 @@ test('composePageBody：空输入返回空串；全空页不产生空行', () =>
   assert.equal(composePageBody([], []), '');
   assert.equal(composePageBody([], undefined), '');
   assert.equal(composePageBody(['', '  '], [[], []]), '');
+});
+
+// ---------------------------------------------------------------------------
+// 2026-11 附件改造：JPEG 压缩 + 按天 zip
+// 用户原话：「附件需要进 git，可以每天的压缩上传，手写内容对画质要求也不高。」
+// ---------------------------------------------------------------------------
+
+test('JPEG 参数常量：quality 60、最长边 1440（一页目标 ≤150KB）', () => {
+  assert.equal(ATTACHMENT_JPEG_QUALITY, 60);
+  assert.equal(ATTACHMENT_MAX_SIDE, 1440);
+});
+
+test('jpegFileName：`<sha256>.jpg`（大写归一化为小写）', () => {
+  assert.equal(jpegFileName(SHA_A), `${SHA_A}.jpg`);
+  assert.equal(jpegFileName(SHA_A.toUpperCase()), `${SHA_A}.jpg`);
+});
+
+test('dayArchiveName：`YYYY-MM-DD.zip`，非法日期抛错', () => {
+  assert.equal(dayArchiveName('2026-11-15'), '2026-11-15.zip');
+  assert.equal(isDayArchiveName('2026-11-15.zip'), true);
+  assert.equal(isDayArchiveName('2026-11-15.png'), false);
+  assert.throws(() => dayArchiveName('2026-1-5'), /日期不合法/);
+  assert.throws(() => dayArchiveName(''), /日期不合法/);
+});
+
+test('zipEntryName：`page-<页号>-<sha8>.jpg`，页号 0 起、非法页号按 0', () => {
+  assert.equal(zipEntryName(0, SHA_A), 'page-0-aaaaaaaa.jpg');
+  assert.equal(zipEntryName(3, SHA_A), 'page-3-aaaaaaaa.jpg');
+  assert.equal(zipEntryName(-5, SHA_A), 'page-0-aaaaaaaa.jpg');
+  assert.equal(zipEntryName(2.7, SHA_A), 'page-2-aaaaaaaa.jpg');
+});
+
+test('parseZipEntryName：合法条目解析出页号与 sha8，非法返回 null', () => {
+  assert.deepEqual(parseZipEntryName('page-2-1a2b3c4d.jpg'), { pageIndex: 2, sha8: '1a2b3c4d' });
+  for (const bad of ['page-2-1a2b3c4d.png', 'evil.jpg', 'page--1a2b3c4d.jpg', 'page-2-1A2B3C4D.jpg', '']) {
+    assert.equal(parseZipEntryName(bad), null, `应拒绝：${bad}`);
+  }
+});
+
+test('buildArchivedAttachmentRefs：新格式带 archive + entry，按页序去重', () => {
+  const refs = buildArchivedAttachmentRefs(
+    [
+      { sha256: SHA_A, pageIndex: 1 },
+      { sha256: 'b'.repeat(64), pageIndex: 0 },
+      { sha256: 'c'.repeat(64), pageIndex: 1 } // 同页后者覆盖前者
+    ],
+    '2026-11-15'
+  );
+  assert.equal(refs.length, 2, '同一页只保留一条');
+  assert.deepEqual(
+    refs.map((item) => item.pageIndex),
+    [0, 1],
+    '必须按页序升序'
+  );
+  assert.deepEqual(refs[0], {
+    sha256: 'b'.repeat(64),
+    name: `page-0-bbbbbbbb.jpg`,
+    pageIndex: 0,
+    archive: '2026-11-15.zip',
+    entry: 'page-0-bbbbbbbb.jpg'
+  });
+  assert.equal(refs[1].sha256, 'c'.repeat(64), '同页后写覆盖先写');
+});
+
+test('parseAttachmentList：新格式带 archive/entry；旧格式无 archive 仍可读', () => {
+  const legacy = JSON.stringify([{ sha256: SHA_A, name: `${SHA_A}.png`, pageIndex: 0 }]);
+  const parsedLegacy = parseAttachmentList(legacy);
+  assert.equal(parsedLegacy.length, 1);
+  assert.equal(parsedLegacy[0].archive, undefined, '旧数据不应凭空长出 archive');
+  assert.equal(isLegacyAttachment(parsedLegacy[0]), true, '旧数据判定必须为 legacy');
+
+  const fresh = JSON.stringify([
+    { sha256: SHA_A, name: 'page-0-aaaaaaaa.jpg', pageIndex: 0, archive: '2026-11-15.zip', entry: 'page-0-aaaaaaaa.jpg' }
+  ]);
+  const parsedFresh = parseAttachmentList(fresh);
+  assert.equal(parsedFresh.length, 1);
+  assert.equal(parsedFresh[0].archive, '2026-11-15.zip');
+  assert.equal(parsedFresh[0].entry, 'page-0-aaaaaaaa.jpg');
+  assert.equal(isLegacyAttachment(parsedFresh[0]), false, '新数据不是旧格式');
+});
+
+test('parseAttachmentList：坏 archive/entry 退回旧格式（不丢整条）', () => {
+  const json = JSON.stringify([
+    { sha256: SHA_A, name: 'x.png', pageIndex: 0, archive: '2026-11-15', entry: 'page-0-aaaaaaaa.jpg' },
+    { sha256: 'b'.repeat(64), name: 'y.png', pageIndex: 1, archive: '2026-11-15.zip', entry: '../../evil.jpg' }
+  ]);
+  const list = parseAttachmentList(json);
+  assert.equal(list.length, 2, '不该因为 archive/entry 坏了就丢条目');
+  for (const item of list) {
+    assert.equal(item.archive, undefined, `${item.sha256} 的坏 archive 必须被丢掉`);
+    assert.equal(isLegacyAttachment(item), true);
+  }
+});
+
+test('parseAttachmentList：坏 sha256 / 坏 pageIndex 仍然跳过', () => {
+  const json = JSON.stringify([
+    { sha256: 'not-a-sha', name: 'a.png', pageIndex: 0 },
+    { sha256: SHA_A, name: 'b.png', pageIndex: 'x' },
+    { sha256: 'c'.repeat(64), name: 'c.png', pageIndex: 2 }
+  ]);
+  const list = parseAttachmentList(json);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].pageIndex, 2);
 });

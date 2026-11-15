@@ -12,10 +12,11 @@
 </head>
 <body>
   <!--
-    加载顺序固定：先 isomorphic-git（暴露全局 `git`），再 git-bridge（暴露 window.DshGitBridge）。
-    git-bridge.js 依赖全局 `git`，顺序颠倒会在宿主代理检查阶段报 E_GIT。
+    加载顺序固定：先 isomorphic-git（暴露全局 `git`）与 JSZip（暴露全局 `JSZip`），
+    再 git-bridge（暴露 window.DshGitBridge）。顺序颠倒会在宿主代理检查阶段报错。
   -->
   <script src="isomorphic-git.js"></script>
+  <script src="jszip.min.js"></script>
   <script src="git-bridge.js"></script>
   <script>
     (function () {

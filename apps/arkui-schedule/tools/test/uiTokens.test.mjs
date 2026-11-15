@@ -14,6 +14,7 @@ import {
   isCompact,
   isLandscapeSize,
   isWide,
+  isMasterDetailWidth,
   masterPaneWidth,
   minWidthFor,
   resolveBreakpoint,
@@ -105,30 +106,49 @@ test('isLandscapeSize 只按宽高比判定（方屏不算横屏）', () => {
   assert.ok(LANDSCAPE_ASPECT > 0)
 })
 
-// ---------------------------------------------------------------- 真实设备尺寸 → 两栏
+// ---------------------------------------------------------------- 真实设备尺寸 → 单列 / 主从
 
-test('真机横向 1280×800vp（2560×1600@2x）判为 expanded ⇒ 两栏', () => {
-  assert.equal(isLandscapeSize(1280, 800), true)
-  const breakpoint = resolveBreakpoint(1280, true)
-  assert.equal(breakpoint, 'expanded')
-  assert.equal(isWide(breakpoint), true)
-  assert.ok(sidebarWidth(1280 - 48) > 280, '侧栏要够宽放日期条')
+test('竖屏平板 673vp 内容宽 ⇒ 单列（用户拍板：竖屏不渲染右栏）', () => {
+  assert.equal(isMasterDetailWidth(673), false)
+  assert.equal(isMasterDetailWidth(839), false, '839 仍不到 840 门槛')
+  // 单列时走的是窄屏骨架，不依赖 isWide
+  assert.equal(resolveBreakpoint(673, false), 'medium')
 })
 
-test('真机纵向 800×1280vp（1600×2560@2x）判为 medium ⇒ 也是两栏', () => {
+test('横向 1024vp 内容宽 ⇒ 左右主从（两栏）', () => {
+  assert.equal(isMasterDetailWidth(1024), true)
+  assert.equal(isMasterDetailWidth(840), true, '840 正好达到门槛')
+  assert.equal(isLandscapeSize(1024, 768), true)
+  const master = masterPaneWidth(1024)
+  assert.ok(master >= 360 && master <= 420, `主栏应在 360–420vp，实际 ${master}`)
+  const right = 1024 - master - 33
+  assert.ok(right >= 360, `右栏至少 360vp，实际 ${right}`)
+})
+
+test('真机横向 1280×800vp（2560×1600@2x）⇒ 主从，主栏够宽放日期条', () => {
+  assert.equal(isLandscapeSize(1280, 800), true)
+  assert.equal(resolveBreakpoint(1280, true), 'expanded')
+  assert.equal(isMasterDetailWidth(1280 - 48), true)
+  assert.ok(masterPaneWidth(1280 - 48) > 280, '主栏要够宽放日期条')
+})
+
+test('竖屏平板 800×1280vp（1600×2560@2x）⇒ 仍是单列', () => {
   const breakpoint = resolveBreakpoint(800, isLandscapeSize(800, 1280))
   assert.equal(breakpoint, 'medium')
-  assert.equal(isWide(breakpoint), true)
+  assert.equal(isMasterDetailWidth(800 - 32), false, '800−32=768 < 840 → 单列')
 })
 
 // ---------------------------------------------------------------- Index / PageLayout 结构守卫
 
-test('Index 只按 breakpoint === compact 分支，且单列/双栏两套骨架都存在', () => {
-  assert.match(INDEX, /if \(this\.breakpoint === 'compact'\) \{/, 'Index 必须只做一处粗粒度分支')
+test('Index 用「内容宽 ≥840」决定主从，两套骨架都存在', () => {
+  assert.match(INDEX, /this\.masterDetail = isMasterDetailWidth\(widthVp\)/, '主从门槛必须走 isMasterDetailWidth')
+  assert.match(INDEX, /if \(this\.masterDetail\) \{/, 'Index 只做一处主从分支')
   assert.match(INDEX, /this\.CompactBody\(\)/)
   assert.match(INDEX, /this\.WideBody\(\)/)
   assert.match(INDEX, /masterPaneWidth\(this\.contentWidth\)/, '主从布局主栏宽度必须走令牌函数（360–420vp）')
+  assert.match(INDEX, /constraintSize\(\{ minWidth: 360 \}\)/, '主从右栏最小 360vp')
   assert.match(INDEX, /onBreakpointChange:/, 'Index 必须接 PageLayout 的断点回调')
+  assert.equal(/this\.breakpoint === 'compact'\) \{[\s\S]{0,40}this\.CompactBody/.test(INDEX), false, '不再用 breakpoint 档位决定主从')
 })
 
 test('Index 双栏骨架：左日期列（DateBlock/ModeTabs/新建）+ 右列表', () => {
