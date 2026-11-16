@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 日程编辑视图（可嵌入 Edit 页，也可作为首页横屏主从布局的右栏）。
  *
  * 入参是**记录 id**（`''` = 新建）：编辑已有记录时保留原 id / 原日期 / 原 `ocr_text` /
@@ -390,7 +390,8 @@ export struct RecordEditorView {
   @Builder
   AttachmentPreview() {
     Column({ space: SPACING.sm }) {
-      Text(`手迹附件（${this.attachments.length} 页）`)
+      // 用户报的「完成后编辑页没有任何反馈」：这里明确写「手迹 N 页」（不是附件 N 个）
+      Text(`手迹 ${this.attachments.length} 页`)
         .fontSize(FONT.caption)
         .lineHeight(LINE_HEIGHT.caption)
         .fontColor($r('app.color.text_secondary'))
@@ -457,6 +458,16 @@ export struct RecordEditorView {
                 .fontSize(FONT.caption)
                 .lineHeight(LINE_HEIGHT.caption)
                 .fontColor($r('app.color.text_secondary'))
+              // 完成后给明确反馈：「手迹 N 页」（用户报过「写完以为白写了」）
+              if (this.attachments.length > 0) {
+                Text(`手迹 ${this.attachments.length} 页`)
+                  .fontSize(FONT.caption)
+                  .lineHeight(LINE_HEIGHT.caption)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.None })
+                  .fontColor($r('app.color.brand'))
+                  .margin({ left: SPACING.sm })
+              }
               Blank()
               this.WritingEntry()
             }

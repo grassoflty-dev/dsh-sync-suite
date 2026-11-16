@@ -360,18 +360,18 @@ describe('runWithFallback：只切一次备用源', () => {
           },
           async () => {
             calls++;
-            return attempt({ ok: false, status: 0, providerId: 'ollama', text: '', error: '备用网络异常' });
+            return attempt({ ok: false, status: 0, providerId: 'custom', text: '', error: '备用网络异常' });
           }
         ),
       (error) => {
         assert.ok(error instanceof AiFallbackError);
         assert.match(error.message, /主源 503/);
-        assert.match(error.message, /备用源 ollama 也失败/);
+        assert.match(error.message, /备用源 custom 也失败/);
         assert.match(error.message, /备用网络异常/);
         assert.equal(error.primaryMessage, '主源 503');
         assert.equal(error.fallbackMessage, '备用网络异常');
         assert.equal(error.status, 0);
-        assert.equal(error.fallbackProviderId, 'ollama');
+        assert.equal(error.fallbackProviderId, 'custom');
         return true;
       }
     );

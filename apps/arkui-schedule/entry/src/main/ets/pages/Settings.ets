@@ -745,15 +745,6 @@ struct Settings {
     return this.aiProviderId === CUSTOM_PROVIDER_ID;
   }
 
-  /** 当前源是否「实验」级（预设表 `experimental` 标记，地址/模型尚未实测）。 */
-  private isExperimentalProvider(): boolean {
-    return this.provider().experimental === true;
-  }
-
-  private isExperimental(id: string): boolean {
-    return findProvider(id).experimental === true;
-  }
-
   private platformLine(): string {
     return `${this.platformText} · ${this.handwritingText} · ${this.ocrText}`;
   }
@@ -1440,10 +1431,6 @@ struct Settings {
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
 
-      if (this.isExperimentalProvider()) {
-        this.HintLine('实验：接口地址与模型清单待核实，请以服务商控制台为准。')
-      }
-
       this.FieldLabel('API Key（仅存本机）')
       TextInput({ text: this.aiKey, placeholder: 'sk-…' })
         .type(InputType.Password)
@@ -1945,12 +1932,6 @@ struct Settings {
                 .fontColor($r('app.color.text_primary'))
                 .layoutWeight(1)
                 .textAlign(TextAlign.Start)
-              if (this.isExperimental(item.id)) {
-                Text('实验')
-                  .fontSize(FONT.caption)
-                  .lineHeight(LINE_HEIGHT.caption)
-                  .fontColor($r('app.color.warning'))
-              }
               Text(item.id === this.aiProviderId ? '✓' : '')
                 .fontSize(FONT.caption)
                 .fontColor($r('app.color.brand'))

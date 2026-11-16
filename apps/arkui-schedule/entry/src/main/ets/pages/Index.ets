@@ -1,6 +1,13 @@
 /**
  * 主页：日期条 + 今日待办/全部未完成 + 列表（左勾选 / 中标题+时间 / 右手迹）+ 「新建」主操作
- * + 页头两个明确动作（✨ AI 汇总 / ⚙ 设置）。
+ * + 页头唯一动作「⚙ 设置」。
+ *
+ * ## 页头 AI 汇总入口已删除（用户反馈：点了没反应，但图标还占着位置）
+ * AI 汇总本来就是**列表第一项**（`SummaryCard`，数据源 `summaryStore.read` / `generate`），
+ * 页头再放一个 AI 汇总图标属于同一动作两处入口，且点了没有可见反馈。现在页头只留
+ * `今天`（左）+ `⚙ 设置`（右），中间不放任何空按钮；AI 汇总只能从汇总块进入
+ * （「✨ 生成今日汇总」/「重试」/「重新生成」/「查看全部」/ 点标题与要点）。
+ * 守卫测试：`tools/test/indexHeader.test.mjs`。
  *
  * 契约：BRIEF §3.5、`docs/CONTRACT.md` §3.4：
  * - 勾选完成 = `appendRecord` 追加一条同 id 新记录（ts=nowIso()），绝不改写历史行；
@@ -485,18 +492,9 @@ struct Index {
 
   // ------------------------------------------------------------------ 今日汇总块（数据源：summaryStore 持久化）
 
-  /** 汇总块标题（页头图标也用它判断该「生成」还是「打开面板」）。 */
+  /** 是否已有可展示的汇总（决定汇总块走 ④「生成」态还是 ⑤「有汇总」态）。 */
   private hasSummary(): boolean {
     return this.summaryHeadline.length > 0;
-  }
-
-  /** 头部图标：有汇总 → 打开完整面板；没有 → 立即生成。 */
-  private onHeaderSummaryAction(): void {
-    if (this.hasSummary()) {
-      this.aiResultVisible = true;
-      return;
-    }
-    this.generateSummary();
   }
 
   /** `generatedAt`（epoch ms）→ 本地 `HH:MM`。 */
@@ -588,7 +586,7 @@ struct Index {
         baseURL
       );
       this.applySummary(saved);
-      // 结果已经进块里了，不自动弹面板（要看全部点块或头部图标）
+      // 结果已经进块里了，不自动弹面板（要看全部点汇总块）
       this.aiResultVisible = false;
     } catch (error) {
       // C2 抛中文 Error；旧汇总保持不变 → 重新读回来继续显示
@@ -1101,7 +1099,7 @@ struct Index {
           .width('100%')
           .textAlign(TextAlign.Start)
       } else if (this.aiBusy) {
-        // ② 生成中（与页头图标共用 aiBusy，两处状态不会打架）
+        // ② 生成中（aiBusy 由 generateSummary 维护，页头已无同源图标）
         Text('正在生成今日汇总…')
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)
@@ -1760,12 +1758,7 @@ struct Index {
       PageLayout({
         title: this.pageTitle(),
         subtitle: this.subtitleText(),
-        // 明确动作：直接跑当天的 AI 汇总 / 进设置（同步相关配置都在设置页）
-        // 明确动作：有汇总→打开面板，无汇总→立即生成；生成中显示 loading 与列表块同源（aiBusy）
-        headerActionOne: this.aiBusy ? '✨ 生成中…' : '✨ AI 汇总',
-        onHeaderActionOne: () => {
-          this.onHeaderSummaryAction();
-        },
+        // 页头唯一动作：进设置。AI 汇总入口只在列表第一项的汇总块（页头不再重复）
         headerActionTwo: '⚙ 设置',
         onHeaderActionTwo: () => {
           this.openSettings();

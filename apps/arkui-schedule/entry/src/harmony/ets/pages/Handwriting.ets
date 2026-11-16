@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 手写板页面（**仅 HarmonyOS**，只在鸿蒙清单 `entry/src/harmony/resources/base/profile/main_pages.json` 登记）。
  *
  * 契约：BRIEF §3.2、`docs/CONTRACT.md` §3.4 + 「区域框内不做 OCR，只保存原图」。
@@ -29,6 +29,7 @@
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
@@ -67,10 +68,17 @@ import {
 } from '../model/draft';
 import type { DraftDoc, DraftPage } from '../model/draft';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN, isLandscapeSize } from '../common/uiTokens';
+import { toolbarMetrics } from '../model/toolbarMetrics';
+import type { ToolbarMetrics } from '../model/toolbarMetrics';
 import type { RegionBox } from '../model/types';
 import type { Attachment } from '../model/types';
 import { IMAGE_MAX_BYTES, IMAGE_MAX_SIDE, TABLE_DEFAULT_LINES, addEmptyPage, bringToFront, clampTableLines, countObjects, deleteObject, findObject, hitTest, imageEntryName, imageRectFor, makePageObject, moveObject, objectsOfPage, removePageObjects, replaceObject, resizeObject, serializePageObjects, setObjectsOfPage, tableRect } from '../model/pageObjects';
 import type { NormalizedRect, ObjectsByPage, PageObject } from '../model/pageObjects';
+import { canOcrTable, objectsToMask, tableOcrEnabled, tablePlaceholder } from '../model/tableOcr';
+import { imageObjectFromSelection } from '../model/pageObjects';
+import type { SelectionImagePlan } from '../model/pageObjects';
+import type { TableCellTask, TableOcrResult } from '../ocr/OcrBatchManager';
+import { objectPlaceholder, sortObjectsByPosition } from '../model/pageObjects';
 import type { SavedImage } from '../services/attachmentStore';
 
 /** `archiveDay` 的入参形状（显式接口：ArkTS 禁止内联对象类型）。 */
@@ -83,42 +91,34 @@ interface ArchivePage {
 const IMAGE_JPEG_QUALITY: number = 90;
 const IMAGE_JPEG_LOW_QUALITY: number = 60;
 
-/** 竖屏顶部工具条高度（vp）——定版要求 ≤48vp。 */
-const TOP_BAR_HEIGHT: number = 48;
 /**
- * 横屏左侧 rail 宽度（vp）。
+ * 工具条尺寸（2026-11-16 定版）：**整页不再写死 48 / 72 / 44 / 40**。
  *
- * 真机实测：56vp 时「手动框」被截成「手动」、「完成」显示成「...」、
- * 步进器 −/+ 被挤出 rail。加宽到 72vp 后 3 字标签完整、步进器改竖向堆叠。
- */
-const RAIL_WIDTH: number = 72;
-/** 横屏 rail 内每个控件的统一高度（vp）——比竖屏的 40vp 高一档，图标/文字更好点。 */
-const RAIL_ITEM_HEIGHT: number = 44;
-/**
- * 横屏 rail 内控件间距（vp）。
+ * 唯一来源是 `model/toolbarMetrics` 的 `toolbarMetrics(vw, vh, landscape)`：
+ * - 竖屏：`barThickness` = 顶部条高度（48~64vp）、`itemSize` = 控件边长（40~64vp）；
+ * - 横屏：`barThickness` = rail 宽度（56~84vp）、`itemSize` = 控件边长（40~72vp）；
+ * - `gap` / `iconSize` / `fontSize` 由 `itemSize` 派生（0.15 / 0.5 / 0.32，各带上下限）。
  *
- * 取 2vp 而不是 4vp：rail 竖向空间被「退出（固定 40）+ 完成（固定 48）」吃掉后只剩
- * ~500vp，2vp 间距能让滚动区多容纳一项；视觉上仍与竖屏 4vp 差异不大。
+ * 页面侧一律通过派生方法取值（`barThickness()` / `itemSize()` / `controlGap()` /
+ * `iconSize()` / `toolbarFontSize()` / `pagerCellWidth()` / `pagerLabelWidth()`），
+ * 这样「屏变大 → 控件变大」只有一处系数可调，也不会再出现某个控件漏改的写死值。
  */
-const RAIL_GAP: number = 2;
-/**
- * 分页区的单元格宽度（vp）。
- *
- * - 横屏 rail：`CELL_WIDTH = 72`，与 rail 里其它控件等宽；
- * - 竖屏顶部条：`CELL_W_COMPACT = 36vp`（≈85px @2.375，每个格 ≈84px），三个单元格 + 间距共 116vp，
- *   给横向 Scroll 留出 ≈420vp 放 7 个工具按钮（实测够用，不会把分页组挤出屏幕）。
- *   单元格内部两半等分，每半 ≈41px 宽（> 34px 验收线）。
- */
-const CELL_WIDTH: number = 72;
-const CELL_W_COMPACT: number = 36;
 /** 横屏 rail 底色（比画布浅一点，与内容区分开；不用投影）。 */
 const RAIL_BG: string = '#F7F9FB';
-/** 工具条控件高度（vp）。 */
-const TOOL_HEIGHT: number = 40;
-/** 工具条控件最小宽度（vp）——定版要求 ≥44vp（徽标 + ▾ 不再被挤没）。 */
-const TOOL_MIN_WIDTH: number = 44;
-/** 「完成」最小宽度（vp）——定版要求 ≥64vp。 */
+/**
+ * 「完成」最小宽度（vp）——定版要求 ≥64vp（真机上曾被省略号截断）。
+ *
+ * 实际宽度 = `max(该下限, metrics.itemSize)`：小屏守住 64、大屏与控制齐平。
+ */
 const FINISH_MIN_WIDTH: number = 64;
+/**
+ * 分页区单元格的硬下限（vp）：`−`/`+`、`‹`/`›` **每半边 ≥44vp**，
+ * `1/1` 页码格 ≥64vp（用户定版：分页区要「放宽」，不许再压成 36vp 的小格）。
+ */
+const PAGER_HALF_MIN: number = 44;
+const PAGER_LABEL_MIN: number = 64;
+/** 控件间距的硬下限（vp）：分页区三个单元格挨太近会误触。 */
+const GAP_MIN: number = 8;
 /** 二级面板每行高度（vp）。 */
 const MENU_ROW_HEIGHT: number = 44;
 /** 二级面板每项最小宽度（vp）——用户定版 ≥140。 */
@@ -148,8 +148,6 @@ const CONFIRM_FIRST: number = 1;
 const CONFIRM_SECOND: number = 2;
 /** 抬笔后自动保存草稿的防抖时间（ms）。 */
 const DRAFT_SAVE_DEBOUNCE_MS: number = 2000;
-/** 退出按钮（`‹`）的边长（vp，与工具条同高）。 */
-const EXIT_SIZE: number = 40;
 /** 草稿提示文案（用户可见，别写内部术语）。 */
 const DRAFT_TOAST_RESTORED: string = '已恢复上次未完成的手迹';
 const DRAFT_TOAST_TOO_LARGE: string = '草稿过大，已只保留前 10 页';
@@ -187,6 +185,8 @@ struct Handwriting {
    */
   @State objectsByPage: ObjectsByPage = {};
   /** 「插入 → 表格」面板里的行列选择（1..10，默认 3×3）。 */
+  /** OCR 进度文案（表格逐格识别时显示在状态行）。 */
+  @State ocrProgress: string = '';
   @State insertRows: number = TABLE_DEFAULT_LINES;
   @State insertCols: number = TABLE_DEFAULT_LINES;
   /** 当前选中的对象 id（'' = 没选中）；选中态画品牌色描边 + 手柄 + ×。 */
@@ -505,6 +505,107 @@ struct Handwriting {
     return localDateKey(new Date());
   }
 
+  // ------------------------------------------------------------------ 完成流程：遮罩 + 占位符
+
+  /**
+   * 把每页的「插入对象」矩形合并进手动框遮罩（`objectsToMask` 是唯一开关点）。
+   *
+   * `objectsToMask()` 只返回**需要填白**的矩形：box/image 总是、table 在关闭识别或超 6×6 时
+   * —— 因此「表格逐格 OCR」打开后，表格区域会自动从遮罩里消失（下一批接线）。
+   */
+  private mergeObjectMasks(base: RegionBox[][], pageIds: string[]): RegionBox[][] {
+    const merged: RegionBox[][] = [];
+    for (let index = 0; index < pageIds.length; index++) {
+      const boxes: RegionBox[] = index < base.length ? base[index].slice() : [];
+      const objects: PageObject[] = objectsOfPage(this.objectsByPage, pageIds[index]);
+      const rects: NormalizedRect[] = objectsToMask(objects);
+      for (const rect of rects) {
+        boxes.push({ x: rect.x, y: rect.y, w: rect.w, h: rect.h });
+      }
+      merged.push(boxes);
+    }
+    return merged;
+  }
+
+  /**
+   * 拼正文：每页「OCR 文本 + 该页占位符（按 y 升序、同 y 按 x）」。
+   *
+   * 占位符与正文的相对位置：遮罩已经把对象区域从识别图里挖掉，OCR 文本里没有对应内容，
+   * 因此这里把该页的占位符**按 y 顺序追加在该页文本之后**（稳定、可预期，且不会打乱跨页顺序）。
+   */
+  private composeBodyWithObjects(pageTexts: string[], pageIds: string[], markdowns: Map<string, string>): string {
+    const parts: string[] = [];
+    for (let index = 0; index < pageIds.length; index++) {
+      const text: string = index < pageTexts.length ? pageTexts[index].trim() : '';
+      const objects: PageObject[] = sortObjectsByPosition(objectsOfPage(this.objectsByPage, pageIds[index]));
+      const lines: string[] = [];
+      if (text.length > 0) {
+        lines.push(text);
+      }
+      for (const object of objects) {
+        // 表格识别成功 → 用 Markdown 替换占位符；关闭/超时/失败 → 保留占位符
+        const markdown: string | undefined = markdowns.get(object.id);
+        if (object.kind === 'table' && markdown !== undefined && markdown.length > 0) {
+          lines.push(markdown);
+        } else {
+          lines.push(this.placeholderOf(object, index + 1));
+        }
+      }
+      if (lines.length > 0) {
+        parts.push(lines.join('\n'));
+      }
+    }
+    return parts.join('\n\n');
+  }
+
+  /** 单个对象的正文占位符（表格关闭识别/超限 → `tablePlaceholder`，否则先按占位符）。 */
+  private placeholderOf(object: PageObject, pageNumber: number): string {
+    if (object.kind === 'table') {
+      const rows: number = object.rows === undefined ? TABLE_DEFAULT_LINES : object.rows;
+      const cols: number = object.cols === undefined ? TABLE_DEFAULT_LINES : object.cols;
+      return tablePlaceholder(rows, cols, pageNumber);
+    }
+    return objectPlaceholder(object, pageNumber);
+  }
+
+  /**
+   * 收集需要逐格识别的表格（`ocrEnabled` 的才收）。
+   *
+   * 坐标（C 项注释订正）：`rect` 是**画布区域**归一化坐标，对象层与落盘 JPEG **同基准**，
+   * `cellRegions()` 用该截图尺寸换算成像素 —— 因此这里**不做任何偏移修正**。
+   * 若将来改成整窗截图，换算必须在此（offset = 横屏 rail 73vp / 竖屏顶栏 49vp），不要改到 OCR 侧。
+   */
+  private collectTableTasks(pageIds: string[]): TableCellTask[] {
+    const tasks: TableCellTask[] = [];
+    for (let index = 0; index < pageIds.length; index++) {
+      const objects: PageObject[] = objectsOfPage(this.objectsByPage, pageIds[index]);
+      for (const object of objects) {
+        if (object.kind !== 'table' || !tableOcrEnabled(object)) {
+          continue;
+        }
+        tasks.push({
+          id: object.id,
+          pageIndex: index,
+          rect: { x: object.x, y: object.y, w: object.w, h: object.h },
+          rows: object.rows === undefined ? TABLE_DEFAULT_LINES : object.rows,
+          cols: object.cols === undefined ? TABLE_DEFAULT_LINES : object.cols
+        });
+      }
+    }
+    return tasks;
+  }
+
+  /** 表格识别结果 → `Map<对象 id, markdown>`（失败/未识别的不进表）。 */
+  private markdownMap(tables: TableOcrResult[]): Map<string, string> {
+    const map: Map<string, string> = new Map<string, string>();
+    for (const item of tables) {
+      if (item.ok && item.markdown.length > 0) {
+        map.set(item.id, item.markdown);
+      }
+    }
+    return map;
+  }
+
   /** 「‹」退出：存草稿 → 返回上一页（不二次确认）。 */
   private exitWritingBoard(): void {    this.clearDraftTimer();
     this.saveDraftNow(false);
@@ -588,7 +689,57 @@ struct Handwriting {
     this.redrawObjects();
     this.panel = '';
     console.info(`[hw] insert=table rows=${rows} cols=${cols} count=${this.currentObjects().length}`);
-    promptAction.showToast({ message: `已插入表格 ${rows}×${cols}`, duration: 1500 });
+    if (canOcrTable(rows, cols)) {
+      promptAction.showToast({ message: `已插入表格 ${rows}×${cols}（可识别文字）`, duration: 1500 });
+    } else {
+      // 超过 6×6 或超 36 格：自动关闭文字识别，只保留原图 + 占位符
+      promptAction.showToast({ message: '表格超过 6×6，已关闭文字识别', duration: 3000 });
+    }
+  }
+
+  /** 当前选中的表格对象（没有选中或选中的不是表格 → undefined）。 */
+  private selectedTableObject(): PageObject | undefined {
+    if (this.selectedObjectId.length === 0) {
+      return undefined;
+    }
+    const found: PageObject | undefined = findObject(this.currentObjects(), this.selectedObjectId);
+    if (found === undefined || found.kind !== 'table') {
+      return undefined;
+    }
+    return found;
+  }
+
+  /** 开关文案：开 = `识别文字：开`，关 = `识别文字：关`。 */
+  private tableOcrSwitchText(): string {
+    return this.tableOcrSwitchOn() ? '开' : '关';
+  }
+
+  /** 选中表格当前是否开启识别（没有选中表格时按关闭处理）。 */
+  private tableOcrSwitchOn(): boolean {
+    const table: PageObject | undefined = this.selectedTableObject();
+    return table === undefined ? false : tableOcrEnabled(table);
+  }
+
+  /** 切换选中表格的「识别文字」开关（写回 `ocrEnabled` 并重绘：关闭后该表重新整块填白）。 */
+  private toggleTableOcr(): void {
+    const table: PageObject | undefined = this.selectedTableObject();
+    if (table === undefined) {
+      return;
+    }
+    const next: PageObject = {
+      id: table.id,
+      kind: table.kind,
+      x: table.x,
+      y: table.y,
+      w: table.w,
+      h: table.h,
+      rows: table.rows,
+      cols: table.cols,
+      ocrEnabled: !tableOcrEnabled(table)
+    };
+    this.writeObjects(replaceObject(this.currentObjects(), next));
+    this.redrawObjects();
+    console.info(`[hw] table ocr toggle id=${table.id} enabled=${next.ocrEnabled === true ? 1 : 0}`);
   }
 
   /** 表格行列步进（1..10，超出夹回边界）。 */
@@ -625,60 +776,138 @@ struct Handwriting {
     options.maxSelectNumber = 1;
     const picker: photoAccessHelper.PhotoViewPicker = new photoAccessHelper.PhotoViewPicker();
     const result: photoAccessHelper.PhotoSelectResult = await picker.select(options);
-    if (result.photoUris === undefined || result.photoUris.length === 0) {
+    const uris: string[] = result.photoUris === undefined ? [] : result.photoUris;
+    if (uris.length === 0) {
       console.info('[hw] insert=image cancelled');
       return;
     }
-    const uri: string = result.photoUris[0];
-    const source: image.ImageSource = image.createImageSource(uri);
-    let pixel: image.PixelMap;
+    const uri: string = uris[0];
+    console.info(`[hw] pick uri=${uri.slice(0, 40)} count=${uris.length}`);
+    await this.insertImageFromUri(uri);
+  }
+
+  /**
+   * 从 picker 返回的 **media URI** 插图（P0 修复点）。
+   *
+   * 为什么不能 `image.createImageSource(uri)`：picker 给的是 `file://media/Photo/…` 这类
+   * **媒体 URI**，不是普通文件路径，鸿蒙上按 uri 解码不可靠（用户实测选完图后失败）。
+   * 正确做法：`fs.openSync(uri)` 拿 **fd** → `createImageSource(fd)` 解码；
+   * 需要原始字节时也从**同一个 fd** 读，避免"解码走 uri、读字节走路径"两套语义混用。
+   *
+   * 失败回滚：已落盘的源图/临时文件清掉，zip 条目本轮未写入（`archiveImages` 只在成功路径调用），
+   * 因此不会留下半成品。
+   */
+  private async insertImageFromUri(uri: string): Promise<void> {
+    let file: fs.File | null = null;
+    let pixel: image.PixelMap | null = null;
+    // 位图是否已交给 objectImages（成功插入后由画布持有，不能再释放）
+    let taken: boolean = false;
     try {
-      pixel = await source.createPixelMap();
+      // ① 打开 fd（media URI 必须走这一步）
+      try {
+        file = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+      } catch (error) {
+        console.info(`[hw] insert image failed at open: ${describeError(error)}`);
+        promptAction.showToast({ message: '插入图片失败（无法读取文件）', duration: 3000 });
+        return;
+      }
+      console.info(`[hw] open ok fd=${file.fd}`);
+      // ② 解码（fd，不是 uri）
+      try {
+        const source: image.ImageSource = image.createImageSource(file.fd);
+        const info: image.ImageInfo = await source.getImageInfo();
+        pixel = await source.createPixelMap();
+        source.release().catch(() => {
+          // 释放失败忽略
+        });
+        console.info(`[hw] decode ok w=${info.size.width} h=${info.size.height}`);
+      } catch (error) {
+        console.info(`[hw] insert image failed at decode: ${describeError(error)}`);
+        promptAction.showToast({ message: '插入图片失败（解码）', duration: 3000 });
+        return;
+      }
+      const info: image.ImageInfo = await pixel.getImageInfo();
+      const width: number = Math.max(1, info.size.width);
+      const height: number = Math.max(1, info.size.height);
+      // ③ 按边长压（>2048 等比缩）
+      const longest: number = Math.max(width, height);
+      if (longest > IMAGE_MAX_SIDE) {
+        const ratio: number = IMAGE_MAX_SIDE / longest;
+        await pixel.scale(ratio, ratio);
+        console.info(
+          `[hw] insert=image scaled ${width}x${height} -> ${Math.round(width * ratio)}x${Math.round(height * ratio)}`
+        );
+      }
+      // ④ 编 JPEG（q90，超 5MB 再 q60）
+      let bytes: ArrayBuffer;
+      try {
+        bytes = await this.packJpeg(pixel, IMAGE_JPEG_QUALITY);
+        if (bytes.byteLength > IMAGE_MAX_BYTES) {
+          bytes = await this.packJpeg(pixel, IMAGE_JPEG_LOW_QUALITY);
+        }
+      } catch (error) {
+        console.info(`[hw] insert image failed at encode: ${describeError(error)}`);
+        promptAction.showToast({ message: '插入图片失败（压缩）', duration: 3000 });
+        return;
+      }
+      // ⑤ 落本地源图 + 算条目名（纯函数决定扩展名/矩形）
+      let saved: SavedImage;
+      try {
+        const plan: SelectionImagePlan = imageObjectFromSelection(uri, width, height, '');
+        saved = attachmentStore.saveImageJpeg(bytes, plan.ext);
+        console.info(`[hw] save ok name=${saved.entry} bytes=${bytes.byteLength}`);
+      } catch (error) {
+        console.info(`[hw] insert image failed at save: ${describeError(error)}`);
+        promptAction.showToast({ message: '插入图片失败（保存附件）', duration: 3000 });
+        return;
+      }
+      // ⑥ 插进当前页（画布上出现 + 可拖动缩放）
+      this.objectImages.set('image-' + saved.sha256.slice(0, 8), pixel);
+      taken = true;
+      this.insertImageAt(saved.sha256, saved.entry, width, height);
+      console.info(`[hw] insert ok id=image-${saved.sha256.slice(0, 8)}`);
+      // ⑦ 打进当天 zip（失败不回滚插入：原图已在本地源目录，完成时会再打包一次）
+      try {
+        await attachmentStore.archiveImages(this.resolveRecordDateKey(), [saved]);
+        console.info(`[hw] save zip ok name=${saved.entry}`);
+      } catch (error) {
+        console.info(`[hw] insert=image archive deferred reason=${describeError(error)}`);
+      }
     } finally {
-      source.release().catch(() => {
-        // 释放失败忽略
-      });
+      if (file !== null) {
+        try {
+          fs.closeSync(file);
+        } catch {
+          // 关闭失败忽略
+        }
+      }
+      // 位图已交给 objectImages（成功时），失败时释放，避免泄漏
+      if (pixel !== null && !taken) {
+        this.releasePixelSafely(pixel);
+      }
     }
-    const info: image.ImageInfo = await pixel.getImageInfo();
-    const width: number = info.size.width;
-    const height: number = info.size.height;
-    // 先按边长压（>2048 等比缩），再按体积判断是否需要降质量重编
-    const longest: number = Math.max(width, height);
-    if (longest > IMAGE_MAX_SIDE) {
-      const ratio: number = IMAGE_MAX_SIDE / longest;
-      await pixel.scale(ratio, ratio);
-      console.info(`[hw] insert=image scaled ${width}x${height} -> ${Math.round(width * ratio)}x${Math.round(height * ratio)}`);
-    }
+  }
+
+  /** 编 JPEG（独立方法便于两档质量复用与释放）。 */
+  private async packJpeg(pixel: image.PixelMap, quality: number): Promise<ArrayBuffer> {
     const packer: image.ImagePacker = image.createImagePacker();
-    let bytes: ArrayBuffer;
     try {
-      bytes = await packer.packing(pixel, { format: 'image/jpeg', quality: IMAGE_JPEG_QUALITY });
+      return await packer.packing(pixel, { format: 'image/jpeg', quality: quality });
     } finally {
       packer.release().catch(() => {
         // 释放失败忽略
       });
     }
-    if (bytes.byteLength > IMAGE_MAX_BYTES) {
-      // 仍然超 5MB：降质量再编一次（用户要求「>5MB 等比缩」，JPEG 质量是最后一道闸）
-      const repacker: image.ImagePacker = image.createImagePacker();
-      try {
-        bytes = await repacker.packing(pixel, { format: 'image/jpeg', quality: IMAGE_JPEG_LOW_QUALITY });
-      } finally {
-        repacker.release().catch(() => {
-          // 释放失败忽略
-        });
-      }
-    }
-    const saved: SavedImage = attachmentStore.saveImageJpeg(bytes, 'jpg');
-    // 记录位图供画布 drawImage（键 = 对象 id，见 insertImageAt）
-    const objectId: string = 'image-' + saved.sha256.slice(0, 8);
-    this.objectImages.set(objectId, pixel);
-    this.insertImageAt(saved.sha256, saved.entry, Math.max(1, width), Math.max(1, height));
-    // 立即把这张图打进当天 zip（失败不影响插入：原图已在 attachments-src/，完成时会再打包一次）
+  }
+
+  /** 释放 PixelMap（吞掉异常）。 */
+  private releasePixelSafely(pixel: image.PixelMap): void {
     try {
-      await attachmentStore.archiveImages(this.resolveRecordDateKey(), [saved]);
-    } catch (error) {
-      console.info(`[hw] insert=image archive deferred reason=${describeError(error)}`);
+      pixel.release().catch(() => {
+        // 释放失败忽略
+      });
+    } catch {
+      // 同步抛错忽略
     }
   }
 
@@ -858,17 +1087,24 @@ struct Handwriting {
     // 按页序取截图 id（稳定页 id：插页/删页后 id 不漂移）
     const ids: string[] = this.pagerState.snapshotIds(HANDWRITING_PAGE_ID_PREFIX);
     const pageRegions: RegionBox[][] = this.pagerState.regionsList();
+    // 插入对象（框/图片/表格）也要填白：合并到每页的遮罩矩形里，框内内容不送 OCR
+    const maskRegions: RegionBox[][] = this.mergeObjectMasks(pageRegions, ids);
     let regionTotal: number = 0;
-    for (let index = 0; index < pageRegions.length; index++) {
-      regionTotal += pageRegions[index].length;
+    for (let index = 0; index < maskRegions.length; index++) {
+      regionTotal += maskRegions[index].length;
     }
     const manager = new OcrBatchManager({
       snapshotIds: ids,
-      pageRegions: pageRegions,
+      pageRegions: maskRegions,
       store: attachmentStore,
       preparePage: (pageIndex: number) => this.preparePage(pageIndex),
       // 区域填白由子组件实现（pager 持有画布上下文），这里只转调注册好的实现
-      maskPage: (pageIndex: number, regions: RegionBox[]) => this.pagerState.maskPage(pageIndex, regions)
+      maskPage: (pageIndex: number, regions: RegionBox[]) => this.pagerState.maskPage(pageIndex, regions),
+      // 表格逐格识别任务（仅 ocrEnabled 的表格；矩形是**画布区域**归一化坐标（与落盘 JPEG 同基准））
+      tableTasks: this.collectTableTasks(ids),
+      onProgress: (message: string, ratio: number) => {
+        this.ocrProgress = message;
+      }
     });
     this.manager = manager;
     this.busy = true;
@@ -879,7 +1115,11 @@ struct Handwriting {
         promptAction.showToast({ message: '已取消识别：已落盘的附件保留在设备目录中', duration: 3000 });
         return;
       }
-      AppStorage.setOrCreate<string>('handwriting.result', result.text);
+      // 正文：每页「识别文本 + 该页对象占位符（按 y 升序）」，页间空行分隔
+      const markdowns: Map<string, string> = this.markdownMap(result.tables);
+      const body: string = this.composeBodyWithObjects(result.pageTexts, ids, markdowns);
+      const failedTables: TableOcrResult[] = result.tables.filter((item: TableOcrResult) => !item.ok);
+      AppStorage.setOrCreate<string>('handwriting.result', body);
       AppStorage.setOrCreate<string>('handwriting.ocrText', result.rawText);
       // 附件：优先打成「当天 zip」引用（仓库里只放 zip）；失败回退散图引用，不阻塞完成
       const packed: Attachment[] = await this.archiveAttachments(result.attachments);
@@ -891,11 +1131,12 @@ struct Handwriting {
         console.info(`[hw] objects total=${countObjects(this.objectsByPage)} pages=${Object.keys(this.objectsByPage).length}`);
       }
       promptAction.showToast({
-        message:
-          `识别完成：${result.attachments.length} 页、${result.regionCount} 个框` +
-          '（框内未识别，原始截图已保存）',
+        message: `已保存 ${result.attachments.length} 页手迹`,
         duration: 3000
       });
+      if (failedTables.length > 0) {
+        promptAction.showToast({ message: '表格识别超时，已保留原图', duration: 3000 });
+      }
       // 只有「完成且 OCR 成功」才作废草稿；失败路径保留（catch 里不动草稿）
       this.discardDraft();
       router.back();
@@ -2188,6 +2429,36 @@ struct Handwriting {
         }
         .width('100%')
         .height(CHIP_HEIGHT)
+        // 选中表格时给「识别文字」开关（关闭后该表恢复整块填白 + 占位符）
+        if (this.selectedTableObject() !== undefined) {
+          Divider()
+            .strokeWidth(DIVIDER)
+            .color($r('app.color.divider'))
+            .width('100%')
+          Row({ space: SPACING.xs }) {
+            Text('识别文字')
+              .fontSize(FONT.caption)
+              .lineHeight(LINE_HEIGHT.caption)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.None })
+              .fontColor($r('app.color.text_primary'))
+              .layoutWeight(1)
+            Text(this.tableOcrSwitchText())
+              .fontSize(FONT.caption)
+              .lineHeight(LINE_HEIGHT.caption)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.None })
+              .fontColor(this.tableOcrSwitchOn() ? $r('app.color.brand') : $r('app.color.text_secondary'))
+          }
+          .width('100%')
+          .height(CHIP_HEIGHT)
+          .padding({ left: SPACING.sm, right: SPACING.sm })
+          .borderRadius(RADIUS.sm)
+          .backgroundColor('#F5F6F8')
+          .onClick(() => {
+            this.toggleTableOcr();
+          })
+        }
       } else {
         ForEach(
           PEN_COLORS,

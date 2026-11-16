@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 页面对象模型：把「框」升级成通用可调矩形（框 / 图片 / 表格共用一套交互）。
  *
  * 契约：
@@ -39,6 +39,8 @@ export interface PageObject {
   rows?: number;
   /** 表格对象：列数（1..10）。 */
   cols?: number;
+  /** 表格对象：是否逐格识别文字（缺省 true；false 时整块填白 + 占位符）。 */
+  ocrEnabled?: boolean;
 }
 
 /** 对象最小尺寸（归一化）：对应真机 40vp（页宽约 1000vp 量级，按比例给 0.04）。 */
@@ -99,7 +101,7 @@ export function makePageObject(
   id: string,
   kind: PageObjectKind,
   rect: NormalizedRect,
-  extra?: { sha256?: string; name?: string; rows?: number; cols?: number }
+  extra?: { sha256?: string; name?: string; rows?: number; cols?: number; ocrEnabled?: boolean }
 ): PageObject {
   const normalized: NormalizedRect = normalizeRect(rect);
   const object: PageObject = {
@@ -121,6 +123,12 @@ export function makePageObject(
   if (kind === 'table') {
     object.rows = clampTableLines(extra === undefined || extra.rows === undefined ? TABLE_DEFAULT_LINES : extra.rows);
     object.cols = clampTableLines(extra === undefined || extra.cols === undefined ? TABLE_DEFAULT_LINES : extra.cols);
+    // 缺省开启「识别文字」；显式 false 才关闭
+    object.ocrEnabled = extra === undefined || extra.ocrEnabled === undefined ? true : extra.ocrEnabled === true;
+    // 规模上限：>6×6 一律关闭（与 model/tableOcr.canOcrTable 同一规则）
+    if (object.rows * object.cols > 36) {
+      object.ocrEnabled = false;
+    }
   }
   return object;
 }
@@ -252,6 +260,7 @@ function cleanObject(object: PageObject): PageObject {
   if (object.kind === 'table') {
     item.rows = clampTableLines(object.rows === undefined ? TABLE_DEFAULT_LINES : object.rows);
     item.cols = clampTableLines(object.cols === undefined ? TABLE_DEFAULT_LINES : object.cols);
+    item.ocrEnabled = object.ocrEnabled !== false && item.rows * item.cols <= 36;
   }
   return item;
 }
@@ -303,7 +312,8 @@ function parsePageList(parsed: PageObject[]): PageObject[] {
         sha256: raw.sha256,
         name: raw.name,
         rows: raw.rows,
-        cols: raw.cols
+        cols: raw.cols,
+        ocrEnabled: raw.ocrEnabled
       })
     );
   }
@@ -612,6 +622,10 @@ function copyExtras(source: PageObject, target: PageObject): void {
   if (source.kind === 'table') {
     target.rows = clampTableLines(source.rows === undefined ? TABLE_DEFAULT_LINES : source.rows);
     target.cols = clampTableLines(source.cols === undefined ? TABLE_DEFAULT_LINES : source.cols);
+    // D3（reviewer 阻塞缺陷）：`ocrEnabled` 必须跟着对象走，否则拖动/缩放后开关会丢回默认值
+    if (source.ocrEnabled !== undefined) {
+      target.ocrEnabled = source.ocrEnabled;
+    }
   }
 }
 
@@ -666,4 +680,77 @@ export function planRender(objects: PageObject[]): ObjectRenderPlan {
     }
   }
   return plan;
+}
+
+// ---------------------------------------------------------------------------
+// P0：「插入图片」失败修复配套的纯函数
+//
+// 背景：相册 picker 返回的是 **media URI**（`file://media/Photo/…`），直接
+// `image.createImageSource(uri)` 在鸿蒙上不可靠 → 必须先拿 fd（页面侧负责）。
+// 这里只做**纯逻辑**：把「选中的图片」换算成页面对象 + zip 条目名，
+// 扩展名解析要能处理：`.jpg/.jpeg/.png/.heic/无后缀/大写后缀/路径含中文`。
+// ---------------------------------------------------------------------------
+
+/** 选图结果换算出来的插入计划（页面直接用它建对象 + 打包）。 */
+export interface SelectionImagePlan {
+  /** 对象 id（`image-<sha 前 8 位>` 由调用方补；这里先用条目名做 id 种子）。 */
+  entry: string;
+  /** 归一化扩展名（`jpg` / `png` / `heic`…；无法识别时回落 `jpg`）。 */
+  ext: string;
+  /** 插入矩形（页中心、40% 页宽、按原图比例）。 */
+  rect: NormalizedRect;
+  /** 用于插入的原始像素尺寸（非法时按 1×1 兜底，避免除零）。 */
+  width: number;
+  height: number;
+}
+
+/** 从 uri/文件名里取扩展名（小写、去点；识别不了返回空串）。 */
+export function extensionOfUri(uri: string): string {
+  const text: string = typeof uri === 'string' ? uri.trim() : '';
+  if (text.length === 0) {
+    return '';
+  }
+  // 去掉 query/hash（media uri 可能带 `?` 参数）
+  const cut: number = text.search(/[?#]/);
+  const path: string = cut >= 0 ? text.slice(0, cut) : text;
+  const dot: number = path.lastIndexOf('.');
+  const slash: number = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  if (dot <= slash || dot === path.length - 1) {
+    return '';
+  }
+  const ext: string = path.slice(dot + 1).toLowerCase();
+  return /^[a-z0-9]{1,5}$/.test(ext) ? ext : '';
+}
+
+/** 归一化扩展名：`jpeg` → `jpg`，未知 → `jpg`。 */
+export function normalizeImageExt(ext: string): string {
+  const value: string = typeof ext === 'string' ? ext.trim().toLowerCase().replace(/^\./, '') : '';
+  if (value === 'jpeg' || value === 'jpe') {
+    return 'jpg';
+  }
+  if (/^[a-z0-9]{2,5}$/.test(value)) {
+    return value;
+  }
+  return 'jpg';
+}
+
+/**
+ * 选中的图片 → 插入计划。
+ *
+ * @param uri picker 返回的 uri（也可能是普通路径）
+ * @param imageW/imageH 解码后的像素尺寸（页面负责解码）
+ * @param sha256 内容摘要（由页面/存储算好后传入；空则不生成 `entry`）
+ */
+export function imageObjectFromSelection(
+  uri: string,
+  imageW: number,
+  imageH: number,
+  sha256: string
+): SelectionImagePlan {
+  const ext: string = normalizeImageExt(extensionOfUri(uri));
+  const width: number = Number.isFinite(imageW) && imageW > 0 ? imageW : 1;
+  const height: number = Number.isFinite(imageH) && imageH > 0 ? imageH : 1;
+  const digest: string = typeof sha256 === 'string' ? sha256.trim().toLowerCase() : '';
+  const entry: string = SHA256_RE.test(digest) ? imageEntryName(digest, ext) : `image-pending.${ext}`;
+  return { entry: entry, ext: ext, rect: imageRectFor(width, height), width: width, height: height };
 }

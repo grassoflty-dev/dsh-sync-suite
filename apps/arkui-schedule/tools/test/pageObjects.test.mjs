@@ -51,7 +51,10 @@ const {
   addEmptyPage,
   countObjects,
   FIRST_PAGE_ID,
-  PAGE_OBJECTS_VERSION
+  PAGE_OBJECTS_VERSION,
+  extensionOfUri,
+  normalizeImageExt,
+  imageObjectFromSelection
 } = await import('../.build/model/pageObjects.js');
 
 const SHA = 'a'.repeat(64);
@@ -505,5 +508,84 @@ describe('按页存储：翻页/插页/删页 与 v1 迁移', () => {
     const pages = setObjectsOfPage({ p1: page1 }, 'p1', []);
     assert.equal(Object.keys(pages).length, 0);
     assert.equal(serializePageObjects(pages), JSON.stringify({ version: PAGE_OBJECTS_VERSION, pages: {} }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P0：「插入图片失败」配套纯函数（扩展名解析 + 插入计划）
+// ---------------------------------------------------------------------------
+
+describe('选图扩展名解析（media URI / 中文路径 / 大写 / 无后缀）', () => {
+  test('.jpg / .jpeg / .png / .heic 都能识别', () => {
+    assert.equal(extensionOfUri('file://media/Photo/12/IMG_001.jpg'), 'jpg');
+    assert.equal(extensionOfUri('file://media/Photo/12/IMG_001.jpeg'), 'jpeg');
+    assert.equal(extensionOfUri('file://media/Photo/12/IMG_001.png'), 'png');
+    assert.equal(extensionOfUri('file://media/Photo/12/IMG_001.heic'), 'heic');
+  });
+
+  test('大写后缀归一化为小写', () => {
+    assert.equal(extensionOfUri('file://media/Photo/12/IMG_001.JPG'), 'jpg');
+    assert.equal(extensionOfUri('file://media/Photo/12/IMG_001.JPEG'), 'jpeg');
+  });
+
+  test('无后缀 / 空串 / 只有点 → 空串（调用方回落 jpg）', () => {
+    for (const uri of ['file://media/Photo/12/IMG_001', '', 'file://media/Photo/12/IMG_001.', 'file://media/x/.jpg']) {
+      const ext = extensionOfUri(uri);
+      assert.equal(typeof ext, 'string');
+      if (uri === 'file://media/x/.jpg') {
+        assert.equal(ext, 'jpg', '.jpg 这种隐藏文件名仍应取到 jpg');
+      } else {
+        assert.equal(ext, '');
+      }
+    }
+  });
+
+  test('路径含中文 / 带 query 参数不影响解析', () => {
+    assert.equal(extensionOfUri('file://media/Photo/12/截图 2026-11-16 上午.png'), 'png');
+    assert.equal(extensionOfUri('file://media/Photo/12/IMG.jpg?width=100'), 'jpg');
+    assert.equal(extensionOfUri('file://media/Photo/12/IMG.jpg#frag'), 'jpg');
+  });
+
+  test('normalizeImageExt：jpeg → jpg，未知 → jpg', () => {
+    assert.equal(normalizeImageExt('jpeg'), 'jpg');
+    assert.equal(normalizeImageExt('.JPEG'), 'jpg');
+    assert.equal(normalizeImageExt('png'), 'png');
+    assert.equal(normalizeImageExt(''), 'jpg');
+    assert.equal(normalizeImageExt('weird/../x'), 'jpg');
+  });
+});
+
+describe('imageObjectFromSelection：插入计划（矩形 + zip 条目名）', () => {
+  test('正常图：条目名 image-<sha8>.<ext>，矩形 40% 页宽居中', () => {
+    const plan = imageObjectFromSelection('file://media/Photo/1/a.PNG', 1000, 500, SHA);
+    assert.equal(plan.ext, 'png');
+    assert.equal(plan.entry, `image-${SHA.slice(0, 8)}.png`);
+    assert.equal(plan.width, 1000);
+    assert.equal(plan.height, 500);
+    assert.equal(plan.rect.w, IMAGE_DEFAULT_WIDTH_RATIO);
+    assert.ok(Math.abs(plan.rect.h - IMAGE_DEFAULT_WIDTH_RATIO * 0.5) < 1e-9);
+    assert.ok(Math.abs(plan.rect.x - (1 - plan.rect.w) / 2) < 1e-9);
+  });
+
+  test('无后缀 uri → 条目名用 jpg', () => {
+    const plan = imageObjectFromSelection('file://media/Photo/1/noext', 800, 600, SHA2);
+    assert.equal(plan.ext, 'jpg');
+    assert.equal(plan.entry, `image-${SHA2.slice(0, 8)}.jpg`);
+  });
+
+  test('尺寸非法（0 / NaN）→ 按 1×1 兜底，不产生 NaN/除零', () => {
+    for (const [w, h] of [[0, 0], [Number.NaN, 100], [-5, 10]]) {
+      const plan = imageObjectFromSelection('file://media/1/a.jpg', w, h, SHA);
+      assert.equal(plan.width >= 1, true);
+      assert.equal(plan.height >= 1, true);
+      for (const value of [plan.rect.x, plan.rect.y, plan.rect.w, plan.rect.h]) {
+        assert.equal(Number.isFinite(value), true);
+      }
+    }
+  });
+
+  test('sha256 缺失/非法 → 条目名带 pending（页面会先算摘要再落盘）', () => {
+    assert.match(imageObjectFromSelection('file://media/1/a.jpg', 10, 10, '').entry, /^image-pending\.jpg$/);
+    assert.match(imageObjectFromSelection('file://media/1/a.jpg', 10, 10, 'not-a-sha').entry, /^image-pending\.jpg$/);
   });
 });

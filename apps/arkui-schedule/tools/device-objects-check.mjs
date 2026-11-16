@@ -16,7 +16,28 @@ import { parseLayoutOutput, findByText, layoutTexts } from './layout-parse.mjs';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP = resolve(HERE, '..');
 const TMP = join(APP, '.tmp-accept');
-const SERIAL = process.env.ACCEPT_SERIAL || '6MFBB25C27205131';
+function opt(name, fallback) {
+  const index = process.argv.indexOf(name);
+  if (index >= 0 && index + 1 < process.argv.length) {
+    return process.argv[index + 1];
+  }
+  return fallback;
+}
+// 显式 --serial 优先；无线调试（host:port）时不要用 list targets 的第一条
+const SERIAL = opt('--serial', process.env.ACCEPT_SERIAL || '6MFBB25C27205131');
+const WIRELESS = /^\d+\.\d+\.\d+\.\d+:\d+$/.test(SERIAL);
+
+/** 无线调试会因息屏断开：每步前探活，失败就明确退出（不傻重试）。 */
+function ensureAlive() {
+  if (!WIRELESS) {
+    return;
+  }
+  const res = hdc(['shell', 'echo ok'], 15000);
+  if (!/ok/.test(res.out)) {
+    console.error('无线调试断开（设备可能息屏）：请保持亮屏后重跑，或改回 USB serial');
+    process.exit(2);
+  }
+}
 const DEVECO_CLI = 'C:\\Users\\GWL\\Desktop\\itwillclaude\\.tmp\\deveco-cli\\node_modules\\.bin\\devecocli.cmd';
 const HDC = 'D:\\A-DevEco\\DevEco Studio\\sdk\\default\\openharmony\\toolchains\\hdc.exe';
 
@@ -35,7 +56,10 @@ const cli = (list) => run(DEVECO_CLI, list);
 const hdc = (list) => run(HDC, ['-t', SERIAL, ...list]);
 const sleep = (s) => spawnSync('powershell', ['-NoProfile', '-Command', `Start-Sleep -Seconds ${s}`], { encoding: 'utf8' });
 
-const layout = () => parseLayoutOutput(cli(['ui', 'layout', '--device', SERIAL, '--format', 'json', '--mode', 'simplified']).out);
+const layout = () => {
+  ensureAlive();
+  return parseLayoutOutput(cli(['ui', 'layout', '--device', SERIAL, '--format', 'json', '--mode', 'simplified']).out);
+};
 
 function tap(node) {
   const [x1, y1, x2, y2] = node.bounds;

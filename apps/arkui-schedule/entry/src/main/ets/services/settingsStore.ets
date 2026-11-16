@@ -24,6 +24,7 @@ import {
   DEFAULT_PROVIDER_ID,
   defaultModelOf,
   findProvider,
+  migrateLegacyProviderId,
   normalizeBaseURL,
   resolveModel as resolveAiModel
 } from '../model/aiProvider';
@@ -46,7 +47,7 @@ export interface ScheduleSettings {
   token: string;
   /** AI 密钥（仅存本机；与源解耦，换源可继续用）。 */
   aiKey: string;
-  /** AI 源 id：`deepseek` | `opencode-go` | `codex` | `custom`（未知/空回退默认源）。 */
+  /** AI 源 id：`deepseek` | `opencode-go` | `codex` | `openrouter` | `custom`（未知/空回退默认源）。 */
   aiProviderId: string;
   /** 模型名，空值与未知值在读取时归一到该源默认模型。 */
   aiModel: string;
@@ -76,6 +77,8 @@ export interface ScheduleSettings {
   gitUsername: string;
   /** 认证方式：`https` | `ssh`（只影响提示文案与 token 是否必填）。 */
   authMode: string;
+  /** 仅手写笔输入：true 时手写板拒绝手指、只接受手写笔（默认 false；旧数据缺字段 = false）。 */
+  penOnlyInput: boolean;
   /** 上次同步成功的时刻（ISO 8601，空串表示从未同步）。仅用于设置页展示。 */
   lastSyncAt: string;
   /** 上次同步失败的**分级后中文文案**（空串表示上次没有失败）。仅用于设置页展示。 */
@@ -112,6 +115,7 @@ export interface SettingsPatch {
   gitPlatform?: string;
   gitUsername?: string;
   authMode?: string;
+  penOnlyInput?: boolean;
 }
 
 /** 备用源配置（`deepseek` 服务层直接消费；`configured=false` 表示不启用）。 */
@@ -144,6 +148,7 @@ const KEY_AUTHOR: string = 'author';
 const KEY_GIT_PLATFORM: string = 'gitPlatform';
 const KEY_GIT_USERNAME: string = 'gitUsername';
 const KEY_AUTH_MODE: string = 'authMode';
+const KEY_PEN_ONLY_INPUT: string = 'penOnlyInput';
 const KEY_LAST_SYNC_AT: string = 'lastSyncAt';
 const KEY_LAST_SYNC_ERROR: string = 'lastSyncError';
 const KEY_LAST_SYNC_ACTION: string = 'lastSyncAction';
@@ -207,6 +212,11 @@ function readNumber(value: preferences.ValueType, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
+/** 读取 preferences 里的布尔值（旧数据没有该键 / 非布尔值 → 默认值）。 */
+function readBoolean(value: preferences.ValueType, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
 export class SettingsStore {
   private prefs: preferences.Preferences | null = null;
   private cache: ScheduleSettings | null = null;
@@ -232,6 +242,8 @@ export class SettingsStore {
     const aiKey = readString(await prefs.get(KEY_AI_KEY, ''), '');
     // 迁移：旧版本只存了 aiKey。providerId 为空即旧数据 → findProvider 回退默认源 deepseek，
     // 模型为空 → deepseek-chat，地址 → 该源预设地址（三个字段一起补齐，不留半套配置）。
+    // 另一条迁移：已下线的本地源（用户升级前选的）归一为「自定义」，原 baseURL / 模型原样保留，
+    // 不报错、不丢配置——「自定义」本来就允许手填 http:// 地址。
     const aiProviderIdRaw = readString(await prefs.get(KEY_AI_PROVIDER_ID, ''), '');
     const aiModel = readString(await prefs.get(KEY_AI_MODEL, DEFAULT_AI_MODEL), DEFAULT_AI_MODEL);
     const aiBaseURLRaw = readString(await prefs.get(KEY_AI_BASE_URL, ''), '');
@@ -245,7 +257,8 @@ export class SettingsStore {
     const aiOptions: AiOptions = normalizeAiOptions(rawOptions);
     // B3 备用源：空 providerId = 不启用；model/baseURL/key 只在启用时才有意义
     const aiFallbackProviderIdRaw = readString(await prefs.get(KEY_AI_FALLBACK_PROVIDER_ID, ''), '');
-    const aiFallbackProviderId: string = normalizeFallbackProviderId(aiFallbackProviderIdRaw);
+    const aiFallbackProviderId: string =
+      normalizeFallbackProviderId(migrateLegacyProviderId(aiFallbackProviderIdRaw));
     const aiFallbackModelRaw = readString(await prefs.get(KEY_AI_FALLBACK_MODEL, ''), '');
     const aiFallbackBaseURLRaw = readString(await prefs.get(KEY_AI_FALLBACK_BASE_URL, ''), '');
     const aiFallbackKeyRaw = readString(await prefs.get(KEY_AI_FALLBACK_KEY, ''), '');
@@ -254,10 +267,12 @@ export class SettingsStore {
     // 向后兼容：旧版本没有这个键 → 读成空串（Gitee 场景由 assertHttpsUsername 提示补填）
     const gitUsername = readString(await prefs.get(KEY_GIT_USERNAME, ''), '');
     const authMode = readString(await prefs.get(KEY_AUTH_MODE, AUTH_HTTPS), AUTH_HTTPS);
+    // 旧数据没有这个键 → false（手指 + 笔都能写，与升级前行为一致）
+    const penOnlyInput = readBoolean(await prefs.get(KEY_PEN_ONLY_INPUT, false), false);
     const lastSyncAt = readString(await prefs.get(KEY_LAST_SYNC_AT, ''), '');
     const lastSyncError = readString(await prefs.get(KEY_LAST_SYNC_ERROR, ''), '');
     const lastSyncAction = readString(await prefs.get(KEY_LAST_SYNC_ACTION, ''), '');
-    const aiProviderId: string = findProvider(aiProviderIdRaw).id;
+    const aiProviderId: string = findProvider(migrateLegacyProviderId(aiProviderIdRaw)).id;
     // 默认源沿用旧默认值 deepseek-chat（迁移）；其它源的空模型由 resolveModel 回落到该源默认模型
     const aiModelForSource: string = aiProviderId === DEFAULT_PROVIDER_ID ? normalizeAiModel(aiModel) : aiModel;
     const settings: ScheduleSettings = {
@@ -280,6 +295,7 @@ export class SettingsStore {
       gitPlatform: normalizePlatform(gitPlatform),
       gitUsername: gitUsername.trim(),
       authMode: normalizeAuthMode(authMode),
+      penOnlyInput: penOnlyInput,
       lastSyncAt: lastSyncAt,
       lastSyncError: lastSyncError,
       lastSyncAction: normalizeSyncAction(lastSyncAction)
@@ -425,6 +441,7 @@ export class SettingsStore {
       gitPlatform: patch.gitPlatform === undefined ? current.gitPlatform : normalizePlatform(patch.gitPlatform),
       gitUsername: patch.gitUsername === undefined ? current.gitUsername : patch.gitUsername.trim(),
       authMode: patch.authMode === undefined ? current.authMode : normalizeAuthMode(patch.authMode),
+      penOnlyInput: patch.penOnlyInput === undefined ? current.penOnlyInput : patch.penOnlyInput === true,
       lastSyncAt: current.lastSyncAt,
       lastSyncError: current.lastSyncError,
       lastSyncAction: current.lastSyncAction
@@ -448,6 +465,7 @@ export class SettingsStore {
     await prefs.put(KEY_GIT_PLATFORM, next.gitPlatform);
     await prefs.put(KEY_GIT_USERNAME, next.gitUsername);
     await prefs.put(KEY_AUTH_MODE, next.authMode);
+    await prefs.put(KEY_PEN_ONLY_INPUT, next.penOnlyInput);
     await prefs.put(KEY_GIT_USERNAME, next.gitUsername);
     await prefs.put(KEY_LAST_SYNC_AT, next.lastSyncAt);
     await prefs.put(KEY_LAST_SYNC_ERROR, next.lastSyncError);
@@ -489,6 +507,7 @@ export class SettingsStore {
       gitPlatform: current.gitPlatform,
       gitUsername: current.gitUsername,
       authMode: current.authMode,
+      penOnlyInput: current.penOnlyInput,
       lastSyncAt: patch.lastSyncAt === undefined ? current.lastSyncAt : patch.lastSyncAt,
       lastSyncError: patch.lastSyncError === undefined ? current.lastSyncError : patch.lastSyncError,
       lastSyncAction:

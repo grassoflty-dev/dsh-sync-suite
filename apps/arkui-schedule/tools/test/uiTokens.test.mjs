@@ -177,12 +177,14 @@ test('宽屏视觉四条：页头不重复日期 / 空态居中 CTA / 列表最�
   assert.match(INDEX, /return this\.selectedDate === localDateKey\(new Date\(\)\) \? '今天' : '日程';/)
 })
 
-test('首页头改成明确动作：不再有「更多」/ActionSheet，头部两个动作齐全', () => {
+test('首页头只留「⚙ 设置」：AI 汇总图标入口已删除，也没有「更多」/ActionSheet', () => {
   assert.equal(/MoreSheet|this\.showMore/.test(INDEX), false, '首页不应再有「更多」底部面板');
   assert.equal(/onMore:/.test(INDEX), false, '首页不应把菜单挂在 PageLayout 的 onMore 上');
-  assert.match(INDEX, /headerActionOne: this\.aiBusy \? '✨ 生成中…' : '✨ AI 汇总'/, '页头动作要带生成中态');
-  assert.match(INDEX, /headerActionTwo: '⚙ 设置'/);
-  assert.match(INDEX, /this\.onHeaderSummaryAction\(\)/, '页头动作用 onHeaderSummaryAction（有汇总开面板 / 无汇总生成）');
+  assert.match(INDEX, /headerActionTwo: '⚙ 设置'/, '页头保留唯一动作「⚙ 设置」');
+  // 用户反馈：页头 AI 汇总图标点了没反应但图标还在 → 整条入口删除（AI 汇总只在列表第一项）
+  assert.equal(/headerActionOne|onHeaderActionOne/.test(INDEX), false, '页头不得再有第一个动作（✨ AI 汇总 入口）');
+  assert.equal(/✨ AI 汇总/.test(INDEX), false, '页头「✨ AI 汇总」文案必须删除');
+  assert.equal(/onHeaderSummaryAction/.test(INDEX), false, '页头汇总 handler 必须删除');
   assert.match(INDEX, /router\.pushUrl\(\{ url: 'pages\/Settings' \}\)/, '设置动作要能进设置页');
   assert.match(INDEX, /HOME_INCLUDE_OTHER_KEY/, '「含其他设备」必须走共享的 AppStorage 键');
 });
@@ -195,7 +197,7 @@ test('今日汇总块：持久化数据源（read/换日期 re-read/generate 失
   assert.match(INDEX_CODE, /this\.summaryError = describeError\(error\);\s*\n?\s*try \{\s*\n?\s*this\.applySummary\(summaryStore\.read\(this\.selectedDate\)\);/);
 });
 
-test('今日汇总块：是列表第一项，五态互斥，且与页头共用 aiBusy', () => {
+test('今日汇总块：是列表第一项，五态互斥，AI 汇总只从这里进入', () => {
   assert.match(INDEX_CODE, /this\.SummaryCard\(\)/, '汇总块必须被渲染');
   assert.match(INDEX_CODE, /✨ 今日汇总/);
   assert.match(INDEX_CODE, /✨ 生成今日汇总/);
@@ -208,8 +210,8 @@ test('今日汇总块：是列表第一项，五态互斥，且与页头共用 a
   assert.match(INDEX_CODE, /summaryStore\.generate\(/, '生成必须走 summaryStore（内部保证失败不覆盖）');
   assert.match(INDEX_CODE, /truncateSummaryForDisplay\(summary, SUMMARY_MAX_POINTS\)/, '块内最多展示 3 条要点');
   assert.equal(/applySummaryFromAiText/.test(INDEX_CODE), false, '旧的「解析自由文本」通道应已退休');
-  // 与页头同源：生成中页头也显示 loading，两者不会矛盾
-  assert.match(INDEX_CODE, /headerActionOne: this\.aiBusy \? '✨ 生成中…' : '✨ AI 汇总'/);
+  // 页头已无 AI 汇总入口：生成的入口全部在汇总块内（生成/重试/重新生成）
+  assert.equal(/headerActionOne/.test(INDEX_CODE), false, '页头不得再有 AI 汇总图标入口');
   const calls = (INDEX_CODE.match(/this\.generateSummary\(\)/g) || []).length;
   assert.ok(calls >= 3, `汇总生成入口应有生成行/重试/重新生成，实际 ${calls} 处`);
   // 空态文案只保留在汇总块里，不再有第二处 EmptyState/EmptyHint

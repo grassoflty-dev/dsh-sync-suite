@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 手写页 OCR 批处理（**仅 HarmonyOS**）。
  *
  * 本文件是薄适配层：真实 SDK 能力注入给纯逻辑 `model/pageCapture.ts` 的 `runPageCaptureBatch`，
@@ -26,6 +26,33 @@ import { composePageBody, concatPageTexts, ATTACHMENT_JPEG_QUALITY, ATTACHMENT_M
 import { sha256Hex } from '../model/sha256';
 import type { Attachment, RegionBox } from '../model/types';
 import type { AttachmentStore } from '../services/attachmentStore';
+import { cellRegions, tableToMarkdown, TABLE_CELL_TIMEOUT_MS, TABLE_OCR_TIMEOUT_MS } from '../model/tableOcr';
+import type { CellRegion } from '../model/tableOcr';
+import type { NormalizedRect } from '../model/pageObjects';
+
+/** 一个待逐格识别的表格（`finish()` 按页收集后传进来）。 */
+export interface TableCellTask {
+  /** 页面对象 id（结果按它回填）。 */
+  id: string;
+  /** 属于第几页（0 起，与 `snapshotIds` 同序）。 */
+  pageIndex: number;
+  /** 表格矩形（归一化 0..1，**画布区域坐标系**：与落盘 JPEG 同基准）。 */
+  rect: NormalizedRect;
+  rows: number;
+  cols: number;
+}
+
+/** 单个表格的识别结果。 */
+export interface TableOcrResult {
+  id: string;
+  pageIndex: number;
+  /** true = 成功（`markdown` 有效）；false = 回退占位符。 */
+  ok: boolean;
+  markdown: string;
+  failedCells: number;
+  /** 失败原因（中文，`ok:true` 时为空串）。 */
+  reason: string;
+}
 
 /** 单页处理结果（pageIndex 与手写板页码一一对应）。 */
 export interface OcrPageResult {
@@ -37,6 +64,8 @@ export interface OcrPageResult {
 
 /** 整批结果。 */
 export interface OcrBatchResult {
+  /** 表格逐格识别结果（每个 ocrEnabled 表格一条）。 */
+  tables: TableOcrResult[];
   /** 逐页结果，按 pageIndex 升序（未识别的页 text 为空串）。 */
   pageResults: OcrPageResult[];
   /** 已落盘的原始截图引用，可直接写入记录的 attachments 字段。 */
@@ -73,6 +102,10 @@ export interface OcrBatchOptions {
    * 二次截图送 OCR）。有区域框却未提供该能力时，模型层会抛错而不是把框内文字送去识别。
    */
   maskPage?: (pageIndex: number, regions: RegionBox[]) => Promise<void>;
+  /** 需要逐格识别的表格（按页收集；空/未传则不识别表格）。 */
+  tableTasks?: TableCellTask[];
+  /** 进度回调（状态行文案 + 0..1 进度）。 */
+  onProgress?: (message: string, ratio: number) => void;
 }
 
 /** 截图 + PNG 编码的结果（显式接口：ArkTS 禁止内联对象类型字面量与 `unknown`）。 */
@@ -105,6 +138,8 @@ export class OcrBatchManager {
 
   private options: OcrBatchOptions;
   private cancelled: boolean = false;
+  /** 超时未等到、需要整批收尾再释放的 PixelMap（D4：避免 use-after-release）。 */
+  private deferredReleases: image.PixelMap[] = [];
   private running: boolean = false;
 
   constructor(options: OcrBatchOptions) {
@@ -186,7 +221,11 @@ export class OcrBatchManager {
       }
 
       const outcome: PageCaptureOutcome = await runPageCaptureBatch(total, deps, options);
-      return this.toResult(outcome);
+      const result: OcrBatchResult = this.toResult(outcome);
+      // 表格逐格识别：在页图全部落盘之后做（用 ttachments-src 里的页 JPEG，画布区域坐标系）
+      const tasks: TableCellTask[] = this.options.tableTasks === undefined ? [] : this.options.tableTasks;
+      result.tables = await this.runTableOcr(tasks, result.attachments);
+      return result;
     } finally {
       if (packer !== null) {
         try {
@@ -202,14 +241,204 @@ export class OcrBatchManager {
           // release 失败忽略
         }
       }
+      this.drainDeferred();
       this.running = false;
     }
   }
 
   // ------------------------------------------------------------------ 内部实现
 
-  /** 转调页面注册的填白实现（包装成 Promise，异常带页码）。 */
-  private async applyMask(
+  // ------------------------------------------------------------------ 表格逐格 OCR
+
+  /**
+   * 对每个 `ocrEnabled` 的表格做逐格 OCR（串行、每格 5s、总计 60s）。
+   *
+   * 关键点（坐标系，C 项注释订正）：`cellRegions(rect, pageW, pageH, rows, cols)` 接受的是
+   * **画布区域截图**的像素尺寸。这里从「页 JPEG」（`attachments-src/<sha>.jpg`，与 zip 同一份）解码，
+   * 拿到的就是**画布区域**像素图 —— 对象归一化坐标与落盘 JPEG **同基准**，所以 `rect` 直接按该图
+   * 尺寸换算即可，**不要**改成整窗截图。若将来必须改：换算放 `collectTableTasks` / `finish()` 侧
+   * （offset = 横屏 rail 73vp / 竖屏顶栏 49vp），不要在这里偷偷加偏移，否则整体错位。
+   *
+   * 裁剪方式：**每格重新从 JPEG 解码一次再 `crop`**。`PixelMap.crop()` 是就地修改，
+   * 复用同一张图会让后续格子的坐标失效；每格解码的代价（≤36 格）远小于坐标错位的风险。
+   */
+  private async runTableOcr(tasks: TableCellTask[], attachments: Attachment[]): Promise<TableOcrResult[]> {
+    const results: TableOcrResult[] = [];
+    if (tasks.length === 0) {
+      return results;
+    }
+    const deadline: number = Date.now() + TABLE_OCR_TIMEOUT_MS;
+    for (const task of tasks) {
+      if (this.cancelled) {
+        results.push(this.tableFailed(task, 0, '已取消识别'));
+        continue;
+      }
+      if (task.pageIndex < 0 || task.pageIndex >= attachments.length) {
+        results.push(this.tableFailed(task, 0, '页面截图缺失'));
+        continue;
+      }
+      const sha256: string = attachments[task.pageIndex].sha256;
+      let bytes: ArrayBuffer;
+      try {
+        bytes = this.options.store.readSourceBytes(sha256);
+      } catch (error) {
+        results.push(this.tableFailed(task, 0, `读取页面图失败：${describeError(error as object)}`));
+        continue;
+      }
+      let pagePixel: image.PixelMap | null = null;
+      let cells: CellRegion[] = [];
+      let pageW: number = 0;
+      let pageH: number = 0;
+      try {
+        pagePixel = await this.decodePixel(bytes);
+        const info: image.ImageInfo = await pagePixel.getImageInfo();
+        pageW = info.size.width;
+        pageH = info.size.height;
+        cells = cellRegions(task.rect, pageW, pageH, task.rows, task.cols);
+      } catch (error) {
+        results.push(this.tableFailed(task, 0, `页面图解析失败：${describeError(error as object)}`));
+        continue;
+      } finally {
+        if (pagePixel !== null) {
+          this.releasePixelMap(pagePixel);
+        }
+      }
+      // 逐格识别（串行）
+      const texts: string[] = [];
+      let failed: number = 0;
+      for (let index = 0; index < cells.length; index++) {
+        if (this.cancelled || Date.now() > deadline) {
+          failed += cells.length - index;
+          break;
+        }
+        const text: string | null = await this.recognizeCell(bytes, cells[index]);
+        if (text === null) {
+          failed++;
+          texts.push('');
+        } else {
+          texts.push(text);
+        }
+        if (this.options.onProgress !== undefined) {
+          this.options.onProgress(
+            `正在识别表格 ${Math.min(index + 1, cells.length)}/${cells.length} 格…`,
+            (task.pageIndex + 1) / Math.max(1, attachments.length)
+          );
+        }
+      }
+      // 失败格数 > 一半 → 放弃该表（回退占位符），否则拼 Markdown
+      // D2（reviewer 阻塞缺陷）：格子数必须 = rows*cols，否则是空壳表（禁止 tableToMarkdown([]) 产出 \|   |   |\）
+      if (cells.length !== task.rows * task.cols) {
+        results.push(
+          this.tableFailed(task, cells.length, '表格格子数异常：已保留原图')
+        );
+        continue;
+      }
+      if (failed > Math.floor(cells.length / 2)) {
+        results.push(this.tableFailed(task, failed, failed >= cells.length ? '表格识别超时，已保留原图' : '表格识别失败格过多'));
+        continue;
+      }
+      const matrix: string[][] = [];
+      for (let row = 0; row < task.rows; row++) {
+        const line: string[] = [];
+        for (let col = 0; col < task.cols; col++) {
+          line.push(texts[row * task.cols + col] === undefined ? '' : texts[row * task.cols + col]);
+        }
+        matrix.push(line);
+      }
+      results.push({
+        id: task.id,
+        pageIndex: task.pageIndex,
+        ok: true,
+        markdown: tableToMarkdown(matrix),
+        failedCells: failed,
+        reason: ''
+      });
+      console.info(`[hw] table ocr id=${task.id} cells=${cells.length} failed=${failed} ok=1`);
+    }
+    return results;
+  }
+
+  /**
+   * 单格识别：重新解码 → crop → recognize，5s 超时；失败/超时返回 null。
+   *
+   * D4（reviewer 阻塞缺陷）：**超时那一路不能立刻 release PixelMap**。
+   * 超时只是我们不等了，但 native 侧的 `recognizeText` 仍在读这块内存，
+   * 立刻 release 会踩 use-after-free / use-after-release 导致整批崩溃。
+   * 因此超时把 PixelMap 记进 `deferredReleases`，由整批收尾（`run()` 的 finally）统一释放。
+   */
+  private async recognizeCell(bytes: ArrayBuffer, cell: CellRegion): Promise<string | null> {
+    let pixel: image.PixelMap | null = null;
+    let timedOut: boolean = false;
+    try {
+      pixel = await this.decodePixel(bytes);
+      const region: image.Region = {
+        x: cell.x,
+        y: cell.y,
+        size: { width: cell.w, height: cell.h }
+      };
+      await pixel.crop(region);
+      const text: string = await this.withTimeout(this.recognize(pixel), TABLE_CELL_TIMEOUT_MS);
+      return text;
+    } catch (error) {
+      timedOut = pixel !== null;
+      return null;
+    } finally {
+      if (pixel !== null) {
+        if (timedOut) {
+          // 交给整批收尾释放（识别 promise 可能仍在跑）
+          this.deferredReleases.push(pixel);
+        } else {
+          this.releasePixelMap(pixel);
+        }
+      }
+    }
+  }
+
+  /** 整批收尾：释放所有「超时未等到」的 PixelMap。 */
+  private drainDeferred(): void {
+    for (const pixel of this.deferredReleases) {
+      this.releasePixelMap(pixel);
+    }
+    this.deferredReleases = [];
+  }
+
+  /** 从 JPEG 字节解码 PixelMap（每格一次，避免就地 crop 污染）。 */
+  private async decodePixel(bytes: ArrayBuffer): Promise<image.PixelMap> {
+    const source: image.ImageSource = image.createImageSource(bytes);
+    try {
+      return await source.createPixelMap();
+    } finally {
+      source.release().catch(() => {
+        // 释放失败忽略
+      });
+    }
+  }
+
+  /** 给识别加超时（超时 reject，上层按失败格计数）。 */
+  private withTimeout(task: Promise<string>, ms: number): Promise<string> {
+    return new Promise<string>((resolve: (value: string) => void, reject: (error: Object) => void) => {
+      const timer: number = setTimeout(() => {
+        reject(new Error('识别超时'));
+      }, ms);
+      task.then(
+        (value: string) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error: Object) => {
+          clearTimeout(timer);
+          reject(error);
+        }
+      );
+    });
+  }
+
+  private tableFailed(task: TableCellTask, failedCells: number, reason: string): TableOcrResult {
+    console.info(`[hw] table ocr id=${task.id} ok=0 reason=${reason}`);
+    return { id: task.id, pageIndex: task.pageIndex, ok: false, markdown: '', failedCells: failedCells, reason: reason };
+  }
+
+  /** 转调页面注册的填白实现（包装成 Promise，异常带页码）。 */  private async applyMask(
     impl: (pageIndex: number, regions: RegionBox[]) => Promise<void>,
     pageIndex: number,
     regions: RegionBox[]
@@ -339,6 +568,7 @@ export class OcrBatchManager {
     return {
       pageResults: pageResults,
       attachments: outcome.attachments,
+      tables: [],
       pageTexts: pageTexts,
       rawText: rawText,
       text: text,

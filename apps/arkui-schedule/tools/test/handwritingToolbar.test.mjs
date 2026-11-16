@@ -1,4 +1,4 @@
-// 手写板竖屏工具条「布局断言」（源码级，防真机回归）。
+﻿// 手写板竖屏工具条「布局断言」（源码级，防真机回归）。
 //
 // 背景（真机 1600×2560 竖屏实测）：菜单栏「只显示钢和向下箭头，没有显示钢笔」、
 // 粗细微菜单 5 个选项空白、删除页的「−」看不见、最右「完成」被省略号截断。
@@ -737,5 +737,112 @@ describe('手写板退出：按钮 / 系统返回 / 草稿落盘', () => {
     assert.ok(/fitDraftToLimits\(doc, DRAFT_MAX_PAGES, DRAFT_MAX_BYTES\)/.test(builderBody('saveDraftNow')), '必须走 fitDraftToLimits');
     // 空内容不写盘（避免下次进来恢复出空白）
     assert.ok(/!hasContent\(doc\)/.test(builderBody('saveDraftNow')), '空草稿不得写盘');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B3 步 1：完成流程（遮罩 + 占位符 + 反馈）的源码级集成断言
+// ---------------------------------------------------------------------------
+
+describe('完成流程：对象遮罩、占位符与完成反馈', () => {
+  test('finish() 合并了 objectsToMask 的矩形（插入对象区域不送 OCR）', () => {
+    const finish = builderBody('finish');
+    assert.match(finish, /mergeObjectMasks\(/, 'finish 必须把插入对象合并进遮罩');
+    assert.match(finish, /pageRegions: maskRegions/, '传给 OCR 的必须是合并后的遮罩');
+    const merge = builderBody('mergeObjectMasks');
+    assert.match(merge, /objectsToMask\(/, '合并逻辑必须调用 objectsToMask（唯一开关点）');
+    assert.match(merge, /objectsOfPage\(this\.objectsByPage/, '遮罩必须按页取对象（不串页）');
+  });
+
+  test('正文占位符按 y 升序拼装，且图片/表格各用自己的文案', () => {
+    const compose = builderBody('composeBodyWithObjects');
+    assert.match(compose, /sortObjectsByPosition\(/, '占位符必须按 y 升序（同 y 按 x）');
+    assert.match(compose, /placeholderOf\(object, index \+ 1\)/, '每页占位符要带页号');
+    const one = builderBody('placeholderOf');
+    assert.match(one, /tablePlaceholder\(rows, cols, pageNumber\)/, '表格用 tablePlaceholder');
+    assert.match(one, /objectPlaceholder\(object, pageNumber\)/, '图片/框用 objectPlaceholder');
+  });
+
+  test('完成 toast 改成「已保存 N 页手迹」', () => {
+    const finish = builderBody('finish');
+    assert.match(finish, /已保存 \$\{result\.attachments\.length\} 页手迹/, 'toast 必须是「已保存 N 页手迹」');
+    assert.equal(/识别完成：/.test(finish), false, '旧的「识别完成：…」文案必须去掉');
+  });
+
+  test('编辑页同时显示「手迹 N 页」（正文行 + 附件区）', () => {
+    const editorPath = join(here, '..', '..', 'entry', 'src', 'main', 'ets', 'components', 'RecordEditorView.ets');
+    const editor = readFileSync(editorPath, 'utf8');
+    const hits = [...editor.matchAll(/手迹 \$\{this\.attachments\.length\} 页/g)];
+    assert.ok(hits.length >= 2, `正文行与附件区都应有「手迹 N 页」，实际 ${hits.length} 处`);
+  });
+});
+
+describe('表格逐格 OCR（B3 步 2）的源码级接线', () => {
+  test('finish() 把 ocrEnabled 的表格收集成任务并传给 OCR（含 cellRegions 使用点）', () => {
+    const finish = builderBody('finish');
+    assert.match(finish, /tableTasks: this\.collectTableTasks\(ids\)/, 'finish 必须收集表格任务');
+    const collect = builderBody('collectTableTasks');
+    assert.match(collect, /tableOcrEnabled\(object\)/, '只收开启识别的表格');
+    // cellRegions 在管理器里用（整页截图坐标系）
+    const manager = readFileSync(join(here, '..', '..', 'entry', 'src', 'harmony', 'ets', 'ocr', 'OcrBatchManager.ets'), 'utf8');
+    assert.match(manager, /cellRegions\(task\.rect, pageW, pageH, task\.rows, task\.cols\)/, '必须用 cellRegions 换算格子');
+  });
+
+  test('成功路径用 tableToMarkdown，失败路径回退 tablePlaceholder', () => {
+    const manager = readFileSync(join(here, '..', '..', 'entry', 'src', 'harmony', 'ets', 'ocr', 'OcrBatchManager.ets'), 'utf8');
+    assert.match(manager, /markdown: tableToMarkdown\(matrix\)/, '成功必须产出 Markdown');
+    const compose = builderBody('composeBodyWithObjects');
+    assert.match(compose, /markdowns\.get\(object\.id\)/, '正文优先用识别出的 Markdown');
+    const one = builderBody('placeholderOf');
+    assert.match(one, /tablePlaceholder\(rows, cols, pageNumber\)/, '失败/关闭回退占位符');
+  });
+
+  test('超时与失败格策略：每格 5s、总 60s、失败过半放弃', () => {
+    const manager = readFileSync(join(here, '..', '..', 'entry', 'src', 'harmony', 'ets', 'ocr', 'OcrBatchManager.ets'), 'utf8');
+    assert.match(manager, /TABLE_CELL_TIMEOUT_MS/, '每格超时用常量');
+    assert.match(manager, /TABLE_OCR_TIMEOUT_MS/, '总超时用常量');
+    assert.match(manager, /failed > Math\.floor\(cells\.length \/ 2\)/, '失败格数过半必须放弃该表');
+    assert.match(manager, /表格识别超时，已保留原图/, '失败要有可读原因');
+  });
+
+  test('ocrEnabled 开关写回对象（赋值存在 + 重绘）', () => {
+    const toggle = builderBody('toggleTableOcr');
+    assert.match(toggle, /ocrEnabled: !tableOcrEnabled\(table\)/, '开关必须写回 ocrEnabled');
+    assert.match(toggle, /this\.writeObjects\(/, '写回当前页');
+    assert.match(toggle, /this\.redrawObjects\(\)/, '必须重绘（关闭后整块填白）');
+    const insert = builderBody('insertTable');
+    assert.match(insert, /canOcrTable\(rows, cols\)/, '插入时按 canOcrTable 决定是否识别');
+    assert.match(insert, /表格超过 6×6，已关闭文字识别/, '超限必须提示');
+  });
+});
+
+describe('reviewer 阻塞缺陷 D2 / D4 的源码级回归', () => {
+  const managerPath = join(here, '..', '..', 'entry', 'src', 'harmony', 'ets', 'ocr', 'OcrBatchManager.ets');
+
+  test('D2：cellRegions 数量 != rows*cols 时直接 failed（不产出空壳 Markdown）', () => {
+    const manager = readFileSync(managerPath, 'utf8');
+    assert.match(
+      manager,
+      /if \(cells\.length !== task\.rows \* task\.cols\) \{/,
+      '必须有「格子数 !== rows*cols」的守卫'
+    );
+    assert.match(manager, /表格格子数异常：已保留原图/, '守卫要给可读原因');
+    // 守卫必须在 tableToMarkdown 之前（否则空壳会先被拼出来）
+    const guard = manager.indexOf('cells.length !== task.rows * task.cols');
+    const markdown = manager.indexOf('markdown: tableToMarkdown(matrix)');
+    assert.ok(guard > 0 && markdown > 0 && guard < markdown, '守卫必须早于 tableToMarkdown');
+  });
+
+  test('D4：超时/失败分支不直接 release（改由 deferredReleases 收尾释放）', () => {
+    const manager = readFileSync(managerPath, 'utf8');
+    const cellBodyStart = manager.indexOf('private async recognizeCell');
+    assert.ok(cellBodyStart > 0, '找不到 recognizeCell 的定义');
+    const cell = manager.slice(cellBodyStart, manager.indexOf('private async decodePixel'));
+    assert.match(cell, /this\.deferredReleases\.push\(pixel\)/, '超时路径必须把 PixelMap 交给延迟释放');
+    // 超时分支内不得出现 immediate release 调用
+    const timeoutBranch = cell.slice(cell.indexOf('timedOut'), cell.indexOf('finally'));
+    assert.equal(/this\.releasePixelMap\(/.test(timeoutBranch), false, '超时分支不得直接释放（use-after-release）');
+    assert.match(manager, /private drainDeferred\(\): void/, '必须有整批收尾释放');
+    assert.match(manager, /this\.drainDeferred\(\)/, 'run() 收尾必须调用 drainDeferred()');
   });
 });

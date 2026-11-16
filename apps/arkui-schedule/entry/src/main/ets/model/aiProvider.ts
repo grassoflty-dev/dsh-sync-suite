@@ -5,7 +5,7 @@
  * 密钥单独存（`settingsStore.aiKey`），换源不必重填 key，也不必手抄一堆端点字段。
  *
  * 预设源全部是 **OpenAI 兼容的 API Key 模式**（含 codex，走 api.openai.com，不是 ChatGPT 订阅登录）；
- * OpenRouter 用 `provider/model` 命名，Ollama 是本地服务（通常不需要 key，但本地反代可能要）。
+ * OpenRouter 用 `provider/model` 命名；本地自建服务请选「自定义」并手填地址（key 可留空）。
  * 模型名允许用户手改（防模型下线），因此 `resolveModel` 对非空模型名一律保留。
  *
  * B2 起本文件还提供「在线拉模型列表」：`parseModelsResponse`（纯解析）+ `modelsURL`（拼 /models）
@@ -20,14 +20,12 @@ export interface AiModelOption {
 
 /** 一个可选的 AI 源。 */
 export interface AiProviderPreset {
-  id: 'deepseek' | 'opencode-go' | 'codex' | 'openrouter' | 'ollama' | 'custom';
+  id: 'deepseek' | 'opencode-go' | 'codex' | 'openrouter' | 'custom';
   label: string;
   baseURL: string;
   models: AiModelOption[];
   /** 一行自助引导：去哪拿 key / 用什么形态的凭据（直接显示在 Key 输入框下方）。 */
   keyHint: string;
-  /** 实验源：端点尚未实测，界面应弱化提示，不当成稳定能力宣传。 */
-  experimental?: boolean;
 }
 
 /** 顺序即设置页展示顺序。 */
@@ -50,8 +48,7 @@ export const AI_PROVIDERS: AiProviderPreset[] = [
       { id: 'deepseek-v4.1-flash', label: 'DeepSeek V4.1 Flash' },
       { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' }
     ],
-    keyHint: 'OpenCode Go 控制台取 key；端点未实测（标「实验」），失败先查 key 与地址',
-    experimental: true
+    keyHint: 'OpenCode Go 控制台取 key（OpenAI 兼容端点），失败先查 key 与地址'
   },
   {
     id: 'codex',
@@ -76,17 +73,6 @@ export const AI_PROVIDERS: AiProviderPreset[] = [
     keyHint: 'openrouter.ai/keys 取 key；模型名是 provider/model 形式'
   },
   {
-    id: 'ollama',
-    label: 'Ollama 本地',
-    baseURL: 'http://127.0.0.1:11434/v1',
-    models: [
-      { id: 'llama3.2', label: 'Llama 3.2（本地）' },
-      { id: 'qwen2.5', label: 'Qwen 2.5（本地）' },
-      { id: 'deepseek-r1', label: 'DeepSeek R1（本地）' }
-    ],
-    keyHint: '本地服务通常不需要 key，留空即可（走代理需填代理的 key）'
-  },
-  {
     id: 'custom',
     label: '自定义（OpenAI 兼容）',
     baseURL: '',
@@ -101,8 +87,18 @@ export const DEFAULT_PROVIDER_ID: string = 'deepseek';
 /** 自定义源 id：地址由用户填，预设地址留空。 */
 export const CUSTOM_PROVIDER_ID: string = 'custom';
 
-/** Ollama 本地源 id（失败提示按本地服务定制）。 */
-export const OLLAMA_PROVIDER_ID: string = 'ollama';
+/**
+ * 已下线的本地源 id（预设表里已删除，仅用于把旧设置迁移到「自定义」）。
+ *
+ * 只在这里出现一次：迁移逻辑（`migrateLegacyProviderId`）是唯一消费方。
+ */
+export const LEGACY_OLLAMA_ID: string = 'ollama';
+
+/** 旧源 id 归一：已下线的本地源 → `custom`（地址/模型由调用方原样保留），其它源原样返回。 */
+export function migrateLegacyProviderId(value: string): string {
+  const text: string = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return text === LEGACY_OLLAMA_ID ? CUSTOM_PROVIDER_ID : value;
+}
 
 /** OpenRouter 源 id（模型名是 provider/model 形式）。 */
 export const OPENROUTER_PROVIDER_ID: string = 'openrouter';
@@ -188,7 +184,7 @@ export function normalizeBaseURL(raw: string): string {
 
 /**
  * 是否为可用的接口基地址。先归一，因此用户只填域名（`api.deepseek.com`）也算通过；
- * 不要求域名带点，`http://localhost:11434/v1` 这类本地反代同样放行。
+ * 不要求域名带点，`http://localhost:8080/v1` 这类本地反代同样放行。
  */
 export function isValidBaseURL(raw: string): boolean {
   const text: string = normalizeBaseURL(raw);
@@ -428,7 +424,7 @@ function modelsFailure(status: number, message: string): AiModelsResult {
  * 在线拉取某个源的模型列表（B2）。
  *
  * - `baseURL` 为空时用预设地址（自定义源为空 → 返回失败，不猜地址）；
- * - `apiKey` 为空时不发 Authorization（Ollama 本地服务通常不校验 key）；
+ * - `apiKey` 为空时不发 Authorization（本地自建服务通常不校验 key）；
  * - `fetchImpl` 可注入（测试用假实现），缺省 `globalThis.fetch`；
  * - **永不抛异常**：网络失败/超时/非 200 都折成 `{ok:false, status, message}`。
  *
@@ -535,17 +531,11 @@ export function hintForProvider(providerId: string, status: number): string {
     return '';
   }
   if (status === -1 || status === 0) {
-    if (preset.id === OLLAMA_PROVIDER_ID) {
-      return '本地服务不可达：请确认已运行 ollama serve，且监听 127.0.0.1:11434';
-    }
     return status === -1 ? '网络或端点不可达（超时），请检查网络/代理' : '网络或端点不可达，请检查网络/代理与防火墙';
   }
   if (status === 401) {
     if (preset.id === CUSTOM_PROVIDER_ID) {
       return 'key 无效或过期，请核对自定义服务的 key';
-    }
-    if (preset.id === OLLAMA_PROVIDER_ID) {
-      return '本地服务通常不校验 key；若走了代理，请核对代理的 key';
     }
     if (preset.id === OPENROUTER_PROVIDER_ID) {
       return 'key 无效或过期，请到 openrouter.ai/keys 重新复制';
@@ -557,13 +547,10 @@ export function hintForProvider(providerId: string, status: number): string {
   }
   if (status === 404) {
     if (preset.id === 'opencode-go') {
-      return '端点可能已变更（OpenCode Go 端点未实测），请核对地址';
+      return '端点可能已变更（OpenCode Go），请核对地址';
     }
     if (preset.id === CUSTOM_PROVIDER_ID) {
       return '端点地址可能不对，请检查 …/v1 路径';
-    }
-    if (preset.id === OLLAMA_PROVIDER_ID) {
-      return '端点可能不对：Ollama 需要 /v1 前缀（http://127.0.0.1:11434/v1）';
     }
     if (preset.id === OPENROUTER_PROVIDER_ID) {
       return '模型名是 provider/model 形式（如 deepseek/deepseek-chat），请核对';

@@ -100,7 +100,7 @@ describe('modelsURL：拼 GET /models', () => {
   test('基地址补 /models；已含 /models 不重复', () => {
     assert.equal(modelsURL('https://api.deepseek.com/v1'), 'https://api.deepseek.com/v1/models');
     assert.equal(modelsURL('https://openrouter.ai/api/v1'), 'https://openrouter.ai/api/v1/models');
-    assert.equal(modelsURL('http://127.0.0.1:11434/v1'), 'http://127.0.0.1:11434/v1/models');
+    assert.equal(modelsURL('http://127.0.0.1:8080/v1'), 'http://127.0.0.1:8080/v1/models');
     assert.equal(modelsURL('https://api.deepseek.com/v1/models'), 'https://api.deepseek.com/v1/models');
     assert.equal(modelsURL('https://api.deepseek.com/v1/models/'), 'https://api.deepseek.com/v1/models');
   });
@@ -117,24 +117,24 @@ describe('modelsURL：拼 GET /models', () => {
 
 describe('fetchModels：200 成功', () => {
   test('用注入的 fake fetch，GET + Accept/Authorization 头，返回模型列表', async () => {
-    const { impl, calls } = fakeFetch(200, JSON.stringify({ data: [{ id: 'llama3.2' }, { id: 'qwen2.5' }] }));
-    const result = await fetchModels('ollama', 'http://127.0.0.1:11434/v1', 'sk-test', impl);
+    const { impl, calls } = fakeFetch(200, JSON.stringify({ data: [{ id: 'custom-model' }, { id: 'my-model' }] }));
+    const result = await fetchModels('custom', 'https://proxy.example.test/v1', 'sk-test', impl);
     assert.equal(result.ok, true);
     assert.equal(result.status, 200);
-    assert.deepEqual(result.models, ['llama3.2', 'qwen2.5']);
+    assert.deepEqual(result.models, ['custom-model', 'my-model']);
     assert.match(result.message, /成功：HTTP 200 \/ 2 个模型/);
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, 'http://127.0.0.1:11434/v1/models');
+    assert.equal(calls[0].url, 'https://proxy.example.test/v1/models');
     assert.equal(calls[0].init.method, 'GET');
     assert.equal(calls[0].init.headers['Accept'], 'application/json');
     assert.equal(calls[0].init.headers['Authorization'], 'Bearer sk-test');
   });
 
-  test('没有 key 时不发 Authorization（Ollama 本地服务）', async () => {
-    const { impl, calls } = fakeFetch(200, '{"data":[{"id":"llama3.2"}]}');
-    const result = await fetchModels('ollama', '', '', impl);
+  test('没有 key 时不发 Authorization（自建本地服务通常不校验 key）', async () => {
+    const { impl, calls } = fakeFetch(200, '{"data":[{"id":"my-model"}]}');
+    const result = await fetchModels('custom', 'http://127.0.0.1:8080/v1', '', impl);
     assert.equal(result.ok, true);
-    assert.equal(calls[0].url, 'http://127.0.0.1:11434/v1/models', '空 baseURL 用预设地址');
+    assert.equal(calls[0].url, 'http://127.0.0.1:8080/v1/models', '用填入的本地地址');
     assert.equal('Authorization' in calls[0].init.headers, false);
     assert.deepEqual(Object.keys(calls[0].init.headers), ['Accept'], '不带 key 时只有 Accept 头');
   });
@@ -187,7 +187,7 @@ describe('fetchModels：失败不抛', () => {
     const impl = async () => {
       throw new Error('ECONNREFUSED');
     };
-    const result = await fetchModels('ollama', '', '', impl);
+    const result = await fetchModels('custom', 'https://proxy.example.test/v1', '', impl);
     assert.equal(result.ok, false);
     assert.equal(result.status, 0);
     assert.match(result.message, /网络异常/);
