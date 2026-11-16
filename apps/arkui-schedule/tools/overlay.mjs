@@ -127,9 +127,12 @@ function status() {
   const manifest = readManifest()
   if (manifest === null) {
     console.log('覆盖层：未应用（工作区为「共享源码 + 平台目录」的原始形态）')
+    // ASCII marker for scripts (build-harmony.ps1 asserts it; PS reads UTF-8 as GBK).
+    console.log('[overlay] applied=false')
     return 0
   }
   console.log(`覆盖层：已应用（覆盖 ${manifest.replaced.length} / 新建 ${manifest.created.length}，时间 ${manifest.at}）`)
+  console.log('[overlay] applied=true')
   return 0
 }
 

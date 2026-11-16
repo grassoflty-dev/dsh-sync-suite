@@ -115,32 +115,39 @@ try { $launcher.ProcessorAffinity = [IntPtr]$mask } catch { Write-Warning "affin
 $started = $launcher.StartTime
 $deadline = (Get-Date).AddHours(2)
 $tick = 0
-while (-not $launcher.HasExited -and (Get-Date) -lt $deadline) {
-  Start-Sleep -Seconds 2
-  $tick++
-  foreach ($p in Get-Process -Name node, java, cmd -ErrorAction SilentlyContinue) {
-    try {
-      if ($p.Id -eq $PID) { continue }
-      if ($p.StartTime -lt $started.AddSeconds(-5)) { continue }
-      if ($p.PriorityClass -ne $Priority) { $p.PriorityClass = $Priority }
-      if ($p.ProcessorAffinity -ne [IntPtr]$mask) { $p.ProcessorAffinity = [IntPtr]$mask }
-    } catch { }
+try {
+  while (-not $launcher.HasExited -and (Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 2
+    $tick++
+    foreach ($p in Get-Process -Name node, java, cmd -ErrorAction SilentlyContinue) {
+      try {
+        if ($p.Id -eq $PID) { continue }
+        if ($p.StartTime -lt $started.AddSeconds(-5)) { continue }
+        if ($p.PriorityClass -ne $Priority) { $p.PriorityClass = $Priority }
+        if ($p.ProcessorAffinity -ne [IntPtr]$mask) { $p.ProcessorAffinity = [IntPtr]$mask }
+      } catch { }
+    }
+    if ($tick % 15 -eq 0) {
+      $load = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
+      Write-Host "[$([DateTime]::Now.ToString('HH:mm:ss'))] building... system CPU ~$load%"
+    }
   }
-  if ($tick % 15 -eq 0) {
-    $load = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
-    Write-Host "[$([DateTime]::Now.ToString('HH:mm:ss'))] building... system CPU ~$load%"
-  }
-}
 
-$launcher.WaitForExit()
-$code = $launcher.ExitCode
+  $launcher.WaitForExit()
+  $code = $launcher.ExitCode
+} finally {
+  # Restore the shared tree as soon as the build process is done (also on Ctrl-C / timeout),
+  # so a hung pipe or an interrupted run can never leave the overlay materialized.
+  & node $overlay restore
+  if ($LASTEXITCODE -ne 0) { Write-Warning "overlay restore failed (exit $LASTEXITCODE)" }
+  $status = (& node $overlay status) -join ' '
+  Write-Host "overlay: $status"
+  if ($status -notmatch 'applied=false') { Write-Warning "overlay may still be applied - run: node tools/overlay.mjs restore" }
+}
 Write-Host ""
 Write-Host "Exit code: $code"
 Write-Host "Log: $log"
 Get-Content $log -Tail 30 -ErrorAction SilentlyContinue
-
-# Always restore the shared tree, even when the build failed.
-& node $overlay restore
 
 if ($code -eq 0) {
   # BUILD SUCCESSFUL is not delivery: assert the artifacts actually contain the feature.
