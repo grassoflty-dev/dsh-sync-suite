@@ -456,6 +456,8 @@ describe('http 桥（不联网，宿主回传伪造响应）', () => {
       repoUrl: 'https://git.example.invalid/owner/private.git',
       branch: 'main',
       deviceId: 'phone-a',
+      // 用户名由 ArkTS 侧解析后传入（GitHub 取 x-access-token；Gitee 是登录名）
+      username: 'x-access-token',
       token: FAKE_TOKEN
     });
     assert.equal(error.code, 'E_AUTH');

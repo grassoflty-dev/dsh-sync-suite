@@ -1,4 +1,4 @@
-﻿/**
+/**
  * syncController — App 级 Git 同步入口（启动自动 pull / 下拉刷新共用一份实例）。
  *
  * 为什么需要它：`GitSyncService` 构造时要 `webview.WebviewController`，而控制器只能由页面里的
@@ -97,7 +97,10 @@ class SyncController {
       deviceId: settings.deviceId,
       token: settings.token,
       authorName: authorName,
-      authorEmail: `${authorName}@users.noreply.github.com`
+      authorEmail: `${authorName}@users.noreply.github.com`,
+      // P0：Gitee 的 HTTPS 用户名必须=登录名；这里只透传，兜底规则在 model/gitAuth.ts
+      platform: settings.gitPlatform,
+      gitUsername: settings.gitUsername
     };
     return config;
   }

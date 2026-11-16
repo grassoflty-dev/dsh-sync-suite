@@ -55,7 +55,8 @@
   var MAX_MESSAGE_LENGTH = 600;
 
   /** call/args 里允许携带的配置字段（token 永不回显）。 */
-  var CONFIG_KEYS = ['repoUrl', 'branch', 'deviceId', 'token', 'authorName', 'authorEmail'];
+  // `username` 是 HTTPS 认证用户名（Gitee = 登录名，GitHub = x-access-token），由 ArkTS 侧解析后传入
+  var CONFIG_KEYS = ['repoUrl', 'branch', 'deviceId', 'token', 'authorName', 'authorEmail', 'username'];
 
   var SUPPORTED_OPS = [
     'init',
@@ -1024,7 +1025,13 @@
 
   // ---------------------------------------------------------------- 认证
 
-  /** GitHub/Gitee HTTPS：token 作为密码，用户名固定 x-access-token。SSH 不支持。 */
+  /**
+   * HTTPS 认证：token 作为密码，用户名由 **ArkTS 侧传下来的 config.username** 决定。
+   *
+   * Gitee 的用户名必须=登录名（写死 x-access-token 必然 401），GitHub 才是 x-access-token。
+   * 兜底规则在 model/gitAuth.ts 的 esolveGitUsername()，这里只消费，不再硬编码。
+   * SSH 不支持。
+   */
   function makeOnAuth(config) {
     return function onAuth() {
       var token = config && config.token;
@@ -1032,7 +1039,12 @@
         // 无 token 时取消而不是拿空密码重试；上层会得到 E_AUTH 中文提示
         return { cancel: true };
       }
-      return { username: 'x-access-token', password: token };
+      var username = config && config.username;
+      if (typeof username !== 'string' || username.length === 0) {
+        // 防御：ArkTS 侧漏传用户名时不猜默认值（猜错平台就是 401），直接取消并给中文原因
+        throw bridgeError('E_AUTH', '缺少认证用户名：Gitee 需填写登录名，GitHub 留空即可');
+      }
+      return { username: username, password: token };
     };
   }
 

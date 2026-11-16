@@ -70,6 +70,7 @@ import {
   modelsOf
 } from '../model/aiProvider';
 import type { AiModelOption, AiProviderPreset } from '../model/aiProvider';
+import { assertHttpsUsername, resolveGitUsername } from '../model/gitAuth';
 import { PageLayout } from '../components/PageLayout';
 import { DIVIDER, FONT, HOME_INCLUDE_OTHER_KEY, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
 
@@ -92,6 +93,14 @@ const PANEL_PROVIDER: string = 'provider';
 const PANEL_MODEL: string = 'model';
 const PANEL_PRIVACY: string = 'privacy';
 const PANEL_REPO: string = 'repo';
+/**
+ * Git 用户名字段标识。
+ *
+ * 与 `model/settingsForm.ts` 里的 `FIELD_*` 同构，但那个文件由另一位执行者维护
+ * （他正在加 `gitUsername` 与 `assertHttpsUsername`），所以先放在页面里，
+ * 两份常量值必须一致（守卫测试会盯）。
+ */
+const FIELD_GIT_USERNAME: string = 'gitUsername';
 
 @Entry
 @Component
@@ -120,6 +129,9 @@ struct Settings {
   @State aiModelError: string = '';
   /** AI 接口地址的内联错误（自定义源专用）。 */
   @State aiBaseUrlError: string = '';
+  /** Git 用户名（仅 HTTPS 认证用：GitHub 可留空，Gitee 必填登录名）。 */
+  @State gitUsername: string = '';
+  @State gitUsernameError: string = '';
   // 表单校验提示（逐字段红字）
   @State deviceIdError: string = '';
   @State authorError: string = '';
@@ -237,6 +249,8 @@ struct Settings {
     this.token = settings.token;
     // 记住已保存的 token：输入框被清空时按「沿用旧 token」处理，不要误判为空
     this.savedToken = settings.token;
+    // HTTPS 用户名（Gitee 必填；GitHub 可空）
+    this.gitUsername = settings.gitUsername;
     this.aiKey = settings.aiKey;
     this.aiModel = settings.aiModel;
     this.aiProviderId = settings.aiProviderId;
@@ -288,6 +302,7 @@ struct Settings {
     this.tokenError = '';
     this.aiModelError = '';
     this.aiBaseUrlError = '';
+    this.gitUsernameError = '';
     const applied: SettingsFieldIssue[] = [];
     for (const issue of issues) {
       if (issue.field === FIELD_DEVICE_ID) {
@@ -298,6 +313,8 @@ struct Settings {
         this.repoUrlError = issue.message;
       } else if (issue.field === FIELD_TOKEN) {
         this.tokenError = issue.message;
+      } else if (issue.field === FIELD_GIT_USERNAME) {
+        this.gitUsernameError = issue.message;
       } else if (issue.field === FIELD_AI_MODEL) {
         this.aiModelError = issue.message;
         this.advancedOpen = true;
@@ -335,6 +352,11 @@ struct Settings {
       },
       repoCheck
     );
+    // HTTPS 用户名（Gitee 必填）：用**纠正后**的平台判定，URL 改了平台没改也不会漏报
+    const usernameIssue: SettingsFieldIssue | null = this.gitUsernameIssue(platform);
+    if (usernameIssue !== null) {
+      issues.push(usernameIssue);
+    }
     this.applyIssues(issues);
     // 无可见落点的 issue 不拦保存（Settings 属凭据敏感文件，禁止 console/hilog，故这里静默跳过）。
     const blocking: boolean = this.issuesSummary.length > 0;
@@ -358,7 +380,9 @@ struct Settings {
         aiBaseURL: this.aiBaseURL,
         author: this.author,
         gitPlatform: platform,
-        authMode: this.authMode
+        authMode: this.authMode,
+        // HTTPS 用户名（Gitee 必填登录名；GitHub 留空由同步层回落 x-access-token）
+        gitUsername: this.gitUsername.trim()
       };
       const saved = await settingsStore.save(patch, context);
       if (this.disposed) {
@@ -393,6 +417,7 @@ struct Settings {
   /** 选择认证方式（影响 token 是否必填与示例文案）。 */
   private pickAuthMode(value: string): void {
     this.authMode = normalizeAuthMode(value);
+    this.gitUsernameError = '';
     // 切到 SSH 时 token 不再必填，清掉残留的必填红字
     if (this.authMode === AUTH_SSH) {
       this.tokenError = '';
@@ -405,7 +430,9 @@ struct Settings {
   private basicAuthHeader(): string {
     const encoder: util.TextEncoder = new util.TextEncoder();
     const helper: util.Base64Helper = new util.Base64Helper();
-    return helper.encodeToStringSync(encoder.encodeInto(`x-access-token:${this.token.trim()}`));
+    // P0：用户名必须按平台解析（Gitee = 登录名，写死 x-access-token 必然 401）
+    const username: string = resolveGitUsername(this.gitPlatform, this.gitUsername);
+    return helper.encodeToStringSync(encoder.encodeInto(`${username}:${this.token.trim()}`));
   }
 
   /**
@@ -582,6 +609,42 @@ struct Settings {
 
   private platformLine(): string {
     return `${this.platformText} · ${this.handwritingText} · ${this.ocrText}`;
+  }
+
+  /** 用户名输入框占位文案（跟着平台变）。 */
+  private gitUsernamePlaceholder(): string {
+    if (this.gitPlatform === PLATFORM_GITEE) {
+      return '必填：Gitee 登录名';
+    }
+    if (this.gitPlatform === PLATFORM_GITHUB) {
+      return '可留空（默认 x-access-token）';
+    }
+    return '可选';
+  }
+
+  /** 用户名下方的一行说明（无错误时显示）。 */
+  private gitUsernameHint(): string {
+    if (this.gitPlatform === PLATFORM_GITEE) {
+      return 'Gitee 的 HTTPS 认证用「登录名 + 私人令牌作密码」，用户名留空必然 401。';
+    }
+    if (this.gitPlatform === PLATFORM_GITHUB) {
+      return 'GitHub 可留空：留空时按 x-access-token 认证。';
+    }
+    return '自建/其他托管：按服务端要求填写，留空则用 x-access-token。';
+  }
+
+  /**
+   * HTTPS 用户名规则：直接复用 `model/gitAuth.ts` 的 `assertHttpsUsername`
+   * （设置页与同步入口共用同一条规则，避免两处判定漂移）。
+   *
+   * 平台用**自动纠正后**的值判断，避免「URL 是 gitee、平台还是 github」时漏报。
+   */
+  private gitUsernameIssue(platform: string): SettingsFieldIssue | null {
+    const message: string | null = assertHttpsUsername(platform, this.authMode, this.gitUsername);
+    if (message === null) {
+      return null;
+    }
+    return { field: FIELD_GIT_USERNAME, message: message };
   }
 
   // ------------------------------------------------------------------ 同步逻辑
@@ -844,6 +907,30 @@ struct Settings {
         .color($r('app.color.divider'))
       if (this.repoUrlError.length > 0) {
         this.ErrorText(this.repoUrlError)
+      }
+
+      // HTTPS 认证必须带用户名：GitHub 可留空（默认 x-access-token），Gitee 必填登录名，否则必 401
+      if (this.authMode === AUTH_HTTPS) {
+        this.FieldLabel('用户名（HTTPS 认证）')
+        TextInput({ text: this.gitUsername, placeholder: this.gitUsernamePlaceholder() })
+          .width('100%')
+          .height(TOUCH_MIN + SPACING.xs)
+          .fontSize(FONT.body)
+          .backgroundColor($r('app.color.page_background'))
+          .borderRadius(RADIUS.none)
+          .padding({ left: 0, right: 0 })
+          .onChange((value: string) => {
+            this.gitUsername = value;
+            this.gitUsernameError = '';
+          })
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+        if (this.gitUsernameError.length > 0) {
+          this.ErrorText(this.gitUsernameError)
+        } else {
+          this.HintLine(this.gitUsernameHint())
+        }
       }
 
       this.FieldLabel(this.authMode === AUTH_SSH ? '访问 token（SSH 方式可留空）' : '访问 token（仅存本机）')

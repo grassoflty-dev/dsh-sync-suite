@@ -229,10 +229,22 @@ describe('幽灵报错守卫：每个 issue 都必须有可见落点', () => {
     [FIELD_REPO_URL]: 'repoUrlError',
     [FIELD_TOKEN]: 'tokenError',
     [FIELD_AI_MODEL]: 'aiModelError',
-    [FIELD_AI_BASE_URL]: 'aiBaseUrlError'
+    [FIELD_AI_BASE_URL]: 'aiBaseUrlError',
+    // P0：HTTPS 用户名（Gitee 必填登录名）。字段常量定义在 Settings 页里（model 侧由别人维护）
+    gitUsername: 'gitUsernameError'
   };
 
-  test('checkSettingsFields 可能返回的 field 集合 == 页面映射表（新增字段必须同步补 UI）', () => {
+  /** `checkSettingsFields`（model 侧）能返回的 field：不含页面自行追加的 gitUsername。 */
+  const MODEL_FIELDS = [
+    FIELD_DEVICE_ID,
+    FIELD_AUTHOR,
+    FIELD_REPO_URL,
+    FIELD_TOKEN,
+    FIELD_AI_MODEL,
+    FIELD_AI_BASE_URL
+  ];
+
+  test('checkSettingsFields 可能返回的 field 全部有页面映射', () => {
     // 一次把所有分支都踩中：空设备标识 / 空作者 / 坏地址 / 无 token / 自定义源缺模型与地址
     const issues = check({
       deviceId: '',
@@ -245,7 +257,32 @@ describe('幽灵报错守卫：每个 issue 都必须有可见落点', () => {
       aiBaseURL: ''
     });
     const returned = [...new Set(issues.map((issue) => issue.field))].sort();
-    assert.deepEqual(returned, Object.keys(FIELD_TO_STATE).sort(), 'field 集合与页面映射表必须一致');
+    assert.deepEqual(returned, [...MODEL_FIELDS].sort(), 'model 侧 field 集合变了就要同步补 UI');
+    for (const field of returned) {
+      assert.ok(field in FIELD_TO_STATE, `field ${field} 没有页面映射（会变成幽灵报错）`);
+    }
+  });
+
+  test('P0：HTTPS 用户名复用 assertHttpsUsername，且 FIELD_GIT_USERNAME 走同一套管线', () => {
+    const page = readSettingsPage();
+    assert.match(page, /const FIELD_GIT_USERNAME: string = 'gitUsername';/, '页面必须有该字段常量');
+    assert.match(
+      page,
+      /assertHttpsUsername\(platform, this\.authMode, this\.gitUsername\)/,
+      '必须复用 model/gitAuth 的规则（不要页面自带一套）'
+    );
+    assert.match(page, /if \(usernameIssue !== null\) \{\s*\n\s*issues\.push\(usernameIssue\);/, '用户名问题要进同一份 issues');
+    assert.match(page, /gitUsername: this\.gitUsername\.trim\(\)/, '保存时必须写进 SettingsPatch');
+    assert.match(page, /this\.gitUsername = settings\.gitUsername;/, '进页面时要回填已保存的用户名');
+  });
+
+  test('P0：用户名占位文案跟着平台变（GitHub 可留空 / Gitee 必填 / 其它可选）', () => {
+    const page = readSettingsPage();
+    assert.match(page, /'必填：Gitee 登录名'/, 'Gitee 占位必须写「必填」');
+    assert.match(page, /'可留空（默认 x-access-token）'/, 'GitHub 占位要说明可留空');
+    assert.match(page, /return '可选';/, '未知平台占位');
+    // 只在 HTTPS 下渲染用户名框（SSH 不该出现）
+    assert.match(page, /if \(this\.authMode === AUTH_HTTPS\) \{[\s\S]{0,400}用户名（HTTPS 认证）/, '用户名框仅 HTTPS 显示');
   });
 
   for (const [field, state] of Object.entries(FIELD_TO_STATE)) {

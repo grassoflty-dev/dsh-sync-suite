@@ -29,6 +29,8 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { checkSyncPrecondition, describeBridgeFailure } from '../model/syncGuard';
+import { assertHttpsUsername, resolveGitUsername } from '../model/gitAuth';
+import { AUTH_HTTPS } from '../model/settingsForm';
 import type { SyncPreconditionInput, SyncPreconditionResult } from '../model/syncGuard';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -54,6 +56,10 @@ export interface GitSyncConfig {
   authorName: string;
   /** 提交作者邮箱 */
   authorEmail: string;
+  /** 托管平台：`github` | `gitee`（决定 HTTPS 用户名兜底规则）。旧数据可缺省。 */
+  platform?: string;
+  /** HTTPS 认证用户名（Gitee 必填 = 登录名）；空串表示未填写。旧数据可缺省。 */
+  gitUsername?: string;
 }
 
 export interface GitSyncResult {
@@ -1067,6 +1073,13 @@ export class GitSyncService {
 
   // -------------------------------------------------------------- 内部：配置与校验
 
+  /** 本次 HTTPS 认证使用的用户名（Gitee = 用户填的登录名；GitHub = x-access-token）。 */
+  private authUsername(): string {
+    const platform: string = this.config.platform === undefined ? '' : this.config.platform;
+    const username: string = this.config.gitUsername === undefined ? '' : this.config.gitUsername;
+    return resolveGitUsername(platform, username);
+  }
+
   private configArgs(): Record<string, string> {
     const args: Record<string, string> = {
       'repoUrl': this.config.repoUrl,
@@ -1074,7 +1087,9 @@ export class GitSyncService {
       'deviceId': this.config.deviceId,
       'token': this.config.token,
       'authorName': this.config.authorName,
-      'authorEmail': this.config.authorEmail
+      'authorEmail': this.config.authorEmail,
+      // 桥的 onAuth 用这个用户名（Gitee = 登录名；GitHub = x-access-token）
+      'username': this.authUsername()
     };
     return args;
   }
@@ -1098,6 +1113,16 @@ export class GitSyncService {
     }
     if (config.token.length === 0) {
       return '请填写访问令牌（GitHub/Gitee Personal Access Token）';
+    }
+    // P0：Gitee 的 HTTPS 用户名必须=登录名（token 只作密码），不能兜底 x-access-token，
+    // 否则一定 401。这里在**发请求前**拦住，任何情况下都不打网络。
+    const usernameProblem: string | null = assertHttpsUsername(
+      config.platform === undefined ? '' : config.platform,
+      AUTH_HTTPS,
+      config.gitUsername === undefined ? '' : config.gitUsername
+    );
+    if (usernameProblem !== null) {
+      return usernameProblem;
     }
     if (!this.ready) {
       return '同步页面尚未就绪：请等待 Web 组件加载完成（onPageEnd 会自动注册代理）';
@@ -1202,7 +1227,7 @@ export class GitSyncService {
     const url: string = base + '/info/refs?service=git-upload-pack';
     const headers: Record<string, string> = { 'User-Agent': 'dsh-arkui-schedule' };
     if (this.config.token.length > 0) {
-      headers['Authorization'] = 'Basic ' + this.base64Text('x-access-token:' + this.config.token);
+      headers['Authorization'] = 'Basic ' + this.base64Text(this.authUsername() + ':' + this.config.token);
     }
     const requestOptions: http.HttpRequestOptions = {
       method: http.RequestMethod.GET,

@@ -161,6 +161,8 @@ export const FIELD_REPO_URL: string = 'repoUrl';
 export const FIELD_TOKEN: string = 'token';
 export const FIELD_AI_MODEL: string = 'aiModel';
 export const FIELD_AI_BASE_URL: string = 'aiBaseURL';
+/** HTTPS 认证用户名（Gitee 必填；GitHub 可留空）。 */
+export const FIELD_GIT_USERNAME: string = 'gitUsername';
 
 /** 字段标识 → 中文名（顶部汇总横幅用）。 */
 export function settingsFieldLabel(field: string): string {
@@ -181,6 +183,9 @@ export function settingsFieldLabel(field: string): string {
   }
   if (field === FIELD_AI_BASE_URL) {
     return 'AI 接口地址';
+  }
+  if (field === FIELD_GIT_USERNAME) {
+    return '用户名';
   }
   return field;
 }

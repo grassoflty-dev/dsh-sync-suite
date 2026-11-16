@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 本机设置存储（设备标识 / 仓库地址 / token / AI 源与模型 / 作者名 / 平台 / 认证方式）。
  *
  * 落盘方式：`@kit.ArkData` 的 `preferences`（值不外泄，不进 Git 同步载荷）。
@@ -47,6 +47,8 @@ export interface ScheduleSettings {
   author: string;
   /** 托管平台：`github` | `gitee`（只影响提示文案与示例）。 */
   gitPlatform: string;
+  /** HTTPS 认证用户名（Gitee 必填 = 登录名；GitHub 留空则用 x-access-token）。旧数据无该字段 = ''。 */
+  gitUsername: string;
   /** 认证方式：`https` | `ssh`（只影响提示文案与 token 是否必填）。 */
   authMode: string;
   /** 上次同步成功的时刻（ISO 8601，空串表示从未同步）。仅用于设置页展示。 */
@@ -75,6 +77,7 @@ export interface SettingsPatch {
   aiBaseURL?: string;
   author?: string;
   gitPlatform?: string;
+  gitUsername?: string;
   authMode?: string;
 }
 
@@ -88,6 +91,7 @@ const KEY_AI_MODEL: string = 'aiModel';
 const KEY_AI_BASE_URL: string = 'aiBaseURL';
 const KEY_AUTHOR: string = 'author';
 const KEY_GIT_PLATFORM: string = 'gitPlatform';
+const KEY_GIT_USERNAME: string = 'gitUsername';
 const KEY_AUTH_MODE: string = 'authMode';
 const KEY_LAST_SYNC_AT: string = 'lastSyncAt';
 const KEY_LAST_SYNC_ERROR: string = 'lastSyncError';
@@ -152,6 +156,8 @@ export class SettingsStore {
     const aiBaseURLRaw = readString(await prefs.get(KEY_AI_BASE_URL, ''), '');
     const author = readString(await prefs.get(KEY_AUTHOR, ''), '');
     const gitPlatform = readString(await prefs.get(KEY_GIT_PLATFORM, PLATFORM_GITHUB), PLATFORM_GITHUB);
+    // 向后兼容：旧版本没有这个键 → 读成空串（Gitee 场景由 assertHttpsUsername 提示补填）
+    const gitUsername = readString(await prefs.get(KEY_GIT_USERNAME, ''), '');
     const authMode = readString(await prefs.get(KEY_AUTH_MODE, AUTH_HTTPS), AUTH_HTTPS);
     const lastSyncAt = readString(await prefs.get(KEY_LAST_SYNC_AT, ''), '');
     const lastSyncError = readString(await prefs.get(KEY_LAST_SYNC_ERROR, ''), '');
@@ -169,6 +175,7 @@ export class SettingsStore {
       aiBaseURL: aiBaseURLFor(aiProviderId, aiBaseURLRaw),
       author: author,
       gitPlatform: normalizePlatform(gitPlatform),
+      gitUsername: gitUsername.trim(),
       authMode: normalizeAuthMode(authMode),
       lastSyncAt: lastSyncAt,
       lastSyncError: lastSyncError,
@@ -235,6 +242,7 @@ export class SettingsStore {
       aiBaseURL: aiBaseURLFor(nextProviderId, patch.aiBaseURL === undefined ? current.aiBaseURL : patch.aiBaseURL),
       author: patch.author === undefined ? current.author : patch.author.trim(),
       gitPlatform: patch.gitPlatform === undefined ? current.gitPlatform : normalizePlatform(patch.gitPlatform),
+      gitUsername: patch.gitUsername === undefined ? current.gitUsername : patch.gitUsername.trim(),
       authMode: patch.authMode === undefined ? current.authMode : normalizeAuthMode(patch.authMode),
       lastSyncAt: current.lastSyncAt,
       lastSyncError: current.lastSyncError,
@@ -249,7 +257,9 @@ export class SettingsStore {
     await prefs.put(KEY_AI_BASE_URL, next.aiBaseURL);
     await prefs.put(KEY_AUTHOR, next.author);
     await prefs.put(KEY_GIT_PLATFORM, next.gitPlatform);
+    await prefs.put(KEY_GIT_USERNAME, next.gitUsername);
     await prefs.put(KEY_AUTH_MODE, next.authMode);
+    await prefs.put(KEY_GIT_USERNAME, next.gitUsername);
     await prefs.put(KEY_LAST_SYNC_AT, next.lastSyncAt);
     await prefs.put(KEY_LAST_SYNC_ERROR, next.lastSyncError);
     await prefs.put(KEY_LAST_SYNC_ACTION, next.lastSyncAction);
@@ -280,12 +290,14 @@ export class SettingsStore {
       aiBaseURL: current.aiBaseURL,
       author: current.author,
       gitPlatform: current.gitPlatform,
+      gitUsername: current.gitUsername,
       authMode: current.authMode,
       lastSyncAt: patch.lastSyncAt === undefined ? current.lastSyncAt : patch.lastSyncAt,
       lastSyncError: patch.lastSyncError === undefined ? current.lastSyncError : patch.lastSyncError,
       lastSyncAction:
         patch.lastSyncAction === undefined ? current.lastSyncAction : normalizeSyncAction(patch.lastSyncAction)
     };
+    await prefs.put(KEY_GIT_USERNAME, next.gitUsername);
     await prefs.put(KEY_LAST_SYNC_AT, next.lastSyncAt);
     await prefs.put(KEY_LAST_SYNC_ERROR, next.lastSyncError);
     await prefs.put(KEY_LAST_SYNC_ACTION, next.lastSyncAction);
