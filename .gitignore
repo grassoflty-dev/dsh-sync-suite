@@ -36,3 +36,6 @@ apps/arkui-schedule/.arkui-x/android/app/libs/
 # 本地签名材料（私钥，绝不入库）
 apps/arkui-schedule/signing/
 
+
+# 真机验收截图（本地产物）
+apps/arkui-schedule/.tmp-accept/
