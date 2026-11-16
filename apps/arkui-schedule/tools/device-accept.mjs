@@ -16,6 +16,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { parseLayoutOutput } from './layout-parse.mjs';
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP = resolve(HERE, '..');
 const REPO = resolve(APP, '..', '..');
@@ -82,37 +84,9 @@ function summarize() {
 function layout(mode = 'simplified') {
   const out = join(TMP, `layout-${Date.now()}.json`);
   const res = cli(['ui', 'layout', '--device', SERIAL, '--format', 'json', '--mode', mode]);
-  const raw = res.out.replace(/\u001b\[[0-9;]*m/g, '');
-  const start = raw.indexOf('[');
-  const end = raw.lastIndexOf(']');
-  if (start < 0 || end <= start) {
-    throw new Error(`ui layout 输出无法解析（找不到 JSON 数组）：${raw.slice(-300)}`);
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw.slice(start, end + 1));
-  } catch (error) {
-    throw new Error(`ui layout JSON 解析失败：${String(error && error.message)}；原文尾部：${raw.slice(-300)}`);
-  }
-  writeFileSync(out, JSON.stringify(parsed, null, 2), 'utf8');
-  const flat = [];
-  const walk = (node) => {
-    if (Array.isArray(node)) {
-      node.forEach(walk);
-      return;
-    }
-    if (!node || typeof node !== 'object') {
-      return;
-    }
-    if (node.text !== undefined || node.id !== undefined) {
-      flat.push({ text: node.text ?? '', id: node.id ?? '', bounds: node.bounds ?? [] });
-    }
-    (node.children ?? []).forEach(walk);
-  };
-  walk(parsed);
-  if (flat.length === 0) {
-    throw new Error('ui layout 解析成功但没有任何节点（页面可能未渲染）');
-  }
+  // 解析逻辑抽到 layout-parse.mjs（纯函数，有单测；能容忍 "- Dumping layout…" 前缀/ANSI/截断）
+  const flat = parseLayoutOutput(res.out);
+  writeFileSync(out, JSON.stringify(flat, null, 2), 'utf8');
   return flat;
 }
 

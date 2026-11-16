@@ -826,3 +826,32 @@ hiai.vision/OCR_LIB_MSG: InitLibrary::ocr finish : 205.51 ms
 - 跨设备「全部未完成」仍走全量扫描（索引只覆盖本机设备目录）。
 - 手写板旋转坐标系、压感体感、多分辨率适配仍属未量化验证项。
 - 本轮修掉的真编译坑：`Web.darkMode` 在 ArkUI-X 不支持（`11706007`）、ArkTS 禁止对象字面量作类型、`failure.code` 需显式收窄。
+
+### 13.5 模拟器（DevEco 本地）尝试结论
+
+- 镜像：`HarmonyOS 7.0.0(26.0.0) tablet`（1.93 GB），`devecocli emulator image list` 显示 `Downloaded=true`；许可 `emulator license accept` 已接受。
+- 实例：`devecocli emulator create pad7 --device-type tablet --os-version "HarmonyOS 7.0.0(26.0.0)"` 成功，`emulator list` 显示 `running`。
+- **但 hdc 始终连不上**：`emulator start` 报 `launched but did not appear in hdc list targets within the timeout`；
+  `hdc kill` → `hdc start` 后 `list targets` 仍为 `[Empty]`；`hdc tconn 127.0.0.1:{5555,8710,18710,6666}` 全部 `Connect failed`；
+  进程层面 `Emulator` 进程确实在跑（PID 950328），说明是**设备侧 hdc 服务未暴露**，不是实例没起。
+- 结论：**模拟器可下载 / 可创建 / 可启动，但本轮 hdc 连不上，未用于任何验证**。
+  另注：现有 HAP 的 Profile 只绑物理平板 UDID，模拟器即使连上也大概率装不上，因此它至多用于 UI 布局迭代，不能替代真机验收。
+
+### 13.6 发布（GitHub Release）
+
+- `tools/publish-release.ps1`：token 取自 `git credential fill`（全程不打印），创建/更新 release 并上传 asset；
+  上传地址用 `upload_url.Split("{")[0]` 截断（否则 PowerShell 报 `Invalid URI`）。
+- Release：`v1.0.0-debug`，asset `arkui-schedule-harmony-debug-signed.hap`；
+  body 从 **UTF-8 文件**读入（PowerShell 命令行参数会丢中文，第一版 body 就变成了 `?????`，已用 `-Body [byte[]]` 修正）。
+- 签名现状：`devecocli signature generate --force` 只更新了 **Profile**（`uuid cbe5a02f…`、`type=debug`、绑平板 UDID），
+  **证书未更换**（指纹与旧证书一致）——AGC 调试证书按团队唯一，换证需在控制台吊销后重新签发；
+  用户已接受该风险（调试证书只绑单设备、不可上架、不能装到别人设备；正式发版用发布证书，与它无关）。
+- `signing/itwill-debug-v2.csr` + `signing/pass.txt` 留作备份（均未入库，`signing/` 已在 `.gitignore`）。
+
+### 13.7 `ui layout` 解析器（工具链健壮性）
+
+- `devecocli ui layout` 的真实输出会混入 `- Dumping layout…` 进度行、PowerShell 的 stderr 提示与 ANSI 颜色，
+  直接 `JSON.parse` 会失败（`devecocli ui layout 输出无法解析`）。
+- 已抽出纯函数 `apps/arkui-schedule/tools/layout-parse.mjs`：`stripAnsi` / `extractJsonArray` / `parseLayoutOutput`
+  / `layoutTexts` / `findByText` / `centerOf` / `screenSize`；`device-accept.mjs` 改为调用它。
+- 单测 `tools/test/layoutParse.test.mjs`（9 例，固定样例文本，不依赖真机）：噪声前缀、ANSI、截断、空数组、嵌套摊平、根节点 bounds 用于屏幕尺寸。
