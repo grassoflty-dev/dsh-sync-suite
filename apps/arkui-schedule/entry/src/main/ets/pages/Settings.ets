@@ -336,8 +336,10 @@ struct Settings {
       repoCheck
     );
     this.applyIssues(issues);
-    if (issues.length > 0) {
-      this.saveHint = describeIssues(issues);
+    // 无可见落点的 issue 不拦保存（Settings 属凭据敏感文件，禁止 console/hilog，故这里静默跳过）。
+    const blocking: boolean = this.issuesSummary.length > 0;
+    if (blocking) {
+      this.saveHint = this.issuesSummary;
       // 滚回顶部：红色汇总 + 第一个错误字段（设备标识/作者名/token/仓库地址都在同步组）
       this.pageScroller.scrollEdge(Edge.Top);
       return;

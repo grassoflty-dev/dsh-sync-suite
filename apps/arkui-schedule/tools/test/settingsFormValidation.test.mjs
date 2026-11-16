@@ -174,9 +174,24 @@ describe('设置页保存校验：与页面源码的接线（防止退回「只�
   });
 
   test('校验失败：写汇总 + 滚到顶部（第一个错误字段可见）', () => {
-    assert.match(SETTINGS_PAGE, /this\.saveHint = describeIssues\(issues\)/, '顶部提示要带「还有 N 项…」');
+    // 只把「有可见落点」的问题计入汇总（applyIssues 过滤后的 issuesSummary），再写进 saveHint。
+    assert.match(SETTINGS_PAGE, /this\.saveHint = this\.issuesSummary/, '顶部提示要用已过滤的汇总（带字段名）');
     assert.match(SETTINGS_PAGE, /pageScroller\.scrollEdge\(Edge\.Top\)/, '必须自动滚到第一个错误字段');
     assert.match(SETTINGS_PAGE, /this\.IssuesBanner\(\)/, '表单顶部要有红色汇总条');
+  });
+
+  test('幽灵拦截守卫：issuesSummary 为空时不拦保存', () => {
+    assert.match(
+      SETTINGS_PAGE,
+      /const blocking: boolean = this\.issuesSummary\.length > 0/,
+      '拦截条件必须基于 issuesSummary（已过滤、有落点的问题）'
+    );
+    assert.match(SETTINGS_PAGE, /if \(blocking\)/, '存在 blocking 分支');
+    assert.equal(
+      /console\.(log|info|warn|error)/.test(SETTINGS_PAGE),
+      false,
+      'Settings 属凭据敏感文件，不允许 console（无落点问题静默跳过即可）'
+    );
   });
 
   test('保存成功要清掉汇总；失败不再用「请先修正标红的问题」', () => {
