@@ -1,9 +1,12 @@
 /**
- * 设置页表单的纯逻辑：平台/认证方式枚举、示例文案、设备标识与作者名校验。
+ * 设置页表单的纯逻辑：平台/认证方式枚举、示例文案、设备标识与作者名校验、
+ * 以及**保存前的整表校验**（`checkSettingsFields`）。
  *
- * 不 import 任何 SDK，可在 Node 直接跑（`tools/test/repoUrl.test.mjs` 覆盖）。
+ * 不 import 任何 SDK，可在 Node 直接跑（`tools/test/settingsFormValidation.test.mjs` 覆盖）。
  * 这里只决定「界面上写什么字」和「保存前拦什么」，不改变同步逻辑。
  */
+import type { RepoUrlCheck } from './repoUrl';
+import { isValidBaseURL } from './aiProvider';
 
 /** 平台：GitHub（只影响提示文案与示例，同步逻辑完全一致）。 */
 export const PLATFORM_GITHUB: string = 'github';
@@ -118,4 +121,165 @@ export function validateToken(authMode: string, rawToken: string): string {
     return 'token 不能包含空格（复制时可能带入了换行或空格）';
   }
   return '';
+}
+
+// ---------------------------------------------------------------- 整表校验（保存前）
+
+/**
+ * 输入框里的 token 留空时沿用已保存的 token。
+ *
+ * 语义：用户「不改 token」就不该被拦，也不该在保存时把已有 token 清空。
+ */
+export function effectiveToken(rawToken: string, savedToken: string): string {
+  const typed: string = typeof rawToken === 'string' ? rawToken.trim() : '';
+  if (typed.length > 0) {
+    return typed;
+  }
+  return typeof savedToken === 'string' ? savedToken.trim() : '';
+}
+
+/**
+ * 按仓库地址自动纠正托管平台：含 `gitee.com` → gitee，含 `github.com` → github，其余保持原值。
+ *
+ * 平台只影响示例/提示文案，纠正它能让用户少一次手动切换（也避免「URL 是 gitee、平台还是 github」）。
+ */
+export function platformForRepoUrl(platform: string, rawUrl: string): string {
+  const url: string = typeof rawUrl === 'string' ? rawUrl.toLowerCase() : '';
+  if (url.indexOf('gitee.com') >= 0) {
+    return PLATFORM_GITEE;
+  }
+  if (url.indexOf('github.com') >= 0) {
+    return PLATFORM_GITHUB;
+  }
+  return normalizePlatform(platform);
+}
+
+/** 字段标识（用于把红字挂到对应输入框并滚动定位）。 */
+export const FIELD_DEVICE_ID: string = 'deviceId';
+export const FIELD_AUTHOR: string = 'author';
+export const FIELD_REPO_URL: string = 'repoUrl';
+export const FIELD_TOKEN: string = 'token';
+export const FIELD_AI_MODEL: string = 'aiModel';
+export const FIELD_AI_BASE_URL: string = 'aiBaseURL';
+
+/** 字段标识 → 中文名（顶部汇总横幅用）。 */
+export function settingsFieldLabel(field: string): string {
+  if (field === FIELD_DEVICE_ID) {
+    return '设备标识';
+  }
+  if (field === FIELD_AUTHOR) {
+    return '作者名';
+  }
+  if (field === FIELD_REPO_URL) {
+    return '仓库地址';
+  }
+  if (field === FIELD_TOKEN) {
+    return 'token';
+  }
+  if (field === FIELD_AI_MODEL) {
+    return 'AI 模型名';
+  }
+  if (field === FIELD_AI_BASE_URL) {
+    return 'AI 接口地址';
+  }
+  return field;
+}
+
+/** 一条校验问题：`field` 决定红字挂哪个输入框，`message` 是给用户看的中文。 */
+export interface SettingsFieldIssue {
+  field: string;
+  message: string;
+}
+
+/** 一次保存校验的输入（全部显式字段，便于纯单测）。 */
+export interface SettingsFormInput {
+  deviceId: string;
+  author: string;
+  repoUrl: string;
+  token: string;
+  authMode: string;
+  savedToken: string;
+  /** 当前 AI 源是否是「自定义」（自定义源必须手动给模型名与接口地址）。 */
+  customProvider: boolean;
+  aiModel: string;
+  aiBaseURL: string;
+}
+
+/**
+ * 保存前的整表校验：返回**全部**问题（不再只报第一条），供页面逐字段标红 + 汇总。
+ *
+ * 规则（与用户实测 bug 直接相关）：
+ * - 仓库地址允许为空（首次使用不该被卡住）；为空时**不校验 token**；
+ * - token 输入框留空但已有保存值 → 合法（沿用旧 token）；
+ * - 只校验**可见**字段：`customProvider` 之外的 AI 字段不参与（预设源的地址/模型由预设表决定）。
+ */
+export function checkSettingsFields(input: SettingsFormInput, repoCheck: RepoUrlCheck): SettingsFieldIssue[] {
+  const issues: SettingsFieldIssue[] = [];
+  const repoEmpty: boolean = typeof input.repoUrl === 'string' ? input.repoUrl.trim().length === 0 : true;
+
+  if (!repoEmpty && !repoCheck.ok) {
+    issues.push({ field: FIELD_REPO_URL, message: repoCheck.error });
+  }
+
+  // token：留空沿用已保存值；仓库地址为空时不要求 token
+  if (!repoEmpty) {
+    const tokenProblem: string = validateToken(input.authMode, effectiveToken(input.token, input.savedToken));
+    if (tokenProblem.length > 0) {
+      issues.push({ field: FIELD_TOKEN, message: tokenProblem });
+    }
+  }
+
+  const deviceProblem: string = validateDeviceIdText(input.deviceId);
+  if (deviceProblem.length > 0) {
+    issues.push({ field: FIELD_DEVICE_ID, message: deviceProblem });
+  }
+
+  const authorProblem: string = validateAuthorName(input.author);
+  if (authorProblem.length > 0) {
+    issues.push({ field: FIELD_AUTHOR, message: authorProblem });
+  }
+
+  // AI：只有自定义源才需要用户填模型名与接口地址（预设源由预设表提供）
+  if (input.customProvider) {
+    if (typeof input.aiModel !== 'string' || input.aiModel.trim().length === 0) {
+      issues.push({ field: FIELD_AI_MODEL, message: '自定义源必须填写模型名（点「高级」手输）' });
+    }
+    const rawBase: string = typeof input.aiBaseURL === 'string' ? input.aiBaseURL.trim() : '';
+    if (rawBase.length === 0) {
+      issues.push({ field: FIELD_AI_BASE_URL, message: '自定义源必须填写接口地址（如 https://api.example.com/v1）' });
+    } else if (!isValidBaseURL(rawBase)) {
+      issues.push({ field: FIELD_AI_BASE_URL, message: '接口地址格式不正确：需要形如 https://api.example.com/v1' });
+    }
+  }
+
+  return issues;
+}
+
+/** 问题列表 → 顶部汇总文案（空列表返回空串）。 */
+export function describeIssues(issues: SettingsFieldIssue[]): string {
+  if (issues === null || issues === undefined || issues.length === 0) {
+    return '';
+  }
+  const names: string[] = [];
+  for (const issue of issues) {
+    const label: string = settingsFieldLabel(issue.field);
+    if (names.indexOf(label) < 0) {
+      names.push(label);
+    }
+  }
+  return `还有 ${issues.length} 项需要处理：${names.join('、')}`;
+}
+
+/**
+ * 第一条问题的「字段名 · 原因」。
+ *
+ * 用途：横幅第二行。字段的红字可能被滚出视野，把第一条原因也写进横幅，
+ * 用户即使不滚动也能知道要改什么（避免「只看到还有 N 项、看不到红字」）。
+ */
+export function describeFirstIssue(issues: SettingsFieldIssue[]): string {
+  if (issues === null || issues === undefined || issues.length === 0) {
+    return '';
+  }
+  const issue: SettingsFieldIssue = issues[0];
+  return `${settingsFieldLabel(issue.field)} · ${issue.message}`;
 }

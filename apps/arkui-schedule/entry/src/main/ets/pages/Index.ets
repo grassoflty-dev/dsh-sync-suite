@@ -148,6 +148,11 @@ struct Index {
   /** 隐藏桥就绪：启动自动 pull（节流；失败只提示，不阻塞任何 UI）。 */
   private onBridgeReady(controller: webview.WebviewController): void {
     syncController.ensureStarted(controller).then(() => {
+      if (!syncController.isReady()) {
+        // 桥没真正就绪（注册失败等）：不做同步，只记录原因
+        console.info('[sync] bridge not ready, skip startup pull');
+        return;
+      }
       syncController.pullOnStartup().then((outcome: SyncOutcome) => {
         console.info(`[sync] startup pull ok=${outcome.ok} elapsed=${outcome.elapsedMs}ms skipped=${outcome.skipped}`);
         if (!outcome.ok && !outcome.skipped) {
@@ -1366,6 +1371,10 @@ struct Index {
       GitBridgeHost({
         onReady: (controller: webview.WebviewController) => {
           this.onBridgeReady(controller);
+        },
+        onFail: (message: string) => {
+          // 桥加载失败：记住原因（不抛），下拉刷新时会以可读文案返回
+          syncController.markBridgeFailed(message);
         }
       })
         .width(1)

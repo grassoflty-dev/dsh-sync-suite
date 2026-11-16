@@ -26,8 +26,8 @@ param(
   [string]$Hap,
   [string]$Out,
   [string]$KeyAlias = 'debugkey',
-  [string]$StorePass = '<已脱敏>',
-  [string]$KeyPass = '<已脱敏>',
+  [string]$StorePass,
+  [string]$KeyPass,
   [int]$CompatibleVersion = 26,
   [switch]$SkipVerify,
   [switch]$Deliver
@@ -48,9 +48,36 @@ if (-not $Hap) { $Hap = Join-Path $projectRoot 'entry\build\default\outputs\defa
 if (-not (Test-Path $Hap)) { throw "unsigned HAP not found: $Hap (run tools/build-harmony.ps1 first)" }
 if (-not $Out) { $Out = [IO.Path]::ChangeExtension($Hap, $null).TrimEnd('.') + '-signed.hap' }
 
-$keystore = Join-Path $signingDir 'itwill-debug.p12'
-$cert = Join-Path $signingDir 'itwill-debug.cer'
-$profile = Join-Path $signingDir 'itwill-debug.p7b'
+$KeyAlias = if ($PSBoundParameters.ContainsKey('KeyAlias')) { $KeyAlias } else { 'debugkey' }
+$StorePass = if ($PSBoundParameters.ContainsKey('StorePass')) { $StorePass } else { '' }
+$KeyPass = if ($PSBoundParameters.ContainsKey('KeyPass')) { $KeyPass } else { $StorePass }
+
+# Prefer v2 key material (rotated after the v1 private key leaked); password comes from signing/pass.txt, never hard-coded.
+$v2Keystore = Join-Path $signingDir 'itwill-debug-v2.p12'
+$v2Cert = Join-Path $signingDir 'itwill-debug-v2.cer'
+$v2Profile = Join-Path $signingDir 'itwill-debug-v2.p7b'
+$passFile = Join-Path $signingDir 'pass.txt'
+
+if ((Test-Path $v2Keystore) -and (Test-Path $v2Cert) -and (Test-Path $v2Profile)) {
+  $keystore = $v2Keystore
+  $cert = $v2Cert
+  $profile = $v2Profile
+} else {
+  # Fallback: v2 material incomplete (AGC has not issued a cert/profile for the v2 CSR yet) -> use v1 and warn.
+  $keystore = Join-Path $signingDir 'itwill-debug.p12'
+  $cert = Join-Path $signingDir 'itwill-debug.cer'
+  $profile = Join-Path $signingDir 'itwill-debug.p7b'
+  Write-Warning "v2 signing material incomplete (need .p12/.cer/.p7b) - falling back to v1 (LEAKED KEY)"
+}
+
+if ($StorePass -eq '' -and (Test-Path $passFile)) {
+  $StorePass = (Get-Content -Raw $passFile).Trim()
+  $KeyPass = $StorePass
+}
+if ($StorePass -eq '') {
+  throw "no password: pass -StorePass, or put it in signing/pass.txt (git-ignored)"
+}
+
 foreach ($f in @($keystore, $cert, $profile)) {
   if (-not (Test-Path $f)) { throw "signing material missing: $f" }
 }
@@ -110,7 +137,7 @@ Write-Host "Install with:"
 Write-Host ("  hdc -t <serial> install -r `"{0}`"" -f $signed.FullName)
 
 if ($Deliver) {
-  # 交付纪律：签名包必须落到 dist-harmony 并打印 SHA256，避免「只装机、不留档」。
+  # Delivery rule: always copy the signed HAP into dist-harmony and print its SHA256 (never install-only).
   if (-not (Test-Path $deliverDir)) { New-Item -ItemType Directory -Force -Path $deliverDir | Out-Null }
   $target = Join-Path $deliverDir 'arkui-schedule-harmony-debug-signed.hap'
   Copy-Item $signed.FullName $target -Force

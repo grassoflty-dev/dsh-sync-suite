@@ -99,12 +99,11 @@ describe('settingsStore：每个 KEY 都成对读写', () => {
 describe('设置页：仓库地址可空保存，但同步/测试连接前强校验（P5 决策 1）', () => {
   test('saveSettings 先算 repoEmpty，空地址时不强制 token/地址格式', () => {
     assert.match(SETTINGS_PAGE, /const repoEmpty: boolean = this\.repoUrl\.trim\(\)\.length === 0;/);
-    assert.match(
-      SETTINGS_PAGE,
-      /const tokenError: string = repoEmpty \? '' : validateToken\(this\.authMode, this\.token\);/,
-      'token 必填必须被 repoEmpty 短路，否则首次使用无法保存'
-    );
-    assert.match(SETTINGS_PAGE, /const repoError: string = repoEmpty \|\| repoCheck\.ok \? '' : repoCheck\.error;/, '空地址不报错');
+    // 校验已搬到纯函数 checkSettingsFields：断言调用点 + 用它拿到全部问题
+    assert.match(SETTINGS_PAGE, /checkSettingsFields\(/, '保存前必须走纯函数整表校验');
+    assert.match(SETTINGS_PAGE, /const issues: SettingsFieldIssue\[\] = checkSettingsFields\(/, '收集全部问题而不是只报第一条');
+    assert.match(SETTINGS_PAGE, /token: effectiveToken\(this\.token, this\.savedToken\),/, 'token 留空沿用已保存值');
+    assert.match(SETTINGS_PAGE, /platformForRepoUrl\(this\.gitPlatform, this\.repoUrl\)/, '保存前按 URL 纠正平台');
     assert.match(SETTINGS_PAGE, /repoUrl: repoEmpty \? '' : repoCheck\.url,/, '空地址存空串，不把非法原文写进设置');
   });
 

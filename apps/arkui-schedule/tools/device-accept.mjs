@@ -74,16 +74,26 @@ function summarize() {
   console.log(`合计：PASS ${ok} / FAIL ${bad} / SKIP ${skip}`);
 }
 
-/** 读 UI 布局树，返回 [{text,id,bounds}]。 */
+/** 读 UI 布局树，返回 [{text,id,bounds}]。
+ *
+ * `devecocli ui layout` 的输出可能混有进度行（`- Dumping layout…`）、ANSI 颜色、空行，
+ * 甚至截断的 stdout；这里取**第一个 `[` 起、到最后一个 `]` 止**的片段再解析，失败时打印原文尾部。
+ */
 function layout(mode = 'simplified') {
   const out = join(TMP, `layout-${Date.now()}.json`);
   const res = cli(['ui', 'layout', '--device', SERIAL, '--format', 'json', '--mode', mode]);
-  const start = res.out.indexOf('[');
-  const end = res.out.lastIndexOf(']');
+  const raw = res.out.replace(/\u001b\[[0-9;]*m/g, '');
+  const start = raw.indexOf('[');
+  const end = raw.lastIndexOf(']');
   if (start < 0 || end <= start) {
-    throw new Error(`ui layout 输出无法解析：${res.out.slice(0, 200)}`);
+    throw new Error(`ui layout 输出无法解析（找不到 JSON 数组）：${raw.slice(-300)}`);
   }
-  const parsed = JSON.parse(res.out.slice(start, end + 1));
+  let parsed;
+  try {
+    parsed = JSON.parse(raw.slice(start, end + 1));
+  } catch (error) {
+    throw new Error(`ui layout JSON 解析失败：${String(error && error.message)}；原文尾部：${raw.slice(-300)}`);
+  }
   writeFileSync(out, JSON.stringify(parsed, null, 2), 'utf8');
   const flat = [];
   const walk = (node) => {
@@ -100,6 +110,9 @@ function layout(mode = 'simplified') {
     (node.children ?? []).forEach(walk);
   };
   walk(parsed);
+  if (flat.length === 0) {
+    throw new Error('ui layout 解析成功但没有任何节点（页面可能未渲染）');
+  }
   return flat;
 }
 

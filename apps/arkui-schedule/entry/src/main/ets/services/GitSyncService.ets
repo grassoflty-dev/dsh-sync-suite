@@ -1,4 +1,4 @@
-/**
+﻿/**
  * GitSyncService — ArkUI-X 日程助手的 Git 同步服务（ArkTS 侧）
  * ============================================================================
  * 结构：
@@ -28,6 +28,8 @@ import { webview } from '@kit.ArkWeb';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
+import { checkSyncPrecondition, describeBridgeFailure } from '../model/syncGuard';
+import type { SyncPreconditionInput, SyncPreconditionResult } from '../model/syncGuard';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import {
@@ -395,6 +397,10 @@ export class GitSyncService {
   private pending: Map<string, PendingRequest> = new Map<string, PendingRequest>();
   private requestSeq: number = 0;
   private ready: boolean = false;
+  /** 桥（WebView 内核）是否真的可用：注册成功 + 页面加载完成（闪退回归：未就绪必须先拦住）。 */
+  private bridgeReady: boolean = false;
+  /** 桥不可用的原因（空串表示没有失败）。 */
+  private bridgeError: string = '';
 
   constructor(controller: webview.WebviewController) {
     this.controller = controller;
@@ -435,10 +441,25 @@ export class GitSyncService {
    * 注意：内部会 `controller.refresh()`，因此 onPageEnd 会再次触发；
    * 调用方用 `isReady()` 做幂等保护即可（设置页已这样处理）。
    */
+  /**
+   * 注册 JavaScript 代理并刷新页面。
+   *
+   * **闪退回归点**：`registerJavaScriptProxy` / `refresh` 在控制器尚未绑定到任何 `Web`
+   * 组件时会抛 `BusinessError`（17100001 等）。历史上这条异常一路上抛到 UI 线程，
+   * 把进程带走。现在整段包 try/catch，失败只把桥标记为「未就绪 + 原因」。
+   */
   registerProxy(): void {
-    this.controller.registerJavaScriptProxy(this, BRIDGE_PROXY_NAME, GitSyncService.proxyMethodList);
-    this.controller.refresh();
-    this.ready = true;
+    try {
+      this.controller.registerJavaScriptProxy(this, BRIDGE_PROXY_NAME, GitSyncService.proxyMethodList);
+      this.controller.refresh();
+      this.ready = true;
+      this.bridgeReady = true;
+      this.bridgeError = '';
+    } catch (error) {
+      this.ready = false;
+      this.bridgeReady = false;
+      this.bridgeError = `同步内核注册失败：${describeBridgeFailure(error as Object)}`;
+    }
   }
 
   /** Web 页面是否已完成代理注册（未就绪时所有操作会直接返回中文错误）。 */
@@ -543,6 +564,10 @@ export class GitSyncService {
 
   /** 拉取：本机无仓库时自动 clone；有仓库时 fetch + fast-forward（永不 merge）。 */
   async pull(): Promise<GitSyncResult> {
+    const guard: SyncPreconditionResult = this.precondition(false);
+    if (!guard.ok) {
+      return rejected('拉取失败', guard.message);
+    }
     const problem: string = this.validateForSync();
     if (problem.length > 0) {
       return rejected('拉取失败', problem);
@@ -578,6 +603,10 @@ export class GitSyncService {
 
   /** 推送：只 add + commit `devices/<deviceId>/`，再推 origin/<branch>；永不 force。 */
   async push(message: string): Promise<GitSyncResult> {
+    const guard: SyncPreconditionResult = this.precondition(false);
+    if (!guard.ok) {
+      return rejected('推送失败', guard.message);
+    }
     const problem: string = this.validateForSync();
     if (problem.length > 0) {
       return rejected('推送失败', problem);
@@ -627,6 +656,10 @@ export class GitSyncService {
     if (this.config.repoUrl.trim().length === 0) {
       return { ok: true, message: '未配置同步仓库，跳过自动拉取' };
     }
+    const guard: SyncPreconditionResult = this.precondition(false);
+    if (!guard.ok) {
+      return rejected('自动拉取跳过', guard.message);
+    }
     try {
       // 说明：services 层**禁止任何 console/hilog**（credentialHygiene 测试硬性检查），
       // 因此这里不打日志，成败信息通过返回的 message 交给调用方展示。
@@ -636,8 +669,49 @@ export class GitSyncService {
     }
   }
 
+  // -------------------------------------------------------------- 就绪状态与前置守卫
+
+  /** 桥（WebView 内核）是否已注册代理并完成刷新。 */
+  isBridgeReady(): boolean {
+    return this.bridgeReady;
+  }
+
+  /** 标记桥就绪（由页面 `onPageEnd`/`Web` 回调调用）。 */
+  markBridgeReady(): void {
+    this.bridgeReady = true;
+  }
+
+  /** 桥加载失败：置未就绪并记下原因（页面据此禁用「立即同步」并展示）。 */
+  markBridgeFailed(reason: string): void {
+    this.bridgeReady = false;
+    this.bridgeError = reason;
+  }
+
+  /** 桥不可用的原因（`bridgeReady === true` 时为空串）。 */
+  bridgeFailure(): string {
+    return this.bridgeError;
+  }
+
+  /**
+   * 同步前置守卫（**永不抛异常**）：忙 → 桥未就绪 → 仓库地址为空。
+   * 结论来自纯函数 `model/syncGuard.ts`，与页面/控制器共用一套文案。
+   */
+  private precondition(busy: boolean): SyncPreconditionResult {
+    const input: SyncPreconditionInput = {
+      repoUrl: this.config.repoUrl,
+      token: this.config.token,
+      bridgeReady: this.bridgeReady,
+      busy: busy
+    };
+    return checkSyncPrecondition(input);
+  }
+
   /** 状态：当前分支 / HEAD / 本地改动 / 远端是否可连（真实发一次 info/refs 探测）。 */
   async status(): Promise<GitSyncResult> {
+    const guard: SyncPreconditionResult = this.precondition(false);
+    if (!guard.ok) {
+      return rejected('查询失败', guard.message);
+    }
     const problem: string = this.validateForStatus();
     if (problem.length > 0) {
       return rejected('查询失败', problem);

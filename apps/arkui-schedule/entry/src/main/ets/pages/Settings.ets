@@ -28,17 +28,28 @@ import type { RepoUrlCheck } from '../model/repoUrl';
 import {
   AUTH_HTTPS,
   AUTH_SSH,
+  FIELD_AI_BASE_URL,
+  FIELD_AI_MODEL,
+  FIELD_AUTHOR,
+  FIELD_DEVICE_ID,
+  FIELD_REPO_URL,
+  FIELD_TOKEN,
   PLATFORM_GITHUB,
   PLATFORM_GITEE,
   authHint,
+  checkSettingsFields,
+  describeFirstIssue,
+  describeIssues,
+  effectiveToken,
   normalizeAuthMode,
   normalizePlatform,
+  platformForRepoUrl,
   repoUrlExamples,
   repoUrlPlaceholder,
   validateAuthorName,
-  validateDeviceIdText,
-  validateToken
+  validateDeviceIdText
 } from '../model/settingsForm';
+import type { SettingsFieldIssue } from '../model/settingsForm';
 import {
   canRetrySync,
   classifySyncError,
@@ -56,7 +67,6 @@ import {
   defaultModelOf,
   findProvider,
   hintForProvider,
-  isValidBaseURL,
   modelsOf
 } from '../model/aiProvider';
 import type { AiModelOption, AiProviderPreset } from '../model/aiProvider';
@@ -102,6 +112,14 @@ struct Settings {
   @State authMode: string = AUTH_HTTPS;
   @State ready: boolean = false;
   @State saveHint: string = '';
+  /** 保存校验的问题汇总（「还有 N 项需要处理：…」，空串 = 无问题）。 */
+  @State issuesSummary: string = '';
+  /** 第一条问题的「字段名 · 原因」：横幅第二行，用户不滚动也能看懂要改什么。 */
+  @State firstIssueText: string = '';
+  /** AI 模型名的内联错误（其余字段各有自己的 *Error 状态）。 */
+  @State aiModelError: string = '';
+  /** AI 接口地址的内联错误（自定义源专用）。 */
+  @State aiBaseUrlError: string = '';
   // 表单校验提示（逐字段红字）
   @State deviceIdError: string = '';
   @State authorError: string = '';
@@ -141,6 +159,10 @@ struct Settings {
   private gitController: webview.WebviewController = new webview.WebviewController();
   private sync: GitSyncService = new GitSyncService(this.gitController);
   private disposed: boolean = false;
+  /** 已保存的 token：输入框留空时沿用（用户「不改 token」不该被拦）。 */
+  private savedToken: string = '';
+  /** 页面主滚动容器：校验失败时滚回顶部，让红色汇总与第一个错误字段进入视野。 */
+  private pageScroller: Scroller = new Scroller();
 
   aboutToAppear(): void {
     this.platformText = isHarmonyOS() ? 'HarmonyOS' : 'Android';
@@ -213,6 +235,8 @@ struct Settings {
     this.author = settings.author;
     this.repoUrl = settings.repoUrl;
     this.token = settings.token;
+    // 记住已保存的 token：输入框被清空时按「沿用旧 token」处理，不要误判为空
+    this.savedToken = settings.token;
     this.aiKey = settings.aiKey;
     this.aiModel = settings.aiModel;
     this.aiProviderId = settings.aiProviderId;
@@ -250,25 +274,72 @@ struct Settings {
    * 「测试连接 / 立即同步 / 推送 / 查看状态」前被强校验拦住（见 `runAction` / `testConnection`）。
    * AI 源与模型只传原始值：`settingsStore.save()` 内部做 `resolveModel` / `aiBaseURLFor` 归一。
    */
+  /**
+   * 把校验问题摊到各字段的 `*Error` 状态上。
+   *
+   * 两条硬约束（对应线上「幽灵报错」：横幅说有 N 项，界面却没有一处红字）：
+   * 1. **每个 issue 都必须落到一个可见字段的内联错误状态**，否则它就是**不可见问题**；
+   * 2. 顶部横幅只统计**真正写进了内联状态的**问题（`applied`），绝不出现「说有 N 项但看不到」。
+   */
+  private applyIssues(issues: SettingsFieldIssue[]): void {
+    this.deviceIdError = '';
+    this.authorError = '';
+    this.repoUrlError = '';
+    this.tokenError = '';
+    this.aiModelError = '';
+    this.aiBaseUrlError = '';
+    const applied: SettingsFieldIssue[] = [];
+    for (const issue of issues) {
+      if (issue.field === FIELD_DEVICE_ID) {
+        this.deviceIdError = issue.message;
+      } else if (issue.field === FIELD_AUTHOR) {
+        this.authorError = issue.message;
+      } else if (issue.field === FIELD_REPO_URL) {
+        this.repoUrlError = issue.message;
+      } else if (issue.field === FIELD_TOKEN) {
+        this.tokenError = issue.message;
+      } else if (issue.field === FIELD_AI_MODEL) {
+        this.aiModelError = issue.message;
+        this.advancedOpen = true;
+      } else if (issue.field === FIELD_AI_BASE_URL) {
+        this.aiBaseUrlError = issue.message;
+        this.advancedOpen = true;
+      } else {
+        // 未知字段：没有内联渲染位置，不计入横幅（守卫测试保证走不到这里）
+        continue;
+      }
+      applied.push(issue);
+    }
+    // 横幅只来自 applied；万一全都没映射（理论不可达），宁可报出来也不静默卡住保存
+    this.issuesSummary = describeIssues(applied.length > 0 || issues.length === 0 ? applied : issues);
+    this.firstIssueText = applied.length > 0 ? describeFirstIssue(applied) : '';
+  }
+
   private async saveSettings(): Promise<void> {
-    const deviceError: string = validateDeviceIdText(this.deviceId);
-    const authorError: string = validateAuthorName(this.author);
     const repoEmpty: boolean = this.repoUrl.trim().length === 0;
     const repoCheck: RepoUrlCheck = validateRepoUrl(this.repoUrl);
-    // 仓库地址为空 → 不做地址/ token 的必填校验（其余字段照常校验）
-    const repoError: string = repoEmpty || repoCheck.ok ? '' : repoCheck.error;
-    const tokenError: string = repoEmpty ? '' : validateToken(this.authMode, this.token);
-    this.deviceIdError = deviceError;
-    this.authorError = authorError;
-    this.tokenError = tokenError;
-    this.repoUrlError = repoError;
-    if (deviceError.length > 0 || authorError.length > 0 || tokenError.length > 0 || repoError.length > 0) {
-      this.saveHint = '设置未保存：请先修正标红的问题';
-      return;
-    }
-    // 自定义源没有预设模型表，模型名必须由用户给（预设源留空由 save() 回落默认）
-    if (this.isCustomProvider() && this.aiModel.trim().length === 0) {
-      this.saveHint = '设置未保存：自定义源必须填写模型名（点「高级」手输）';
+    // 平台自动纠正（URL 含 gitee.com → gitee），避免「URL 是 gitee、平台还是 github」导致提示错乱
+    const platform: string = platformForRepoUrl(this.gitPlatform, this.repoUrl);
+    // 整表校验交给纯函数：一次返回**全部**问题，页面逐字段标红 + 顶部汇总
+    const issues: SettingsFieldIssue[] = checkSettingsFields(
+      {
+        deviceId: this.deviceId,
+        author: this.author,
+        repoUrl: this.repoUrl,
+        token: this.token,
+        authMode: this.authMode,
+        savedToken: this.savedToken,
+        customProvider: this.isCustomProvider(),
+        aiModel: this.aiModel,
+        aiBaseURL: this.aiBaseURL
+      },
+      repoCheck
+    );
+    this.applyIssues(issues);
+    if (issues.length > 0) {
+      this.saveHint = describeIssues(issues);
+      // 滚回顶部：红色汇总 + 第一个错误字段（设备标识/作者名/token/仓库地址都在同步组）
+      this.pageScroller.scrollEdge(Edge.Top);
       return;
     }
     const context = getContext(this) as common.UIAbilityContext;
@@ -277,13 +348,14 @@ struct Settings {
         deviceId: normalizeDeviceId(this.deviceId),
         // 保留用户输入的地址原文，只去掉首尾空白（末尾 .git 不擅自增删）；空地址存空串
         repoUrl: repoEmpty ? '' : repoCheck.url,
-        token: this.token,
+        // 输入框留空 = 沿用已保存的 token（不要把旧 token 清空）
+        token: effectiveToken(this.token, this.savedToken),
         aiKey: this.aiKey,
         aiProviderId: this.aiProviderId,
         aiModel: this.aiModel,
         aiBaseURL: this.aiBaseURL,
         author: this.author,
-        gitPlatform: this.gitPlatform,
+        gitPlatform: platform,
         authMode: this.authMode
       };
       const saved = await settingsStore.save(patch, context);
@@ -291,6 +363,7 @@ struct Settings {
         return;
       }
       this.applySettings(saved);
+      this.issuesSummary = '';
       scheduleStore.setDeviceId(saved.deviceId);
       this.storageHint = `日程目录：${scheduleStore.deviceRoot()}/schedules/`;
       this.configure();
@@ -505,15 +578,6 @@ struct Settings {
     return findProvider(id).experimental === true;
   }
 
-  /** baseURL 即时校验：空/非法给红字，合法返回空串。 */
-  private baseURLError(): string {
-    const raw: string = this.aiBaseURL.trim();
-    if (raw.length === 0) {
-      return '自定义源必须填写接口地址（如 https://api.example.com/v1）';
-    }
-    return isValidBaseURL(raw) ? '' : '接口地址格式不正确：需要 http(s):// 开头';
-  }
-
   private platformLine(): string {
     return `${this.platformText} · ${this.handwritingText} · ${this.ocrText}`;
   }
@@ -659,6 +723,44 @@ struct Settings {
       .textAlign(TextAlign.Start)
   }
 
+  /** 字段内联错误：danger 令牌（深色模式同样可见），与灰色说明文字区分开。 */
+  @Builder
+  ErrorText(text: string) {
+    Text(text)
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .fontColor($r('app.color.danger'))
+      .width('100%')
+      .textAlign(TextAlign.Start)
+  }
+
+  /** 保存失败时的顶部红色汇总（「还有 N 项需要处理：…」+ 第一条原因）。 */
+  @Builder
+  IssuesBanner() {
+    if (this.issuesSummary.length > 0) {
+      Column({ space: SPACING.xs }) {
+        Text(this.issuesSummary)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.danger'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+        if (this.firstIssueText.length > 0) {
+          Text(this.firstIssueText)
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.danger'))
+            .width('100%')
+            .textAlign(TextAlign.Start)
+        }
+      }
+      .width('100%')
+      .padding({ top: SPACING.sm, bottom: SPACING.sm, left: SPACING.md, right: SPACING.md })
+      .backgroundColor($r('app.color.brand_soft'))
+      .alignItems(HorizontalAlign.Start)
+    }
+  }
+
   /** 一行说明（超长省略，完整内容进 `?`）。 */
   @Builder
   HintLine(text: string) {
@@ -733,12 +835,13 @@ struct Settings {
         .padding({ left: 0, right: 0 })
         .onChange((value: string) => {
           this.repoUrl = value;
+          this.repoUrlError = '';
         })
       Divider()
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
       if (this.repoUrlError.length > 0) {
-        this.FieldLabel(this.repoUrlError)
+        this.ErrorText(this.repoUrlError)
       }
 
       this.FieldLabel(this.authMode === AUTH_SSH ? '访问 token（SSH 方式可留空）' : '访问 token（仅存本机）')
@@ -755,12 +858,13 @@ struct Settings {
         .padding({ left: 0, right: 0 })
         .onChange((value: string) => {
           this.token = value;
+          this.tokenError = '';
         })
       Divider()
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
       if (this.tokenError.length > 0) {
-        this.FieldLabel(this.tokenError)
+        this.ErrorText(this.tokenError)
       }
 
       Row({ space: SPACING.md }) {
@@ -775,6 +879,7 @@ struct Settings {
             .padding({ left: 0, right: 0 })
             .onChange((value: string) => {
               this.deviceId = value;
+              this.deviceIdError = '';
             })
           Divider()
             .strokeWidth(DIVIDER)
@@ -794,6 +899,7 @@ struct Settings {
             .padding({ left: 0, right: 0 })
             .onChange((value: string) => {
               this.author = value;
+              this.authorError = '';
             })
           Divider()
             .strokeWidth(DIVIDER)
@@ -806,10 +912,10 @@ struct Settings {
       .alignItems(VerticalAlign.Top)
 
       if (this.deviceIdError.length > 0) {
-        this.FieldLabel(this.deviceIdError)
+        this.ErrorText(this.deviceIdError)
       }
       if (this.authorError.length > 0) {
-        this.FieldLabel(this.authorError)
+        this.ErrorText(this.authorError)
       }
 
       Row({ space: SPACING.md }) {
@@ -819,7 +925,8 @@ struct Settings {
           .backgroundColor($r('app.color.brand_soft'))
           .fontColor($r('app.color.brand'))
           .borderRadius(RADIUS.sm)
-          .enabled(!this.syncBusy)
+          // 闪退回归：桥未就绪时禁用（原因显示在右侧状态行），避免未就绪就发起同步
+          .enabled(!this.syncBusy && this.webReady)
           .onClick(() => {
             this.runAction('pull');
           })
@@ -869,7 +976,15 @@ struct Settings {
       }
 
       if (this.saveHint.length > 0) {
-        this.HintLine(this.saveHint)
+        // 校验失败时这条也必须是红的：它在「保存」按钮正上方，用户一定看得到
+        Text(this.saveHint)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor(this.issuesSummary.length > 0 ? $r('app.color.danger') : $r('app.color.text_secondary'))
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+          .textAlign(TextAlign.Start)
       }
 
       // 隐藏的 Git 运行环境：1x1、全透明，只用于执行 isomorphic-git（必须挂载）
@@ -1046,10 +1161,14 @@ struct Settings {
           .padding({ left: 0, right: 0 })
           .onChange((value: string) => {
             this.aiModel = value;
+            this.aiModelError = '';
           })
         Divider()
           .strokeWidth(DIVIDER)
           .color($r('app.color.divider'))
+        if (this.aiModelError.length > 0) {
+          this.ErrorText(this.aiModelError)
+        }
 
         if (this.isCustomProvider()) {
           this.FieldLabel('接口地址 baseURL')
@@ -1062,16 +1181,14 @@ struct Settings {
             .padding({ left: 0, right: 0 })
             .onChange((value: string) => {
               this.aiBaseURL = value;
+              this.aiBaseUrlError = '';
             })
           Divider()
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
-          Text(this.baseURLError())
-            .fontSize(FONT.caption)
-            .lineHeight(LINE_HEIGHT.caption)
-            .fontColor($r('app.color.warning'))
-            .width('100%')
-            .textAlign(TextAlign.Start)
+          if (this.aiBaseUrlError.length > 0) {
+            this.ErrorText(this.aiBaseUrlError)
+          }
         } else {
           this.HintLine('预设源使用内置接口地址；要自定义地址请把「服务」切到「自定义」。')
         }
@@ -1159,8 +1276,9 @@ struct Settings {
   @Builder
   CompactBody() {
     Column({ space: SPACING.md }) {
-      Scroll() {
+      Scroll(this.pageScroller) {
         Column({ space: SPACING.xl }) {
+          this.IssuesBanner()
           this.SyncGroup()
           Divider()
             .strokeWidth(DIVIDER)
@@ -1190,31 +1308,36 @@ struct Settings {
   @Builder
   WideBody() {
     Column({ space: SPACING.md }) {
-      Scroll() {
-        Row({ space: SPACING.xl }) {
-          Column({ space: SPACING.xl }) {
-            this.SyncGroup()
+      Scroll(this.pageScroller) {
+        Column({ space: SPACING.md }) {
+          this.IssuesBanner()
+          Row({ space: SPACING.xl }) {
+            Column({ space: SPACING.xl }) {
+              this.SyncGroup()
+              Divider()
+                .strokeWidth(DIVIDER)
+                .color($r('app.color.divider'))
+              this.AboutGroup()
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+
             Divider()
+              .vertical(true)
               .strokeWidth(DIVIDER)
               .color($r('app.color.divider'))
-            this.AboutGroup()
-          }
-          .layoutWeight(1)
-          .alignItems(HorizontalAlign.Start)
 
-          Divider()
-            .vertical(true)
-            .strokeWidth(DIVIDER)
-            .color($r('app.color.divider'))
-
-          Column({ space: SPACING.md }) {
-            this.AiGroup()
+            Column({ space: SPACING.md }) {
+              this.AiGroup()
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
           }
-          .layoutWeight(1)
-          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .alignItems(VerticalAlign.Top)
         }
         .width('100%')
-        .alignItems(VerticalAlign.Top)
+        .alignItems(HorizontalAlign.Start)
         .padding({ bottom: SPACING.xl })
       }
       .layoutWeight(1)

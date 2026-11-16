@@ -1,4 +1,4 @@
-/**
+﻿/**
  * syncController — App 级 Git 同步入口（启动自动 pull / 下拉刷新共用一份实例）。
  *
  * 为什么需要它：`GitSyncService` 构造时要 `webview.WebviewController`，而控制器只能由页面里的
@@ -15,6 +15,7 @@ import { GitSyncService } from './GitSyncService';
 import type { GitSyncConfig, GitSyncResult } from './GitSyncService';
 import { settingsStore } from './settingsStore';
 import type { ScheduleSettings } from './settingsStore';
+import { BRIDGE_NOT_READY_MESSAGE } from '../model/syncGuard';
 
 /** 两次自动 pull 之间的最小间隔（回前台节流）：60 秒。 */
 const STARTUP_THROTTLE_MS: number = 60 * 1000;
@@ -34,10 +35,31 @@ class SyncController {
   private service: GitSyncService | null = null;
   private lastPullAt: number = 0;
   private starting: boolean = false;
+  /** 桥加载失败的原因（`GitBridgeHost.onFail` 写入）。 */
+  private bridgeReason: string = '';
 
   /** 桥是否可用（隐藏 Web 已加载 + 服务已配置）。 */
   isReady(): boolean {
-    return this.service !== null;
+    return this.service !== null && this.service.isBridgeReady();
+  }
+
+  /** 桥不可用的原因（`isReady()` 为 true 时为空串）：页面用它做说明行/禁用理由。 */
+  notReadyReason(): string {
+    if (this.service === null) {
+      return BRIDGE_NOT_READY_MESSAGE;
+    }
+    const reason: string = this.service.bridgeFailure();
+    return reason.length > 0 ? reason : BRIDGE_NOT_READY_MESSAGE;
+  }
+
+  /** 桥加载失败（`GitBridgeHost.onFail` 调）：置未就绪 + 记原因，**不抛**。 */
+  markBridgeFailed(reason: string): void {
+    this.bridgeReason = reason;
+  }
+
+  /** 桥失败原因（空串表示没失败过）。 */
+  bridgeFailure(): string {
+    return this.bridgeReason;
   }
 
   /**
@@ -92,11 +114,13 @@ class SyncController {
     return this.pullNow();
   }
 
-  /** 立即 pull（下拉刷新 / 启动强拉），不节流。 */
+  /** 立即 pull（下拉刷新 / 启动强拉），不节流。**永不抛异常**。 */
   async pullNow(): Promise<SyncOutcome> {
     const started: number = Date.now();
-    if (this.service === null) {
-      return { ok: false, message: '同步桥尚未就绪', elapsedMs: 0, skipped: false };
+    if (this.service === null || !this.service.isBridgeReady()) {
+      // 闪退回归：桥没好就绝不下探，直接返回可读错误给调用方展示
+      const reason: string = this.notReadyReason();
+      return { ok: false, message: reason, elapsedMs: 0, skipped: true };
     }
     let result: GitSyncResult;
     try {

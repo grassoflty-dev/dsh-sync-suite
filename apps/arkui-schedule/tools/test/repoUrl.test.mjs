@@ -7,7 +7,29 @@
 // 校验必须 fail-closed 并给中文原因；通过时只做 trim，不擅自增删 `.git`。
 // 这两个模块没有任何运行时 import，因此不需要 registerHooks 补 `.js` 后缀。
 import assert from 'node:assert/strict';
+import { registerHooks } from 'node:module';
 import { describe, test } from 'node:test';
+
+// settingsForm.ts 已开始 import ./aiProvider（运行时依赖），编译产物里是**无后缀**的 ESM 说明符，
+// 必须补 .js 才能被 Node 解析（与 pageBook / draft 等测试同一套 hook）。
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    try {
+      return nextResolve(specifier, context);
+    } catch (error) {
+      if (
+        error !== null &&
+        typeof error === 'object' &&
+        error.code === 'ERR_MODULE_NOT_FOUND' &&
+        specifier.startsWith('.') &&
+        !specifier.endsWith('.js')
+      ) {
+        return nextResolve(`${specifier}.js`, context);
+      }
+      throw error;
+    }
+  }
+});
 
 const { describeRepoProbe, repoProbeUrl, validateRepoUrl } = await import('../.build/model/repoUrl.js');
 const {
