@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 日程编辑视图（可嵌入 Edit 页，也可作为首页横屏主从布局的右栏）。
  *
  * 入参是**记录 id**（`''` = 新建）：编辑已有记录时保留原 id / 原日期 / 原 `ocr_text` /
@@ -86,6 +86,8 @@ export struct RecordEditorView {
   @State done: boolean = false;
   @State ocrText: string = '';
   @State attachments: Attachment[] = [];
+  /** 手写板插入对象（v2 按页文档 JSON；来自 AppStorage handwriting.pageObjects）。 */
+  @State pageObjectsJson: string = '';
   @State handwritingAvailable: boolean = false;
   @State ready: boolean = false;
   @State statusText: string = '';
@@ -239,6 +241,11 @@ export struct RecordEditorView {
       this.ocrText = ocrText;
       AppStorage.setOrCreate<string>('handwriting.ocrText', '');
     }
+    const pageObjectsJson = AppStorage.get<string>('handwriting.pageObjects');
+    if (pageObjectsJson !== undefined && pageObjectsJson.length > 0) {
+      this.pageObjectsJson = pageObjectsJson;
+      AppStorage.setOrCreate<string>('handwriting.pageObjects', '');
+    }
     const attachmentsJson = AppStorage.get<string>('handwriting.attachments');
     if (attachmentsJson !== undefined && attachmentsJson.length > 0) {
       const incoming = parseAttachmentList(attachmentsJson);
@@ -320,6 +327,10 @@ export struct RecordEditorView {
     }
     if (this.attachments.length > 0) {
       record.attachments = this.attachments.slice();
+    }
+    // 手写板插入的对象（框/图片/表格，v2 按页文档）；只在有内容时写，别给旧记录塞空串
+    if (this.pageObjectsJson.length > 0) {
+      record.pageObjects = this.pageObjectsJson;
     }
     if (!changed && this.originalAiStructured.length > 0) {
       record.ai_structured = this.originalAiStructured;

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 手写截图附件存储：`<filesDir>/git-repo/devices/<deviceId>/attachments/<sha256>.png`。
  *
  * 契约（`docs/DATA-CONTRACT.md` §3、BRIEF §3.2）：
@@ -9,6 +9,7 @@
  * 说明：共享层（main）禁止引用 `@kit.ImageKit` / PixelMap（validate 规则 4），
  * 因此详情页预览用沙箱文件 URI（`file://<绝对路径>`）交给 `Image()`，不在这里解码像素。
  */
+import { imageEntryName } from '../model/pageObjects';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import type { PageShotRef } from '../model/attachments';
 import {
@@ -57,6 +58,18 @@ export function parseAttachmentList(json: string): Attachment[] {
   }
   list.sort((left: Attachment, right: Attachment) => left.pageIndex - right.pageIndex);
   return list;
+}
+
+/** 待归档的插图条目（sha256 + zip 条目名）。 */
+export interface ArchiveImageEntry {
+  sha256: string;
+  entry: string;
+}
+
+/** 保存插图后的返回值（sha256 + zip 条目名）。 */
+export interface SavedImage {
+  sha256: string;
+  entry: string;
 }
 
 export class AttachmentStore {
@@ -197,6 +210,65 @@ export class AttachmentStore {
       this.writeFileSync(path, bytes);
     }
     return { sha256: sha256, name: jpegFileName(sha256), pageIndex: pageIndex };
+  }
+
+  /**
+   * 把「插入的原始图片」也打进当天 zip（条目名 `image-<sha8>.<ext>`）。
+   *
+   * 与 `archiveDay()` 分开：页 JPEG 用 `page-<N>-<sha8>.jpg`，插图用 `image-<sha8>.<ext>`，
+   * 两者共用同一个 zip（合并写、同名覆盖），因此可以分开调用、互不覆盖。
+   */
+  async archiveImages(dateKey: string, images: ArchiveImageEntry[]): Promise<number> {
+    if (images.length === 0) {
+      return 0;
+    }
+    const sync: GitSyncService | null = GitSyncService.active();
+    if (sync === null) {
+      throw new Error('同步桥未就绪：无法打包插图');
+    }
+    const archivePath: string = `${this.attachmentsDir()}/${dayArchiveName(dateKey)}`;
+    const entries: ZipEntryInput[] = [];
+    for (let index = 0; index < images.length; index++) {
+      const item = images[index];
+      const source: string = this.sourcePath(item.sha256);
+      if (!this.fileExists(source)) {
+        continue; // 源图缺失：跳过，不阻塞其它条目
+      }
+      const bytes: ArrayBuffer = this.readSourceBytes(item.sha256);
+      entries.push({ name: item.entry, chunks: this.toChunks(bytes) });
+    }
+    if (entries.length === 0) {
+      return 0;
+    }
+    await sync.zipUpsert(archivePath, entries);
+    console.info(`[hw] archive images=${entries.length} file=${dayArchiveName(dateKey)}`);
+    return entries.length;
+  }
+
+  /**
+   * 保存一张「插入的图片」（JPEG 字节）到本地源目录，返回 sha256 与 zip 条目名。
+   *
+   * 与 `savePageJpeg` 同一条落盘链路（按 sha256 去重），区别只在条目命名（`image-…`）。
+   */
+  saveImageJpeg(bytes: ArrayBuffer, ext: string): SavedImage {
+    if (!scheduleStore.isReady()) {
+      throw new Error('附件存储尚未初始化：请先调用 attachmentStore.ensureReady(context)');
+    }
+    if (bytes === undefined || bytes === null || bytes.byteLength === 0) {
+      throw new Error('图片内容为空，无法保存');
+    }
+    const sha256: string = sha256Hex(new Uint8Array(bytes));
+    const path: string = this.sourcePath(sha256);
+    if (!this.fileExists(path)) {
+      this.ensureDir(this.sourceDir(), '创建源图目录失败');
+      this.writeFileSync(path, bytes);
+    }
+    return { sha256: sha256, entry: imageEntryName(sha256, ext) };
+  }
+
+  /** 读本地源图 URI（画布插图预览用；已落盘才可用）。 */
+  sourceUri(sha256: string): string {
+    return `file://${this.sourcePath(sha256)}`;
   }
 
   /**

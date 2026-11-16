@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 日程数据模型（纯类型，无运行时依赖）。
  *
  * 契约来源：`docs/DATA-CONTRACT.md` §3、`docs/CONTRACT.md` §3.2。
@@ -43,6 +43,11 @@ export interface ScheduleRecord {
   /** 完成情况。 */
   done: boolean;
   attachments?: Attachment[];
+  /**
+   * 手写板插入的对象（框 / 图片 / 表格），v2 按页文档 JSON：{version:2, pages:{p1:[…]}}。
+   * 键是稳定页 id；旧记录没有这个字段。
+   */
+  pageObjects?: string;
   /** AI 结构化结果（可编辑）。 */
   ai_structured?: string;
   /** 是否已 AI 处理。 */

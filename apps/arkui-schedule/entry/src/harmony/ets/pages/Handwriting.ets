@@ -29,6 +29,7 @@
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
+import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import {
@@ -68,14 +69,19 @@ import type { DraftDoc, DraftPage } from '../model/draft';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN, isLandscapeSize } from '../common/uiTokens';
 import type { RegionBox } from '../model/types';
 import type { Attachment } from '../model/types';
-import { TABLE_DEFAULT_LINES, addEmptyPage, bringToFront, clampTableLines, countObjects, deleteObject, findObject, hitTest, imageEntryName, imageRectFor, makePageObject, moveObject, objectsOfPage, removePageObjects, replaceObject, resizeObject, setObjectsOfPage, tableRect } from '../model/pageObjects';
+import { IMAGE_MAX_BYTES, IMAGE_MAX_SIDE, TABLE_DEFAULT_LINES, addEmptyPage, bringToFront, clampTableLines, countObjects, deleteObject, findObject, hitTest, imageEntryName, imageRectFor, makePageObject, moveObject, objectsOfPage, removePageObjects, replaceObject, resizeObject, serializePageObjects, setObjectsOfPage, tableRect } from '../model/pageObjects';
 import type { NormalizedRect, ObjectsByPage, PageObject } from '../model/pageObjects';
+import type { SavedImage } from '../services/attachmentStore';
 
 /** `archiveDay` 的入参形状（显式接口：ArkTS 禁止内联对象类型）。 */
 interface ArchivePage {
   sha256: string;
   pageIndex: number;
 }
+
+/** 插入图片的 JPEG 质量：先 90（清晰），体积仍超 5MB 再降到 60。 */
+const IMAGE_JPEG_QUALITY: number = 90;
+const IMAGE_JPEG_LOW_QUALITY: number = 60;
 
 /** 竖屏顶部工具条高度（vp）——定版要求 ≤48vp。 */
 const TOP_BAR_HEIGHT: number = 48;
@@ -596,8 +602,84 @@ struct Handwriting {
 
   /** 选图入口（真机接线替换：photoAccessHelper.PhotoViewPicker → 读入 → insertImageAt）。 */
   private requestInsertImage(): void {
-    // 本轮先给出明确反馈与日志；选图/读取接线见 insertImageAt() 的 TODO（真机验证后补）
-    console.info('[hw] insert=image picker=pending');
+    this.pickImageFromGallery().catch((error: Error) => {
+      // 取消/权限拒绝/解码失败一律不崩：toast + 日志，用户可再试
+      console.info(`[hw] insert=image failed reason=${describeError(error)}`);
+      promptAction.showToast({ message: `插入图片失败：${describeError(error)}`, duration: 3000 });
+    });
+  }
+
+  /**
+   * 相册选图 → PixelMap → （必要时压缩）→ 存本地源图 → 插入到当前页中心。
+   *
+   * 流程细节：
+   * - `PhotoViewPicker.select()` 返回 uri；用户取消时返回空数组 → 静默返回（不 toast 报错）；
+   * - 用 `image.createImageSource(uri)` 直接解码（鸿蒙支持 file uri），拿到 PixelMap 与尺寸；
+   * - 体积/边长超限（>5MB 或长边 >2048）→ `scale()` 等比缩到长边 2048，再 `packing(jpeg, q90)`；
+   * - 落盘走 `attachmentStore.saveImageJpeg()`（按 sha256 去重，条目名 `image-<sha8>.jpg`）；
+   * - 插到页中心后**必须重绘**（真机踩过：只改状态不重绘 → 画布全白）。
+   */
+  private async pickImageFromGallery(): Promise<void> {
+    const options: photoAccessHelper.PhotoSelectOptions = new photoAccessHelper.PhotoSelectOptions();
+    options.MIMEType = photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE;
+    options.maxSelectNumber = 1;
+    const picker: photoAccessHelper.PhotoViewPicker = new photoAccessHelper.PhotoViewPicker();
+    const result: photoAccessHelper.PhotoSelectResult = await picker.select(options);
+    if (result.photoUris === undefined || result.photoUris.length === 0) {
+      console.info('[hw] insert=image cancelled');
+      return;
+    }
+    const uri: string = result.photoUris[0];
+    const source: image.ImageSource = image.createImageSource(uri);
+    let pixel: image.PixelMap;
+    try {
+      pixel = await source.createPixelMap();
+    } finally {
+      source.release().catch(() => {
+        // 释放失败忽略
+      });
+    }
+    const info: image.ImageInfo = await pixel.getImageInfo();
+    const width: number = info.size.width;
+    const height: number = info.size.height;
+    // 先按边长压（>2048 等比缩），再按体积判断是否需要降质量重编
+    const longest: number = Math.max(width, height);
+    if (longest > IMAGE_MAX_SIDE) {
+      const ratio: number = IMAGE_MAX_SIDE / longest;
+      await pixel.scale(ratio, ratio);
+      console.info(`[hw] insert=image scaled ${width}x${height} -> ${Math.round(width * ratio)}x${Math.round(height * ratio)}`);
+    }
+    const packer: image.ImagePacker = image.createImagePacker();
+    let bytes: ArrayBuffer;
+    try {
+      bytes = await packer.packing(pixel, { format: 'image/jpeg', quality: IMAGE_JPEG_QUALITY });
+    } finally {
+      packer.release().catch(() => {
+        // 释放失败忽略
+      });
+    }
+    if (bytes.byteLength > IMAGE_MAX_BYTES) {
+      // 仍然超 5MB：降质量再编一次（用户要求「>5MB 等比缩」，JPEG 质量是最后一道闸）
+      const repacker: image.ImagePacker = image.createImagePacker();
+      try {
+        bytes = await repacker.packing(pixel, { format: 'image/jpeg', quality: IMAGE_JPEG_LOW_QUALITY });
+      } finally {
+        repacker.release().catch(() => {
+          // 释放失败忽略
+        });
+      }
+    }
+    const saved: SavedImage = attachmentStore.saveImageJpeg(bytes, 'jpg');
+    // 记录位图供画布 drawImage（键 = 对象 id，见 insertImageAt）
+    const objectId: string = 'image-' + saved.sha256.slice(0, 8);
+    this.objectImages.set(objectId, pixel);
+    this.insertImageAt(saved.sha256, saved.entry, Math.max(1, width), Math.max(1, height));
+    // 立即把这张图打进当天 zip（失败不影响插入：原图已在 attachments-src/，完成时会再打包一次）
+    try {
+      await attachmentStore.archiveImages(this.resolveRecordDateKey(), [saved]);
+    } catch (error) {
+      console.info(`[hw] insert=image archive deferred reason=${describeError(error)}`);
+    }
   }
 
   /** 把已读入的图片按「页中心 + 40% 页宽」插入（选图回调里调它）。 */
@@ -802,6 +884,12 @@ struct Handwriting {
       // 附件：优先打成「当天 zip」引用（仓库里只放 zip）；失败回退散图引用，不阻塞完成
       const packed: Attachment[] = await this.archiveAttachments(result.attachments);
       AppStorage.setOrCreate<string>('handwriting.attachments', JSON.stringify(packed));
+      // 插入对象（框/图片/表格）按页写入记录：v2 文档，键是稳定页 id
+      const objectsJson: string = this.hasAnyObject() ? serializePageObjects(this.objectsByPage) : '';
+      AppStorage.setOrCreate<string>('handwriting.pageObjects', objectsJson);
+      if (objectsJson.length > 0) {
+        console.info(`[hw] objects total=${countObjects(this.objectsByPage)} pages=${Object.keys(this.objectsByPage).length}`);
+      }
       promptAction.showToast({
         message:
           `识别完成：${result.attachments.length} 页、${result.regionCount} 个框` +
@@ -1530,6 +1618,11 @@ struct Handwriting {
       return;
     }
     this.objectsByPage = setObjectsOfPage(this.objectsByPage, pageId, objects);
+  }
+
+  /** 是否有任何页存在对象（finish 决定要不要写 pageObjects 字段）。 */
+  private hasAnyObject(): boolean {
+    return countObjects(this.objectsByPage) > 0;
   }
 
   /** 页面切换后：取消选中并重绘（对象随页切换，不会串页）。 */
