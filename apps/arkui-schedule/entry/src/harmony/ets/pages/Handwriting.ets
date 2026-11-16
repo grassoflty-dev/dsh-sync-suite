@@ -24,6 +24,14 @@
  * - 「完成」实底品牌蓝 + 白字、`minWidth 64vp`、`flexShrink(0)`（真机被省略号截断）；
  * - 面板开合打 `[hw] panel open=...` 日志，便于 `hilog | grep '[hw]'` 自证（Popup 不一定进 `ui layout`）。
  *
+ * 2026-11-16 尺寸定版（**按屏比例自适应**，详见 `model/toolbarMetrics.ts`）：
+ * - 上面那些写死的 48 / 72 / 44 / 40 全部作废：工具条控件的**宽/高/间距/图标/字号**改为从
+ *   `toolbarMetrics(视口宽, 视口高, 横屏?)` 取（竖屏 `barThickness`=顶部条高度、横屏=rail 宽度）；
+ * - 分页区**放宽**：`−`/`+`、`‹`/`›` 每半 ≥44vp、`1/1` 格 ≥64vp、格间距 = `max(8vp, metrics.gap)`；
+ * - 放不下就滚动、**不压缩控件**：竖屏工具按钮横向 Scroll、横屏 rail 中段竖向 Scroll（「完成」永远固定）；
+ * - 页面侧只读派生方法（`barThickness()/itemSize()/controlGap()/iconSize()/toolbarFontSize()`），
+ *   除「屏太小连固定段都放不下」时把分页组并进 Scroll 外，两套布局的组件树结构保持恒定。
+ *
  * 布局不用 `if/else` 切横竖屏（会重建 `HandwritingPager`，画布已画的像素会丢）：
  * rail 宽度、顶部条高度随 `landscape` 变化，组件树结构保持恒定。
  */
@@ -232,6 +240,128 @@ struct Handwriting {
    * 重新生成一份存回去 —— 用户下次进来就会看到「已经识别过了的手迹」还在。
    */
   private draftClosed: boolean = false;
+
+  // ------------------------------------------------------------------ 工具条尺寸（按视口比例自适应）
+
+  /**
+   * 当前视口 → 一组工具条尺寸（纯函数在 `model/toolbarMetrics`，Node 单测覆盖）。
+   *
+   * `pageW/pageH` 由 `build()` 的 `onAreaChange` 写入、`landscape` 由宽高比较得出；
+   * 这三个 @State 一变，所有读 `metrics()` 的控件就跟着重算（不依赖 mediaquery）。
+   */
+  private metrics(): ToolbarMetrics {
+    return toolbarMetrics(this.pageW, this.pageH, this.landscape);
+  }
+
+  /** 工具条「厚度」：竖屏 = 顶部条高度；横屏 = rail 宽度（vp）。 */
+  private barThickness(): number {
+    return this.metrics().barThickness;
+  }
+
+  /** 单个控件的方形边长（vp）：控件高度与最小宽度都用它。 */
+  private itemSize(): number {
+    const metrics: ToolbarMetrics = this.metrics();
+    if (this.landscape) {
+      return metrics.itemSize;
+    }
+    // 竖屏兜底：控件不能比顶部条还高（极端方形屏会出现 barThickness < itemSize）
+    return Math.min(metrics.itemSize, metrics.barThickness);
+  }
+
+  /** 控件间距（vp）：取 `metrics.gap`，但**不小于 8vp**（`SPACING.sm`，分页区三格挨太近会误触）。 */
+  private controlGap(): number {
+    const metrics: ToolbarMetrics = this.metrics();
+    return Math.max(SPACING.sm, metrics.gap);
+  }
+
+  /** 自绘图标的基准尺寸（vp）。 */
+  private iconSize(): number {
+    return this.metrics().iconSize;
+  }
+
+  /** 工具条文字字号（fp）。 */
+  private toolbarFontSize(): number {
+    return this.metrics().fontSize;
+  }
+
+  /**
+   * 横屏 rail 的实际宽度（vp）。
+   *
+   * 主值取 `metrics.barThickness`（56~84），但 rail 里还塞着**分页区三个单元格**：
+   * `[−|+]` / `[‹|›]` 每半 ≥44vp ⇒ 单元格 ≥89vp，`1/1` ≥64vp。窄于这个下限时宁可 rail 宽一点，
+   * 也不压缩分页区（用户定版「不要压缩控件」）；同时兜住「手动框」这类 3 字标签的排版宽度。
+   */
+  private railWidth(): number {
+    const metrics: ToolbarMetrics = this.metrics();
+    const forThreeLabels: number = metrics.fontSize * 3 + SPACING.xs;
+    let width: number = Math.max(metrics.barThickness, forThreeLabels);
+    width = Math.max(width, this.pagerCellWidth());
+    return Math.max(width, this.pagerLabelWidth());
+  }
+
+  /** 横屏 rail 容器宽度（含 1vp 分割线；竖屏为 0）。 */
+  private railTotalWidth(): number {
+    return this.landscape ? this.railWidth() + DIVIDER : 0;
+  }
+
+  /** 竖屏顶部条容器高度（含 1vp 分割线；横屏为 0）。 */
+  private topBarTotalHeight(): number {
+    return this.landscape ? 0 : this.barThickness() + DIVIDER;
+  }
+
+  /**
+   * 分页区每个「半边」（`−` / `+` / `‹` / `›`）的宽度（vp）：**≥44vp**。
+   *
+   * 竖屏顶部条宽裕，跟着 `itemSize` 一起放大；横屏 rail 竖向空间宝贵，守住 44 下限即可，
+   * 否则 rail 会被分页区撑得过宽。
+   */
+  private pagerHalfWidth(): number {
+    if (this.landscape) {
+      return PAGER_HALF_MIN;
+    }
+    const metrics: ToolbarMetrics = this.metrics();
+    return Math.max(PAGER_HALF_MIN, metrics.itemSize * 0.75);
+  }
+
+  /** 分页区 `[−|+]` / `[‹|›]` 单元格宽度（vp）：两半 + 中间 1vp 分割线。 */
+  private pagerCellWidth(): number {
+    return 2 * this.pagerHalfWidth() + DIVIDER;
+  }
+
+  /** 分页区 `1/1` 页码格宽度（vp）：**≥64vp**。 */
+  private pagerLabelWidth(): number {
+    const metrics: ToolbarMetrics = this.metrics();
+    return Math.max(PAGER_LABEL_MIN, metrics.itemSize * 1.1);
+  }
+
+  /** 分页区「三格 + 两个间距」的总宽（vp，竖屏判断放不放得下用）。 */
+  private pagerTotalWidth(): number {
+    return 2 * this.pagerCellWidth() + this.pagerLabelWidth() + 2 * this.controlGap();
+  }
+
+  /**
+   * 竖屏顶部条里，分页组是否**固定在横向 Scroll 之外**（永远可见）。
+   *
+   * 平板竖屏放得下 → 固定（真机上曾被 Scroll 边缘裁掉，这条是 P0 修复）；
+   * 窄屏（连「退出 + 笔迹 + 分页组 + 完成 + 一个工具」都放不下）→ 把分页组并进 Scroll，
+   * **宁可横向滚动，也不压缩控件**（用户定版）。
+   */
+  private pagerPinned(): boolean {
+    if (this.landscape) {
+      return false;
+    }
+    const exitW: number = this.itemSize();
+    const brushW: number = this.itemSize() + 2 * SPACING.sm;
+    const fixed: number =
+      2 * SPACING.sm + exitW + brushW + this.finishWidth() + this.pagerTotalWidth() + 4 * this.controlGap();
+    // 再留出「一个控件」给中间那条横向 Scroll，否则工具按钮会被挤成 0 宽
+    return fixed + this.itemSize() <= this.pageW;
+  }
+
+  /** 「完成」按钮宽度（vp）：≥64vp，且不小于控件边长。 */
+  private finishWidth(): number {
+    return Math.max(FINISH_MIN_WIDTH, this.itemSize());
+  }
 
   aboutToAppear(): void {
     this.draftKey = this.resolveDraftKey();
@@ -573,7 +703,8 @@ struct Handwriting {
    *
    * 坐标（C 项注释订正）：`rect` 是**画布区域**归一化坐标，对象层与落盘 JPEG **同基准**，
    * `cellRegions()` 用该截图尺寸换算成像素 —— 因此这里**不做任何偏移修正**。
-   * 若将来改成整窗截图，换算必须在此（offset = 横屏 rail 73vp / 竖屏顶栏 49vp），不要改到 OCR 侧。
+   * 若将来改成整窗截图，换算必须在此（offset = 横屏 `railTotalWidth()` / 竖屏 `topBarTotalHeight()`，
+   * 两者都随视口自适应，写死数值会漂），不要改到 OCR 侧。
    */
   private collectTableTasks(pageIds: string[]): TableCellTask[] {
     const tasks: TableCellTask[] = [];
@@ -1178,18 +1309,18 @@ struct Handwriting {
     return $r('app.color.text_primary');
   }
 
-  /** 笔形图标：一根按笔刷类型变粗的斜杆（18vp 高）。 */
+  /** 笔形图标：一根按笔刷类型变粗的斜杆（长度取 `metrics.iconSize`）。 */
   @Builder
   brushIcon(kind: string) {
     Text('')
       .width(this.brushIconWidth(kind))
-      .height(18)
+      .height(this.iconSize() * 0.75)
       .borderRadius(2)
       .backgroundColor(this.brushIconColor(kind))
       .rotate({ angle: -35 })
   }
 
-  /** 粗细图标：三个递增圆点。 */
+  /** 粗细图标：三个递增圆点（圆点直径代表档位，容器高度取 `metrics.iconSize`）。 */
   @Builder
   sizeIcon() {
     Row({ space: 1 }) {
@@ -1209,28 +1340,28 @@ struct Handwriting {
         .borderRadius(5)
         .backgroundColor($r('app.color.text_primary'))
     }
-    .height(18)
+    .height(this.iconSize() * 0.75)
     .alignItems(VerticalAlign.Center)
   }
 
-  /** 颜色图标：三个小色块。 */
+  /** 颜色图标：三个小色块（尺寸随 `metrics.iconSize` 缩放）。 */
   @Builder
   colorIcon() {
     Row({ space: 1 }) {
       Text('')
-        .width(7)
-        .height(12)
+        .width(this.iconSize() * 0.25)
+        .height(this.iconSize() * 0.4)
         .backgroundColor('#1A1A1A')
       Text('')
-        .width(7)
-        .height(12)
+        .width(this.iconSize() * 0.25)
+        .height(this.iconSize() * 0.4)
         .backgroundColor('#D93025')
       Text('')
-        .width(7)
-        .height(12)
+        .width(this.iconSize() * 0.25)
+        .height(this.iconSize() * 0.4)
         .backgroundColor('#1A73E8')
     }
-    .height(18)
+    .height(this.iconSize() * 0.75)
   }
 
   // ------------------------------------------------------------------ 工具条按钮（宽度随内容自适应）
@@ -1272,28 +1403,26 @@ struct Handwriting {
   brushMenuButton() {
     Row({ space: 2 }) {
       Text('笔迹')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
+        .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
         .fontColor(this.panel === PANEL_INK ? Color.White : $r('app.color.text_primary'))
-      // 12×12 当前色块：即使文案收缩成「钢笔 · 3.5」也能看出颜色
+      // 当前色块（边长取 `metrics.iconSize × 0.6`）：文案收缩时也还能看出颜色
       Text('')
-        .width(12)
-        .height(12)
+        .width(this.iconSize() * 0.6)
+        .height(this.iconSize() * 0.6)
         .borderRadius(3)
         .backgroundColor(this.pagerState.penColor)
         .border({ width: 1, color: this.panel === PANEL_INK ? Color.White : '#DDDDDD' })
         .margin({ left: 2 })
       Text('▾')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
+        .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
         .fontColor(this.panel === PANEL_INK ? Color.White : $r('app.color.text_secondary'))
     }
-    .height(TOOL_HEIGHT)
-    .constraintSize({ minWidth: TOOL_MIN_WIDTH })
+    .height(this.itemSize())
+    .constraintSize({ minWidth: this.itemSize() })
     .padding({ left: SPACING.sm, right: SPACING.sm })
     .borderRadius(RADIUS.sm)
     .backgroundColor(this.panel === PANEL_INK ? $r('app.color.brand') : '#F1F3F5')
@@ -1310,11 +1439,10 @@ struct Handwriting {
   @Builder
   toolButton(label: string, tool: string) {
     Text(label)
-      .height(TOOL_HEIGHT)
-      .constraintSize({ minWidth: TOOL_MIN_WIDTH })
+      .height(this.itemSize())
+      .constraintSize({ minWidth: this.itemSize() })
       .padding({ left: SPACING.sm, right: SPACING.sm })
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
+      .fontSize(this.toolbarFontSize())
       .maxLines(1)
       .textOverflow({ overflow: TextOverflow.None })
       .textAlign(TextAlign.Center)
@@ -1333,20 +1461,18 @@ struct Handwriting {
   insertMenuButton() {
     Row({ space: 2 }) {
       Text('插入')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
+        .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
         .fontColor(this.panel === PANEL_INSERT ? Color.White : $r('app.color.text_primary'))
       Text('▾')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
+        .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
         .fontColor(this.panel === PANEL_INSERT ? Color.White : $r('app.color.text_secondary'))
     }
-    .height(TOOL_HEIGHT)
-    .constraintSize({ minWidth: TOOL_MIN_WIDTH })
+    .height(this.itemSize())
+    .constraintSize({ minWidth: this.itemSize() })
     .padding({ left: SPACING.sm, right: SPACING.sm })
     .borderRadius(RADIUS.sm)
     .backgroundColor(this.panel === PANEL_INSERT ? $r('app.color.brand') : '#F1F3F5')
@@ -1356,26 +1482,24 @@ struct Handwriting {
     })
   }
 
-  /** rail「插入」按钮：与其它 rail 控件同尺寸（72×44），文案固定 + ▾。 */
+  /** rail「插入」按钮：与其它 rail 控件同尺寸（100% 宽 × `metrics.itemSize` 高），文案固定 + ▾。 */
   @Builder
   railInsertButton() {
     Row({ space: 2 }) {
       Text('插入')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
+        .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
         .fontColor(this.panel === PANEL_INSERT ? Color.White : $r('app.color.text_primary'))
       Text('▾')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
+        .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
         .fontColor(this.panel === PANEL_INSERT ? Color.White : $r('app.color.text_secondary'))
     }
     .justifyContent(FlexAlign.Center)
     .width('100%')
-    .height(RAIL_ITEM_HEIGHT)
+    .height(this.itemSize())
     .borderRadius(RADIUS.sm)
     .backgroundColor(this.panel === PANEL_INSERT ? $r('app.color.brand') : '#F1F3F5')
     .onClick(() => {
@@ -1387,10 +1511,10 @@ struct Handwriting {
   @Builder
   historyButton(kind: string, label: string, enabled: boolean) {
     Text(label)
-      .height(TOOL_HEIGHT)
-      .constraintSize({ minWidth: TOOL_MIN_WIDTH })
+      .height(this.itemSize())
+      .constraintSize({ minWidth: this.itemSize() })
       .padding({ left: SPACING.sm, right: SPACING.sm })
-      .fontSize(FONT.body)
+      .fontSize(this.toolbarFontSize())
       .maxLines(1)
       .textOverflow({ overflow: TextOverflow.None })
       .textAlign(TextAlign.Center)
@@ -1418,18 +1542,22 @@ struct Handwriting {
    * ```
    * [ − | + ]   [ 3/5 ]   [ ‹ | › ]
    * ```
-   * 竖屏：放在**顶部条**里、**横向 Scroll 之外**（固定显示，宽度取紧凑档 `CELL_W_COMPACT = 36vp ≈84px`），
-   * 这样不会被 Scroll 边缘裁掉；
-   * 横屏：放在 rail 里纵向堆叠，宽度取 `CELL_WIDTH`（72vp，与 rail 其它控件等宽）。
+   * 2026-11-16「分页区放宽」定版：`−`/`+`、`‹`/`›` **每半 ≥44vp**（`PAGER_HALF_MIN`），
+   * 页码格 **≥64vp**（`PAGER_LABEL_MIN`），格间距 = `controlGap()`（`metrics.gap`，且不小于 8vp）。
+   * 竖屏顶部条与横屏 rail **共用这一套单元格**，宽度分别由 `pagerCellWidth()` / `pagerLabelWidth()` 给。
+   *
+   * 竖屏：默认固定在顶部条里、横向 Scroll 之外（永远可见，真机上曾被 Scroll 边缘裁掉）；
+   * 只有窄屏连「退出 + 笔迹 + 分页组 + 完成」都放不下时，才整体并进 Scroll（宁可滚动、不压缩）。
+   * 横屏：放在 rail 里纵向堆叠，宽度 = rail 宽度（`railWidth()` 已兜住 ≥89vp 的分页下限）。
    */
   @Builder
   pageStepper() {
-    Row({ space: SPACING.xs }) {
-      this.insertDeleteCell(CELL_W_COMPACT)
-      this.pageLabelCell(CELL_W_COMPACT)
-      this.prevNextCell(CELL_W_COMPACT)
+    Row({ space: this.controlGap() }) {
+      this.insertDeleteCell(this.pagerCellWidth())
+      this.pageLabelCell(this.pagerLabelWidth())
+      this.prevNextCell(this.pagerCellWidth())
     }
-    .height(RAIL_ITEM_HEIGHT)
+    .height(this.itemSize())
     .flexShrink(0)
   }
 
@@ -1449,8 +1577,8 @@ struct Handwriting {
     Row() {
       Text('−')
         .layoutWeight(1)
-        .height(RAIL_ITEM_HEIGHT)
-        .fontSize(FONT.body)
+        .height(this.itemSize())
+        .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
         .textAlign(TextAlign.Center)
@@ -1465,12 +1593,12 @@ struct Handwriting {
         .vertical(true)
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
-        .height(RAIL_ITEM_HEIGHT)
+        .height(this.itemSize())
 
       Text('+')
         .layoutWeight(1)
-        .height(RAIL_ITEM_HEIGHT)
-        .fontSize(FONT.body)
+        .height(this.itemSize())
+        .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
         .textAlign(TextAlign.Center)
@@ -1481,7 +1609,7 @@ struct Handwriting {
         })
     }
     .width(width)
-    .height(RAIL_ITEM_HEIGHT)
+    .height(this.itemSize())
     .borderRadius(RADIUS.sm)
     .backgroundColor('#F7F8FA')
     .clip(true)
@@ -1494,16 +1622,15 @@ struct Handwriting {
     Row() {
       Text(`${this.pageIndex() + 1}/${this.pageTotal()}`)
         .width('100%')
-        .height(RAIL_ITEM_HEIGHT)
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
+        .height(this.itemSize())
+        .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
         .textAlign(TextAlign.Center)
         .fontColor($r('app.color.text_primary'))
     }
     .width(width)
-    .height(RAIL_ITEM_HEIGHT)
+    .height(this.itemSize())
     .borderRadius(RADIUS.sm)
     .backgroundColor('#F7F8FA')
     .clip(true)
@@ -1516,8 +1643,8 @@ struct Handwriting {
     Row() {
       Text('‹')
         .layoutWeight(1)
-        .height(RAIL_ITEM_HEIGHT)
-        .fontSize(FONT.body)
+        .height(this.itemSize())
+        .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
         .textAlign(TextAlign.Center)
@@ -1531,12 +1658,12 @@ struct Handwriting {
         .vertical(true)
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
-        .height(RAIL_ITEM_HEIGHT)
+        .height(this.itemSize())
 
       Text('›')
         .layoutWeight(1)
-        .height(RAIL_ITEM_HEIGHT)
-        .fontSize(FONT.body)
+        .height(this.itemSize())
+        .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
         .textAlign(TextAlign.Center)
@@ -1547,7 +1674,7 @@ struct Handwriting {
         })
     }
     .width(width)
-    .height(RAIL_ITEM_HEIGHT)
+    .height(this.itemSize())
     .borderRadius(RADIUS.sm)
     .backgroundColor('#F7F8FA')
     .clip(true)
@@ -1558,17 +1685,17 @@ struct Handwriting {
    * 「完成」：唯一主操作，实底品牌蓝 + 白字、不收缩。
    *
    * 真机缺陷：rail 里 56vp 宽时 Button 内部 padding 把 2 个字挤成「...」。
-   * 现在：竖屏固定 64vp 宽（横屏改用 `railFinishButton()`），并显式给 4vp 左右 padding，
+   * 现在：宽度 = `finishWidth()`（≥64vp，且不小于控件边长），并显式给 4vp 左右 padding，
    * 否则 Button 默认内边距会把 2 个字挤成「...」。
    */
   @Builder
   finishButton() {
     Button(this.busy ? '识别中' : '完成')
-      .height(TOOL_HEIGHT)
-      .width(FINISH_MIN_WIDTH)
+      .height(this.itemSize())
+      .width(this.finishWidth())
       .constraintSize({ minWidth: FINISH_MIN_WIDTH })
       .padding({ left: SPACING.xs, right: SPACING.xs })
-      .fontSize(FONT.caption)
+      .fontSize(this.toolbarFontSize())
       .backgroundColor($r('app.color.brand'))
       .fontColor(Color.White)
       .enabled(!this.busy)
@@ -1587,11 +1714,10 @@ struct Handwriting {
   @Builder
   exitButton() {
     Text('‹')
-      .width(EXIT_SIZE)
-      .height(TOOL_HEIGHT)
-      .constraintSize({ minWidth: EXIT_SIZE })
-      .fontSize(FONT.title)
-      .lineHeight(LINE_HEIGHT.title)
+      .width(this.itemSize())
+      .height(this.itemSize())
+      .constraintSize({ minWidth: this.itemSize() })
+      .fontSize(this.toolbarFontSize())
       .maxLines(1)
       .textOverflow({ overflow: TextOverflow.None })
       .textAlign(TextAlign.Center)
@@ -1605,46 +1731,55 @@ struct Handwriting {
   }
 
   /**
-   * 竖屏：顶部单行工具条（48vp）——**四段固定布局，分页组不参与横向滚动**：
+   * 竖屏：顶部单行工具条（高度 = `metrics.barThickness`，48~64vp）。
    *
    * ```
-   * [‹ 退出] [Scroll: 钢笔▾ 3.5▾ 黑▾ 橡皮 手动框 ↶ ↷] [ [−|+] [1/1] [‹|›] ] [完成]
+   * [‹ 退出] [笔迹▾] [Scroll: 橡皮 手动框 插入▾ ↶ ↷] [ [−|+] [1/1] [‹|›] ] [完成]
    * ```
-   * 之前分页组塞在 Scroll 里，真机上 `‹` 被 Scroll 边缘裁成 20px、`›` 完全不可见；
-   * 现在三个单元格固定在 `完成` 左侧，只有中间那 7 个工具按钮横向滚动。
+   * - 退出 / 笔迹 / 分页组 / 完成**不参与横向滚动**（永远可见：真机上分页组曾被 Scroll 边缘裁成 20px）；
+   * - 只有中间那组工具按钮横向滚动 —— 屏再窄也**不压缩控件**（用户定版）；
+   * - 窄屏（`pagerPinned() === false`：连固定段都放不下）时，分页组也并进同一条 Scroll，
+   *   保证整条工具条不溢出屏幕。**注意**：这里只是「同一个 builder 出现两次」的 if 分支，
+   *   画布（`HandwritingPager`）始终在 `build()` 的同一位置，不会因方向/宽度变化被重建。
    */
   @Builder
   topBar() {
-    Row({ space: SPACING.xs }) {
+    Row({ space: this.controlGap() }) {
       this.exitButton()
 
       // 「笔迹设置」：笔形/粗细/颜色三合一入口，固定在 Scroll 之外（主操作，不被滚走）
       this.brushMenuButton()
 
       Scroll() {
-        Row({ space: SPACING.xs }) {
+        Row({ space: this.controlGap() }) {
           this.toolButton('橡皮', HW_TOOL_ERASER)
           this.toolButton('手动框', HW_TOOL_SELECT)
           this.insertMenuButton()
           this.historyButton('undo', '↶', this.pagerState.undoSteps > 0)
           this.historyButton('redo', '↷', this.pagerState.redoAvailable)
+          // 窄屏：分页组并进 Scroll（宁可横向滚动，也不把分页区压小）
+          if (!this.pagerPinned()) {
+            this.pageStepper()
+          }
         }
-        .height(TOOL_HEIGHT)
+        .height(this.itemSize())
         .alignItems(VerticalAlign.Center)
       }
       .scrollable(ScrollDirection.Horizontal)
       .scrollBar(BarState.Off)
       .layoutWeight(1)
-      .height(TOOL_HEIGHT)
+      .height(this.itemSize())
       .align(Alignment.Start)
 
-      // 分页三单元格：Scroll 之外、完成左侧，固定可见
-      this.pageStepper()
+      // 宽屏：分页三单元格固定在 Scroll 之外、完成左侧，永远可见
+      if (this.pagerPinned()) {
+        this.pageStepper()
+      }
 
       this.finishButton()
     }
     .width('100%')
-    .height(TOP_BAR_HEIGHT)
+    .height(this.barThickness())
     .padding({ left: SPACING.sm, right: SPACING.sm })
     .backgroundColor($r('app.color.page_background'))
     .alignItems(VerticalAlign.Center)
@@ -1660,34 +1795,45 @@ struct Handwriting {
   }
 
   /**
-   * 横屏：最左侧竖排 rail（72vp 内容 + 1vp 分割线）。
+   * 横屏：最左侧竖排 rail（宽度 = `railWidth()` + 1vp 分割线）。
    *
-   * 11 项：`‹` 退出 + 笔形/粗细/颜色 + 橡皮 + 手动框 + ↶ + ↷ + **三个分页单元格**
-   * （`[−|+]` / `[n/m]` / `[‹|›]`），`完成` 用 `Blank()` 压到底部固定可见。
+   * 12 项：`‹` 退出 + 笔迹 + 橡皮 + 手动框 + 插入 + ↶ + ↷ + **三个分页单元格**
+   * （`[−|+]` / `[n/m]` / `[‹|›]`）；「完成」压到底部、不参与滚动。
    *
-   * 高度核算：11×44 + 10×2(间距) = 504，再加完成 44 + 间距 2 + 上下 padding 16 ≈ **566vp**
-   * ≤ 真机 rail 可用 ≈601vp ⇒ 不需要 Scroll，「完成」也不会被挤出屏幕。
+   * 尺寸改成随屏自适应后（`itemSize` 最大 72vp），12 项竖向总高可能超过真机可用高度
+   * （≈601vp），因此中段整体放进**竖向 Scroll**：所有控件都点得到、「完成」也不会被挤出屏幕。
+   * 这不是「压缩控件」——每个控件仍是 `metrics.itemSize` 见方，只是允许滚动。
    */
   @Builder
   railBar() {
     Row() {
-      Column({ space: RAIL_GAP }) {
-        // 横屏专用一套按钮：**统一 72vp 宽（100%）+ 高 44vp（退出 40）+ 同圆角/同底色**
-        this.railExitButton()
-        this.railBrushButton()
-        this.railToolButton('橡皮', HW_TOOL_ERASER)
-        this.railToolButton('手动框', HW_TOOL_SELECT)
-        this.railInsertButton()
-        this.railHistoryButton('undo', '↶', this.pagerState.undoSteps > 0)
-        this.railHistoryButton('redo', '↷', this.pagerState.redoAvailable)
-        // 分页三单元格：宽度同为 72vp（CELL_WIDTH == RAIL_WIDTH），与上面按钮等宽
-        this.insertDeleteCell(CELL_WIDTH)
-        this.pageLabelCell(CELL_WIDTH)
-        this.prevNextCell(CELL_WIDTH)
-        Blank()
+      Column({ space: this.controlGap() }) {
+        Scroll() {
+          Column({ space: this.controlGap() }) {
+            // 横屏专用一套按钮：**统一 rail 宽（100%）+ 高 = `metrics.itemSize`**
+            this.railExitButton()
+            this.railBrushButton()
+            this.railToolButton('橡皮', HW_TOOL_ERASER)
+            this.railToolButton('手动框', HW_TOOL_SELECT)
+            this.railInsertButton()
+            this.railHistoryButton('undo', '↶', this.pagerState.undoSteps > 0)
+            this.railHistoryButton('redo', '↷', this.pagerState.redoAvailable)
+            // 分页三单元格：宽度 = rail 宽度（`railWidth()` 已兜住「每半 ≥44」的下限）
+            this.insertDeleteCell(this.railWidth())
+            this.pageLabelCell(this.railWidth())
+            this.prevNextCell(this.railWidth())
+          }
+          .width('100%')
+        }
+        .scrollable(ScrollDirection.Vertical)
+        .scrollBar(BarState.Off)
+        .width('100%')
+        .layoutWeight(1)
+        .align(Alignment.Top)
+
         this.railFinishButton()
       }
-      .width(RAIL_WIDTH)
+      .width(this.railWidth())
       .height('100%')
       .padding({ top: SPACING.sm, bottom: SPACING.sm })
       .backgroundColor(RAIL_BG)
@@ -1700,21 +1846,20 @@ struct Handwriting {
         .color($r('app.color.divider'))
         .height('100%')
     }
-    .width(RAIL_WIDTH + DIVIDER)
+    .width(this.railWidth() + DIVIDER)
     .height('100%')
     .alignItems(VerticalAlign.Top)
   }
 
-  // ------------------------------------------------------------------ 横屏 rail 专用按钮（统一 100% × 44vp）
+  // ------------------------------------------------------------------ 横屏 rail 专用按钮（统一 100% × itemSize）
 
-  /** rail 顶部「‹」退出：固定 72×40、不参与滚动（与竖屏同一个动作：存草稿 → 返回）。 */
+  /** rail 顶部「‹」退出：满 rail 宽 × `metrics.itemSize` 高（与竖屏同一个动作：存草稿 → 返回）。 */
   @Builder
   railExitButton() {
     Text('‹')
       .width('100%')
-      .height(TOOL_HEIGHT)
-      .fontSize(FONT.title)
-      .lineHeight(LINE_HEIGHT.title)
+      .height(this.itemSize())
+      .fontSize(this.toolbarFontSize())
       .maxLines(1)
       .textOverflow({ overflow: TextOverflow.None })
       .textAlign(TextAlign.Center)
@@ -1727,33 +1872,31 @@ struct Handwriting {
       })
   }
 
-  /** rail「笔迹」按钮：宽 100%（=72vp）、高 44vp、内容居中，文案固定 + 12×12 当前色块。 */
+  /** rail「笔迹」按钮：满 rail 宽 × `metrics.itemSize` 高，内容居中，文案固定 + 当前色块。 */
   @Builder
   railBrushButton() {
     Row({ space: 2 }) {
       Text('笔迹')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
+        .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
         .fontColor(this.panel === PANEL_INK ? Color.White : $r('app.color.text_primary'))
       Text('')
-        .width(12)
-        .height(12)
+        .width(this.iconSize() * 0.6)
+        .height(this.iconSize() * 0.6)
         .borderRadius(3)
         .backgroundColor(this.pagerState.penColor)
         .border({ width: 1, color: this.panel === PANEL_INK ? Color.White : '#DDDDDD' })
         .margin({ left: 2 })
       Text('▾')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
+        .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
         .fontColor(this.panel === PANEL_INK ? Color.White : $r('app.color.text_secondary'))
     }
     .justifyContent(FlexAlign.Center)
     .width('100%')
-    .height(RAIL_ITEM_HEIGHT)
+    .height(this.itemSize())
     .borderRadius(RADIUS.sm)
     .backgroundColor(this.panel === PANEL_INK ? $r('app.color.brand') : '#F1F3F5')
     .onClick(() => {
@@ -1762,14 +1905,12 @@ struct Handwriting {
   }
 
   /** rail 的橡皮 / 手动框：与竖屏语义一致（再点回画笔），尺寸统一。 */
-  /** rail 的橡皮 / 手动框：与竖屏语义一致（再点回画笔），尺寸统一。 */
   @Builder
   railToolButton(label: string, tool: string) {
     Text(label)
       .width('100%')
-      .height(RAIL_ITEM_HEIGHT)
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
+      .height(this.itemSize())
+      .fontSize(this.toolbarFontSize())
       .maxLines(1)
       .textOverflow({ overflow: TextOverflow.None })
       .textAlign(TextAlign.Center)
@@ -1787,8 +1928,8 @@ struct Handwriting {
   railHistoryButton(kind: string, label: string, enabled: boolean) {
     Text(label)
       .width('100%')
-      .height(RAIL_ITEM_HEIGHT)
-      .fontSize(FONT.body)
+      .height(this.itemSize())
+      .fontSize(this.toolbarFontSize())
       .maxLines(1)
       .textOverflow({ overflow: TextOverflow.None })
       .textAlign(TextAlign.Center)
@@ -1808,15 +1949,15 @@ struct Handwriting {
       })
   }
 
-  /** rail 底部「完成」：72×44 实底品牌蓝 + 白字，固定底部、不压缩、不参与滚动。 */
+  /** rail 底部「完成」：满 rail 宽 × `metrics.itemSize` 实底品牌蓝 + 白字，固定底部、不参与滚动。 */
   @Builder
   railFinishButton() {
     Button(this.busy ? '识别中' : '完成')
-      .width(CELL_WIDTH)
-      .height(RAIL_ITEM_HEIGHT)
+      .width(this.railWidth())
+      .height(this.itemSize())
       .borderRadius(RADIUS.sm)
       .constraintSize({ minWidth: FINISH_MIN_WIDTH })
-      .fontSize(FONT.caption)
+      .fontSize(this.toolbarFontSize())
       .backgroundColor($r('app.color.brand'))
       .fontColor(Color.White)
       .enabled(!this.busy)
@@ -1872,14 +2013,14 @@ struct Handwriting {
     this.redrawObjects();
   }
 
-  /** 对象层左上角 x（竖屏顶到工具条下方、横屏贴 rail 右侧）。 */
+  /** 对象层左上角 x（竖屏贴左边、横屏贴 rail 右侧；rail 宽度随屏自适应）。 */
   private objectLeft(): number {
-    return this.landscape ? RAIL_WIDTH + DIVIDER : 0;
+    return this.railTotalWidth();
   }
 
   /** 对象层左上角 y（竖屏在工具条下方、横屏顶到 0）。 */
   private objectTop(): number {
-    return this.landscape ? 0 : TOP_BAR_HEIGHT + DIVIDER;
+    return this.topBarTotalHeight();
   }
 
   private objectWidth(): number {
@@ -2092,17 +2233,17 @@ struct Handwriting {
 
   /** 面板锚点：竖屏在工具条下方、横屏在 rail 右侧（都不碰画布中心）。 */
   private panelLeft(): number {
-    // 横屏：rail（72）+ 1vp 分割线 + 8vp 间距；竖屏：贴工具条左边 8vp
-    return this.landscape ? RAIL_WIDTH + DIVIDER + SPACING.sm : SPACING.sm;
+    // 横屏：rail 宽 + 8vp 间距；竖屏：贴工具条左边 8vp（railTotalWidth 竖屏为 0）
+    return this.railTotalWidth() + SPACING.sm;
   }
 
   private panelTop(): number {
     if (this.landscape) {
-      // rail 顺序：笔迹(0) / 橡皮(1) / 手动框(2) / 插入(3)，控件统一 44vp 高
+      // rail 顺序：笔迹(0) / 橡皮(1) / 手动框(2) / 插入(3)，控件高 = metrics.itemSize、间距 = controlGap
       const index: number = this.panel === PANEL_INK ? 0 : (this.panel === PANEL_INSERT ? 3 : 1);
-      return SPACING.sm + index * (RAIL_ITEM_HEIGHT + SPACING.xs);
+      return SPACING.sm + index * (this.itemSize() + this.controlGap());
     }
-    return TOP_BAR_HEIGHT + DIVIDER + SPACING.xs;
+    return this.topBarTotalHeight() + SPACING.xs;
   }
 
   /** 面板宽度（按内容给足，避免文字被截断）。 */
@@ -2364,7 +2505,7 @@ struct Handwriting {
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.None })
             .height(CHIP_HEIGHT)
-            .width(TOOL_MIN_WIDTH)
+            .width(TOUCH_MIN)
             .textAlign(TextAlign.Center)
             .borderRadius(RADIUS.sm)
             .backgroundColor('#F1F3F5')
@@ -2385,7 +2526,7 @@ struct Handwriting {
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.None })
             .height(CHIP_HEIGHT)
-            .width(TOOL_MIN_WIDTH)
+            .width(TOUCH_MIN)
             .textAlign(TextAlign.Center)
             .borderRadius(RADIUS.sm)
             .backgroundColor('#F1F3F5')
@@ -2398,7 +2539,7 @@ struct Handwriting {
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.None })
             .height(CHIP_HEIGHT)
-            .width(TOOL_MIN_WIDTH)
+            .width(TOUCH_MIN)
             .textAlign(TextAlign.Center)
             .borderRadius(RADIUS.sm)
             .backgroundColor('#F1F3F5')
@@ -2419,7 +2560,7 @@ struct Handwriting {
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.None })
             .height(CHIP_HEIGHT)
-            .width(TOOL_MIN_WIDTH)
+            .width(TOUCH_MIN)
             .textAlign(TextAlign.Center)
             .borderRadius(RADIUS.sm)
             .backgroundColor('#F1F3F5')
@@ -2625,8 +2766,8 @@ struct Handwriting {
         Column() {
           this.railBar()
         }
-        // rail 容器 = 72vp 内容 + 1vp 分割线（分割线在 railBar 内部，宽度也算进来）
-        .width(this.landscape ? RAIL_WIDTH + DIVIDER : 0)
+        // rail 容器 = railWidth + 1vp 分割线（分割线在 railBar 内部，宽度也算进来）
+        .width(this.railTotalWidth())
         .height('100%')
         .clip(true)
 
@@ -2635,7 +2776,7 @@ struct Handwriting {
             this.topBar()
             this.topBarDivider()
           }
-          .height(this.landscape ? 0 : TOP_BAR_HEIGHT + DIVIDER)
+          .height(this.topBarTotalHeight())
           .clip(true)
 
           HandwritingPager({

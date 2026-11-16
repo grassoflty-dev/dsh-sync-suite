@@ -203,6 +203,8 @@ struct Settings {
   @State advancedOpen: boolean = false;
   /** 首页是否展示其他设备的只读记录（写 AppStorage，首页读取）。 */
   @State includeOtherDevices: boolean = false;
+  /** 仅手写笔输入（手写板开关：开 → 手指不能写；切换即落盘，手写页读同一份设置）。 */
+  @State penOnlyInput: boolean = false;
 
   /** 从列表页跳转过来时要自动执行的同步动作（pull / push / status）。 */
   private autoAction: string = '';
@@ -305,9 +307,30 @@ struct Settings {
     this.aiBaseURL = settings.aiBaseURL;
     this.gitPlatform = normalizePlatform(settings.gitPlatform);
     this.authMode = normalizeAuthMode(settings.authMode);
+    this.penOnlyInput = settings.penOnlyInput;
     this.lastSyncAt = settings.lastSyncAt;
     this.lastSyncError = settings.lastSyncError;
     this.lastSyncAction = normalizeSyncAction(settings.lastSyncAction);
+  }
+
+  /**
+   * 「仅手写笔输入」开关：切换即保存（不等底部「保存设置」——手写页读的是落盘值，
+   * 用户切完开关就去写字，中间不该再有一步）。
+   */
+  private async savePenOnlyInput(isOn: boolean): Promise<void> {
+    this.penOnlyInput = isOn;
+    const context = getContext(this) as common.UIAbilityContext;
+    const patch: SettingsPatch = { penOnlyInput: isOn };
+    try {
+      await settingsStore.save(patch, context);
+    } catch (error) {
+      if (this.disposed) {
+        return;
+      }
+      // 写盘失败就退回原状态，避免界面显示「已开」但手写板仍能用手指
+      this.penOnlyInput = !isOn;
+      this.saveHint = `「仅手写笔输入」保存失败：${describeError(error)}`;
+    }
   }
 
   /**
@@ -1545,6 +1568,50 @@ struct Settings {
     .alignItems(HorizontalAlign.Start)
   }
 
+  /** 手写组：手写板的输入方式（目前只有「仅手写笔输入」一项）。 */
+  @Builder
+  PenGroup() {
+    Column({ space: SPACING.md }) {
+      Text('手写')
+        .fontSize(FONT.body)
+        .lineHeight(LINE_HEIGHT.body)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+
+      Row({ space: SPACING.sm }) {
+        Column({ space: SPACING.xs }) {
+          Text('仅手写笔输入')
+            .fontSize(FONT.body)
+            .lineHeight(LINE_HEIGHT.body)
+            .fontColor($r('app.color.text_primary'))
+            .width('100%')
+            .textAlign(TextAlign.Start)
+          Text('开启后手指不能书写，只能用手写笔')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.text_secondary'))
+            .width('100%')
+            .textAlign(TextAlign.Start)
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+
+        Toggle({ type: ToggleType.Switch, isOn: this.penOnlyInput })
+          .selectedColor($r('app.color.brand'))
+          .onChange((isOn: boolean) => {
+            this.savePenOnlyInput(isOn);
+          })
+      }
+      .width('100%')
+      .height(TOUCH_MIN + SPACING.sm)
+      .alignItems(VerticalAlign.Center)
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
   /** 关于组：版本+上次同步 / 平台信息 / 隐私? / 权限?。 */
   @Builder
   AboutGroup() {
@@ -1620,7 +1687,7 @@ struct Settings {
       })
   }
 
-  /** 紧凑屏：三组自上而下。 */
+  /** 紧凑屏：四组自上而下。 */
   @Builder
   CompactBody() {
     Column({ space: SPACING.md }) {
@@ -1632,6 +1699,10 @@ struct Settings {
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
           this.AiGroup()
+          Divider()
+            .strokeWidth(DIVIDER)
+            .color($r('app.color.divider'))
+          this.PenGroup()
           Divider()
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
@@ -1652,7 +1723,7 @@ struct Settings {
     .height('100%')
   }
 
-  /** 宽屏/横屏：左（同步 + 关于）/ 右（AI），底部统一保存。 */
+  /** 宽屏/横屏：左（同步 + 手写 + 关于）/ 右（AI），底部统一保存。 */
   @Builder
   WideBody() {
     Column({ space: SPACING.md }) {
@@ -1662,6 +1733,10 @@ struct Settings {
           Row({ space: SPACING.xl }) {
             Column({ space: SPACING.xl }) {
               this.SyncGroup()
+              Divider()
+                .strokeWidth(DIVIDER)
+                .color($r('app.color.divider'))
+              this.PenGroup()
               Divider()
                 .strokeWidth(DIVIDER)
                 .color($r('app.color.divider'))

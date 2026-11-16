@@ -1,11 +1,11 @@
-﻿// 手写板竖屏工具条「布局断言」（源码级，防真机回归）。
+// 手写板竖屏工具条「布局断言」（源码级，防真机回归）。
 //
 // 背景（真机 1600×2560 竖屏实测）：菜单栏「只显示钢和向下箭头，没有显示钢笔」、
 // 粗细微菜单 5 个选项空白、删除页的「−」看不见、最右「完成」被省略号截断。
 // 根因：按钮给了**固定窄宽**（38/44vp）+ 单字文案，内容放不下就被截断。
 //
 // 用户定版（本文件即验收口径）：
-//   - 按钮**宽度按内容自适应**：只给 `constraintSize({ minWidth: 44 })` + `padding 8/8` +
+//   - 按钮**宽度按内容自适应**：只给 `constraintSize({ minWidth })` + `padding 8/8` +
 //     `flexShrink(0)`，**不得再给固定 `width`**；
 //   - 笔形按钮显示**当前笔刷名**（钢笔/圆珠笔/铅笔/马克笔/荧光笔）+ ▾；
 //     粗细按钮显示「当前档位圆点 + 数值 + ▾」；颜色按钮显示「20×20 色块 + ▾」；
@@ -13,6 +13,10 @@
 //   - 二级菜单每项 `minWidth ≥ 140`；粗细行显示「圆点 + `N vp`」；笔形行「图标 + 名称 + ✓」；
 //     颜色行「28×28 色块 + 名称 + ✓」；
 //   - 页面禁止 `TextOverflow.Ellipsis`；工具条/面板 `Text` 必须 `maxLines(1)`。
+//
+// **2026-11-16 定版变更**：工具条尺寸不再写死（原来是 48 / 72 / 44 / 40），改为
+// `model/toolbarMetrics` 按「视口宽高 + 横竖屏」算出来；本文件里所有尺寸断言都改成
+// 「引用 metrics 派生方法」，纯函数的数值断言在 `toolbarMetrics.test.mjs`。
 //
 // 只读源码、不依赖 ArkTS 编译器，`node --test` 毫秒级跑完。
 import assert from 'node:assert/strict';
@@ -60,22 +64,24 @@ function labelledTexts(chrome) {
 }
 
 describe('手写板工具条：宽度自适应与不截断', () => {
-  test('尺寸常量：控件 ≥44 / 高 40 / 分页单元格 72（两半 ≥32）/ 完成 ≥64 / 菜单项 ≥140 / 行高 44', () => {
+  test('尺寸下限：完成 ≥64 / 分页每半 ≥44 / 页码格 ≥64 / 菜单项 ≥140 / 行高 44 / chip 40', () => {
     const read = (name) => Number(new RegExp(`const ${name}: number = (\\d+(?:\\.\\d+)?);`).exec(code)?.[1]);
-    assert.ok(read('TOOL_MIN_WIDTH') >= 44, 'TOOL_MIN_WIDTH 必须 ≥44');
-    assert.equal(read('TOOL_HEIGHT'), 40);
-    assert.equal(read('CELL_WIDTH'), 72, '分页单元格宽必须是 72vp（= rail 宽）');
-    // 两半等分后每半宽 = (72 − 1vp 分割线) / 2 ≈ 35.5vp ≥ 32vp 点击区
-    assert.ok((read('CELL_WIDTH') - 1) / 2 >= 32, '单元格两半必须各 ≥32vp 宽');
-    assert.ok(read('FINISH_MIN_WIDTH') >= 64, '完成最小宽必须 ≥64');
+    assert.ok(read('FINISH_MIN_WIDTH') >= 64, '「完成」最小宽必须 ≥64');
+    assert.equal(read('PAGER_HALF_MIN'), 44, '分页区每半硬下限必须是 44vp');
+    assert.equal(read('PAGER_LABEL_MIN'), 64, '页码格硬下限必须是 64vp');
     assert.ok(read('MENU_MIN_WIDTH') >= 140, '菜单项最小宽必须 ≥140');
     assert.equal(read('MENU_ROW_HEIGHT'), 44);
+    assert.equal(read('CHIP_HEIGHT'), 40);
+    // 旧的写死尺寸常量必须消失（尺寸只来自 model/toolbarMetrics）
+    for (const gone of ['TOOL_HEIGHT', 'RAIL_ITEM_HEIGHT', 'CELL_WIDTH', 'CELL_W_COMPACT', 'TOOL_MIN_WIDTH', 'EXIT_SIZE', 'TOP_BAR_HEIGHT', 'RAIL_WIDTH']) {
+      assert.equal(new RegExp(`const ${gone}:`).test(code), false, `不得再有写死常量 ${gone}`);
+    }
   });
 
-  test('固定宽度清零：按钮容器不得给固定 width（图标内部允许），改用 minWidth + padding 自适应', () => {
+  test('固定宽度清零：按钮容器不得给固定 width（图标内部允许），改用 minWidth(itemSize) + padding 自适应', () => {
     // 图标本身可以有宽高（色块），这里把「图标宽」排除后再断言容器没有固定宽
     const iconWidths = {
-      brushMenuButton: ['.width(12)'],
+      brushMenuButton: ['.width(this.iconSize() * 0.6)'],
       toolButton: [],
       historyButton: []
     };
@@ -86,7 +92,10 @@ describe('手写板工具条：宽度自适应与不截断', () => {
         stripped = stripped.split(fragment).join('');
       }
       assert.equal(/\.width\(/.test(stripped), false, `${builder} 的按钮容器不得给固定 width（会被截断）`);
-      assert.ok(/\.constraintSize\(\{ minWidth: TOOL_MIN_WIDTH \}\)/.test(body), `${builder} 缺少 minWidth(44)`);
+      assert.ok(
+        /\.constraintSize\(\{ minWidth: this\.itemSize\(\) \}\)/.test(body),
+        `${builder} 缺少 minWidth(metrics.itemSize)`
+      );
       assert.ok(/\.padding\(\{ left: SPACING\.sm, right: SPACING\.sm \}\)/.test(body), `${builder} 缺少左右 8vp padding`);
       assert.ok(/\.flexShrink\(0\)/.test(body), `${builder} 缺少 flexShrink(0)`);
     }
@@ -118,20 +127,23 @@ describe('手写板工具条：宽度自适应与不截断', () => {
     }
   });
 
-  test('「笔迹设置」按钮带 12×12 当前色块（颜色文字可收缩但颜色永远可见）', () => {
+  test('「笔迹设置」按钮带当前色块（角度随 metrics.iconSize，颜色永远可见）', () => {
     const body = builderBody('brushMenuButton');
-    assert.ok(/\.width\(12\)/.test(body) && /\.height\(12\)/.test(body), '按钮必须有 12×12 色块');
+    assert.ok(
+      /\.width\(this\.iconSize\(\) \* 0\.6\)/.test(body) && /\.height\(this\.iconSize\(\) \* 0\.6\)/.test(body),
+      '按钮必须有跟随 metrics.iconSize 的当前色块'
+    );
     assert.ok(/backgroundColor\(this\.pagerState\.penColor\)/.test(body), '色块必须是当前颜色');
     const summary = builderBody('inkSummary');
     assert.ok(/currentColorLabel\(\)/.test(summary), '文案必须含当前色名（钢笔 · 3.5 · 黑）');
   });
 
-  test('溢出时该行横向滚动：Scroll + 横向 + 无滚动条 + 高度 48（不换行不加高）', () => {
+  test('溢出时该行横向滚动：Scroll + 横向 + 无滚动条 + 高度 = metrics.barThickness（不换行不加高）', () => {
     const bar = builderBody('topBar');
     assert.ok(/Scroll\(\)/.test(bar), '工具条必须包在 Scroll 里');
     assert.ok(/\.scrollable\(ScrollDirection\.Horizontal\)/.test(bar), '必须横向滚动');
     assert.ok(/\.scrollBar\(BarState\.Off\)/.test(bar), '不显示滚动条');
-    assert.ok(/\.height\(TOP_BAR_HEIGHT\)/.test(bar), '工具条高度固定 48（≤48vp）');
+    assert.ok(/\.height\(this\.barThickness\(\)\)/.test(bar), '工具条高度必须取 metrics.barThickness（48~64vp）');
   });
 
   test('「笔迹设置」面板 = 笔形 + 粗细 + 颜色 三段：标题、chip、档位格、色块、两条 1vp 分割线', () => {
@@ -228,8 +240,11 @@ describe('手写板工具条：宽度自适应与不截断', () => {
     assert.ok(/\.fontColor\(Color\.White\)/.test(body), '完成必须白字');
     assert.ok(/\.flexShrink\(0\)/.test(body), '完成不得被压缩');
     assert.ok(/constraintSize\(\{ minWidth: FINISH_MIN_WIDTH \}\)/.test(body), '完成最小宽必须 ≥64');
-    assert.ok(/\.width\(FINISH_MIN_WIDTH\)/.test(body), '竖屏完成宽 = 64vp');
+    assert.ok(/\.width\(this\.finishWidth\(\)\)/.test(body), '竖屏完成宽 = max(64, metrics.itemSize)');
+    assert.ok(/\.height\(this\.itemSize\(\)\)/.test(body), '完成高度 = metrics.itemSize');
     assert.ok(/\.padding\(\{ left: SPACING\.xs, right: SPACING\.xs \}\)/.test(body), '完成必须收窄内部 padding，否则 2 字会被挤成 ...');
+    // finishWidth 必须兜住 64 下限
+    assert.ok(/Math\.max\(FINISH_MIN_WIDTH, this\.itemSize\(\)\)/.test(builderBody('finishWidth')), 'finishWidth() 必须 ≥64');
   });
 
   test('工具条顺序 = 退出/笔形/粗细/颜色/橡皮/手动框/撤销/重做/步进器/完成', () => {
@@ -279,14 +294,14 @@ describe('手写板工具条：宽度自适应与不截断', () => {
 
   test('「笔迹设置」面板方位：竖屏向下展开、横屏向右展开，且不遮画布中心', () => {
     const left = builderBody('panelLeft');
-    assert.ok(/RAIL_WIDTH \+ DIVIDER \+ SPACING\.sm/.test(left), '横屏面板贴 rail 右侧展开');
-    assert.ok(/: SPACING\.sm;/.test(left), '竖屏面板贴左边 8vp');
+    assert.ok(/this\.railTotalWidth\(\) \+ SPACING\.sm/.test(left), '横屏面板贴 rail 右侧展开、竖屏贴左边 8vp');
     const top = builderBody('panelTop');
-    assert.ok(/TOP_BAR_HEIGHT \+ DIVIDER \+ SPACING\.xs/.test(top), '竖屏面板在工具条下方（向下展开）');
+    assert.ok(/this\.topBarTotalHeight\(\) \+ SPACING\.xs/.test(top), '竖屏面板在工具条下方（向下展开）');
     assert.ok(
       /this\.panel === PANEL_INK \? 0 : \(this\.panel === PANEL_INSERT \? 3 : 1\)/.test(top),
       '横屏：笔迹=rail 第 1 个（index 0）、插入=第 4 个（index 3）'
     );
+    assert.ok(/this\.itemSize\(\) \+ this\.controlGap\(\)/.test(top), '横屏面板 Y 必须按当前控件高/间距算（跟着 metrics 走）');
     const width = builderBody('panelWidth');
     assert.ok(/INK_PANEL_MIN_WIDTH \+ 2 \* SPACING\.sm/.test(width), '笔迹设置面板宽 240+16');
   });
@@ -294,13 +309,23 @@ describe('手写板工具条：宽度自适应与不截断', () => {
 
 // ---------------------------------------------------------------------------
 // 横屏 rail（真机 2560×1600 实测）：56vp 太窄 → 「手动框」截成「手动」、「完成」变「...」、
-// 步进器 `−`/`+` 被挤出 rail。定版：rail 72vp、步进器纵向三行、颜色加色名、完成 ≥64。
+// 步进器 `−`/`+` 被挤出 rail。
+//
+// 2026-11-16 定版：rail 宽度改为 `metrics.barThickness`（56~84）驱动，并且**必须兜住**
+// 分页区下限（每半 ≥44vp ⇒ 单元格 ≥89vp）与 3 字标签宽度，因此实际宽度 ≥89vp。
 // ---------------------------------------------------------------------------
 
 describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () => {
-  test('rail 宽度 ≥72vp，「手动框」「橡皮」等 3 字控件才放得下', () => {
-    const rail = Number(/const RAIL_WIDTH: number = (\d+);/.exec(code)?.[1]);
-    assert.ok(rail >= 72, `RAIL_WIDTH 必须 ≥72，实际 ${rail}`);
+  test('rail 宽度由 metrics.barThickness 驱动，并兜住「3 字标签 / 分页区下限」', () => {
+    const body = builderBody('railWidth');
+    assert.ok(/metrics\.barThickness/.test(body), 'railWidth() 必须以 metrics.barThickness 为主值');
+    assert.ok(/metrics\.fontSize \* 3/.test(body), 'railWidth() 必须兜住 3 字标签的排版宽度');
+    assert.ok(/this\.pagerCellWidth\(\)/.test(body), 'railWidth() 必须兜住分页区两半单元格（每半 ≥44vp）');
+    // 表格化校验：三字标签在 18fp 下需要 54vp，加 4vp 余量 ⇒ 58；分页下限 89 ⇒ 取 89
+    const labelNeed = 18 * 3 + 4;
+    const pagerNeed = 2 * 44 + 1;
+    const railWidth = Math.max(56, labelNeed, pagerNeed, Math.max(64, 72 * 1.1));
+    assert.ok(railWidth >= 72, `横屏 rail 实际宽度 ${railWidth}vp 必须 ≥72（旧真机验收线）`);
   });
 
   test('rail 只放工具 + 三个分页单元格，「完成」压底固定（不再有独立的 rail 页码行）', () => {
@@ -311,75 +336,80 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     const exitAt = bar.indexOf('this.railExitButton()');
     const brushAt = bar.indexOf('this.railBrushButton()');
     assert.ok(exitAt >= 0 && exitAt < brushAt, '`‹` 退出按钮必须在 rail 最上方（笔形之前）');
-    // 三个单元格纵向堆叠在工具之后、「完成」之前（都按 CELL_WIDTH 传参）
-    const stepperAt = bar.indexOf('this.insertDeleteCell(CELL_WIDTH)');
+    // 三个单元格纵向堆叠在工具之后、「完成」之前（宽度都取 railWidth()）
+    const stepperAt = bar.indexOf('this.insertDeleteCell(this.railWidth())');
     const finishAt = bar.indexOf('this.railFinishButton()');
     assert.ok(stepperAt > brushAt, '分页单元格必须在工具按钮之后');
     assert.ok(finishAt > stepperAt, '「完成」在最后（压底）');
-    assert.ok(/Blank\(\)/.test(bar), 'rail 用 Blank() 把「完成」压到底部');
+    // 「完成」不再靠 Blank() 压底，而是放在 Scroll 之外、用 layoutWeight 让滚动区吃掉余量
+    assert.ok(/\.layoutWeight\(1\)/.test(bar), 'rail 滚动区必须 layoutWeight(1)，把「完成」压到底部');
+    const scrollEnd = bar.indexOf('.align(Alignment.Top)');
+    assert.ok(finishAt > scrollEnd, '「完成」必须在竖向 Scroll 之外（不随滚动跑掉）');
   });
 
-  test('竖屏：分页三单元格在横向 Scroll 之外（固定可见，不被裁切）', () => {
+  test('竖屏：分页三单元格默认在横向 Scroll 之外（固定可见，不被裁切）', () => {
     const bar = builderBody('topBar');
     const scrollAt = bar.indexOf('Scroll()');
-    const stepperAt = bar.indexOf('this.pageStepper()');
     const finishAt = bar.indexOf('this.finishButton()');
     const exitAt = bar.indexOf('this.exitButton()');
     assert.ok(exitAt >= 0 && exitAt < scrollAt, '退出按钮在 Scroll 之前');
-    assert.ok(stepperAt > scrollAt, '分页组在 Scroll 之后（即 Scroll 之外）');
+    // 分页组出现两次：Scroll 内的「窄屏兜底」分支 + Scroll 外的「宽屏固定」分支
+    const pinnedAt = bar.indexOf('if (this.pagerPinned())');
+    const narrowAt = bar.indexOf('if (!this.pagerPinned())');
+    const stepperAt = bar.indexOf('this.pageStepper()', pinnedAt);
+    assert.ok(narrowAt > scrollAt && narrowAt < bar.indexOf('.align(Alignment.Start)'), '窄屏兜底分支必须在 Scroll 内');
+    assert.ok(pinnedAt > bar.indexOf('.align(Alignment.Start)'), '宽屏固定分支必须在 Scroll 之后');
+    assert.ok(stepperAt > pinnedAt, '分页组必须渲染在 Scroll 之外的固定分支里');
     assert.ok(finishAt > stepperAt, '分页组固定在「完成」左侧');
-    // Scroll 内只放 7 个工具按钮，不再塞分页组
-    const scrollBody = bar.slice(scrollAt, bar.indexOf('.align(Alignment.Start)'));
-    assert.equal(/this\.pageStepper\(\)/.test(scrollBody), false, '分页组不得在 Scroll 内（真机曾被裁成 20px）');
+    assert.ok(bar.indexOf('this.pageStepper()') < pinnedAt, '窄屏兜底分支里也要有分页组（Scroll 内）');
     for (const tool of ["this.toolButton('橡皮'", "this.toolButton('手动框'"]) {
-      assert.ok(scrollBody.includes(tool), `Scroll 内必须保留工具按钮 ${tool}`);
+      assert.ok(bar.indexOf(tool) > scrollAt, `Scroll 内必须保留工具按钮 ${tool}`);
     }
   });
 
-  test('竖屏单元格用紧凑宽度（36vp ≈84px），两半各 ≥34px 宽', () => {
-    const compact = Number(/const CELL_W_COMPACT: number = (\d+);/.exec(code)?.[1]);
-    assert.ok(compact >= 34 && compact <= 36, `CELL_W_COMPACT 必须落在 34~36vp（≈81~85px），实际 ${compact}`);
-    const portrait = builderBody('pageStepper');
-    for (const token of ['this.insertDeleteCell(CELL_W_COMPACT)', 'this.pageLabelCell(CELL_W_COMPACT)', 'this.prevNextCell(CELL_W_COMPACT)']) {
-      assert.ok(portrait.includes(token), `竖屏分页区必须用紧凑宽度：${token}`);
+  test('竖屏分页区放宽：每半 ≥44vp、页码格 ≥64vp、两半仍等分（不再压成 36vp 小格）', () => {
+    const stepper = builderBody('pageStepper');
+    for (const token of [
+      'this.insertDeleteCell(this.pagerCellWidth())',
+      'this.pageLabelCell(this.pagerLabelWidth())',
+      'this.prevNextCell(this.pagerCellWidth())'
+    ]) {
+      assert.ok(stepper.includes(token), `竖屏分页区必须用指标宽度：${token}`);
     }
-    // 整格 ≈84px（验收口径）
-    const cellPx = compact * 2.375;
-    assert.ok(cellPx >= 81 && cellPx <= 86, `单元格 ${cellPx.toFixed(1)}px 应 ≈84px`);
-    // 两半每半宽 = (compact − 1vp 分割线) / 2，换算成 px 必须 ≥34px（验收线）
-    const halfPx = ((compact - 1) / 2) * 2.375;
-    assert.ok(halfPx >= 34, `两半每半 ${halfPx.toFixed(1)}px 必须 ≥34px`);
-    // 竖屏宽度预算：退出 + 分页组 + 完成 + 间距 后，Scroll 仍有 ≥400vp（7 个工具放得下）
-    const exitW = Number(/const EXIT_SIZE: number = (\d+);/.exec(code)?.[1]);
-    const finishW = Number(/const FINISH_MIN_WIDTH: number = (\d+);/.exec(code)?.[1]);
-    const gap = 4;
-    const fixed = 16 /* 左右 padding */ + exitW + 3 * compact + 2 * gap + finishW + 4 * gap;
-    // 竖屏屏宽 1600px / 2.375 = 673.7vp
-    assert.ok(673.7 - fixed >= 400, `Scroll 剩余宽度只有 ${(673.7 - fixed).toFixed(1)}vp，放不下 7 个工具`);
-    // 横屏仍用 72vp
+    // 竖屏 673.7×1077.9（真机 1600×2560 @2.375）下的实际数值：itemSize=64 → 每半 48、页码格 70.4
+    const itemSize = 64;
+    const half = Math.max(44, itemSize * 0.75);
+    const cell = 2 * half + 1;
+    const label = Math.max(64, itemSize * 1.1);
+    assert.ok(half >= 44, `每半 ${half}vp 必须 ≥44vp`);
+    assert.ok(label >= 64, `页码格 ${label}vp 必须 ≥64vp`);
+    assert.ok(cell >= 2 * 44 + 1, `两半单元格 ${cell}vp 必须 ≥89vp`);
+    // 两半换算成 px（@2.375）必须远超 44px 触控线
+    assert.ok(half * 2.375 >= 44, `每半 ${(half * 2.375).toFixed(1)}px 必须 ≥44px`);
+    // 横屏也用同一套单元格（宽度取 rail 宽度）
     const rail = builderBody('railBar');
-    assert.ok(rail.includes('this.insertDeleteCell(CELL_WIDTH)'), '横屏必须用 CELL_WIDTH(72)');
+    assert.ok(rail.includes('this.insertDeleteCell(this.railWidth())'), '横屏必须用 railWidth() 给分页单元格宽度');
   });
 
-  test('rail 内控件尺寸统一：72vp 宽 / 高 44（退出 40）/ 同圆角 / 同底色', () => {
+  test('rail 内控件尺寸统一：满 rail 宽 / 高 = metrics.itemSize / 同圆角 / 同底色', () => {
     const railControls = ['railBrushButton', 'railToolButton', 'railHistoryButton'];
     for (const name of railControls) {
       const body = builderBody(name);
-      assert.ok(/\.width\('100%'\)/.test(body), `${name} 必须宽 100%（rail 内容宽统一 72vp）`);
-      assert.ok(/\.height\(RAIL_ITEM_HEIGHT\)/.test(body), `${name} 必须统一 44vp 高`);
+      assert.ok(/\.width\('100%'\)/.test(body), `${name} 必须宽 100%（= rail 宽度）`);
+      assert.ok(/\.height\(this\.itemSize\(\)\)/.test(body), `${name} 必须统一 metrics.itemSize 高`);
       assert.ok(/\.borderRadius\(RADIUS\.sm\)/.test(body), `${name} 必须统一圆角`);
     }
-    // 三个分页单元格与完成：宽度由调用方传（横屏 CELL_WIDTH=72）/ 完成固定 72vp，高都是 44vp
+    // 三个分页单元格与完成：宽度由调用方传（横屏 railWidth()）/ 完成满 rail 宽，高都是 itemSize
     for (const name of ['insertDeleteCell', 'pageLabelCell', 'prevNextCell']) {
       const body = builderBody(name);
-      assert.ok(/\.width\(width\)/.test(body), `${name} 必须由调用方传宽度（竖屏紧凑/横屏 72）`);
-      assert.ok(/\.height\(RAIL_ITEM_HEIGHT\)/.test(body), `${name} 必须 44vp 高`);
+      assert.ok(/\.width\(width\)/.test(body), `${name} 必须由调用方传宽度（竖屏 pagerCellWidth / 横屏 railWidth）`);
+      assert.ok(/\.height\(this\.itemSize\(\)\)/.test(body), `${name} 必须统一 metrics.itemSize 高`);
       assert.ok(/\.borderRadius\(RADIUS\.sm\)/.test(body), `${name} 必须统一圆角`);
     }
     {
       const body = builderBody('railFinishButton');
-      assert.ok(/\.width\(CELL_WIDTH\)/.test(body), 'railFinishButton 必须 72vp 宽');
-      assert.ok(/\.height\(RAIL_ITEM_HEIGHT\)/.test(body), 'railFinishButton 必须 44vp 高');
+      assert.ok(/\.width\(this\.railWidth\(\)\)/.test(body), 'railFinishButton 必须满 rail 宽');
+      assert.ok(/\.height\(this\.itemSize\(\)\)/.test(body), 'railFinishButton 必须 metrics.itemSize 高');
       assert.ok(/\.borderRadius\(RADIUS\.sm\)/.test(body), 'railFinishButton 必须统一圆角');
     }
     // 橡皮/手动框 + 三个单元格：同底色 #F1F3F5 / #F7F8FA 系（railToolButton 是三元）
@@ -430,24 +460,24 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     assert.equal(/\.onClick\(/.test(label), false, '页码单元格不可点');
     assert.equal(/\.enabled\(/.test(label), false, '页码单元格不需要 enabled');
 
-    // 三个单元格：宽度由调用方传（竖屏紧凑 / 横屏 72），高 44、圆角统一
+    // 三个单元格：宽度由调用方传（竖屏 pagerCellWidth/pagerLabelWidth / 横屏 railWidth），高 itemSize、圆角统一
     for (const name of ['insertDeleteCell', 'pageLabelCell', 'prevNextCell']) {
       const body = builderBody(name);
       assert.ok(/\.width\(width\)/.test(body), `${name} 必须由调用方传宽度`);
-      assert.ok(/\.height\(RAIL_ITEM_HEIGHT\)/.test(body), `${name} 必须 44vp 高`);
+      assert.ok(/\.height\(this\.itemSize\(\)\)/.test(body), `${name} 必须 metrics.itemSize 高`);
       assert.ok(/\.borderRadius\(RADIUS\.sm\)/.test(body), `${name} 必须统一圆角`);
     }
-    assert.ok(/const CELL_WIDTH: number = 72;/.test(code), 'CELL_WIDTH（横屏）必须是 72（与 rail 宽一致）');
-    assert.ok(/const CELL_W_COMPACT: number = 36;/.test(code), 'CELL_W_COMPACT（竖屏）必须是 36vp ≈ 84px');
+    assert.ok(/const PAGER_HALF_MIN: number = 44;/.test(code), '分页区每半下限必须是 44vp');
+    assert.ok(/const PAGER_LABEL_MIN: number = 64;/.test(code), '页码格下限必须是 64vp');
 
-    // 竖屏：一个 Row 里三个单元格（同一行），且用紧凑宽度
+    // 竖屏：一个 Row 里三个单元格（同一行），且用指标宽度
     const portrait = builderBody('pageStepper');
-    assert.ok(/Row\(\{ space: SPACING\.xs \}\)/.test(portrait), '竖屏分页区必须是横向 Row');
+    assert.ok(/Row\(\{ space: this\.controlGap\(\) \}\)/.test(portrait), '竖屏分页区必须是横向 Row（间距 = metrics.gap）');
     let cursor = -1;
     for (const token of [
-      'this.insertDeleteCell(CELL_W_COMPACT)',
-      'this.pageLabelCell(CELL_W_COMPACT)',
-      'this.prevNextCell(CELL_W_COMPACT)'
+      'this.insertDeleteCell(this.pagerCellWidth())',
+      'this.pageLabelCell(this.pagerLabelWidth())',
+      'this.prevNextCell(this.pagerCellWidth())'
     ]) {
       const at = portrait.indexOf(token);
       assert.ok(at >= 0, `竖屏分页区缺少 ${token}`);
@@ -456,27 +486,30 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     }
     assert.ok(/this\.pageStepper\(\)/.test(builderBody('topBar')), '竖屏顶部条必须用 pageStepper()');
 
-    // 横屏：rail 里纵向堆叠同样三个单元格（72vp），且在「完成」之前
+    // 横屏：rail 里纵向堆叠同样三个单元格（railWidth()），且在「完成」之前
     const rail = builderBody('railBar');
     for (const token of [
-      'this.insertDeleteCell(CELL_WIDTH)',
-      'this.pageLabelCell(CELL_WIDTH)',
-      'this.prevNextCell(CELL_WIDTH)'
+      'this.insertDeleteCell(this.railWidth())',
+      'this.pageLabelCell(this.railWidth())',
+      'this.prevNextCell(this.railWidth())'
     ]) {
       assert.ok(rail.includes(token), `rail 缺少 ${token}`);
     }
     assert.ok(
-      rail.indexOf('this.prevNextCell(CELL_WIDTH)') < rail.indexOf('this.railFinishButton()'),
+      rail.indexOf('this.prevNextCell(this.railWidth())') < rail.indexOf('this.railFinishButton()'),
       '三个单元格必须在「完成」之前'
     );
   });
 
-  test('竖屏按钮仍是「内容自适应 + minWidth 44」（两套布局分开写，rail 的固定宽不要污染竖屏）', () => {
+  test('竖屏按钮仍是「内容自适应 + minWidth(itemSize)」（两套布局分开写，rail 的固定宽不要污染竖屏）', () => {
     const controls = ['brushMenuButton', 'toolButton', 'historyButton'];
     for (const name of controls) {
       const body = builderBody(name);
       assert.ok(/\.flexShrink\(0\)/.test(body), `${name} 缺少 flexShrink(0)`);
-      assert.ok(/constraintSize\(\{ minWidth: TOOL_MIN_WIDTH \}\)/.test(body), `${name} 缺少 minWidth 44`);
+      assert.ok(
+        /constraintSize\(\{ minWidth: this\.itemSize\(\) \}\)/.test(body),
+        `${name} 缺少 minWidth(metrics.itemSize)`
+      );
       assert.equal(/\.width\('100%'\)/.test(body), false, `${name} 属于竖屏，不得固定 100% 宽`);
     }
     // rail 专用按钮反过来：必须 100%，且不参与竖屏
@@ -498,26 +531,25 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     );
   });
 
-  test('rail 11 项 + 完成 ≤ 真机可用高度（≈601vp），不再需要 Scroll，「完成」不会被挤出屏幕', () => {
+  test('rail 12 项在 itemSize=72 时超出真机可用高度（≈601vp），因此必须给竖向 Scroll，「完成」固定在 Scroll 之外', () => {
     const bar = builderBody('railBar');
-    // 结构：三个分页单元格已合并（不再有 5 行散件），所以无需 Scroll
-    assert.equal(/Scroll\(\)/.test(bar), false, 'rail 不再需要 Scroll（分页已合并成 3 个单元格）');
-    assert.ok(/Blank\(\)/.test(bar), 'rail 用 Blank() 把「完成」压到底部');
+    // 尺寸改成自适应后（最大 72vp），12 项放不下 ⇒ 中段必须可滚动
+    assert.ok(/Scroll\(\)/.test(bar), 'rail 必须有竖向 Scroll（否则「完成」会被挤出屏幕）');
+    assert.ok(/\.scrollable\(ScrollDirection\.Vertical\)/.test(bar), 'rail 的 Scroll 必须是竖向');
+    assert.ok(!/Blank\(\)/.test(bar), '不再用 Blank() 压底（改由 layoutWeight(1) 的滚动区吃掉余量）');
 
-    const item = Number(/const RAIL_ITEM_HEIGHT: number = (\d+);/.exec(code)?.[1]);
-    const gap = Number(/const RAIL_GAP: number = (\d+);/.exec(code)?.[1]);
-    const padding = 8; // SPACING.sm，rail 上下 padding
     const soloButtons = (bar.match(/this\.rail(Exit|Brush|Tool|History)Button\(/g) ?? []).length;
     assert.equal(soloButtons, 6, 'rail 独立按钮应为 6 个（退出/笔迹设置/橡皮/手动框/撤销/重做）');
-    const exitIsShorter = /\.height\(TOOL_HEIGHT\)/.test(builderBody('railExitButton'));
+    // 真机横屏（1600×2560 @2.375 = 673.7vp 高）下的实际值：itemSize = 72、gap = 10.8
+    const item = 72;
+    const gap = Math.max(8, item * 0.15);
+    const padding = 8; // SPACING.sm，rail 上下 padding
     const items = soloButtons + 3 /* [−|+] [n/m] [‹|›] */ + 1 /* 完成 */;
-    const content =
-      item * (items - 1) + (exitIsShorter ? Number(/const TOOL_HEIGHT: number = (\d+);/.exec(code)?.[1]) : item) +
-      gap * items +
-      padding * 2;
-    // 真机实测 rail 竖向可用高度 ≈601vp（状态栏 105px 起、底边 1534px，@2.375）
-    assert.ok(content <= 601, `rail 内容 ${content}vp 必须 ≤ 真机可用 601vp（否则「完成」会被挤出屏幕）`);
-    assert.ok(content >= 440 && content <= 601, `rail 内容 ${content}vp 应落在合理区间（Blank 吸收余量）`);
+    const content = item * items + gap * (items - 1) + padding * 2;
+    assert.ok(content > 601, `rail 内容 ${content.toFixed(1)}vp 已超真机可用 601vp，必须靠 Scroll 才不裁切`);
+    // 「完成」在 Scroll 之外（固定底部）
+    const finishAt = bar.indexOf('this.railFinishButton()');
+    assert.ok(finishAt > bar.indexOf('.align(Alignment.Top)'), '「完成」必须在竖向 Scroll 之后（不随滚动跑掉）');
   });
 
   test('竖屏「完成」也在针向 Scroll 之外（不会被横向滚走）', () => {
@@ -611,8 +643,8 @@ describe('手写板工具条与画布的分界线', () => {
     assert.ok(/\.strokeWidth\(DIVIDER\)/.test(bar), '分割线宽度必须是 DIVIDER(=1)');
     assert.ok(/\.color\(\$r\('app\.color\.divider'\)\)/.test(bar), '分割线颜色必须是 app.color.divider');
     assert.ok(/\.height\('100%'\)/.test(bar), '竖分割线必须撑满高度');
-    // rail 容器宽度 = 72 + 1
-    assert.ok(/\.width\(RAIL_WIDTH \+ DIVIDER\)/.test(bar), 'rail 容器宽 = RAIL_WIDTH + DIVIDER');
+    // rail 容器宽度 = railWidth + 1
+    assert.ok(/\.width\(this\.railWidth\(\) \+ DIVIDER\)/.test(bar), 'rail 容器宽 = railWidth() + DIVIDER');
   });
 
   test('横屏 rail 底色略浅且不投影', () => {
@@ -631,7 +663,10 @@ describe('手写板工具条与画布的分界线', () => {
     // build 里工具条高度要把分割线算进去，且只在竖屏出现
     const build = builderBody('build');
     assert.ok(/this\.topBarDivider\(\)/.test(build), 'build 必须渲染顶部横分割线');
-    assert.ok(/TOP_BAR_HEIGHT \+ DIVIDER/.test(build), '顶部条高度必须含分割线（48+1）');
+    const total = builderBody('topBarTotalHeight');
+    assert.ok(/this\.barThickness\(\) \+ DIVIDER/.test(total), '顶部条高度必须 = metrics.barThickness + DIVIDER');
+    assert.ok(/this\.landscape \? 0 :/.test(total), '顶部条高度只在竖屏非 0');
+    assert.ok(/\.height\(this\.topBarTotalHeight\(\)\)/.test(build), 'build 必须用 topBarTotalHeight()');
   });
 });
 
@@ -641,19 +676,19 @@ describe('手写板工具条与画布的分界线', () => {
 // ---------------------------------------------------------------------------
 
 describe('手写板退出：按钮 / 系统返回 / 草稿落盘', () => {
-  test('竖屏工具条最左侧有「‹」退出按钮（40×40，在 Scroll 之外）', () => {
+  test('竖屏工具条最左侧有「‹」退出按钮（itemSize 见方，在 Scroll 之外）', () => {
     const exit = builderBody('exitButton');
     assert.ok(/Text\('‹'\)/.test(exit), '必须是「‹」');
-    assert.ok(/\.width\(EXIT_SIZE\)/.test(exit) && /\.height\(TOOL_HEIGHT\)/.test(exit), '必须 40×40');
+    assert.ok(/\.width\(this\.itemSize\(\)\)/.test(exit) && /\.height\(this\.itemSize\(\)\)/.test(exit), '必须 metrics.itemSize 见方');
     assert.ok(/\.onClick\(\(\) => \{\s*this\.exitWritingBoard\(\);/.test(exit), '点击必须走 exitWritingBoard()');
     assert.equal(/\.opacity\(/.test(exit), false, '退出按钮不得透明');
   });
 
-  test('横屏 rail 顶部有「‹」退出按钮（72×40，与 rail 等宽）', () => {
+  test('横屏 rail 顶部有「‹」退出按钮（满 rail 宽 × itemSize 高）', () => {
     const exit = builderBody('railExitButton');
     assert.ok(/Text\('‹'\)/.test(exit), '必须是「‹」');
-    assert.ok(/\.width\('100%'\)/.test(exit), '必须与 rail 其它控件等宽（72vp）');
-    assert.ok(/\.height\(TOOL_HEIGHT\)/.test(exit), '顶部固定区高度 40vp');
+    assert.ok(/\.width\('100%'\)/.test(exit), '必须与 rail 其它控件等宽');
+    assert.ok(/\.height\(this\.itemSize\(\)\)/.test(exit), '高度 = metrics.itemSize');
     assert.ok(/\.flexShrink\(0\)/.test(exit), '退出按钮不得被压缩');
     assert.ok(/this\.railExitButton\(\)/.test(builderBody('railBar')), 'railBar 必须渲染退出按钮');
   });
