@@ -1,4 +1,4 @@
-﻿// 页面对象模型（框 / 图片 / 表格）纯逻辑测试。
+// 页面对象模型（框 / 图片 / 表格）纯逻辑测试。
 //
 // 锁死用户明确要求的行为：
 //   - 归一化/夹取/最小尺寸（40vp 对应 0.04）、序列化往返；
@@ -43,7 +43,15 @@ const {
   replaceObject,
   deleteObject,
   bringToFront,
-  planRender
+  planRender,
+  parsePageObjectsDoc,
+  objectsOfPage,
+  setObjectsOfPage,
+  removePageObjects,
+  addEmptyPage,
+  countObjects,
+  FIRST_PAGE_ID,
+  PAGE_OBJECTS_VERSION
 } = await import('../.build/model/pageObjects.js');
 
 const SHA = 'a'.repeat(64);
@@ -187,17 +195,21 @@ describe('遮罩与占位符：混合对象', () => {
 });
 
 describe('序列化往返与旧数据迁移', () => {
-  test('序列化 → 解析往返一致（含 image/table 额外字段）', () => {
-    const original = [
-      makePageObject('i1', 'image', { x: 0.2, y: 0.1, w: 0.3, h: 0.2 }, { sha256: SHA, name: imageEntryName(SHA, 'jpg') }),
-      makePageObject('t1', 'table', { x: 0.1, y: 0.5, w: 0.5, h: 0.3 }, { rows: 2, cols: 5 }),
-      makePageObject('b1', 'box', { x: 0.05, y: 0.05, w: 0.1, h: 0.1 })
-    ];
-    const parsed = parsePageObjects(serializePageObjects(original));
-    assert.equal(parsed.length, 3);
-    assert.deepEqual(parsed[0], original[0]);
-    assert.deepEqual(parsed[1], original[1]);
-    assert.deepEqual(parsed[2], original[2]);
+  test('v2 序列化 → 解析往返一致（按页、含 image/table 额外字段）', () => {
+    const original = {
+      p1: [
+        makePageObject('i1', 'image', { x: 0.2, y: 0.1, w: 0.3, h: 0.2 }, { sha256: SHA, name: imageEntryName(SHA, 'jpg') }),
+        makePageObject('b1', 'box', { x: 0.05, y: 0.05, w: 0.1, h: 0.1 })
+      ],
+      p2: [makePageObject('t1', 'table', { x: 0.1, y: 0.5, w: 0.5, h: 0.3 }, { rows: 2, cols: 5 })]
+    };
+    const encoded = serializePageObjects(original);
+    const doc = JSON.parse(encoded);
+    assert.equal(doc.version, 2, 'v2 文档必须带 version:2');
+    const result = parsePageObjectsDoc(encoded);
+    assert.equal(result.migrated, false, 'v2 不需要迁移');
+    assert.deepEqual(objectsOfPage(result.pages, 'p1'), original.p1);
+    assert.deepEqual(objectsOfPage(result.pages, 'p2'), original.p2);
   });
 
   test('旧 boxes（只有坐标、没有 kind/id）→ 迁移成 kind:box', () => {
@@ -413,5 +425,85 @@ describe('replaceObject / deleteObject / bringToFront / planRender', () => {
       planRender([c, a, t2]).tables.map((item) => item.id),
       ['c', 't2']
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B2 批 1：按页存储（v2）+ v1 迁移 + 插页/删页联动
+// ---------------------------------------------------------------------------
+
+describe('按页存储：翻页/插页/删页 与 v1 迁移', () => {
+  const page1 = [makePageObject('a', 'box', { x: 0.1, y: 0.1, w: 0.2, h: 0.2 })];
+  const page2 = [makePageObject('b', 'table', { x: 0.3, y: 0.3, w: 0.2, h: 0.2 }, { rows: 2, cols: 2 })];
+
+  test('① 翻页后对象不串页：p1/p2 各自只看到自己的对象', () => {
+    const pages = { p1: page1, p2: page2 };
+    assert.deepEqual(
+      objectsOfPage(pages, 'p1').map((item) => item.id),
+      ['a']
+    );
+    assert.deepEqual(
+      objectsOfPage(pages, 'p2').map((item) => item.id),
+      ['b']
+    );
+    assert.deepEqual(objectsOfPage(pages, 'p3'), [], '没有对象的页返回空数组而不是 undefined');
+  });
+
+  test('② 插页后原页对象仍在，新页为空', () => {
+    const before = { p1: page1, p2: page2 };
+    // 在第 2 页后面插一页 → PageBook 给它一个新 id（这里用 p3 表示）
+    const after = addEmptyPage(before, 'p3');
+    assert.deepEqual(
+      objectsOfPage(after, 'p1').map((item) => item.id),
+      ['a'],
+      '插页不得影响原页对象'
+    );
+    assert.deepEqual(
+      objectsOfPage(after, 'p2').map((item) => item.id),
+      ['b']
+    );
+    assert.deepEqual(objectsOfPage(after, 'p3'), [], '新页为空');
+    assert.equal(countObjects(after), 2);
+  });
+
+  test('③ 删页后该页对象一起删，其它页不受影响', () => {
+    const before = { p1: page1, p2: page2 };
+    const after = removePageObjects(before, 'p2');
+    assert.equal(countObjects(after), 1);
+    assert.deepEqual(objectsOfPage(after, 'p2'), []);
+    assert.deepEqual(
+      objectsOfPage(after, 'p1').map((item) => item.id),
+      ['a']
+    );
+    // 原对象（入参）不被就地修改
+    assert.equal(countObjects(before), 2, '操作必须返回新 map，不得改入参');
+  });
+
+  test('④ v1（单列表）迁移到 p1，数量不变且不抛', () => {
+    const v1 = JSON.stringify([
+      { x: 0.1, y: 0.1, w: 0.2, h: 0.2 },
+      { x: 0.4, y: 0.4, w: 0.2, h: 0.2 }
+    ]);
+    const result = parsePageObjectsDoc(v1);
+    assert.equal(result.migrated, true, '必须标记为迁移');
+    assert.equal(countObjects(result.pages), 2, '对象数量不得变');
+    assert.equal(objectsOfPage(result.pages, FIRST_PAGE_ID).length, 2, '整份挂到 p1');
+    assert.equal(objectsOfPage(result.pages, 'p2').length, 0);
+    // 单页兼容入口仍能拿到同一批
+    assert.equal(parsePageObjects(v1).length, 2);
+  });
+
+  test('v2 文档里坏页值（非数组）被跳过，不影响其它页', () => {
+    const json = JSON.stringify({ version: 2, pages: { p1: page1, p2: 'oops', p3: page2 } });
+    const result = parsePageObjectsDoc(json);
+    assert.equal(objectsOfPage(result.pages, 'p1').length, 1);
+    assert.equal(objectsOfPage(result.pages, 'p3').length, 1);
+    assert.equal(objectsOfPage(result.pages, 'p2').length, 0);
+  });
+
+  test('setObjectsOfPage：写空即删键（序列化不会留空页）', () => {
+    const pages = setObjectsOfPage({ p1: page1 }, 'p1', []);
+    assert.equal(Object.keys(pages).length, 0);
+    assert.equal(serializePageObjects(pages), JSON.stringify({ version: PAGE_OBJECTS_VERSION, pages: {} }));
   });
 });

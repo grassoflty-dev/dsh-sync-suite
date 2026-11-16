@@ -310,6 +310,28 @@ function main() {
   }
   pass('完成', '返回编辑页且未崩溃');
 
+  // 3.5 完成后的用户可见反馈：toast「已保存 N 页手迹」/ 编辑页「手迹 N 页」
+  const afterTexts = texts(layout());
+  const inkNotice = afterTexts.find((t) => /手迹\s*\d+\s*页/.test(t));
+  if (inkNotice !== undefined) {
+    pass('完成反馈', `编辑页显示「${inkNotice}」`);
+  } else {
+    const toastLine = (hilog(3).match(/已保存\s*\d+\s*页手迹/g) ?? [])[0];
+    if (toastLine !== undefined) {
+      pass('完成反馈', `hilog 命中 toast「${toastLine}」（编辑页未显示手迹页数）`);
+    } else {
+      fail('完成反馈', `未见「手迹 N 页」也未见 toast（页面文本：${afterTexts.slice(0, 10).join(' | ')}）`);
+    }
+  }
+
+  // 3.6 正文占位符（图片/表格对象参与遮罩后应留下可读占位）
+  const placeholders = afterTexts.filter((t) => /\[(图片|表格)[^\]]*\]/.test(t));
+  if (placeholders.length > 0) {
+    pass('正文占位符', placeholders.slice(0, 3).join(' / '));
+  } else {
+    skipped('正文占位符', '本轮未插入图片/表格对象（占位符由对象生成）');
+  }
+
   // 4. 附件 zip：拉回当天 zip 并断言
   const dateKey = new Date().toISOString().slice(0, 10);
   const pkg = 'com.itwill.schedule';

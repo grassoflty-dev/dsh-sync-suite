@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 手写板页面（**仅 HarmonyOS**，只在鸿蒙清单 `entry/src/harmony/resources/base/profile/main_pages.json` 登记）。
  *
  * 契约：BRIEF §3.2、`docs/CONTRACT.md` §3.4 + 「区域框内不做 OCR，只保存原图」。
@@ -68,8 +68,8 @@ import type { DraftDoc, DraftPage } from '../model/draft';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN, isLandscapeSize } from '../common/uiTokens';
 import type { RegionBox } from '../model/types';
 import type { Attachment } from '../model/types';
-import { TABLE_DEFAULT_LINES, bringToFront, clampTableLines, deleteObject, findObject, hitTest, imageRectFor, makePageObject, moveObject, replaceObject, resizeObject, tableRect, imageEntryName } from '../model/pageObjects';
-import type { NormalizedRect, PageObject } from '../model/pageObjects';
+import { TABLE_DEFAULT_LINES, addEmptyPage, bringToFront, clampTableLines, countObjects, deleteObject, findObject, hitTest, imageEntryName, imageRectFor, makePageObject, moveObject, objectsOfPage, removePageObjects, replaceObject, resizeObject, setObjectsOfPage, tableRect } from '../model/pageObjects';
+import type { NormalizedRect, ObjectsByPage, PageObject } from '../model/pageObjects';
 
 /** `archiveDay` 的入参形状（显式接口：ArkTS 禁止内联对象类型）。 */
 interface ArchivePage {
@@ -179,7 +179,7 @@ struct Handwriting {
    * 按页持久化（以 `PageBook` 的稳定页 id 为键）会在 B2 与 `pageObjects` 写进 JSONL 时一起做，
    * 避免现在改数据形状把已通过的模型测试推翻。
    */
-  @State pageObjects: PageObject[] = [];
+  @State objectsByPage: ObjectsByPage = {};
   /** 「插入 → 表格」面板里的行列选择（1..10，默认 3×3）。 */
   @State insertRows: number = TABLE_DEFAULT_LINES;
   @State insertCols: number = TABLE_DEFAULT_LINES;
@@ -578,9 +578,10 @@ struct Handwriting {
       rows: rows,
       cols: cols
     });
-    this.pageObjects.push(obj);
+    this.writeObjects(this.objectsOfCurrentPage().concat([obj]));
+    this.redrawObjects();
     this.panel = '';
-    console.info(`[hw] insert=table rows=${rows} cols=${cols} count=${this.pageObjects.length}`);
+    console.info(`[hw] insert=table rows=${rows} cols=${cols} count=${this.currentObjects().length}`);
     promptAction.showToast({ message: `已插入表格 ${rows}×${cols}`, duration: 1500 });
   }
 
@@ -606,9 +607,10 @@ struct Handwriting {
       sha256: sha256,
       name: name
     });
-    this.pageObjects.push(obj);
+    this.writeObjects(this.objectsOfCurrentPage().concat([obj]));
+    this.redrawObjects();
     const ext: string = name.indexOf('.') >= 0 ? name.slice(name.lastIndexOf('.') + 1) : 'jpg';
-    console.info('[hw] insert=image entry=' + imageEntryName(sha256, ext) + ' w=' + String(imageW) + ' h=' + String(imageH) + ' count=' + String(this.pageObjects.length));
+    console.info('[hw] insert=image entry=' + imageEntryName(sha256, ext) + ' w=' + String(imageW) + ' h=' + String(imageH) + ' count=' + String(this.currentObjects().length));
   }
 
   private closeOverlays(): void {
@@ -669,6 +671,8 @@ struct Handwriting {
    */
   private touchUi(): void {
     this.uiTick = this.uiTick + 1;
+    // 页可能变了：对象层跟着当前页重绘（对象随页切换，不串页）
+    this.redrawObjects();
   }
 
   /** 打印当前页状态（真机取证用：页码文本必须与这里一致）。 */
@@ -681,6 +685,7 @@ struct Handwriting {
 
   private goPrevPage(): void {
     if (this.pagerState.prev()) {
+      this.onPageSwitched();
       this.touchUi();
       this.scheduleDraftSave();
     }
@@ -688,6 +693,7 @@ struct Handwriting {
 
   private goNextPage(): void {
     if (this.pagerState.next()) {
+      this.onPageSwitched();
       this.touchUi();
       this.scheduleDraftSave();
     }
@@ -722,7 +728,13 @@ struct Handwriting {
     if (this.confirmStage === CONFIRM_SECOND) {
       this.confirmStage = CONFIRM_NONE;
       const pageNo: number = this.pagerState.current + 1;
+      // 删页前先记下该页 id：删掉后它的对象要一起删（不让对象留在孤儿页上）
+      const removedPageId: string = this.currentPageId();
       if (this.pagerState.removePage(this.pagerState.current)) {
+        if (removedPageId.length > 0) {
+          this.objectsByPage = removePageObjects(this.objectsByPage, removedPageId);
+        }
+        this.selectedObjectId = '';
         console.info(`[hw] page deleted ${pageNo}, pages=${this.pagerState.pages}`);
         this.logPageState('delete');
         this.touchUi();
@@ -1489,6 +1501,43 @@ struct Handwriting {
 
   // ------------------------------------------------------------------ 对象层（框 / 图片 / 表格）
 
+  // ------------------------------------------------------------------ 按页对象（B2 批 1）
+
+  /** 当前页的稳定 id（`PageBook` 的 `p1/p2…`）；取不到返回空串。 */
+  private currentPageId(): string {
+    const ids: string[] = this.pagerState.pageIds;
+    const index: number = this.pagerState.current;
+    if (index < 0 || index >= ids.length) {
+      return '';
+    }
+    return ids[index];
+  }
+
+  /** 当前页对象（只读副本；空页返回空数组）。 */
+  private currentObjects(): PageObject[] {
+    return objectsOfPage(this.objectsByPage, this.currentPageId());
+  }
+
+  /** 当前页对象（同 `currentObjects()`，命名区分「按页取」的语义）。 */
+  private objectsOfCurrentPage(): PageObject[] {
+    return this.currentObjects();
+  }
+
+  /** 写回当前页对象（按页 id 存；空页自动删键）。 */
+  private writeObjects(objects: PageObject[]): void {
+    const pageId: string = this.currentPageId();
+    if (pageId.length === 0) {
+      return;
+    }
+    this.objectsByPage = setObjectsOfPage(this.objectsByPage, pageId, objects);
+  }
+
+  /** 页面切换后：取消选中并重绘（对象随页切换，不会串页）。 */
+  private onPageSwitched(): void {
+    this.selectedObjectId = '';
+    this.redrawObjects();
+  }
+
   /** 对象层左上角 x（竖屏顶到工具条下方、横屏贴 rail 右侧）。 */
   private objectLeft(): number {
     return this.landscape ? RAIL_WIDTH + DIVIDER : 0;
@@ -1556,7 +1605,7 @@ struct Handwriting {
       return;
     }
     context.clearRect(0, 0, width, height);
-    for (const obj of this.pageObjects) {
+    for (const obj of this.currentObjects()) {
       this.drawObject(context, obj, obj.id === this.selectedObjectId);
     }
   }
@@ -1652,7 +1701,7 @@ struct Handwriting {
     }
     const point = this.toNormalized(touch.x, touch.y);
     if (event.type === TouchType.Down) {
-      const hit = hitTest(this.pageObjects, point.nx, point.ny);
+      const hit = hitTest(this.currentObjects(), point.nx, point.ny);
       if (hit.id.length === 0) {
         // 点空白：取消选中，并把事件让给画布（不 return，画笔照常落笔）
         if (this.selectedObjectId.length > 0) {
@@ -1662,16 +1711,16 @@ struct Handwriting {
         return;
       }
       if (hit.part === 'close') {
-        this.pageObjects = deleteObject(this.pageObjects, hit.id);
+        this.writeObjects(deleteObject(this.currentObjects(), hit.id));
         this.selectedObjectId = '';
-        console.info(`[hw] object delete id=${hit.id} count=${this.pageObjects.length}`);
+        console.info(`[hw] object delete id=${hit.id} count=${this.currentObjects().length}`);
         this.redrawObjects();
         return;
       }
       // 选中即置顶（点谁谁在上）
-      this.pageObjects = bringToFront(this.pageObjects, hit.id);
+      this.writeObjects(bringToFront(this.currentObjects(), hit.id));
       this.selectedObjectId = hit.id;
-      const origin: PageObject | undefined = findObject(this.pageObjects, hit.id);
+      const origin: PageObject | undefined = findObject(this.currentObjects(), hit.id);
       if (origin === undefined) {
         return;
       }
@@ -1686,12 +1735,12 @@ struct Handwriting {
       const origin: PageObject = this.dragObject;
       if (this.dragPart === 'handle') {
         const next: PageObject = resizeObject(origin, point.nx, point.ny);
-        this.pageObjects = replaceObject(this.pageObjects, next);
+        this.writeObjects(replaceObject(this.currentObjects(), next));
       } else {
         const dx: number = point.nx - this.dragStart.nx;
         const dy: number = point.ny - this.dragStart.ny;
         const next: PageObject = moveObject(origin, origin.x + dx, origin.y + dy);
-        this.pageObjects = replaceObject(this.pageObjects, next);
+        this.writeObjects(replaceObject(this.currentObjects(), next));
         this.dragStart = point;
       }
       this.redrawObjects();

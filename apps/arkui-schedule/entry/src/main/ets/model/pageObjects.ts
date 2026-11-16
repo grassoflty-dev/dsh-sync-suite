@@ -215,34 +215,69 @@ export function pagePlaceholders(objects: PageObject[], pageNumber: number, incl
   return texts;
 }
 
-/** 序列化（JSONL 里存 `pageObjects` 字段）；只保留关键字面量字段。 */
-export function serializePageObjects(objects: PageObject[]): string {
-  const clean: PageObject[] = [];
-  for (const object of objects) {
-    const normalized: NormalizedRect = normalizeRect(object);
-    const item: PageObject = {
-      id: object.id,
-      kind: object.kind,
-      x: normalized.x,
-      y: normalized.y,
-      w: normalized.w,
-      h: normalized.h
-    };
-    if (object.kind === 'image') {
-      if (object.sha256 !== undefined) {
-        item.sha256 = object.sha256;
-      }
-      if (object.name !== undefined) {
-        item.name = object.name;
-      }
+/** 按页存对象：键是**稳定页 id**（`PageBook` 的 `p1/p2…`），值是该页对象（z 序）。 */
+export type ObjectsByPage = Record<string, PageObject[]>;
+
+/** v2 文档版本号（v1 = 旧的「单列表」）。 */
+export const PAGE_OBJECTS_VERSION: number = 2;
+
+/** 迁移时旧数据挂到哪一页（`PageBook` 的首页 id 固定为 `p1`）。 */
+export const FIRST_PAGE_ID: string = 'p1';
+
+/** v2 序列化结果的形状（显式接口：ArkTS 禁止内联对象类型）。 */
+interface PageObjectsDoc {
+  version: number;
+  pages: ObjectsByPage;
+}
+
+/** 只保留关键字面量字段（顺带夹取坐标/行列），返回干净副本。 */
+function cleanObject(object: PageObject): PageObject {
+  const normalized: NormalizedRect = normalizeRect(object);
+  const item: PageObject = {
+    id: object.id,
+    kind: object.kind,
+    x: normalized.x,
+    y: normalized.y,
+    w: normalized.w,
+    h: normalized.h
+  };
+  if (object.kind === 'image') {
+    if (object.sha256 !== undefined) {
+      item.sha256 = object.sha256;
     }
-    if (object.kind === 'table') {
-      item.rows = clampTableLines(object.rows === undefined ? TABLE_DEFAULT_LINES : object.rows);
-      item.cols = clampTableLines(object.cols === undefined ? TABLE_DEFAULT_LINES : object.cols);
+    if (object.name !== undefined) {
+      item.name = object.name;
     }
-    clean.push(item);
   }
-  return JSON.stringify(clean);
+  if (object.kind === 'table') {
+    item.rows = clampTableLines(object.rows === undefined ? TABLE_DEFAULT_LINES : object.rows);
+    item.cols = clampTableLines(object.cols === undefined ? TABLE_DEFAULT_LINES : object.cols);
+  }
+  return item;
+}
+
+/**
+ * 序列化**整份按页对象**（JSONL 里的 `pageObjects` 字段）。
+ *
+ * v2 形状：`{ "version": 2, "pages": { "p1": [obj…], "p2": [obj…] } }`
+ * —— 键是稳定页 id，插页/删页/翻页都不会让对象串页。
+ */
+export function serializePageObjects(pages: ObjectsByPage): string {
+  const clean: ObjectsByPage = {};
+  const keys: string[] = Object.keys(pages);
+  for (const pageId of keys) {
+    const list: PageObject[] = pages[pageId];
+    if (!Array.isArray(list) || list.length === 0) {
+      continue; // 空页不写，减小 JSONL 体积
+    }
+    const items: PageObject[] = [];
+    for (const object of list) {
+      items.push(cleanObject(object));
+    }
+    clean[pageId] = items;
+  }
+  const doc: PageObjectsDoc = { version: PAGE_OBJECTS_VERSION, pages: clean };
+  return JSON.stringify(doc);
 }
 
 function readKind(value: string | undefined): PageObjectKind {
@@ -252,27 +287,8 @@ function readKind(value: string | undefined): PageObjectKind {
   return 'box';
 }
 
-/**
- * 解析 `pageObjects`（损坏一律跳过，不让整页丢失）。
- *
- * 兼容两种输入：
- * - 新结构：`[{id, kind, x, y, w, h, ...}]`；
- * - 旧结构（只有框）：`[{x, y, w, h}]` → 自动补 `id`（`box-<序号>`）与 `kind: 'box'`。
- */
-export function parsePageObjects(json: string): PageObject[] {
-  const text: string = typeof json === 'string' ? json.trim() : '';
-  if (text.length === 0) {
-    return [];
-  }
-  let parsed: PageObject[] = [];
-  try {
-    parsed = JSON.parse(text) as PageObject[];
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) {
-    return [];
-  }
+/** 解析**单个页面列表**（v1 或 v2 里的某个页值），坏条目跳过。 */
+function parsePageList(parsed: PageObject[]): PageObject[] {
   const result: PageObject[] = [];
   let seq: number = 0;
   for (const raw of parsed) {
@@ -282,15 +298,134 @@ export function parsePageObjects(json: string): PageObject[] {
     const kind: PageObjectKind = readKind(raw.kind);
     const id: string = typeof raw.id === 'string' && raw.id.length > 0 ? raw.id : `box-${seq}`;
     seq++;
-    const object: PageObject = makePageObject(id, kind, raw, {
-      sha256: raw.sha256,
-      name: raw.name,
-      rows: raw.rows,
-      cols: raw.cols
-    });
-    result.push(object);
+    result.push(
+      makePageObject(id, kind, raw, {
+        sha256: raw.sha256,
+        name: raw.name,
+        rows: raw.rows,
+        cols: raw.cols
+      })
+    );
   }
   return result;
+}
+
+/** 解析结果（带「是否发生过 v1 迁移」标记）。 */
+export interface PageObjectsParseResult {
+  pages: ObjectsByPage;
+  /** true 表示输入是 v1（单列表）或不可识别结构，已整份迁移到首页。 */
+  migrated: boolean;
+}
+
+/**
+ * 解析 `pageObjects` 字段（**永不低于丢对象、永不抛**）。
+ *
+ * - v2：`{version:2, pages:{…}}` → 原样（逐页清理坏条目）；
+ * - v1：`[{…}]` 单列表 → 整份挂到 `FIRST_PAGE_ID`（`p1`），`migrated: true`；
+ * - 空串/损坏/非数组 → `{pages:{}, migrated:false}`。
+ */
+export function parsePageObjectsDoc(json: string): PageObjectsParseResult {
+  const text: string = typeof json === 'string' ? json.trim() : '';
+  if (text.length === 0) {
+    return { pages: {}, migrated: false };
+  }
+  let parsed: Object | null = null;
+  try {
+    parsed = JSON.parse(text) as Object;
+  } catch {
+    return { pages: {}, migrated: false };
+  }
+  if (parsed === null || parsed === undefined) {
+    return { pages: {}, migrated: false };
+  }
+  // v1：顶层就是数组
+  if (Array.isArray(parsed)) {
+    const list: PageObject[] = parsePageList(parsed as PageObject[]);
+    const pages: ObjectsByPage = {};
+    if (list.length > 0) {
+      pages[FIRST_PAGE_ID] = list;
+    }
+    return { pages: pages, migrated: list.length > 0 };
+  }
+  // v2：{version, pages}
+  const doc: PageObjectsDoc = parsed as PageObjectsDoc;
+  const rawPages: ObjectsByPage | undefined = doc.pages;
+  if (rawPages === undefined || rawPages === null || typeof rawPages !== 'object') {
+    return { pages: {}, migrated: false };
+  }
+  const pages: ObjectsByPage = {};
+  const keys: string[] = Object.keys(rawPages);
+  for (const pageId of keys) {
+    const list: PageObject[] = rawPages[pageId];
+    if (!Array.isArray(list)) {
+      continue;
+    }
+    const cleaned: PageObject[] = parsePageList(list);
+    if (cleaned.length > 0) {
+      pages[pageId] = cleaned;
+    }
+  }
+  return { pages: pages, migrated: false };
+}
+
+/**
+ * 解析单页对象列表（**兼容 v1 单列表与 v2 文档**）。
+ *
+ * 页面里按当前页取对象时用 `objectsOfPage()`；这个函数只给「只有一页」的老调用方用。
+ */
+export function parsePageObjects(json: string): PageObject[] {
+  const result: PageObjectsParseResult = parsePageObjectsDoc(json);
+  const page: PageObject[] | undefined = result.pages[FIRST_PAGE_ID];
+  if (page !== undefined) {
+    return page;
+  }
+  const keys: string[] = Object.keys(result.pages);
+  return keys.length > 0 ? result.pages[keys[0]] : [];
+}
+
+// ---------------------------------------------------------------------------
+// 按页操作（翻页/插页/删页都走这里，保证对象永远跟着页 id）
+// ---------------------------------------------------------------------------
+
+/** 取某页对象（空数组而不是 undefined，调用方少判空）。 */
+export function objectsOfPage(pages: ObjectsByPage, pageId: string): PageObject[] {
+  const list: PageObject[] | undefined = pages[pageId];
+  return list === undefined ? [] : list;
+}
+
+/** 写回某页对象（返回新 map，不改入参）。 */
+export function setObjectsOfPage(pages: ObjectsByPage, pageId: string, objects: PageObject[]): ObjectsByPage {
+  const next: ObjectsByPage = {};
+  const keys: string[] = Object.keys(pages);
+  for (const key of keys) {
+    next[key] = pages[key];
+  }
+  if (objects.length === 0) {
+    delete next[pageId];
+  } else {
+    next[pageId] = objects;
+  }
+  return next;
+}
+
+/** 删页：该页对象一起删（其它页不受影响）。 */
+export function removePageObjects(pages: ObjectsByPage, pageId: string): ObjectsByPage {
+  return setObjectsOfPage(pages, pageId, []);
+}
+
+/** 插页：新页天然没有键（这里显式给出「插页后对象为空」的语义，便于调用方表达意图）。 */
+export function addEmptyPage(pages: ObjectsByPage, pageId: string): ObjectsByPage {
+  return setObjectsOfPage(pages, pageId, []);
+}
+
+/** 总对象数（测试与日志用）。 */
+export function countObjects(pages: ObjectsByPage): number {
+  let total: number = 0;
+  const keys: string[] = Object.keys(pages);
+  for (const key of keys) {
+    total += pages[key].length;
+  }
+  return total;
 }
 
 /** 旧数据迁移：`RegionBox[]`（只有 4 个坐标）→ `PageObject[]`（kind 全是 'box'）。 */
