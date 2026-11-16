@@ -38,10 +38,15 @@ const TMP = join(REPO, '.tmp', 'device-accept');
 const results = [];
 
 function run(bin, list, timeoutMs = 120000) {
-  const done = spawnSync(bin, list, { encoding: 'utf8', timeout: timeoutMs, shell: false });
+  // Windows 上 .cmd/.bat 不能直接 spawn（ENOENT），必须经 cmd.exe /c 调用。
+  const isCmd = /\.(cmd|bat)$/i.test(bin);
+  const command = isCmd ? (process.env.ComSpec ?? 'cmd.exe') : bin;
+  const argv = isCmd ? ['/d', '/s', '/c', bin, ...list] : list;
+  const done = spawnSync(command, argv, { encoding: 'utf8', timeout: timeoutMs, shell: false });
+  const spawnError = done.error ? `${done.error.name}: ${done.error.message}` : '';
   return {
     code: done.status === null ? -1 : done.status,
-    out: `${done.stdout ?? ''}${done.stderr ?? ''}`.trim()
+    out: `${done.stdout ?? ''}${done.stderr ?? ''}${spawnError}`.trim()
   };
 }
 
@@ -103,9 +108,13 @@ function tap(node) {
   hdc(['shell', `uitest uiInput click ${x} ${y}`]);
 }
 
-function swipe(x1, y1, x2, y2, speed = 700) {
-  hdc(['shell', `uitest uiInput swipe ${x1} ${y1} ${x2} ${y2} ${speed}`]);
+/** 滑动手势：`uitest uiInput swipe` 只接受 4 个坐标参数（没有 duration），多传会直接报错。 */
+function swipe(x1, y1, x2, y2) {
+  hdc(['shell', `uitest uiInput swipe ${x1} ${y1} ${x2} ${y2}`]);
 }
+
+/** 工具条上的「笔迹设置」按钮显示的是当前值（如 `钢笔 · 3.5 · 黑`），不是固定文案。 */
+const INK_BUTTON_RE = /·/;
 
 function screenSize(flat) {
   const root = flat[0];
@@ -170,8 +179,22 @@ function main() {
   }
   pass('启动无崩溃', 'hilog 8s 无 fatal');
 
-  // 2. 竖屏单列 / 横屏主从
+  // 1.5 回到首页：应用可能停留在上次的编辑/手写页（脚本要可重复跑）
   let flat = layout();
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    flat = layout();
+    const textsNow = texts(flat);
+    const onHome = textsNow.includes('新建') || textsNow.some((t) => t.includes('今日待办'));
+    const inHandwriting = textsNow.some((t) => /^[^·]*·/.test(t)) && textsNow.includes('完成');
+    if (onHome && !inHandwriting) {
+      break;
+    }
+    hdc(['shell', 'uitest uiInput keyEvent Back']);
+    spawnSync('powershell', ['-NoProfile', '-Command', 'Start-Sleep -Seconds 2'], { encoding: 'utf8' });
+  }
+
+  // 2. 竖屏单列 / 横屏主从
+  flat = layout();
   let size = screenSize(flat);
   const portrait = size.h >= size.w;
   if (portrait) {
@@ -212,11 +235,40 @@ function main() {
   tap(inkEntry);
   spawnSync('powershell', ['-NoProfile', '-Command', 'Start-Sleep -Seconds 4'], { encoding: 'utf8' });
   flat = layout();
-  if (!hasText(flat, '笔迹设置')) {
-    fail('手写板工具条', '未找到「笔迹设置」');
+  // 工具条（新设计）：「笔迹」固定文案 + 「插入」二级菜单；不再显示 `钢笔 · 3.5 · 黑` 这类拼接值。
+  const toolbarTexts = texts(flat);
+  if (!toolbarTexts.includes('笔迹')) {
+    fail('手写板工具条', `未找到「笔迹」按钮（现有文本：${toolbarTexts.slice(0, 12).join(' | ')}）`);
     return;
   }
-  pass('手写板工具条', '笔迹设置就位');
+  if (!toolbarTexts.includes('插入')) {
+    fail('手写板工具条', `未找到「插入」按钮（现有文本：${toolbarTexts.slice(0, 12).join(' | ')}）`);
+    return;
+  }
+  const legacyLabel = toolbarTexts.find((t) => t.includes('·') && /笔|钢笔|中性|马克/.test(t));
+  if (legacyLabel !== undefined) {
+    fail('手写板工具条', `仍有拼接标签「${legacyLabel}」（应改为固定「笔迹」）`);
+    return;
+  }
+  if (toolbarTexts.includes('颜色') || toolbarTexts.includes('粗细')) {
+    fail('手写板工具条', `不该有独立「颜色/粗细」按钮（现有：${toolbarTexts.join(' | ')}）`);
+    return;
+  }
+  pass('手写板工具条', '「笔迹」+「插入」就位，无拼接标签、无独立颜色/粗细');
+
+  // 「插入」二级菜单：图片 / 表格
+  const insertBtn = byText(flat, '插入');
+  if (insertBtn) {
+    tap(insertBtn);
+    spawnSync('powershell', ['-NoProfile', '-Command', 'Start-Sleep -Seconds 2'], { encoding: 'utf8' });
+    const menuFlat = layout();
+    const menuTexts = texts(menuFlat);
+    if (menuTexts.includes('图片') && menuTexts.includes('表格')) {
+      pass('插入菜单', `含「图片」「表格」（${menuTexts.filter((t) => /图片|表格/.test(t)).join(' / ')}）`);
+    } else {
+      fail('插入菜单', `点击「插入」后未见图片/表格（现有：${menuTexts.slice(0, 14).join(' | ')}）`);
+    }
+  }
 
   // 画 2 笔
   swipe(400, 700, 900, 800);
@@ -309,7 +361,7 @@ function main() {
   }
 
   // 7. 下拉刷新
-  hdc(['shell', 'uitest uiInput swipe 800 400 800 1200 600']);
+  hdc(['shell', 'uitest uiInput swipe 800 400 800 1200']);
   const refreshLog = hilog(8);
   if (/\[sync\] refresh pull/.test(refreshLog)) {
     pass('下拉刷新', 'hilog 命中 [sync] refresh pull');

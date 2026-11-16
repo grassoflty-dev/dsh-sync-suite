@@ -1,9 +1,20 @@
 /**
- * 设置页：三组（同步 / AI / 关于），每组 ≤4 行，长说明收进 `?` 弹层。
+ * 设置页：三组（同步 / AI / 关于），长说明收进 `?` 弹层。
+ * （同步组因为「分支 / 推送 / 状态」三项新需求变长，次要项继续收在组头「更多」里。）
  *
  * 本页仍做四件事（逻辑未改）：内嵌隐藏 Web 跑 isomorphic-git、注册代理、按钮触发
- * pull/push/status、保存前做表单校验。「同步组」只留「立即同步」（= pull），
- * 推送/查看状态/重试上次/测试连接 + 平台与认证方式在组头「更多」里。
+ * pull/push/status、保存前做表单校验。
+ *
+ * 同步组（A1/A2 之后）：
+ * - 仓库地址 / 用户名 / token / **分支** / 设备标识 + 作者名；
+ * - 「立即同步」（= pull）与「推送」（A2 第 3 条）是组内两个主按钮，
+ *   查看状态 / 重试上次 / 测试连接 / **托管平台（GitHub、Gitee、GitLab、自建）** /
+ *   认证方式在组头「更多」里；
+ * - 平台按仓库地址自动推断（手动选过则以用户为准），保存后给一行「已按地址推断平台为 X」；
+ * - 分支默认 main、可配，非法值给可读红字；首次推送时远端没有该分支会自动创建；
+ * - 同步状态（分支 / 领先 / 落后 / 冲突 / 本地改动）与最近一次同步时间+成败都在本页展示；
+ * - **SSH 在本版本不可用**（内置内核只有 HTTP(S) 传输），选中时直接写「当前版本仅支持 HTTPS」
+ *   并禁用同步按钮，不做「看起来支持」的假入口。
  *
  * AI 组接 `model/aiProvider.ts`：服务=预设源表，模型随服务联动；`save()` 内部已做
  * `resolveModel` / `aiBaseURLFor` 归一，因此本页**只传原始值**，不重复归一化。
@@ -34,18 +45,12 @@ import {
   FIELD_DEVICE_ID,
   FIELD_REPO_URL,
   FIELD_TOKEN,
-  PLATFORM_GITHUB,
-  PLATFORM_GITEE,
-  authHint,
   checkSettingsFields,
   describeFirstIssue,
   describeIssues,
   effectiveToken,
   normalizeAuthMode,
   normalizePlatform,
-  platformForRepoUrl,
-  repoUrlExamples,
-  repoUrlPlaceholder,
   validateAuthorName,
   validateDeviceIdText
 } from '../model/settingsForm';
@@ -53,11 +58,15 @@ import type { SettingsFieldIssue } from '../model/settingsForm';
 import {
   canRetrySync,
   classifySyncError,
-  describeLastSync,
+  describeLastSyncOutcome,
+  describePushReadiness,
+  normalizeBranchName,
   normalizeSyncAction,
-  syncActionLabel
+  syncActionLabel,
+  validateBranchName,
+  DEFAULT_BRANCH
 } from '../model/syncError';
-import type { SyncErrorInfo } from '../model/syncError';
+import type { SyncErrorInfo, SyncStatusView } from '../model/syncError';
 import { testAiConnection } from '../services/deepseek';
 import type { AiTestResult } from '../services/deepseek';
 import {
@@ -70,12 +79,31 @@ import {
   modelsOf
 } from '../model/aiProvider';
 import type { AiModelOption, AiProviderPreset } from '../model/aiProvider';
-import { assertHttpsUsername, resolveGitUsername } from '../model/gitAuth';
+import {
+  GITEE_PLATFORM,
+  PLATFORM_CUSTOM,
+  PLATFORM_GITHUB,
+  PLATFORM_GITLAB,
+  SSH_UNSUPPORTED_SHORT,
+  assertHttpsUsername,
+  authHintFor,
+  describeAuthModeBlocker,
+  gitUsernameHintFor,
+  gitUsernamePlaceholderFor,
+  isSshAuthMode,
+  normalizeGitPlatform,
+  platformLabel,
+  repoUrlExamplesFor,
+  repoUrlPlaceholderFor,
+  resolveGitUsername,
+  resolvePlatformSelection,
+  tokenPlaceholderFor
+} from '../model/gitAuth';
+import type { PlatformResolution } from '../model/gitAuth';
+import { gitExtrasStore } from '../services/syncController';
+import type { GitSyncExtras } from '../services/syncController';
 import { PageLayout } from '../components/PageLayout';
 import { DIVIDER, FONT, HOME_INCLUDE_OTHER_KEY, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
-
-/** 同步分支：与 `docs/DATA-CONTRACT.md` §1 一致，固定 main。 */
-const SYNC_BRANCH: string = 'main';
 
 /** 仓库探测超时（毫秒）：探测只看域名通不通，不需要长超时。 */
 const PROBE_TIMEOUT_MS: number = 10000;
@@ -115,9 +143,17 @@ struct Settings {
   @State aiProviderId: string = DEFAULT_PROVIDER_ID;
   /** 自定义源的接口地址；预设源下存的是预设地址快照，页面上不展示。 */
   @State aiBaseURL: string = '';
-  /** 托管平台：`github` / `gitee`（只影响提示文案与示例）。 */
+  /** 托管平台：`github` / `gitee` / `gitlab` / `custom`（只影响提示文案与示例）。 */
   @State gitPlatform: string = PLATFORM_GITHUB;
-  /** 认证方式：`https` / `ssh`（只影响提示文案与 token 是否必填）。 */
+  /** 用户是否手动点过平台 chip（点过 = 以用户为准，不再按地址推断）。 */
+  @State platformTouched: boolean = false;
+  /** 平台推断/锁定的一行提示（空串 = 不显示）。 */
+  @State platformNotice: string = '';
+  /** 同步分支（默认 main，可配；存在 gitExtrasStore 里）。 */
+  @State branch: string = DEFAULT_BRANCH;
+  /** 分支名的内联错误。 */
+  @State branchError: string = '';
+  /** 认证方式：`https` / `ssh`（SSH 本版本不可用，会被拦）。 */
   @State authMode: string = AUTH_HTTPS;
   @State ready: boolean = false;
   @State saveHint: string = '';
@@ -151,6 +187,8 @@ struct Settings {
   @State lastSyncAction: string = '';
   @State syncMessage: string = '同步内核尚未就绪：请保持本页打开，等待隐藏 Web 环境加载完成';
   @State syncBusy: boolean = false;
+  /** 最近一次「查看状态」的结果（分支 / ahead / behind / 冲突 / 本地改动）。 */
+  @State statusLine: string = '';
   @State webReady: boolean = false;
   @State platformText: string = '';
   @State handwritingText: string = '';
@@ -173,6 +211,8 @@ struct Settings {
   private disposed: boolean = false;
   /** 已保存的 token：输入框留空时沿用（用户「不改 token」不该被拦）。 */
   private savedToken: string = '';
+  /** 最近一次同步状态结果（只在页面内部用于派生「推送是否就绪」的说明行）。 */
+  private lastStatusResult: GitSyncResult | null = null;
   /** 页面主滚动容器：校验失败时滚回顶部，让红色汇总与第一个错误字段进入视野。 */
   private pageScroller: Scroller = new Scroller();
 
@@ -217,6 +257,12 @@ struct Settings {
         return;
       }
       this.applySettings(settings);
+      // Git 扩展设置（分支 / 平台）：单独 preferences，读失败内部退回默认值
+      const extras: GitSyncExtras = await gitExtrasStore.load(context);
+      if (this.disposed) {
+        return;
+      }
+      this.applyExtras(extras);
       // 让 Git 桥使用与应用一致的沙箱根目录（G 的服务支持静态预置，缺省时才回落 getContext()）
       GitSyncService.setFilesDir(context.filesDir);
       await scheduleStore.ensureReady(context);
@@ -226,6 +272,8 @@ struct Settings {
       this.ready = true;
       this.storageHint = `日程目录：${scheduleStore.deviceRoot()}/schedules/`;
       this.configure();
+      // 分支/平台可能已经改过：等桥就绪后补一次本地状态（不联网，只是 git.status/log）
+      this.refreshStatus(true);
       // Web 先于设置就绪时，自动动作排在这里补触发
       if (this.webReady && this.autoAction.length > 0) {
         const pending = this.autoAction;
@@ -262,6 +310,23 @@ struct Settings {
     this.lastSyncAction = normalizeSyncAction(settings.lastSyncAction);
   }
 
+  /**
+   * 把扩展设置（分支 / 平台 / 平台锁定标记）铺到表单上。
+   *
+   * 平台以扩展设置为准（它能表达 gitlab/custom）；扩展设置为空时回落到 settingsStore 的
+   * github/gitee，保证老数据不受影响。
+   */
+  private applyExtras(extras: GitSyncExtras): void {
+    this.branch = extras.branch.length > 0 ? extras.branch : DEFAULT_BRANCH;
+    this.platformTouched = extras.platformTouched;
+    if (extras.platform.length > 0) {
+      this.gitPlatform = extras.platform;
+    }
+    this.platformNotice = this.platformTouched
+      ? `平台已固定为 ${platformLabel(this.gitPlatform)}（手动选择优先）`
+      : '';
+  }
+
   /** 作者邮箱按设备标识派生（同步提交只用于署名，不涉及个人邮箱）。 */
   private authorEmail(): string {
     const id = normalizeDeviceId(this.deviceId);
@@ -272,11 +337,16 @@ struct Settings {
   private configure(): void {
     const config: GitSyncConfig = {
       repoUrl: this.repoUrl.trim(),
-      branch: SYNC_BRANCH,
+      // 分支可配（A2）：空值回落 main，非法值由 `runAction` / 服务层统一拦住
+      branch: normalizeBranchName(this.branch).length > 0 ? normalizeBranchName(this.branch) : DEFAULT_BRANCH,
       deviceId: normalizeDeviceId(this.deviceId),
       token: this.token.trim(),
       authorName: this.author.trim().length > 0 ? this.author.trim() : normalizeDeviceId(this.deviceId),
-      authorEmail: this.authorEmail()
+      authorEmail: this.authorEmail(),
+      // A1：平台决定 HTTPS 用户名兜底与示例文案；认证方式决定是否放行同步
+      platform: this.gitPlatform,
+      gitUsername: this.gitUsername.trim(),
+      authMode: this.authMode
     };
     this.sync.configure(config);
   }
@@ -335,8 +405,13 @@ struct Settings {
   private async saveSettings(): Promise<void> {
     const repoEmpty: boolean = this.repoUrl.trim().length === 0;
     const repoCheck: RepoUrlCheck = validateRepoUrl(this.repoUrl);
-    // 平台自动纠正（URL 含 gitee.com → gitee），避免「URL 是 gitee、平台还是 github」导致提示错乱
-    const platform: string = platformForRepoUrl(this.gitPlatform, this.repoUrl);
+    // A1：平台按地址推断（用户手动改过则以用户为准）——保存前算出最终值 + 一行提示
+    const platformResolution: PlatformResolution = resolvePlatformSelection(
+      this.repoUrl,
+      this.gitPlatform,
+      this.platformTouched
+    );
+    const platform: string = platformResolution.platform;
     // 整表校验交给纯函数：一次返回**全部**问题，页面逐字段标红 + 顶部汇总
     const issues: SettingsFieldIssue[] = checkSettingsFields(
       {
@@ -358,10 +433,13 @@ struct Settings {
       issues.push(usernameIssue);
     }
     this.applyIssues(issues);
+    // A2：分支名（不进 settingsForm 的那张表，单独落内联红字 + 拦保存）
+    const branchProblem: string = validateBranchName(this.branch);
+    this.branchError = branchProblem;
     // 无可见落点的 issue 不拦保存（Settings 属凭据敏感文件，禁止 console/hilog，故这里静默跳过）。
-    const blocking: boolean = this.issuesSummary.length > 0;
+    const blocking: boolean = this.issuesSummary.length > 0 || branchProblem.length > 0;
     if (blocking) {
-      this.saveHint = this.issuesSummary;
+      this.saveHint = this.issuesSummary.length > 0 ? this.issuesSummary : branchProblem;
       // 滚回顶部：红色汇总 + 第一个错误字段（设备标识/作者名/token/仓库地址都在同步组）
       this.pageScroller.scrollEdge(Edge.Top);
       return;
@@ -379,7 +457,9 @@ struct Settings {
         aiModel: this.aiModel,
         aiBaseURL: this.aiBaseURL,
         author: this.author,
-        gitPlatform: platform,
+        // settingsStore 只认 github/gitee（它的 normalizePlatform 会把 gitlab/custom 折成 github），
+        // 真正的四值平台存在 gitExtrasStore 里，这里写回一个它认识的等价物即可。
+        gitPlatform: platform === GITEE_PLATFORM ? GITEE_PLATFORM : PLATFORM_GITHUB,
         authMode: this.authMode,
         // HTTPS 用户名（Gitee 必填登录名；GitHub 留空由同步层回落 x-access-token）
         gitUsername: this.gitUsername.trim()
@@ -388,18 +468,40 @@ struct Settings {
       if (this.disposed) {
         return;
       }
+      // A2：分支 + 平台（四值）+ 平台锁定标记单独落盘
+      const extras: GitSyncExtras = await gitExtrasStore.save(
+        {
+          branch: normalizeBranchName(this.branch),
+          platform: platform,
+          platformTouched: this.platformTouched
+        },
+        context
+      );
+      if (this.disposed) {
+        return;
+      }
       this.applySettings(saved);
+      this.applyExtras(extras);
+      this.gitPlatform = platform;
+      this.platformNotice = platformResolution.notice;
       this.issuesSummary = '';
+      this.branchError = '';
       scheduleStore.setDeviceId(saved.deviceId);
       this.storageHint = `日程目录：${scheduleStore.deviceRoot()}/schedules/`;
       this.configure();
+      let hint: string = `设置已保存（${nowIso()}）`;
       if (repoEmpty) {
-        this.saveHint = `设置已保存（${nowIso()}）；仓库地址为空，同步前需要先填写`;
-      } else if (this.authMode === AUTH_SSH) {
-        this.saveHint = `设置已保存（${nowIso()}）；应用内同步内核只支持 HTTPS，真正同步前请切回 HTTPS(PAT)`;
-      } else {
-        this.saveHint = `设置已保存（${nowIso()}）`;
+        hint = `设置已保存（${nowIso()}）；仓库地址为空，同步前需要先填写`;
+      } else if (isSshAuthMode(this.authMode)) {
+        hint = `设置已保存（${nowIso()}）；${SSH_UNSUPPORTED_SHORT}，请切回 HTTPS(PAT) 后再同步`;
       }
+      if (platformResolution.notice.length > 0) {
+        hint = `${hint}；${platformResolution.notice}`;
+      }
+      if (this.branch !== normalizeBranchName(this.branch)) {
+        this.branch = normalizeBranchName(this.branch);
+      }
+      this.saveHint = hint;
       promptAction.showToast({ message: '设置已保存' });
     } catch (error) {
       if (this.disposed) {
@@ -409,9 +511,33 @@ struct Settings {
     }
   }
 
-  /** 选择平台（只改文案与示例，同步逻辑不变）。 */
+  /**
+   * 选择平台（只改文案与示例，同步协议不变）。
+   *
+   * 点过就以用户为准（`platformTouched`）：之后保存时不再被地址推断覆盖。
+   */
   private pickPlatform(value: string): void {
-    this.gitPlatform = normalizePlatform(value);
+    this.gitPlatform = normalizeGitPlatform(value);
+    this.platformTouched = true;
+    this.platformNotice = `已手动选择 ${platformLabel(this.gitPlatform)}（保存后不再按地址推断）`;
+  }
+
+  /** 仓库地址变化时更新平台提示（只提示，保存时才真正采用推断值）。 */
+  private syncPlatformNotice(): void {
+    const resolution: PlatformResolution = resolvePlatformSelection(
+      this.repoUrl,
+      this.gitPlatform,
+      this.platformTouched
+    );
+    if (this.platformTouched) {
+      this.platformNotice = resolution.inferred.length > 0 && resolution.inferred !== this.gitPlatform
+        ? `地址看起来是 ${platformLabel(resolution.inferred)}，但平台已按你的选择固定为 ${platformLabel(this.gitPlatform)}`
+        : `平台已固定为 ${platformLabel(this.gitPlatform)}（手动选择优先）`;
+      return;
+    }
+    this.platformNotice = resolution.inferred.length > 0
+      ? `地址识别为 ${platformLabel(resolution.inferred)}（保存时采用）`
+      : '';
   }
 
   /** 选择认证方式（影响 token 是否必填与示例文案）。 */
@@ -421,7 +547,28 @@ struct Settings {
     // 切到 SSH 时 token 不再必填，清掉残留的必填红字
     if (this.authMode === AUTH_SSH) {
       this.tokenError = '';
+      this.syncMessage = `${SSH_UNSUPPORTED_SHORT}：SSH 不会被使用，请切回 HTTPS(PAT)`;
     }
+  }
+
+  /** 当前认证方式的阻塞原因（空串 = 可同步）；页面据此禁用按钮并说明原因。 */
+  private authBlocker(): string {
+    return describeAuthModeBlocker(this.authMode);
+  }
+
+  /** 推送按钮的阻塞原因（空串 = 可以推）：未就绪 / SSH / 无地址 / 分支非法 / 无改动。 */
+  private pushBlockedReason(): string {
+    if (isSshAuthMode(this.authMode)) {
+      return `${SSH_UNSUPPORTED_SHORT}：SSH 下无法推送`;
+    }
+    if (this.repoUrl.trim().length === 0) {
+      return '推送前需要先填写并保存仓库地址';
+    }
+    const branchProblem: string = validateBranchName(this.branch);
+    if (branchProblem.length > 0) {
+      return branchProblem;
+    }
+    return '';
   }
 
   // ------------------------------------------------------------------ 测试连接
@@ -476,7 +623,7 @@ struct Settings {
       return;
     }
     if (repoCheck.scheme === 'ssh' || repoCheck.scheme === 'scp') {
-      this.connectionText = `ℹ️ SSH 地址无法在应用内探测（依赖系统 ssh-agent）：请在本机执行 git ls-remote ${repoCheck.url} 验证`;
+      this.connectionText = `ℹ️ ${SSH_UNSUPPORTED_SHORT}：SSH 地址不会被应用使用（内置同步内核只有 HTTP(S) 传输），请改成 https:// 地址再测`;
       return;
     }
     const probeUrl: string = repoProbeUrl(repoCheck.url);
@@ -613,24 +760,12 @@ struct Settings {
 
   /** 用户名输入框占位文案（跟着平台变）。 */
   private gitUsernamePlaceholder(): string {
-    if (this.gitPlatform === PLATFORM_GITEE) {
-      return '必填：Gitee 登录名';
-    }
-    if (this.gitPlatform === PLATFORM_GITHUB) {
-      return '可留空（默认 x-access-token）';
-    }
-    return '可选';
+    return gitUsernamePlaceholderFor(this.gitPlatform);
   }
 
   /** 用户名下方的一行说明（无错误时显示）。 */
   private gitUsernameHint(): string {
-    if (this.gitPlatform === PLATFORM_GITEE) {
-      return 'Gitee 的 HTTPS 认证用「登录名 + 私人令牌作密码」，用户名留空必然 401。';
-    }
-    if (this.gitPlatform === PLATFORM_GITHUB) {
-      return 'GitHub 可留空：留空时按 x-access-token 认证。';
-    }
-    return '自建/其他托管：按服务端要求填写，留空则用 x-access-token。';
+    return gitUsernameHintFor(this.gitPlatform);
   }
 
   /**
@@ -679,11 +814,61 @@ struct Settings {
     this.syncMessage = this.repoUrl.trim().length === 0
       ? '同步内核已就绪；仓库地址为空，请先填写并保存（只在本机记录日程可以留空）'
       : '同步内核已就绪，可以拉取 / 推送 / 查看状态';
+    // A2：桥一就绪就先读一次本地同步状态（不联网），让「领先/落后/冲突」立即可见
+    this.refreshStatus(true);
     const pending = this.autoAction;
     this.autoAction = '';
     if (pending.length > 0) {
       this.runAction(pending);
     }
+  }
+
+  /**
+   * 刷新同步状态（A2 第 2 条）：分支 / ahead / behind / 冲突数 / 本地改动。
+   *
+   * @param localOnly true = 只读本地仓库（`status(false)`，不额外发 `info/refs` 探测）；
+   *                  false = 带一次真实连通性探测（用户点「查看状态」时用）。
+   */
+  private async refreshStatus(localOnly: boolean): Promise<void> {
+    if (!this.webReady || !this.ready || this.disposed || this.syncBusy) {
+      return;
+    }
+    const repoCheck: RepoUrlCheck = validateRepoUrl(this.repoUrl);
+    if (!repoCheck.ok || (repoCheck.scheme !== 'https' && repoCheck.scheme !== 'http')) {
+      return;
+    }
+    if (this.authBlocker().length > 0) {
+      return;
+    }
+    try {
+      this.configure();
+      const result: GitSyncResult = await this.sync.status(!localOnly);
+      if (this.disposed || !result.ok) {
+        return;
+      }
+      this.lastStatusResult = result;
+      this.statusLine = result.message;
+    } catch (error) {
+      // 状态刷新失败不影响主流程（同步结果已经展示在 syncMessage 里）
+    }
+  }
+
+  /** 最近一次 status 结果 → 纯逻辑视图（供 `describePushReadiness` 生成「能不能推」的说明）。 */
+  private statusView(): SyncStatusView {
+    const result: GitSyncResult | null = this.lastStatusResult;
+    const view: SyncStatusView = {
+      initialized: result !== null && result.initialized === true,
+      branch: result === null || result.branch === undefined ? DEFAULT_BRANCH : result.branch,
+      head: result === null || result.commit === undefined ? '' : result.commit,
+      ahead: result === null || result.ahead === undefined ? 0 : result.ahead,
+      behind: result === null || result.behind === undefined ? 0 : result.behind,
+      diverged: result !== null && result.diverged === true,
+      conflicts: result === null || result.conflicts === undefined ? 0 : result.conflicts,
+      changedCount: result === null || result.changedCount === undefined ? 0 : result.changedCount,
+      remoteConfigured: result !== null && result.remoteConfigured === true,
+      lastCommitMessage: ''
+    };
+    return view;
   }
 
   /** 把「上次同步」三项状态回写本机 preferences（失败不影响已完成的同步动作）。 */
@@ -728,7 +913,20 @@ struct Settings {
     }
     if (repoCheck.scheme !== 'https' && repoCheck.scheme !== 'http') {
       // 同步内核（isomorphic-git + 桥）只实现 HTTPS，SSH 地址会直接失败，这里先拦住
-      this.syncMessage = '应用内同步内核只支持 HTTPS 仓库地址：请把认证方式切回 HTTPS(PAT) 并填写 token';
+      this.syncMessage = `${SSH_UNSUPPORTED_SHORT}：请把仓库地址改成 https:// 并切回 HTTPS(PAT)`;
+      return;
+    }
+    // A1：SSH 认证方式在本版本没有传输层，直接拦住并写清原因（不发起任何请求）
+    const authBlocker: string = this.authBlocker();
+    if (authBlocker.length > 0) {
+      this.syncMessage = `❌ ${authBlocker}`;
+      return;
+    }
+    // A2：分支名先在本页校验，非法值不发请求
+    const branchProblem: string = validateBranchName(this.branch);
+    this.branchError = branchProblem;
+    if (branchProblem.length > 0) {
+      this.syncMessage = `❌ 分支名不合法：${branchProblem}`;
       return;
     }
     const op: string = normalizeSyncAction(action);
@@ -741,6 +939,7 @@ struct Settings {
     this.syncMessage = `正在${label}…`;
     // 先记住动作：失败后「重试」按钮据此重放同一次操作
     this.lastSyncAction = op;
+    let succeeded: boolean = false;
     try {
       this.configure();
       let result: GitSyncResult;
@@ -749,7 +948,7 @@ struct Settings {
       } else if (op === 'push') {
         result = await this.sync.push(`日程同步：${nowIso()}`);
       } else {
-        result = await this.sync.status();
+        result = await this.sync.status(true);
       }
       if (this.disposed) {
         return;
@@ -763,6 +962,7 @@ struct Settings {
       this.syncMessage = `✅ ${result.message}${commit}`;
       this.lastSyncError = '';
       this.lastSyncAt = nowIso();
+      succeeded = true;
       await this.persistSyncState();
     } catch (error) {
       if (this.disposed) {
@@ -773,6 +973,10 @@ struct Settings {
       if (!this.disposed) {
         this.syncBusy = false;
       }
+    }
+    // A2：动作成功后刷新一次本地状态（领先/落后/冲突），失败不影响已经展示的结果
+    if (succeeded) {
+      await this.refreshStatus(true);
     }
   }
 
@@ -891,7 +1095,7 @@ struct Settings {
       .width('100%')
       .alignItems(VerticalAlign.Center)
 
-      TextInput({ text: this.repoUrl, placeholder: repoUrlPlaceholder(this.gitPlatform, this.authMode) })
+      TextInput({ text: this.repoUrl, placeholder: repoUrlPlaceholderFor(this.gitPlatform, this.authMode) })
         .width('100%')
         .height(TOUCH_MIN + SPACING.xs)
         .fontSize(FONT.body)
@@ -901,12 +1105,17 @@ struct Settings {
         .onChange((value: string) => {
           this.repoUrl = value;
           this.repoUrlError = '';
+          // A1：地址一变就更新「将按地址推断为哪个平台」的提示（保存时才真正采用）
+          this.syncPlatformNotice();
         })
       Divider()
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
       if (this.repoUrlError.length > 0) {
         this.ErrorText(this.repoUrlError)
+      } else if (this.platformNotice.length > 0) {
+        // 平台推断/锁定的提示（「已按地址推断平台为 X」/「已保留你的手动选择」）
+        this.HintLine(this.platformNotice)
       }
 
       // HTTPS 认证必须带用户名：GitHub 可留空（默认 x-access-token），Gitee 必填登录名，否则必 401
@@ -936,7 +1145,7 @@ struct Settings {
       this.FieldLabel(this.authMode === AUTH_SSH ? '访问 token（SSH 方式可留空）' : '访问 token（仅存本机）')
       TextInput({
         text: this.token,
-        placeholder: this.authMode === AUTH_SSH ? 'SSH 依赖系统 ssh-agent，可留空' : 'ghp_… / gitee token'
+        placeholder: this.authMode === AUTH_SSH ? '当前版本仅支持 HTTPS，可留空' : tokenPlaceholderFor(this.gitPlatform)
       })
         .type(InputType.Password)
         .width('100%')
@@ -954,6 +1163,37 @@ struct Settings {
         .color($r('app.color.divider'))
       if (this.tokenError.length > 0) {
         this.ErrorText(this.tokenError)
+      }
+
+      // A2：分支可配（默认 main）。首次推送时远端没有该分支会自动创建（桥里 force:false）。
+      Row({ space: SPACING.sm }) {
+        Text('分支')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .width(72)
+          .textAlign(TextAlign.Start)
+        TextInput({ text: this.branch, placeholder: DEFAULT_BRANCH })
+          .height(TOUCH_MIN + SPACING.xs)
+          .fontSize(FONT.body)
+          .backgroundColor($r('app.color.page_background'))
+          .borderRadius(RADIUS.none)
+          .padding({ left: 0, right: 0 })
+          .layoutWeight(1)
+          .onChange((value: string) => {
+            this.branch = value;
+            this.branchError = '';
+          })
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+      if (this.branchError.length > 0) {
+        this.ErrorText(this.branchError)
+      } else {
+        this.HintLine('默认 main；首次推送时远端没有该分支会自动创建（永不强制覆盖远端）')
       }
 
       Row({ space: SPACING.md }) {
@@ -1015,9 +1255,20 @@ struct Settings {
           .fontColor($r('app.color.brand'))
           .borderRadius(RADIUS.sm)
           // 闪退回归：桥未就绪时禁用（原因显示在右侧状态行），避免未就绪就发起同步
-          .enabled(!this.syncBusy && this.webReady)
+          .enabled(!this.syncBusy && this.webReady && this.authBlocker().length === 0)
           .onClick(() => {
             this.runAction('pull');
+          })
+        // 手动推送（A2 第 3 条）：未就绪 / SSH / 无地址 / 分支非法时禁用并给出原因
+        Button('推送')
+          .height(TOUCH_MIN + SPACING.sm)
+          .fontSize(FONT.body)
+          .backgroundColor($r('app.color.brand_soft'))
+          .fontColor($r('app.color.brand'))
+          .borderRadius(RADIUS.sm)
+          .enabled(!this.syncBusy && this.webReady && this.pushBlockedReason().length === 0)
+          .onClick(() => {
+            this.runAction('push');
           })
         Text(this.syncMessage)
           .fontSize(FONT.caption)
@@ -1033,6 +1284,26 @@ struct Settings {
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
+
+      // 推送被禁用的具体原因（未就绪/SSH/无地址/分支非法），避免「按钮灰着不知道为什么」
+      if (this.pushBlockedReason().length > 0) {
+        this.HintLine(`推送不可用：${this.pushBlockedReason()}`)
+      }
+
+      // A2：同步状态（分支 / 领先 / 落后 / 冲突 / 本地改动）——桥就绪后自动刷新一次
+      if (this.statusLine.length > 0) {
+        Text(this.statusLine)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+          .textAlign(TextAlign.Start)
+      }
+      if (this.statusLine.length > 0 && describePushReadiness(this.statusView()).length > 0) {
+        this.HintLine(describePushReadiness(this.statusView()))
+      }
 
       // 从首页搬来的过滤开关：首页列表是否同时展示其他设备的只读记录
       Row({ space: SPACING.sm }) {
@@ -1305,7 +1576,8 @@ struct Settings {
           .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.text_secondary'))
         Blank()
-        Text(describeLastSync(this.lastSyncAt, nowIso()))
+        // A2：最近一次同步时间 + 动作 + 成败（失败原因是分级后的中文）
+        Text(describeLastSyncOutcome(this.lastSyncAt, this.lastSyncError, this.lastSyncAction, nowIso()))
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.text_secondary'))
@@ -1467,6 +1739,22 @@ struct Settings {
     .alignItems(VerticalAlign.Center)
   }
 
+  /** 一个平台 chip（A1：四个预设 GitHub / Gitee / GitLab / 自建）。 */
+  @Builder
+  PlatformChip(id: string) {
+    Text(platformLabel(id))
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .fontColor(this.gitPlatform === id ? $r('app.color.brand') : $r('app.color.text_secondary'))
+      .backgroundColor(this.gitPlatform === id ? $r('app.color.brand_soft') : $r('app.color.page_background'))
+      .height(TOUCH_MIN)
+      .layoutWeight(1)
+      .textAlign(TextAlign.Center)
+      .onClick(() => {
+        this.pickPlatform(id);
+      })
+  }
+
   /** 同步组「更多」：推送 / 查看状态 / 重试 / 测试连接 / 平台 / 认证。 */
   @Builder
   SyncMoreSheet() {
@@ -1531,30 +1819,18 @@ struct Settings {
 
       this.FieldLabel('托管平台')
       Row({ space: SPACING.sm }) {
-        Text('GitHub')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor(this.gitPlatform === PLATFORM_GITHUB ? $r('app.color.brand') : $r('app.color.text_secondary'))
-          .backgroundColor(this.gitPlatform === PLATFORM_GITHUB ? $r('app.color.brand_soft') : $r('app.color.page_background'))
-          .height(TOUCH_MIN)
-          .layoutWeight(1)
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
-            this.pickPlatform(PLATFORM_GITHUB);
-          })
-        Text('Gitee')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor(this.gitPlatform === PLATFORM_GITEE ? $r('app.color.brand') : $r('app.color.text_secondary'))
-          .backgroundColor(this.gitPlatform === PLATFORM_GITEE ? $r('app.color.brand_soft') : $r('app.color.page_background'))
-          .height(TOUCH_MIN)
-          .layoutWeight(1)
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
-            this.pickPlatform(PLATFORM_GITEE);
-          })
+        this.PlatformChip(PLATFORM_GITHUB)
+        this.PlatformChip(GITEE_PLATFORM)
       }
       .width('100%')
+      Row({ space: SPACING.sm }) {
+        this.PlatformChip(PLATFORM_GITLAB)
+        this.PlatformChip(PLATFORM_CUSTOM)
+      }
+      .width('100%')
+      if (this.platformNotice.length > 0) {
+        this.HintLine(this.platformNotice)
+      }
 
       this.FieldLabel('认证方式')
       Row({ space: SPACING.sm }) {
@@ -1569,10 +1845,10 @@ struct Settings {
           .onClick(() => {
             this.pickAuthMode(AUTH_HTTPS);
           })
-        Text('SSH')
+        Text('SSH（本版本不可用）')
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)
-          .fontColor(this.authMode === AUTH_SSH ? $r('app.color.brand') : $r('app.color.text_secondary'))
+          .fontColor(this.authMode === AUTH_SSH ? $r('app.color.warning') : $r('app.color.text_secondary'))
           .backgroundColor(this.authMode === AUTH_SSH ? $r('app.color.brand_soft') : $r('app.color.page_background'))
           .height(TOUCH_MIN)
           .layoutWeight(1)
@@ -1583,7 +1859,17 @@ struct Settings {
       }
       .width('100%')
 
-      this.HintLine(authHint(this.authMode))
+      if (this.authMode === AUTH_SSH) {
+        // 明确写「仅支持 HTTPS」+ 原因，绝不让用户以为填了私钥路径就能同步
+        Text(describeAuthModeBlocker(this.authMode))
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.danger'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+      } else {
+        this.HintLine(authHintFor(this.gitPlatform, this.authMode))
+      }
       if (this.connectionText.length > 0) {
         this.HintLine(this.connectionText)
       }
@@ -1606,7 +1892,7 @@ struct Settings {
               .fontColor($r('app.color.text_primary'))
               .width('100%')
           } else {
-            Text(repoUrlExamples(this.gitPlatform, this.authMode))
+            Text(repoUrlExamplesFor(this.gitPlatform, this.authMode))
               .fontSize(FONT.body)
               .lineHeight(LINE_HEIGHT.body)
               .fontColor($r('app.color.text_primary'))
@@ -1616,7 +1902,12 @@ struct Settings {
               .lineHeight(LINE_HEIGHT.caption)
               .fontColor($r('app.color.text_secondary'))
               .width('100%')
-            Text(authHint(this.authMode))
+            Text(`平台：${platformLabel(this.gitPlatform)}（保存时按地址自动推断；手动选过则以你的选择为准）。分支默认 ${DEFAULT_BRANCH}，首次推送时远端没有会自动创建。`)
+              .fontSize(FONT.caption)
+              .lineHeight(LINE_HEIGHT.caption)
+              .fontColor($r('app.color.text_secondary'))
+              .width('100%')
+            Text(authHintFor(this.gitPlatform, this.authMode))
               .fontSize(FONT.caption)
               .lineHeight(LINE_HEIGHT.caption)
               .fontColor($r('app.color.text_secondary'))

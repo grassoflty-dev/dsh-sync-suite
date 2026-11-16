@@ -10,12 +10,18 @@
  * - 读取走 `parseJsonl` + `foldById`（同 id 取较晚记录），跨设备目录天然不冲突；
  * - 追加是真正的物理追加（定位到文件末尾写入），不会重写历史字节。
  *
+ * 删除（软删除）：删除同样是一次普通追加 —— 追加一条 `deleted:true` 的同 id 新版本（见
+ * `model/undoDelete.ts`）。**所有读取入口统一用 `withoutDeleted()` 过滤墓碑**：折叠后的最新版本
+ * 带 `deleted:true` 时，这条记录在列表 / 详情 / 汇总 / 未完成索引里一律不存在。
+ * 这层过滤只影响「读」，不改变 `appendRecord` 的追加语义（历史行仍然只增不改）。
+ *
  * 契约：`docs/CONTRACT.md` §3.3、BRIEF §3.4。
  */
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import { encodeRecord, foldById, parseJsonl, recordDateKey, sortRecords } from '../model/jsonl';
 import type { ScheduleRecord } from '../model/types';
+import { withoutDeleted } from '../model/undoDelete';
 import { localDateKey } from '../common/date';
 import { DEFAULT_DEVICE_ID, normalizeDeviceId, settingsStore } from './settingsStore';
 
@@ -134,11 +140,11 @@ export class ScheduleStore {
     }
   }
 
-  /** 读取某天记录：JSONL → 折叠同 id → 按 ts 升序。 */
+  /** 读取某天记录：JSONL → 折叠同 id → 按 ts 升序 → 过滤墓碑（`deleted:true`）。 */
   readDay(date: string): ScheduleRecord[] {
     const text = this.readDayText(date);
     const parsed = parseJsonl(text);
-    return sortRecords(foldById(parsed.records));
+    return withoutDeleted(sortRecords(foldById(parsed.records)));
   }
 
   /** 列出本设备已存在的日期（`YYYY-MM-DD`，升序）。 */
@@ -164,7 +170,7 @@ export class ScheduleStore {
     return dates;
   }
 
-  /** 读取本设备全部记录（跨日期折叠，按 ts 升序）。 */
+  /** 读取本设备全部记录（跨日期折叠，按 ts 升序，过滤墓碑）。 */
   readAll(): ScheduleRecord[] {
     const dates = this.listDates();
     const merged: ScheduleRecord[] = [];
@@ -174,7 +180,7 @@ export class ScheduleStore {
         merged.push(record);
       }
     }
-    return sortRecords(foldById(merged));
+    return withoutDeleted(sortRecords(foldById(merged)));
   }
 
   /** 全部设备目录根：`<filesDir>/git-repo/devices`（只读其他设备，永不写入）。 */
@@ -221,7 +227,7 @@ export class ScheduleStore {
     }
   }
 
-  /** 读所有设备某天的记录并折叠（BRIEF §3.4：fetch 后折叠展示；本机目录优先）。 */
+  /** 读所有设备某天的记录并折叠（BRIEF §3.4：fetch 后折叠展示；本机目录优先；过滤墓碑）。 */
   readDayAllDevices(date: string): ScheduleRecord[] {
     this.requireReady();
     const merged: ScheduleRecord[] = [];
@@ -230,10 +236,10 @@ export class ScheduleStore {
         merged.push(record);
       }
     }
-    return sortRecords(foldById(merged));
+    return withoutDeleted(sortRecords(foldById(merged)));
   }
 
-  /** 读所有设备全部记录并折叠（只读）。 */
+  /** 读所有设备全部记录并折叠（只读；过滤墓碑）。 */
   readAllDevices(): ScheduleRecord[] {
     this.requireReady();
     const merged: ScheduleRecord[] = [];
@@ -244,7 +250,7 @@ export class ScheduleStore {
         }
       }
     }
-    return sortRecords(foldById(merged));
+    return withoutDeleted(sortRecords(foldById(merged)));
   }
 
   /** 某设备已有的日期列表（只读）。 */

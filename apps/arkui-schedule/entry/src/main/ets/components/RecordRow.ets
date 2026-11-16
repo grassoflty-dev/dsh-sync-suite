@@ -4,6 +4,10 @@
  * 约定：BRIEF §3.5「列表行（左 Checkbox 勾选写回、中标题+截止时间、右图标表示有手迹附件）」。
  * 共享层组件：只读记录字段，勾选与进详情通过回调交给页面（页面负责追加写回）。
  *
+ * 删除入口（Wave 2-A）：行尾「删除」文字按钮（40vp 触控高、`app.color.danger` 字色）。
+ * 组件自身**不删除任何东西**：只把 `record.id` 交给 `onDelete`，由页面走软删除（墓碑追加）+ 5 秒撤销。
+ * `onDelete` 为 `null` 时不渲染该按钮（历史调用方/只读场景）。
+ *
  * 设计（`docs/UI-DESIGN.md`）：
  * - 不再用「白卡片 + 圆角 + 间距」分隔行，改为**行 + 1vp 细分割线**（去掉卡片层）；
  * - 勾选区从 24vp 放大到 40vp（`TOUCH_MIN`），整行高度 ≥ 56vp；
@@ -30,6 +34,10 @@ export struct RecordRow {
   onToggle: (id: string, done: boolean) => void = () => {};
   /** 点击行回调：进入详情（紧凑屏跳页 / 主从布局切右栏）。 */
   onOpen: (id: string) => void = () => {};
+  /**
+   * 删除回调（软删除 + 撤销由页面负责）；`null` = 不渲染删除按钮。
+   */
+  onDelete: ((id: string) => void) | null = null;
   /** 是否选中（主从布局的左侧列表用：浅蓝底 + 2vp 品牌竖条）。 */
   @Prop selected: boolean = false;
 
@@ -117,6 +125,23 @@ export struct RecordRow {
         .onClick(() => {
           this.onOpen(this.record.id);
         })
+
+        if (this.onDelete !== null) {
+          Text('删除')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.danger'))
+            .height(TOUCH_MIN)
+            .padding({ left: SPACING.sm, right: SPACING.sm })
+            .textAlign(TextAlign.Center)
+            .flexShrink(0)
+            .onClick(() => {
+              const handler: ((id: string) => void) | null = this.onDelete;
+              if (handler !== null) {
+                handler(this.record.id);
+              }
+            })
+        }
       }
       .width('100%')
       .padding({ top: SPACING.md, bottom: SPACING.md })

@@ -40,6 +40,14 @@
  *   push 只 git.add + git.commit 路径限定 `devices/<deviceId>/`；
  *   fetch / pull 只读取其它设备目录，**从不 merge**（`pull` 固定 fastForwardOnly）。
  *
+ * 分支（A2）：
+ *   - 分支名来自 args.branch（默认 main），**从不 force 推送**（`pushPlan().force === false`）；
+ *   - 首次推送时本地/远端分支可能还不存在：先 `ensureOnBranch()` 把 HEAD 换到目标分支
+ *     （必要时 `writeRef refs/heads/<branch>`），提交后再补写一次分支引用，
+ *     然后由 `git.push({ref})` 在远端**自动创建**同名分支，返回 `branchCreated` 说明是否新建；
+ *   - `status` 额外返回 ahead/behind（`refs/heads/<branch>` 与 `refs/remotes/origin/<branch>`
+ *     的提交集合差）与冲突数，供设置页展示「领先 / 落后 / 冲突」。
+ *
  * 安全：token 只出现在 HTTP Authorization 头里，不写日志、不进 call 的返回值、不进错误信息
  *       （错误信息经 sanitizeMessage 二次脱敏）。
  * ============================================================================
@@ -368,6 +376,13 @@
     if (/^E[A-Z]+$/.test(name) || /EACCES|EPERM|EIO|EBUSY/.test(name)) {
       return bridgeError('E_FS', '本地文件读写失败：' + message);
     }
+    // 证书 / DNS 是「确定性的环境问题」，给一句能照着排查的中文，别让用户只看到英文异常
+    if (/CERT_|ERR_CERT|SSL|TLS|certificate|证书|self.?signed|UNABLE_TO_VERIFY/i.test(message)) {
+      return bridgeError('E_HTTP', '证书错误（HTTPS 校验未通过）：' + message);
+    }
+    if (/ENOTFOUND|EAI_AGAIN|getaddrinfo|nodename nor servname|域名解析|无法解析域名|DNS 解析/i.test(message)) {
+      return bridgeError('E_HTTP', '域名解析失败（DNS）：' + message);
+    }
     return bridgeError('E_GIT', 'Git 操作失败：' + message);
   }
 
@@ -528,6 +543,185 @@
       depth = 200;
     }
     return depth;
+  }
+
+  // ---------------------------------------------------------------- 分支与 ahead/behind（A2）
+
+  /** 计算 ahead/behind 时读取的提交条数上限（超出部分按「下界」处理，不联网、不读 packfile）。 */
+  var BRANCH_LOG_DEPTH = 500;
+
+  /**
+   * 由「本地分支提交 sha 列表」与「远端分支提交 sha 列表」算 ahead/behind。
+   *
+   * 纯函数（与 ArkTS 侧 `model/syncError.ts` 的 `computeAheadBehind` 同一口径）：
+   * 只看集合差，重复 sha 只算一次；两侧列表通常来自 `git.log`（新到旧），结果与顺序无关。
+   */
+  function computeAheadBehind(localShas, remoteShas) {
+    var local = Array.isArray(localShas) ? localShas : [];
+    var remote = Array.isArray(remoteShas) ? remoteShas : [];
+    var remoteSet = Object.create(null);
+    var localSet = Object.create(null);
+    var i;
+    for (i = 0; i < remote.length; i++) {
+      var remoteSha = String(remote[i] === undefined || remote[i] === null ? '' : remote[i]).trim();
+      if (remoteSha.length > 0) {
+        remoteSet[remoteSha] = true;
+      }
+    }
+    for (i = 0; i < local.length; i++) {
+      var localSha = String(local[i] === undefined || local[i] === null ? '' : local[i]).trim();
+      if (localSha.length > 0) {
+        localSet[localSha] = true;
+      }
+    }
+    var ahead = 0;
+    var behind = 0;
+    var key;
+    for (key in localSet) {
+      if (remoteSet[key] !== true) {
+        ahead++;
+      }
+    }
+    for (key in remoteSet) {
+      if (localSet[key] !== true) {
+        behind++;
+      }
+    }
+    return {
+      ahead: ahead,
+      behind: behind,
+      diverged: ahead > 0 && behind > 0,
+      comparable: Object.keys(localSet).length > 0 || Object.keys(remoteSet).length > 0
+    };
+  }
+
+  /**
+   * 从 `git.statusMatrix()` 估冲突条目数。
+   *
+   * isomorphic-git 的 statusMatrix 没有「未合并」标记，这里用最接近的启发式：
+   * HEAD / 工作区 / 暂存区**三者互不相同**（文件在三个地方都不一样）才算冲突。
+   * 本应用从不 merge（pull 固定 fastForwardOnly），所以正常情况恒为 0；
+   * 只有外部工具在仓库目录里做过合并才会出现。
+   */
+  function countConflicts(matrix) {
+    if (!Array.isArray(matrix)) {
+      return 0;
+    }
+    var conflicts = 0;
+    for (var i = 0; i < matrix.length; i++) {
+      var row = matrix[i];
+      if (!Array.isArray(row) || row.length < 4) {
+        continue;
+      }
+      var head = row[1];
+      var workdir = row[2];
+      var stage = row[3];
+      if (head !== workdir && head !== stage && workdir !== stage) {
+        conflicts++;
+      }
+    }
+    return conflicts;
+  }
+
+  /**
+   * 推送参数（纯函数）：远端 origin、ref 是分支名、**force 恒为 false**。
+   *
+   * 单测直接断言这个对象，防止以后有人为了「推上去就行」加上 `force: true`
+   * （本应用的契约是永不覆盖远端历史）。
+   */
+  function pushPlan(branch) {
+    var name = typeof branch === 'string' && branch.length > 0 ? branch : 'main';
+    return { remote: 'origin', ref: name, refspec: 'refs/heads/' + name, force: false };
+  }
+
+  /** 读某 ref 的 oid；不存在/读失败返回 null（分支可能还没建，不抛）。 */
+  async function refOid(git, ref) {
+    try {
+      var oid = await git.resolveRef({ fs: session.fs, dir: session.repoRoot, ref: ref });
+      return oid === undefined || oid === null ? null : String(oid);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /** 读某 ref 的提交 sha 列表（读不到返回空数组）。 */
+  async function logShas(git, ref) {
+    try {
+      var commits = await git.log({ fs: session.fs, dir: session.repoRoot, ref: ref, depth: BRANCH_LOG_DEPTH });
+      var shas = [];
+      for (var i = 0; i < commits.length; i++) {
+        var oid = commits[i] && commits[i].oid ? String(commits[i].oid) : '';
+        if (oid.length > 0) {
+          shas.push(oid);
+        }
+      }
+      return shas;
+    } catch (error) {
+      return [];
+    }
+  }
+
+  /**
+   * 本地分支 + 远端跟踪分支的状态：是否存在、oid、ahead/behind。
+   *
+   * ahead = 本地独有提交数（该推的量），behind = 远端独有提交数（该拉的量）。
+   */
+  async function branchState(git, branch) {
+    var name = typeof branch === 'string' && branch.length > 0 ? branch : 'main';
+    var localRef = 'refs/heads/' + name;
+    var remoteRef = 'refs/remotes/origin/' + name;
+    var localOid = await refOid(git, localRef);
+    var remoteOid = await refOid(git, remoteRef);
+    var localShas = localOid === null ? [] : await logShas(git, localRef);
+    var remoteShas = remoteOid === null ? [] : await logShas(git, remoteRef);
+    var range = computeAheadBehind(localShas, remoteShas);
+    return {
+      branch: name,
+      localRef: localRef,
+      remoteRef: remoteRef,
+      localBranchExists: localOid !== null,
+      remoteBranchExists: remoteOid !== null,
+      localBranchOid: localOid,
+      remoteBranchOid: remoteOid,
+      ahead: range.ahead,
+      behind: range.behind,
+      diverged: range.diverged,
+      comparable: range.comparable,
+      localCommitCount: localShas.length,
+      remoteCommitCount: remoteShas.length
+    };
+  }
+
+  /**
+   * 把 HEAD 换到目标分支（拉取/推送前调用），必要时先建出本地分支。
+   *
+   * 顺序：已在目标分支 → 什么都不做；本地有该分支 → checkout；本地没有但远端有 →
+   * `writeRef refs/heads/<branch>` 指向远端 oid 再 checkout；都没有（空仓库）→
+   * 返回 `from: 'empty'`，等提交后再由 `opPush` 补写引用。
+   */
+  async function ensureOnBranch(git, branch) {
+    var name = branch;
+    var current = await currentBranchOf(git);
+    if (current === name) {
+      return { switched: false, createdLocalBranch: false, current: current, from: 'current' };
+    }
+    var localOid = await refOid(git, 'refs/heads/' + name);
+    if (localOid !== null) {
+      await git.checkout({ fs: session.fs, dir: session.repoRoot, ref: name });
+      return { switched: true, createdLocalBranch: false, current: name, from: 'local' };
+    }
+    var base = await refOid(git, 'refs/remotes/origin/' + name);
+    var from = 'remote';
+    if (base === null) {
+      base = await refOid(git, 'HEAD');
+      from = 'head';
+    }
+    if (base === null) {
+      return { switched: false, createdLocalBranch: false, current: current, from: 'empty' };
+    }
+    await git.writeRef({ fs: session.fs, dir: session.repoRoot, ref: 'refs/heads/' + name, value: base, force: true });
+    await git.checkout({ fs: session.fs, dir: session.repoRoot, ref: name });
+    return { switched: true, createdLocalBranch: true, current: name, from: from };
   }
 
   // ---------------------------------------------------------------- fs 适配器
@@ -1305,6 +1499,8 @@
     }
     await ensureRemote(git, config);
     var branch = config.branch || 'main';
+    // 分支可配：HEAD 不在目标分支时先切过去（本地没有就按远端/HEAD 建），否则 pull 会更新错分支
+    await ensureOnBranch(git, branch);
     var before = await resolveHead(git);
     // fastForwardOnly：本应用永不 merge；分叉时 isomorphic-git 抛 FastForwardError，由 normalizeError 转中文
     var result = await git.pull({
@@ -1350,6 +1546,15 @@
       throw bridgeError('E_GIT', '设备标识（deviceId）不合法：需匹配 ^[a-z0-9][a-z0-9-]{0,31}$');
     }
     await ensureRemote(git, config);
+
+    // 分支可配（A2）：HEAD 不在目标分支时先切过去（本地没有就按远端/HEAD 建），
+    // 否则 commit 会落到别的分支上，push ref 也就推错了。
+    var branchSwitch = { switched: false, createdLocalBranch: false, current: null, from: 'current' };
+    try {
+      branchSwitch = await ensureOnBranch(git, branch);
+    } catch (error) {
+      throw normalizeError(error);
+    }
 
     // 提交前尽力快进拉取，降低推送被拒的概率（失败只记录，不影响后面的提交）
     var prePull = { performed: false, fastForward: false, alreadyUpToDate: false, message: '' };
@@ -1401,12 +1606,37 @@
       commit = null;
     }
 
+    // 首次推送：本地分支引用可能还不存在（空仓库 / 刚换的新分支名）→ 提交后补写一次，
+    // 让 `git.push({ref: branch})` 有东西可推，远端据此自动创建同名分支。
+    var commitOid =
+      commit === undefined || commit === null ? await resolveHead(git) : String(commit);
+    var branchCreatedLocal = branchSwitch.createdLocalBranch === true;
+    if (commitOid !== null && commitOid !== undefined && commitOid.length > 0) {
+      var branchOidBefore = await refOid(git, 'refs/heads/' + branch);
+      if (branchOidBefore === null) {
+        await git.writeRef({
+          fs: session.fs,
+          dir: root,
+          ref: 'refs/heads/' + branch,
+          value: commitOid,
+          force: true
+        });
+        branchCreatedLocal = true;
+      }
+    }
+
+    // 远端此前有没有这个分支：决定「自动创建分支」的提示（以本地缓存的远端跟踪引用为准）
+    var remoteBranchExisted = (await refOid(git, 'refs/remotes/origin/' + branch)) !== null;
+
+    // force 恒为 false（`pushPlan` 是纯函数，单测直接断言）：本应用永不覆盖远端历史
+    var plan = pushPlan(branch);
     var pushResult = await git.push({
       fs: session.fs,
       http: session.http,
       dir: root,
-      remote: 'origin',
-      ref: branch,
+      remote: plan.remote,
+      ref: plan.ref,
+      force: plan.force,
       onAuth: makeOnAuth(config)
     });
     return {
@@ -1415,6 +1645,11 @@
       files: files.length,
       commit: commit === undefined || commit === null ? null : String(commit),
       pushed: !(pushResult && pushResult.ok === false),
+      refspec: plan.refspec,
+      force: plan.force,
+      branchCreated: !remoteBranchExisted,
+      branchCreatedLocal: branchCreatedLocal,
+      branchSwitch: branchSwitch,
       prePull: prePull,
       message: commit === null ? '没有新的改动可提交' : '已提交并推送'
     };
@@ -1432,7 +1667,18 @@
       remoteUrl: null,
       changedCount: 0,
       changed: [],
+      conflicts: 0,
       lastCommit: null,
+      // A2：分支与同步状态（本地 vs origin/<branch>）
+      targetBranch: null,
+      localBranchExists: false,
+      remoteBranchExists: false,
+      localBranchOid: null,
+      remoteBranchOid: null,
+      ahead: 0,
+      behind: 0,
+      diverged: false,
+      comparable: false,
       config: {
         repoUrl: typeof config.repoUrl === 'string' ? config.repoUrl : null,
         branch: typeof config.branch === 'string' && config.branch.length > 0 ? config.branch : 'main',
@@ -1441,6 +1687,8 @@
         authorName: typeof config.authorName === 'string' ? config.authorName : null
       }
     };
+    // A2：目标分支先填好（未初始化也要回显，页面据此提示「首次拉取会自动克隆 / 首次推送会建分支」）
+    report.targetBranch = typeof config.branch === 'string' && config.branch.length > 0 ? config.branch : 'main';
     if (!report.initialized) {
       return report;
     }
@@ -1451,6 +1699,20 @@
       report.remoteUrl = remote === undefined || remote === null ? null : String(remote);
     } catch (error) {
       report.remoteUrl = null;
+    }
+    // A2：ahead/behind（refs/heads/<branch> vs refs/remotes/origin/<branch>）
+    try {
+      var state = await branchState(git, report.targetBranch);
+      report.localBranchExists = state.localBranchExists;
+      report.remoteBranchExists = state.remoteBranchExists;
+      report.localBranchOid = state.localBranchOid;
+      report.remoteBranchOid = state.remoteBranchOid;
+      report.ahead = state.ahead;
+      report.behind = state.behind;
+      report.diverged = state.diverged;
+      report.comparable = state.comparable;
+    } catch (error) {
+      report.branchError = sanitizeMessage(error && error.message !== undefined ? error.message : error);
     }
     if (report.head !== null) {
       try {
@@ -1474,6 +1736,7 @@
       }
       report.changedCount = changed.length;
       report.changed = changed.slice(0, 100);
+      report.conflicts = countConflicts(matrix);
     } catch (error) {
       report.statusError = sanitizeMessage(error && error.message !== undefined ? error.message : error);
     }
@@ -1777,7 +2040,22 @@
     zipUpsert: opZipUpsert,
     zipList: opZipList,
     zipRead: opZipRead,
-    zipChunkBytes: ZIP_CHUNK_BYTES
+    zipChunkBytes: ZIP_CHUNK_BYTES,
+    // 分支与同步状态（A2）：纯函数 + 需要真实仓库的两个 helper
+    computeAheadBehind: computeAheadBehind,
+    countConflicts: countConflicts,
+    pushPlan: pushPlan,
+    branchState: branchState,
+    ensureOnBranch: ensureOnBranch,
+    refOid: refOid,
+    branchLogDepth: BRANCH_LOG_DEPTH,
+    // 已绑定会话（repoRoot/fs）的便捷包装，供 Node 单测直接调用（不用自己造 git 实例）
+    branchStateOf: function (branch) {
+      return branchState(gitApi(), branch);
+    },
+    switchBranchTo: function (branch) {
+      return ensureOnBranch(gitApi(), branch);
+    }
   };
 
   var DshGitBridge = {

@@ -45,7 +45,10 @@ describe('classifySyncError：网络类（可重试）', () => {
   test('网络不可达（无响应 / DNS / 连接被拒）→ retry', () => {
     assertShape(classifySyncError('E_HTTP', '网络请求失败：EHOSTUNREACH'), 'retry', 'network');
     assertShape(classifySyncError(0, ''), 'retry', 'network');
-    assertShape(classifySyncError('', '域名解析失败，无法连接仓库'), 'retry', 'network');
+    // A1 起 DNS 单独一档（排查手段不同：先看域名/网络/DNS），仍可重试
+    const dns = assertShape(classifySyncError('', '域名解析失败，无法连接仓库'), 'retry', 'dns');
+    assert.match(dns.title, /DNS|解析/);
+    assertShape(classifySyncError('E_HTTP', '网络请求失败：ENOTFOUND git.example.com'), 'retry', 'dns');
     assertShape(classifySyncError('E_HTTP', '网络请求失败：ECONNREFUSED'), 'retry', 'network');
   });
 

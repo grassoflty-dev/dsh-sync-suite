@@ -92,17 +92,23 @@ describe('手写板工具条：宽度自适应与不截断', () => {
     }
   });
 
-  test('工具条只有「笔迹设置」+「颜色」两个菜单（粗细不再单独占位）', () => {
+  test('「笔迹」按钮文案固定（不再拼接当前值，因此不会被裁）', () => {
     const body = builderBody('brushMenuButton');
-    assert.ok(/Text\(this\.inkSummary\(\)\)/.test(body), '「笔迹设置」按钮必须显示当前状态文案（inkSummary）');
-    assert.ok(/Text\('▾'\)/.test(body), '「笔迹设置」按钮必须有 ▾');
-    assert.equal(/substring\(0,\s*1\)/.test(code), false, '不得把文案截成单字');
+    // 用户定版：按钮固定写「笔迹」+ ▾；当前值（钢笔 · 3.5 · 黑）只在面板里看
+    assert.ok(/Text\('笔迹'\)/.test(body), '竖屏「笔迹」按钮文案必须固定为「笔迹」');
+    assert.equal(/inkSummary\(\)/.test(body), false, '按钮不得再显示 inkSummary（会被裁）');
+    assert.equal(/·/.test(body), false, '按钮文案里不得出现「·」拼接');
+    assert.ok(/Text\('▾'\)/.test(body), '「笔迹」按钮必须有 ▾');
+    const rail = builderBody('railBrushButton');
+    assert.ok(/Text\('笔迹'\)/.test(rail), '横屏 rail 按钮文案也必须固定为「笔迹」');
+    assert.equal(/inkSummary\(\)/.test(rail), false, 'rail 也不得显示 inkSummary');
+    // 状态摘要仍保留（hilog / 草稿提示用），但不再进按钮
     const summary = builderBody('inkSummary');
-    assert.ok(/currentBrushLabel\(\)/.test(summary), '文案必须含当前笔刷名');
-    assert.ok(/pagerState\.penWidth/.test(summary), '文案必须含当前粗细档位');
-    // 笔形/粗细/颜色 三段全部并入「笔迹设置」：独立按钮一个都不能留
+    assert.ok(/currentBrushLabel\(\)/.test(summary), 'inkSummary 仍应包含笔刷名');
+    assert.ok(/pagerState\.penWidth/.test(summary), 'inkSummary 仍应包含档位');
+    // 笔形/粗细/颜色 三段全部并入「笔迹」：独立按钮一个都不能留
     for (const gone of ['sizeMenuButton', 'railSizeButton', 'colorMenuButton', 'railColorButton']) {
-      assert.equal(new RegExp(gone).test(code), false, `不得再有 ${gone}（已并入笔迹设置）`);
+      assert.equal(new RegExp(gone).test(code), false, `不得再有 ${gone}（已并入笔迹）`);
     }
     for (const bar of ['topBar', 'railBar']) {
       const barBody = builderBody(bar);
@@ -277,7 +283,10 @@ describe('手写板工具条：宽度自适应与不截断', () => {
     assert.ok(/: SPACING\.sm;/.test(left), '竖屏面板贴左边 8vp');
     const top = builderBody('panelTop');
     assert.ok(/TOP_BAR_HEIGHT \+ DIVIDER \+ SPACING\.xs/.test(top), '竖屏面板在工具条下方（向下展开）');
-    assert.ok(/this\.panel === PANEL_INK \? 0 : 1/.test(top), '横屏：笔迹设置对应 rail 第 1 个按钮（index 0）');
+    assert.ok(
+      /this\.panel === PANEL_INK \? 0 : \(this\.panel === PANEL_INSERT \? 3 : 1\)/.test(top),
+      '横屏：笔迹=rail 第 1 个（index 0）、插入=第 4 个（index 3）'
+    );
     const width = builderBody('panelWidth');
     assert.ok(/INK_PANEL_MIN_WIDTH \+ 2 \* SPACING\.sm/.test(width), '笔迹设置面板宽 240+16');
   });

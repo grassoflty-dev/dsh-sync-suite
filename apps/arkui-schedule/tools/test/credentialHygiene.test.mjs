@@ -53,14 +53,29 @@ function collectFiles(dir, suffix, out = []) {
   return out;
 }
 
+/**
+ * 唯一允许的日志行（B3 请求日志）：只有源/模型/耗时/成败四个字段。
+ *
+ * 白名单按「整行逐字相等」比对，任何改动（多带一个参数、换成模板串）都会让本测试失败，
+ * 必须连同 `tools/test/aiReliability.test.mjs` 一起评审。
+ */
+const ALLOWED_AI_LOG_LINE =
+  "console.info('[ai] provider=%s model=%s latency=%dms ok=%s', providerId, model, latencyMs, ok ? 'true' : 'false');";
+
 describe('日志：App 侧不打印任何请求头/请求体（含 token / AI key）', () => {
-  test('页面与服务里没有 console.* / hilog.* 调用', () => {
+  test('页面与服务里没有 console.* / hilog.* 调用（唯一例外是 deepseek 的 [ai] 日志）', () => {
+    let allowed = 0;
     for (const [name, source] of SECRET_TOUCHING_SOURCES) {
       for (const line of codeLines(source)) {
+        if (name === 'services/deepseek.ets' && line === ALLOWED_AI_LOG_LINE) {
+          allowed++;
+          continue;
+        }
         assert.equal(/console\.(log|info|warn|error|debug)/.test(line), false, `${name} 里有 console 调用：${line}`);
         assert.equal(/hilog\.(debug|info|warn|error|fatal)/.test(line), false, `${name} 里有 hilog 调用：${line}`);
       }
     }
+    assert.equal(allowed, 1, 'deepseek 的 [ai] 行为日志必须恰好一条');
   });
 
   test('token / aiKey 从未被拼进任何 Text(...) 展示（只能用 Password 输入框）', () => {

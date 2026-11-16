@@ -3,11 +3,13 @@
 // 前置：先构建纯逻辑层
 //   node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json
 //
-// 覆盖 P2 的四块可测逻辑：
-// 1. `buildAiRequest` 的 URL 拼接与请求体（model + prompt + max_tokens）；
-// 2. `classifyAiError` 的中文错误映射（401/402/403/404/429/5xx/超时/网络异常）；
-// 3. `shouldRetry` 的重试判定（网络错误 / 429 / 5xx 才重试，超时与确定性错误不重试）；
-// 4. `parseAiReply` 的回复解析（正常 / 缺字段 / 非 JSON / 空内容）。
+// 覆盖：
+// 1. `buildAiRequest` 的 URL 拼接与请求体（model + prompt + temperature/max_tokens/stream）；
+// 2. `AiOptions` 参数体系（默认 0.7 / 1024 / 30000 / 1、逐字段覆盖、非法值夹取）；
+// 3. `classifyAiError` 的中文错误映射（401/402/403/404/429/5xx/超时/网络异常）；
+// 4. `shouldRetry`（网络 / 429 / 5xx）与 `shouldFallback`（超时/网络/429/5xx 才切源）；
+// 5. `runWithFallback` 只切一次备用源（含「不切第三次」与「确定性错误不切」）；
+// 6. `parseAiReply` / `parseAiReplyFull` / `parseUsage` / `describeUsage`。
 //
 // 该模块没有任何运行时 import，因此不需要 registerHooks 补 `.js` 后缀。
 import assert from 'node:assert/strict';
@@ -15,6 +17,16 @@ import { describe, test } from 'node:test';
 
 const {
   AI_DEFAULT_MAX_TOKENS,
+  AI_DEFAULT_RETRIES,
+  AI_DEFAULT_TEMPERATURE,
+  AI_MAX_MAX_TOKENS,
+  AI_MAX_RETRIES,
+  AI_MAX_TEMPERATURE,
+  AI_MAX_TIMEOUT_MS,
+  AI_MIN_MAX_TOKENS,
+  AI_MIN_RETRIES,
+  AI_MIN_TEMPERATURE,
+  AI_MIN_TIMEOUT_MS,
   AI_PROBE_MAX_TOKENS,
   AI_PROBE_PROMPT,
   AI_RETRY_BACKOFF_MS,
@@ -23,20 +35,43 @@ const {
   AI_TIMEOUT_MS,
   DEFAULT_AI_BASE_URL,
   DEFAULT_AI_MODEL,
+  AiFallbackError,
   aiChatUrl,
   buildAiRequest,
   classifyAiError,
+  defaultAiOptions,
   describeAiTestResult,
+  describeUsage,
+  normalizeAiOptions,
   parseAiReply,
+  parseAiReplyFull,
+  parseUsage,
+  runWithFallback,
+  shouldFallback,
   shouldRetry
 } = await import('../.build/model/aiRequest.js');
+
+/** 构造一次尝试结果（runWithFallback 的注入桩）。 */
+function attempt(overrides = {}) {
+  return {
+    ok: true,
+    status: 200,
+    text: '正文',
+    error: '',
+    usage: null,
+    elapsedMs: 10,
+    providerId: 'deepseek',
+    model: 'deepseek-chat',
+    ...overrides
+  };
+}
 
 describe('buildAiRequest：URL 与请求体构造', () => {
   test('默认基地址拼出 /chat/completions，请求体含 model 与 prompt', () => {
     const request = buildAiRequest(DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL, '请把今天的日程整理一下');
     assert.equal(request.url, 'https://api.deepseek.com/chat/completions');
     assert.equal(request.timeoutMs, AI_TIMEOUT_MS);
-    assert.equal(AI_TIMEOUT_MS, 20000, '整体超时固定 20 秒');
+    assert.equal(AI_TIMEOUT_MS, 30000, '整体超时默认 30 秒（B2）');
 
     const body = JSON.parse(request.body);
     assert.equal(body.model, 'deepseek-chat');
@@ -44,6 +79,7 @@ describe('buildAiRequest：URL 与请求体构造', () => {
     assert.equal(body.messages[0].role, 'user');
     assert.equal(body.messages[0].content, '请把今天的日程整理一下');
     assert.equal(body.max_tokens, AI_DEFAULT_MAX_TOKENS);
+    assert.equal(body.temperature, AI_DEFAULT_TEMPERATURE);
     assert.equal(body.stream, false);
   });
 
@@ -71,15 +107,17 @@ describe('buildAiRequest：URL 与请求体构造', () => {
   });
 
   test('连通性测试的最小请求：prompt=ping、max_tokens=8', () => {
-    const request = buildAiRequest(DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL, AI_PROBE_PROMPT, AI_PROBE_MAX_TOKENS);
+    const options = { ...defaultAiOptions(), maxTokens: AI_PROBE_MAX_TOKENS, retries: 0 };
+    const request = buildAiRequest(DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL, AI_PROBE_PROMPT, options);
     const body = JSON.parse(request.body);
     assert.equal(AI_PROBE_MAX_TOKENS, 8);
     assert.equal(body.messages[0].content, 'ping');
     assert.equal(body.max_tokens, 8);
+    assert.equal(request.retries, 0, '连通性测试自己控制重试，请求层不重试');
   });
 
   test('可选 system 消息排在第一，user 在后', () => {
-    const request = buildAiRequest(DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL, '正文', 100, '你是整理助手');
+    const request = buildAiRequest(DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL, '正文', null, '你是整理助手');
     const body = JSON.parse(request.body);
     assert.equal(body.messages.length, 2);
     assert.equal(body.messages[0].role, 'system');
@@ -94,6 +132,70 @@ describe('buildAiRequest：URL 与请求体构造', () => {
     assert.throws(() => buildAiRequest(DEFAULT_AI_BASE_URL, 'deepseek-chat', ''), /提示词不能为空/);
     assert.throws(() => buildAiRequest(DEFAULT_AI_BASE_URL, 'deepseek-chat', '   '), /提示词不能为空/);
     assert.throws(() => aiChatUrl('  '), /接口地址不能为空/);
+  });
+});
+
+describe('AiOptions：默认 0.7 / 1024 / 30000 / 1', () => {
+  test('默认值逐项钉住，且每次返回新对象', () => {
+    assert.equal(AI_DEFAULT_TEMPERATURE, 0.7);
+    assert.equal(AI_DEFAULT_MAX_TOKENS, 1024);
+    assert.equal(AI_TIMEOUT_MS, 30000);
+    assert.equal(AI_DEFAULT_RETRIES, 1);
+    assert.deepEqual(defaultAiOptions(), {
+      temperature: 0.7,
+      maxTokens: 1024,
+      timeoutMs: 30000,
+      retries: 1
+    });
+    const first = defaultAiOptions();
+    const second = defaultAiOptions();
+    assert.notStrictEqual(first, second, '不能把共享常量对象交给调用方修改');
+  });
+
+  test('null/undefined 归一为默认值', () => {
+    assert.deepEqual(normalizeAiOptions(null), defaultAiOptions());
+    assert.deepEqual(normalizeAiOptions(undefined), defaultAiOptions());
+  });
+
+  test('传入覆盖逐字段生效', () => {
+    const options = normalizeAiOptions({
+      temperature: 0.2,
+      maxTokens: 512,
+      timeoutMs: 8000,
+      retries: 0
+    });
+    assert.deepEqual(options, { temperature: 0.2, maxTokens: 512, timeoutMs: 8000, retries: 0 });
+  });
+
+  test('越界/NaN/类型错误夹到边界或回落默认', () => {
+    assert.equal(normalizeAiOptions({ ...defaultAiOptions(), temperature: 9 }).temperature, AI_MAX_TEMPERATURE);
+    assert.equal(normalizeAiOptions({ ...defaultAiOptions(), temperature: -1 }).temperature, AI_MIN_TEMPERATURE);
+    assert.equal(normalizeAiOptions({ ...defaultAiOptions(), temperature: Number.NaN }).temperature, 0.7);
+    assert.equal(normalizeAiOptions({ ...defaultAiOptions(), maxTokens: 0 }).maxTokens, AI_MIN_MAX_TOKENS);
+    assert.equal(normalizeAiOptions({ ...defaultAiOptions(), maxTokens: 1e9 }).maxTokens, AI_MAX_MAX_TOKENS);
+    assert.equal(normalizeAiOptions({ ...defaultAiOptions(), maxTokens: 12.9 }).maxTokens, 12, '取整');
+    assert.equal(normalizeAiOptions({ ...defaultAiOptions(), timeoutMs: 10 }).timeoutMs, AI_MIN_TIMEOUT_MS);
+    assert.equal(normalizeAiOptions({ ...defaultAiOptions(), timeoutMs: 1e9 }).timeoutMs, AI_MAX_TIMEOUT_MS);
+    assert.equal(normalizeAiOptions({ ...defaultAiOptions(), retries: -1 }).retries, AI_MIN_RETRIES);
+    assert.equal(normalizeAiOptions({ ...defaultAiOptions(), retries: 99 }).retries, AI_MAX_RETRIES);
+    assert.equal(normalizeAiOptions({ ...defaultAiOptions(), retries: 1.8 }).retries, 1);
+    // 字段缺失（老调用点只传了部分字段）
+    assert.deepEqual(normalizeAiOptions({ temperature: 0.1 }), { ...defaultAiOptions(), temperature: 0.1 });
+  });
+
+  test('buildAiRequest 把 options 写进请求体与请求对象', () => {
+    const request = buildAiRequest(DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL, 'ping', {
+      temperature: 0.3,
+      maxTokens: 512,
+      timeoutMs: 12000,
+      retries: 2
+    });
+    const body = JSON.parse(request.body);
+    assert.equal(body.temperature, 0.3);
+    assert.equal(body.max_tokens, 512);
+    assert.equal(body.stream, false, '必须显式关闭流式，否则拿不到一次性 JSON');
+    assert.equal(request.timeoutMs, 12000);
+    assert.equal(request.retries, 2);
   });
 });
 
@@ -118,7 +220,7 @@ describe('classifyAiError：HTTP 状态 → 中文文案', () => {
 
   test('超时与网络异常使用伪状态码，也给出中文原因', () => {
     assert.match(classifyAiError(AI_STATUS_TIMEOUT, ''), /请求超时/);
-    assert.match(classifyAiError(AI_STATUS_TIMEOUT, ''), /20 秒/);
+    assert.match(classifyAiError(AI_STATUS_TIMEOUT, ''), /30 秒/);
     assert.match(classifyAiError(AI_STATUS_NETWORK, ''), /网络异常/);
     assert.match(classifyAiError(AI_STATUS_NETWORK, 'socket hang up'), /socket hang up/);
   });
@@ -169,15 +271,143 @@ describe('shouldRetry：只有网络错误 / 429 / 5xx 值得退避重试', () =
   });
 
   test('不重试：超时、2xx、确定性 4xx', () => {
-    assert.equal(shouldRetry(AI_STATUS_TIMEOUT), false, '20 秒超时再等一轮只会让用户白等');
+    assert.equal(shouldRetry(AI_STATUS_TIMEOUT), false, '30 秒超时再等一轮只会让用户白等');
     assert.equal(shouldRetry(200), false);
     for (const status of [400, 401, 402, 403, 404, 422]) {
       assert.equal(shouldRetry(status), false, `HTTP ${status} 重试没有意义`);
     }
   });
 
-  test('退避时长是 1 秒（只重试一次）', () => {
+  test('退避时长是 1 秒（默认只重试一次）', () => {
     assert.equal(AI_RETRY_BACKOFF_MS, 1000);
+  });
+});
+
+describe('shouldFallback：换源有没有用（表驱动）', () => {
+  const cases = [
+    [-1, true],
+    [0, true],
+    [429, true],
+    [500, true],
+    [502, true],
+    [503, true],
+    [504, true],
+    [599, true],
+    [401, false],
+    [403, false],
+    [404, false],
+    [400, false]
+  ];
+  for (const [status, expected] of cases) {
+    test(`HTTP ${status} → ${expected}`, () => {
+      assert.equal(shouldFallback(status), expected);
+    });
+  }
+
+  test('2xx / 其它未列出 4xx 默认不切源', () => {
+    assert.equal(shouldFallback(200), false);
+    assert.equal(shouldFallback(402), false);
+    assert.equal(shouldFallback(422), false);
+  });
+});
+
+describe('runWithFallback：只切一次备用源', () => {
+  test('主源成功：一次调用、usedFallback=false', async () => {
+    let calls = 0;
+    const outcome = await runWithFallback(async () => {
+      calls++;
+      return attempt();
+    }, async () => {
+      calls++;
+      return attempt({ providerId: 'openrouter' });
+    });
+    assert.equal(calls, 1);
+    assert.equal(outcome.usedFallback, false);
+    assert.equal(outcome.providerId, 'deepseek');
+    assert.equal(outcome.text, '正文');
+    assert.equal(outcome.primaryError, '');
+  });
+
+  test('主源超时 → 备用成功：恰好切 1 次（共 2 次调用）', async () => {
+    let calls = 0;
+    const outcome = await runWithFallback(
+      async () => {
+        calls++;
+        return attempt({ ok: false, status: AI_STATUS_TIMEOUT, text: '', error: '主源超时' });
+      },
+      async () => {
+        calls++;
+        return attempt({ providerId: 'openrouter', model: 'deepseek/deepseek-chat', elapsedMs: 20 });
+      }
+    );
+    assert.equal(calls, 2, '只允许切换一次');
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.usedFallback, true);
+    assert.equal(outcome.providerId, 'openrouter');
+    assert.equal(outcome.elapsedMs, 30, '总耗时 = 主源 + 备用源');
+    assert.equal(outcome.primaryError, '主源超时');
+    assert.equal(outcome.fallbackError, '');
+  });
+
+  test('主源 5xx → 备用也失败：只切一次，抛 AiFallbackError 且带两段原因', async () => {
+    let calls = 0;
+    await assert.rejects(
+      () =>
+        runWithFallback(
+          async () => {
+            calls++;
+            return attempt({ ok: false, status: 503, text: '', error: '主源 503' });
+          },
+          async () => {
+            calls++;
+            return attempt({ ok: false, status: 0, providerId: 'ollama', text: '', error: '备用网络异常' });
+          }
+        ),
+      (error) => {
+        assert.ok(error instanceof AiFallbackError);
+        assert.match(error.message, /主源 503/);
+        assert.match(error.message, /备用源 ollama 也失败/);
+        assert.match(error.message, /备用网络异常/);
+        assert.equal(error.primaryMessage, '主源 503');
+        assert.equal(error.fallbackMessage, '备用网络异常');
+        assert.equal(error.status, 0);
+        assert.equal(error.fallbackProviderId, 'ollama');
+        return true;
+      }
+    );
+    assert.equal(calls, 2, '不得尝试第三次');
+  });
+
+  test('主源 401 不切源（换源也没用）', async () => {
+    let calls = 0;
+    await assert.rejects(
+      () =>
+        runWithFallback(
+          async () => {
+            calls++;
+            return attempt({ ok: false, status: 401, text: '', error: '主源 401 密钥无效' });
+          },
+          async () => {
+            calls++;
+            return attempt({ providerId: 'openrouter' });
+          }
+        ),
+      /主源 401 密钥无效/
+    );
+    assert.equal(calls, 1);
+  });
+
+  test('没配备用源：直接抛主源错误（不空转）', async () => {
+    let calls = 0;
+    await assert.rejects(
+      () =>
+        runWithFallback(async () => {
+          calls++;
+          return attempt({ ok: false, status: 429, text: '', error: '主源限流' });
+        }, null),
+      /主源限流/
+    );
+    assert.equal(calls, 1);
   });
 });
 
@@ -214,6 +444,48 @@ describe('parseAiReply：取 choices[0].message.content', () => {
   test('带 error 字段的错误响应不会被当成正常回复', () => {
     const errorBody = JSON.stringify({ error: { message: 'quota exceeded', type: 'insufficient_quota' } });
     assert.throws(() => parseAiReply(errorBody), /quota exceeded/);
+  });
+});
+
+describe('usage：解析与展示（B4）', () => {
+  test('parseAiReplyFull 同时给出正文、usage 与 finish_reason', () => {
+    const text = JSON.stringify({
+      choices: [{ message: { role: 'assistant', content: '摘要' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 120, completion_tokens: 340, total_tokens: 460 }
+    });
+    const reply = parseAiReplyFull(text);
+    assert.equal(reply.text, '摘要');
+    assert.equal(reply.finishReason, 'stop');
+    assert.deepEqual(reply.usage, { promptTokens: 120, completionTokens: 340, totalTokens: 460 });
+  });
+
+  test('没有 usage / 全 0 时 usage 为 null', () => {
+    assert.equal(parseUsage('{"choices":[]}'), null);
+    assert.equal(parseUsage(''), null);
+    assert.equal(parseUsage('not-json'), null);
+    assert.equal(parseUsage('{"usage":{}}'), null);
+    assert.equal(parseUsage('{"usage":{"prompt_tokens":0,"completion_tokens":0}}'), null);
+    assert.equal(parseAiReplyFull('{"choices":[{"message":{"content":"x"}}]}').usage, null);
+  });
+
+  test('total_tokens 缺失时用输入+输出补，负数归 0', () => {
+    assert.deepEqual(parseUsage('{"usage":{"prompt_tokens":10,"completion_tokens":5}}'), {
+      promptTokens: 10,
+      completionTokens: 5,
+      totalTokens: 15
+    });
+    assert.deepEqual(parseUsage('{"usage":{"prompt_tokens":-3,"completion_tokens":5.9}}'), {
+      promptTokens: 0,
+      completionTokens: 5,
+      totalTokens: 5
+    });
+  });
+
+  test('describeUsage → 「输入 120 / 输出 340 tokens」', () => {
+    assert.equal(describeUsage({ promptTokens: 120, completionTokens: 340, totalTokens: 460 }), '输入 120 / 输出 340 tokens');
+    assert.equal(describeUsage(null), '');
+    assert.equal(describeUsage({ promptTokens: 0, completionTokens: 0, totalTokens: 0 }), '');
+    assert.equal(describeUsage({ promptTokens: 7, completionTokens: 0, totalTokens: 7 }), '输入 7 / 输出 0 tokens');
   });
 });
 

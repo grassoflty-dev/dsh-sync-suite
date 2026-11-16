@@ -20,7 +20,9 @@ import { describeError, scheduleStore } from '../services/scheduleStore';
 import { settingsStore } from '../services/settingsStore';
 import { attachmentStore } from '../services/attachmentStore';
 import { deviceTimeZone, summarize } from '../services/deepseek';
+import { loadingText, toastMsFor } from '../common/copy';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
+import { StateView } from './StateView';
 
 const PRIMARY_HEIGHT: number = 48;
 const THUMB: number = 88;
@@ -78,6 +80,26 @@ export struct RecordDetailView {
   /** 容器刷新（保存 / 切选中行）时重读。 */
   onRefreshTick(): void {
     this.load();
+  }
+
+  /**
+   * 三态里的「重试」：先清掉错误文案，再重跑一次「确保存储就绪 → 读取记录」。
+   *
+   * 重跑走 `bootstrap()` 而不是只 `load()`：失败可能发生在 `ensureReady`（深链/冷启动直达详情），
+   * 只重读记录会在存储尚未就绪时立刻再失败一次。
+   */
+  private retryLoad(): void {
+    this.statusText = '';
+    this.bootstrap();
+  }
+
+  /** 错误标题：取 `statusText` 里冒号前那半句（「存储初始化失败」「记录不存在」…），取不到给通用标题。 */
+  private statusTitle(): string {
+    const cut: number = this.statusText.indexOf('：');
+    if (cut > 0) {
+      return this.statusText.slice(0, cut);
+    }
+    return '读取失败';
   }
 
   private load(): void {
@@ -170,7 +192,7 @@ export struct RecordDetailView {
     try {
       scheduleStore.appendRecord(next);
     } catch (error) {
-      promptAction.showToast({ message: `保存失败：${describeError(error)}`, duration: 4000 });
+      promptAction.showToast({ message: `保存失败：${describeError(error)}`, duration: toastMsFor(true) });
       return;
     }
     promptAction.showToast({ message: 'AI 结构化内容已保存' });
@@ -199,7 +221,7 @@ export struct RecordDetailView {
       return;
     }
     if (aiKey.trim().length === 0) {
-      promptAction.showToast({ message: '请先在设置页填写 AI Key', duration: 4000 });
+      promptAction.showToast({ message: '请先在设置页填写 AI Key', duration: toastMsFor(true) });
       return;
     }
     const candidate: ScheduleRecord = cloneRecord(base);
@@ -213,9 +235,9 @@ export struct RecordDetailView {
     try {
       const text = await summarize(payload, aiKey, nowIso(), deviceTimeZone(), model, providerId, baseURL);
       this.aiText = text;
-      promptAction.showToast({ message: 'AI 结果已填入，点「保存」写入记录', duration: 4000 });
+      promptAction.showToast({ message: 'AI 结果已填入，点「保存」写入记录', duration: toastMsFor(false) });
     } catch (error) {
-      promptAction.showToast({ message: describeError(error), duration: 5000 });
+      promptAction.showToast({ message: describeError(error), duration: toastMsFor(true) });
     } finally {
       this.aiBusy = false;
     }
@@ -444,25 +466,29 @@ export struct RecordDetailView {
     Stack({ alignContent: Alignment.Center }) {
       Column() {
         if (this.recordId.length === 0) {
-          Column({ space: SPACING.sm }) {
-            Text('从左侧选一条日程查看')
-              .fontSize(FONT.body)
-              .lineHeight(LINE_HEIGHT.body)
-              .fontColor($r('app.color.text_secondary'))
-              .width('100%')
-              .textAlign(TextAlign.Center)
+          // 空态：没选记录（主从布局右栏 / 深链缺参）
+          Column() {
+            StateView({ kind: 'empty', title: '从左侧选一条日程查看' })
           }
           .width('100%')
           .height('100%')
           .justifyContent(FlexAlign.Center)
         } else if (!this.loaded) {
-          Column({ space: SPACING.sm }) {
-            Text(this.statusText.length > 0 ? this.statusText : '正在读取记录…')
-              .fontSize(FONT.caption)
-              .lineHeight(LINE_HEIGHT.caption)
-              .fontColor($r('app.color.text_secondary'))
-              .width('100%')
-              .textAlign(TextAlign.Center)
+          // 未载入：有 statusText = 出错（给重试），没有 = 还在读（loading）
+          Column() {
+            if (this.statusText.length > 0) {
+              StateView({
+                kind: 'error',
+                title: this.statusTitle(),
+                detail: this.statusText,
+                retryLabel: '重试',
+                onRetry: () => {
+                  this.retryLoad();
+                }
+              })
+            } else {
+              StateView({ kind: 'loading', title: loadingText('日程') })
+            }
           }
           .width('100%')
           .height('100%')
@@ -486,12 +512,17 @@ export struct RecordDetailView {
                 this.AttachmentStrip()
               }
               if (this.statusText.length > 0) {
-                Text(this.statusText)
-                  .fontSize(FONT.caption)
-                  .lineHeight(LINE_HEIGHT.caption)
-                  .fontColor($r('app.color.danger'))
-                  .width('100%')
-                  .textAlign(TextAlign.Start)
+                // 已载入但仍有错误文案（例如二次读取失败）：行内错误条 + 重试，不再直接铺红字
+                StateView({
+                  kind: 'error',
+                  title: this.statusTitle(),
+                  detail: this.statusText,
+                  retryLabel: '重试',
+                  compact: true,
+                  onRetry: () => {
+                    this.retryLoad();
+                  }
+                })
               }
               this.Actions()
             }

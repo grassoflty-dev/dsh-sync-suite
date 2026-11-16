@@ -28,6 +28,7 @@
  * rail 宽度、顶部条高度随 `landscape` 变化，组件树结构保持恒定。
  */
 import { promptAction, router } from '@kit.ArkUI';
+import { image } from '@kit.ImageKit';
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import {
@@ -67,6 +68,8 @@ import type { DraftDoc, DraftPage } from '../model/draft';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN, isLandscapeSize } from '../common/uiTokens';
 import type { RegionBox } from '../model/types';
 import type { Attachment } from '../model/types';
+import { TABLE_DEFAULT_LINES, bringToFront, clampTableLines, deleteObject, findObject, hitTest, imageRectFor, makePageObject, moveObject, replaceObject, resizeObject, tableRect, imageEntryName } from '../model/pageObjects';
+import type { NormalizedRect, PageObject } from '../model/pageObjects';
 
 /** `archiveDay` 的入参形状（显式接口：ArkTS 禁止内联对象类型）。 */
 interface ArchivePage {
@@ -124,6 +127,8 @@ const COLOR_LABELS: string[] = ['黑', '红', '蓝', '绿', '橙'];
 /** 「笔迹设置」面板：笔形 + 粗细合在一个浮层里（用户需求：合并成一个二级菜单）。 */
 const PANEL_INK: string = 'ink';
 const PANEL_COLOR: string = 'color';
+/** 「插入」二级菜单：图片 / 表格（不为它们各加一个 rail 按钮）。 */
+const PANEL_INSERT: string = 'insert';
 /** 笔迹设置面板最小宽度（vp）——用户定版 ≥260（三段：笔形 / 粗细 / 颜色）。 */
 const INK_PANEL_MIN_WIDTH: number = 260;
 /** 笔迹设置面板里 chip / 档位格的触控高度（vp）——定版 ≥40。 */
@@ -144,6 +149,12 @@ const DRAFT_TOAST_RESTORED: string = '已恢复上次未完成的手迹';
 const DRAFT_TOAST_TOO_LARGE: string = '草稿过大，已只保留前 10 页';
 const DRAFT_TOAST_SAVE_FAILED: string = '暂存失败，退出后可能丢失这次手迹';
 
+/** 归一化坐标点（拖拽起点、触摸换算共用，避免 ArkTS 禁止的"对象字面量当类型"）。 */
+interface NormPoint {
+  nx: number;
+  ny: number;
+}
+
 @Entry
 @Component
 struct Handwriting {
@@ -161,6 +172,29 @@ struct Handwriting {
   @State panel: string = '';
   /** 删除确认阶段（0/1/2）。 */
   @State confirmStage: number = CONFIRM_NONE;
+  /**
+   * 当前页的可调对象（框 / 图片 / 表格，共用一套交互）。
+   *
+   * **B1 已知限制**：这里是「当前页一份列表」，翻页时不清空也不按页保存 ——
+   * 按页持久化（以 `PageBook` 的稳定页 id 为键）会在 B2 与 `pageObjects` 写进 JSONL 时一起做，
+   * 避免现在改数据形状把已通过的模型测试推翻。
+   */
+  @State pageObjects: PageObject[] = [];
+  /** 「插入 → 表格」面板里的行列选择（1..10，默认 3×3）。 */
+  @State insertRows: number = TABLE_DEFAULT_LINES;
+  @State insertCols: number = TABLE_DEFAULT_LINES;
+  /** 当前选中的对象 id（'' = 没选中）；选中态画品牌色描边 + 手柄 + ×。 */
+  @State selectedObjectId: string = '';
+  /** 对象层尺寸（vp，onAreaChange 写入；归一化坐标换算用）。 */
+  private objectW: number = 0;
+  private objectH: number = 0;
+  /** 对象层画布上下文与图片位图缓存（B2 阶段用选图结果填充）。 */
+  private objectCtx: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
+  private objectImages: Map<string, image.PixelMap> = new Map<string, image.PixelMap>();
+  /** 拖拽中的对象与起始点（手势状态，不需要触发重绘）。 */
+  private dragObject: PageObject | null = null;
+  private dragPart: string = 'body';
+  private dragStart: NormPoint = { nx: 0, ny: 0 };
   /** 是否横屏（由 `onAreaChange` 的宽高比较得出，不依赖 mediaquery）。 */
   @State landscape: boolean = false;
   /** 页面尺寸（vp）：浮层定位用。 */
@@ -524,6 +558,59 @@ struct Handwriting {
     console.info(`[hw] menu=${name} open=${next.length === 0 ? 0 : 1} panel=${next.length === 0 ? 'none' : next}`);
   }
 
+  /**
+   * 插入图片：拍照/相册选图 → 读入 → 以页中心插入（默认 40% 页宽、按原图比例）。
+   *
+   * 真机接线（`photoAccessHelper`）在 `beginInsertImage()`；选图失败/拒绝权限只 toast，不崩。
+   */
+  private insertImage(): void {
+    this.panel = '';
+    console.info('[hw] insert=image open=0');
+    promptAction.showToast({ message: '插入图片：请选择图片', duration: 1500 });
+    this.requestInsertImage();
+  }
+
+  /** 插入表格：把当前行列插入到页中心（默认 3×3、60%×40%）。 */
+  private insertTable(): void {
+    const rows: number = clampTableLines(this.insertRows);
+    const cols: number = clampTableLines(this.insertCols);
+    const obj: PageObject = makePageObject(`table-${Date.now().toString()}`, 'table', tableRect(), {
+      rows: rows,
+      cols: cols
+    });
+    this.pageObjects.push(obj);
+    this.panel = '';
+    console.info(`[hw] insert=table rows=${rows} cols=${cols} count=${this.pageObjects.length}`);
+    promptAction.showToast({ message: `已插入表格 ${rows}×${cols}`, duration: 1500 });
+  }
+
+  /** 表格行列步进（1..10，超出夹回边界）。 */
+  private stepTableLines(delta: number, isRows: boolean): void {
+    if (isRows) {
+      this.insertRows = clampTableLines(this.insertRows + delta);
+    } else {
+      this.insertCols = clampTableLines(this.insertCols + delta);
+    }
+  }
+
+  /** 选图入口（真机接线替换：photoAccessHelper.PhotoViewPicker → 读入 → insertImageAt）。 */
+  private requestInsertImage(): void {
+    // 本轮先给出明确反馈与日志；选图/读取接线见 insertImageAt() 的 TODO（真机验证后补）
+    console.info('[hw] insert=image picker=pending');
+  }
+
+  /** 把已读入的图片按「页中心 + 40% 页宽」插入（选图回调里调它）。 */
+  private insertImageAt(sha256: string, name: string, imageW: number, imageH: number): void {
+    const rect: NormalizedRect = imageRectFor(imageW, imageH);
+    const obj: PageObject = makePageObject('image-' + sha256.slice(0, 8), 'image', rect, {
+      sha256: sha256,
+      name: name
+    });
+    this.pageObjects.push(obj);
+    const ext: string = name.indexOf('.') >= 0 ? name.slice(name.lastIndexOf('.') + 1) : 'jpg';
+    console.info('[hw] insert=image entry=' + imageEntryName(sha256, ext) + ' w=' + String(imageW) + ' h=' + String(imageH) + ' count=' + String(this.pageObjects.length));
+  }
+
   private closeOverlays(): void {
     if (this.panel.length > 0) {
       console.info('[hw] menu=none open=0');
@@ -808,12 +895,12 @@ struct Handwriting {
   // ------------------------------------------------------------------ 工具条按钮（宽度随内容自适应）
 
   /**
-   * 「笔迹设置」按钮上的状态文案：`钢笔 · 3.5`。
+   * 当前笔迹状态摘要：`笔刷名 · 档位 · 色名`（例：`钢笔 · 3.5 · 黑`）。
    *
-   * 用户允许「太长可缩成 `钢笔`」；这里取 `笔刷名 · 档位`，面板里再给完整信息。
+   * **按钮上不再显示它**（真机上会被裁成 `钢笔 · 3.5`）——按钮固定写「笔迹」，
+   * 具体选中项在面板里看。这里只留给 hilog / 提示文案用。
    */
   private inkSummary(): string {
-    // 三段合并后按钮文案：笔刷 · 档位 · 色名（例：`钢笔 · 3.5 · 黑`）
     return `${this.currentBrushLabel()} · ${this.pagerState.penWidth} · ${this.currentColorLabel()}`;
   }
 
@@ -837,13 +924,13 @@ struct Handwriting {
   /**
    * 「笔迹设置」按钮（笔形 + 粗细合并后的入口）。
    *
-   * 文案显示当前状态：`钢笔 · 3.5`（太长时用户可只看笔刷名，见 `inkSummary()`）。
-   * 宽度按内容自适应：只给 `minWidth(44)` + 左右 8vp padding，`flexShrink(0)` 不压缩。
+   * 文案**固定为「笔迹」**（不再显示当前值 `钢笔 · 3.5 · 黑`——真机上会被裁成 `钢笔 · 3.5`）。
+   * 当前值在面板里看（三段各有选中态）；宽度按内容自适应，`flexShrink(0)` 不压缩。
    */
   @Builder
   brushMenuButton() {
     Row({ space: 2 }) {
-      Text(this.inkSummary())
+      Text('笔迹')
         .fontSize(FONT.caption)
         .lineHeight(LINE_HEIGHT.caption)
         .maxLines(1)
@@ -898,6 +985,61 @@ struct Handwriting {
       .onClick(() => {
         this.toggleTool(tool);
       })
+  }
+
+  /** 「插入」按钮：固定文案 + ▾（二级菜单里选 图片 / 表格）。 */
+  @Builder
+  insertMenuButton() {
+    Row({ space: 2 }) {
+      Text('插入')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === PANEL_INSERT ? Color.White : $r('app.color.text_primary'))
+      Text('▾')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === PANEL_INSERT ? Color.White : $r('app.color.text_secondary'))
+    }
+    .height(TOOL_HEIGHT)
+    .constraintSize({ minWidth: TOOL_MIN_WIDTH })
+    .padding({ left: SPACING.sm, right: SPACING.sm })
+    .borderRadius(RADIUS.sm)
+    .backgroundColor(this.panel === PANEL_INSERT ? $r('app.color.brand') : '#F1F3F5')
+    .flexShrink(0)
+    .onClick(() => {
+      this.togglePanel(PANEL_INSERT);
+    })
+  }
+
+  /** rail「插入」按钮：与其它 rail 控件同尺寸（72×44），文案固定 + ▾。 */
+  @Builder
+  railInsertButton() {
+    Row({ space: 2 }) {
+      Text('插入')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === PANEL_INSERT ? Color.White : $r('app.color.text_primary'))
+      Text('▾')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .fontColor(this.panel === PANEL_INSERT ? Color.White : $r('app.color.text_secondary'))
+    }
+    .justifyContent(FlexAlign.Center)
+    .width('100%')
+    .height(RAIL_ITEM_HEIGHT)
+    .borderRadius(RADIUS.sm)
+    .backgroundColor(this.panel === PANEL_INSERT ? $r('app.color.brand') : '#F1F3F5')
+    .onClick(() => {
+      this.togglePanel(PANEL_INSERT);
+    })
   }
 
   /** 撤销 / 重做（图标按钮；`kind` 分发，避免把回调传进 @Builder）。 */
@@ -1142,6 +1284,7 @@ struct Handwriting {
         Row({ space: SPACING.xs }) {
           this.toolButton('橡皮', HW_TOOL_ERASER)
           this.toolButton('手动框', HW_TOOL_SELECT)
+          this.insertMenuButton()
           this.historyButton('undo', '↶', this.pagerState.undoSteps > 0)
           this.historyButton('redo', '↷', this.pagerState.redoAvailable)
         }
@@ -1193,6 +1336,7 @@ struct Handwriting {
         this.railBrushButton()
         this.railToolButton('橡皮', HW_TOOL_ERASER)
         this.railToolButton('手动框', HW_TOOL_SELECT)
+        this.railInsertButton()
         this.railHistoryButton('undo', '↶', this.pagerState.undoSteps > 0)
         this.railHistoryButton('redo', '↷', this.pagerState.redoAvailable)
         // 分页三单元格：宽度同为 72vp（CELL_WIDTH == RAIL_WIDTH），与上面按钮等宽
@@ -1242,11 +1386,11 @@ struct Handwriting {
       })
   }
 
-  /** rail「笔迹设置」按钮：宽 100%（=72vp）、高 44vp、内容居中，文案带 笔形·档位·色名 + 12×12 色块。 */
+  /** rail「笔迹」按钮：宽 100%（=72vp）、高 44vp、内容居中，文案固定 + 12×12 当前色块。 */
   @Builder
   railBrushButton() {
     Row({ space: 2 }) {
-      Text(this.inkSummary())
+      Text('笔迹')
         .fontSize(FONT.caption)
         .lineHeight(LINE_HEIGHT.caption)
         .maxLines(1)
@@ -1343,6 +1487,226 @@ struct Handwriting {
 
   // ------------------------------------------------------------------ 二级面板（绝对定位浮层，不挤压画布）
 
+  // ------------------------------------------------------------------ 对象层（框 / 图片 / 表格）
+
+  /** 对象层左上角 x（竖屏顶到工具条下方、横屏贴 rail 右侧）。 */
+  private objectLeft(): number {
+    return this.landscape ? RAIL_WIDTH + DIVIDER : 0;
+  }
+
+  /** 对象层左上角 y（竖屏在工具条下方、横屏顶到 0）。 */
+  private objectTop(): number {
+    return this.landscape ? 0 : TOP_BAR_HEIGHT + DIVIDER;
+  }
+
+  private objectWidth(): number {
+    return Math.max(0, this.pageW - this.objectLeft());
+  }
+
+  private objectHeight(): number {
+    return Math.max(0, this.pageH - this.objectTop());
+  }
+
+  /** 触摸点（`Up` 时 `touches` 可能已空，退到 `changedTouches`）。 */
+  private primaryTouch(event: TouchEvent): TouchObject | null {
+    const touches: TouchObject[] = event.touches;
+    if (touches !== undefined && touches !== null && touches.length > 0) {
+      return touches[0];
+    }
+    const changed: TouchObject[] = event.changedTouches;
+    if (changed !== undefined && changed !== null && changed.length > 0) {
+      return changed[0];
+    }
+    return null;
+  }
+
+  /** 触摸点 → 归一化坐标（用对象层自身尺寸，和画布 1:1）。 */
+  private toNormalized(x: number, y: number): NormPoint {
+    const width: number = Math.max(1, this.objectW);
+    const height: number = Math.max(1, this.objectH);
+    return { nx: x / width, ny: y / height };
+  }
+
+  @Builder
+  objectLayer() {
+    Canvas(this.objectCtx)
+      .width(this.objectWidth())
+      .height(this.objectHeight())
+      .position({ x: this.objectLeft(), y: this.objectTop() })
+      .hitTestBehavior(HitTestMode.Transparent)
+      .onReady(() => {
+        this.redrawObjects();
+      })
+      .onAreaChange((_oldArea: Area, newArea: Area) => {
+        this.objectW = Number(newArea.width);
+        this.objectH = Number(newArea.height);
+        this.redrawObjects();
+      })
+      .onTouch((event: TouchEvent) => {
+        this.onObjectTouch(event);
+      })
+  }
+
+  /** 重绘整层：清屏 → 按 z 序画三种对象 → 选中态高亮 + 手柄/×。 */
+  private redrawObjects(): void {
+    const context: CanvasRenderingContext2D = this.objectCtx;
+    const width: number = this.objectW;
+    const height: number = this.objectH;
+    if (width <= 0 || height <= 0) {
+      return;
+    }
+    context.clearRect(0, 0, width, height);
+    for (const obj of this.pageObjects) {
+      this.drawObject(context, obj, obj.id === this.selectedObjectId);
+    }
+  }
+
+  /** 画单个对象（box：半透明描边；image：有 pixelMap 画图、否则占位框；table：网格线）。 */
+  private drawObject(context: CanvasRenderingContext2D, obj: PageObject, selected: boolean): void {
+    const width: number = this.objectW;
+    const height: number = this.objectH;
+    const x: number = obj.x * width;
+    const y: number = obj.y * height;
+    const w: number = obj.w * width;
+    const h: number = obj.h * height;
+    const stroke: string = selected ? '#2F6BFF' : 'rgba(47,107,255,0.45)';
+
+    if (obj.kind === 'image') {
+      const pixel: image.PixelMap | undefined = this.objectImages.get(obj.id);
+      if (pixel !== undefined) {
+        context.drawImage(pixel, x, y, w, h);
+      } else {
+        // 没有位图（B1 阶段/解码失败）：画占位框 + 「图片」字样，保证看得见
+        context.globalAlpha = 0.12;
+        context.fillStyle = '#2F6BFF';
+        context.fillRect(x, y, w, h);
+        context.globalAlpha = 1;
+        context.fillStyle = '#4A5563';
+        context.font = '14vp sans-serif';
+        context.fillText('图片', x + 8, y + h / 2);
+      }
+    } else if (obj.kind === 'table') {
+      const rows: number = obj.rows === undefined ? 3 : obj.rows;
+      const cols: number = obj.cols === undefined ? 3 : obj.cols;
+      context.strokeStyle = '#4A5563';
+      context.lineWidth = 1;
+      for (let row = 0; row <= rows; row++) {
+        const lineY: number = y + (h * row) / Math.max(1, rows);
+        context.beginPath();
+        context.moveTo(x, lineY);
+        context.lineTo(x + w, lineY);
+        context.stroke();
+      }
+      for (let col = 0; col <= cols; col++) {
+        const lineX: number = x + (w * col) / Math.max(1, cols);
+        context.beginPath();
+        context.moveTo(lineX, y);
+        context.lineTo(lineX, y + h);
+        context.stroke();
+      }
+    } else {
+      context.globalAlpha = 0.08;
+      context.fillStyle = '#2F6BFF';
+      context.fillRect(x, y, w, h);
+      context.globalAlpha = 1;
+    }
+
+    // 外框 + 选中态加粗
+    context.strokeStyle = stroke;
+    context.lineWidth = selected ? 2 : 1;
+    context.strokeRect(x, y, w, h);
+
+    if (selected) {
+      // 右下角缩放手柄
+      context.fillStyle = '#2F6BFF';
+      context.fillRect(x + w - 8, y + h - 8, 8, 8);
+      // 左上角删除 ×
+      context.strokeStyle = '#D93025';
+      context.lineWidth = 2;
+      context.beginPath();
+      context.moveTo(x, y);
+      context.lineTo(x + 14, y + 14);
+      context.moveTo(x + 14, y);
+      context.lineTo(x, y + 14);
+      context.stroke();
+    }
+  }
+
+  /**
+   * 对象层手势（定版：三类对象共用一套）。
+   *
+   * 互斥关系（**定死**）：`手动框`模式仍然是「拉出一个新框」（原有语义不变）；
+   * 插入的对象在**选择/移动态**下操作 —— 两者不抢手势：
+   * - `手动框` 激活时，对象层**不消费**触摸（`hitTestBehavior` 透明 + 这里直接 return），
+   *   用户仍可拉新框；
+   * - 否则对象层优先命中已有对象（选中/移动/缩放/删除），点空白才把事件让给画布。
+   */
+  private onObjectTouch(event: TouchEvent): void {
+    if (this.pagerState.tool === HW_TOOL_SELECT) {
+      // 手动框优先：不拦截，让画布拉框
+      return;
+    }
+    const touch: TouchObject | null = this.primaryTouch(event);
+    if (touch === null) {
+      return;
+    }
+    const point = this.toNormalized(touch.x, touch.y);
+    if (event.type === TouchType.Down) {
+      const hit = hitTest(this.pageObjects, point.nx, point.ny);
+      if (hit.id.length === 0) {
+        // 点空白：取消选中，并把事件让给画布（不 return，画笔照常落笔）
+        if (this.selectedObjectId.length > 0) {
+          this.selectedObjectId = '';
+          this.redrawObjects();
+        }
+        return;
+      }
+      if (hit.part === 'close') {
+        this.pageObjects = deleteObject(this.pageObjects, hit.id);
+        this.selectedObjectId = '';
+        console.info(`[hw] object delete id=${hit.id} count=${this.pageObjects.length}`);
+        this.redrawObjects();
+        return;
+      }
+      // 选中即置顶（点谁谁在上）
+      this.pageObjects = bringToFront(this.pageObjects, hit.id);
+      this.selectedObjectId = hit.id;
+      const origin: PageObject | undefined = findObject(this.pageObjects, hit.id);
+      if (origin === undefined) {
+        return;
+      }
+      this.dragObject = origin;
+      this.dragPart = hit.part;
+      this.dragStart = point;
+      this.redrawObjects();
+      console.info(`[hw] object select id=${hit.id} part=${hit.part}`);
+      return;
+    }
+    if (event.type === TouchType.Move && this.dragObject !== null) {
+      const origin: PageObject = this.dragObject;
+      if (this.dragPart === 'handle') {
+        const next: PageObject = resizeObject(origin, point.nx, point.ny);
+        this.pageObjects = replaceObject(this.pageObjects, next);
+      } else {
+        const dx: number = point.nx - this.dragStart.nx;
+        const dy: number = point.ny - this.dragStart.ny;
+        const next: PageObject = moveObject(origin, origin.x + dx, origin.y + dy);
+        this.pageObjects = replaceObject(this.pageObjects, next);
+        this.dragStart = point;
+      }
+      this.redrawObjects();
+      return;
+    }
+    if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+      if (this.dragObject !== null) {
+        console.info(`[hw] object ${this.dragPart === 'handle' ? 'resize' : 'move'} id=${this.dragObject.id} done`);
+      }
+      this.dragObject = null;
+      this.dragPart = 'body';
+      this.redrawObjects();
+    }
+  }
+
   /** 面板锚点：竖屏在工具条下方、横屏在 rail 右侧（都不碰画布中心）。 */
   private panelLeft(): number {
     // 横屏：rail（72）+ 1vp 分割线 + 8vp 间距；竖屏：贴工具条左边 8vp
@@ -1351,8 +1715,8 @@ struct Handwriting {
 
   private panelTop(): number {
     if (this.landscape) {
-      // rail 里第 1 个按钮是「笔迹设置」、第 2 个是「颜色」（rail 控件统一 44vp 高）
-      const index: number = this.panel === PANEL_INK ? 0 : 1;
+      // rail 顺序：笔迹(0) / 橡皮(1) / 手动框(2) / 插入(3)，控件统一 44vp 高
+      const index: number = this.panel === PANEL_INK ? 0 : (this.panel === PANEL_INSERT ? 3 : 1);
       return SPACING.sm + index * (RAIL_ITEM_HEIGHT + SPACING.xs);
     }
     return TOP_BAR_HEIGHT + DIVIDER + SPACING.xs;
@@ -1362,6 +1726,9 @@ struct Handwriting {
   private panelWidth(): number {
     if (this.panel === PANEL_INK) {
       return INK_PANEL_MIN_WIDTH + 2 * SPACING.sm;
+    }
+    if (this.panel === PANEL_INSERT) {
+      return 224;
     }
     return 156;
   }
@@ -1550,6 +1917,132 @@ struct Handwriting {
             },
             (color: string) => `ink-color-${color}`
           )
+        }
+        .width('100%')
+        .height(CHIP_HEIGHT)
+      } else if (this.panel === PANEL_INSERT) {
+        // ---- 「插入」二级菜单：图片 / 表格（表格带 行×列 步进，1..10）
+        Text('插入')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.None })
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_secondary'))
+
+        Row({ space: SPACING.xs }) {
+          Text('图片')
+            .fontSize(FONT.body)
+            .lineHeight(LINE_HEIGHT.body)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.None })
+            .textAlign(TextAlign.Center)
+            .height(CHIP_HEIGHT)
+            .layoutWeight(1)
+            .borderRadius(RADIUS.sm)
+            .backgroundColor('#F5F6F8')
+            .fontColor($r('app.color.text_primary'))
+            .onClick(() => {
+              this.insertImage();
+            })
+          Text('表格')
+            .fontSize(FONT.body)
+            .lineHeight(LINE_HEIGHT.body)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.None })
+            .textAlign(TextAlign.Center)
+            .height(CHIP_HEIGHT)
+            .layoutWeight(1)
+            .borderRadius(RADIUS.sm)
+            .backgroundColor('#F5F6F8')
+            .fontColor($r('app.color.text_primary'))
+            .onClick(() => {
+              this.insertTable();
+            })
+        }
+        .width('100%')
+
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+          .width('100%')
+
+        // ---- 表格行列（1..10，默认 3×3）；「表格」按钮用当前选择插入
+        Text('表格行列')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.None })
+          .fontColor($r('app.color.text_secondary'))
+        Row({ space: SPACING.xs }) {
+          Text('−')
+            .fontSize(FONT.body)
+            .lineHeight(LINE_HEIGHT.body)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.None })
+            .height(CHIP_HEIGHT)
+            .width(TOOL_MIN_WIDTH)
+            .textAlign(TextAlign.Center)
+            .borderRadius(RADIUS.sm)
+            .backgroundColor('#F1F3F5')
+            .onClick(() => {
+              this.stepTableLines(-1, true);
+            })
+          Text(`行 ${this.insertRows}`)
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.None })
+            .layoutWeight(1)
+            .textAlign(TextAlign.Center)
+            .fontColor($r('app.color.text_primary'))
+          Text('+')
+            .fontSize(FONT.body)
+            .lineHeight(LINE_HEIGHT.body)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.None })
+            .height(CHIP_HEIGHT)
+            .width(TOOL_MIN_WIDTH)
+            .textAlign(TextAlign.Center)
+            .borderRadius(RADIUS.sm)
+            .backgroundColor('#F1F3F5')
+            .onClick(() => {
+              this.stepTableLines(1, true);
+            })
+          Text('−')
+            .fontSize(FONT.body)
+            .lineHeight(LINE_HEIGHT.body)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.None })
+            .height(CHIP_HEIGHT)
+            .width(TOOL_MIN_WIDTH)
+            .textAlign(TextAlign.Center)
+            .borderRadius(RADIUS.sm)
+            .backgroundColor('#F1F3F5')
+            .onClick(() => {
+              this.stepTableLines(-1, false);
+            })
+          Text(`列 ${this.insertCols}`)
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.None })
+            .layoutWeight(1)
+            .textAlign(TextAlign.Center)
+            .fontColor($r('app.color.text_primary'))
+          Text('+')
+            .fontSize(FONT.body)
+            .lineHeight(LINE_HEIGHT.body)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.None })
+            .height(CHIP_HEIGHT)
+            .width(TOOL_MIN_WIDTH)
+            .textAlign(TextAlign.Center)
+            .borderRadius(RADIUS.sm)
+            .backgroundColor('#F1F3F5')
+            .onClick(() => {
+              this.stepTableLines(1, false);
+            })
         }
         .width('100%')
         .height(CHIP_HEIGHT)
@@ -1748,6 +2241,12 @@ struct Handwriting {
       }
       .width('100%')
       .height('100%')
+
+      // 对象层（框 / 图片 / 表格）：**绝对定位覆盖在画布区域之上**，不参与布局，
+      // 因此不影响笔迹画布尺寸；它自己一层 Canvas，笔迹重绘/撤销与对象层互不影响。
+      if (this.pageW > 0) {
+        this.objectLayer()
+      }
 
       // 读取 uiTick 建立重绘依赖（条件恒为假，不渲染任何东西）：
       // 页数/当前页变化后 bump 一次，页码与 `− / +` 的可用性立刻跟着变。

@@ -277,10 +277,14 @@ describe('幽灵报错守卫：每个 issue 都必须有可见落点', () => {
   });
 
   test('P0：用户名占位文案跟着平台变（GitHub 可留空 / Gitee 必填 / 其它可选）', () => {
+    // A1 之后这几句文案搬到了 model/gitAuth.ts（平台预设表），页面只调用
+    // gitUsernamePlaceholderFor()/gitUsernameHintFor()，避免「两处文案各写一套」再次漂移。
+    const model = readFileSyncSafe('../../entry/src/main/ets/model/gitAuth.ts');
+    assert.match(model, /'必填：Gitee 登录名'/, 'Gitee 占位必须写「必填」');
+    assert.match(model, /'可留空（默认 x-access-token）'/, 'GitHub 占位要说明可留空');
+    assert.match(model, /'可选（留空用 x-access-token）'/, '未知平台占位');
     const page = readSettingsPage();
-    assert.match(page, /'必填：Gitee 登录名'/, 'Gitee 占位必须写「必填」');
-    assert.match(page, /'可留空（默认 x-access-token）'/, 'GitHub 占位要说明可留空');
-    assert.match(page, /return '可选';/, '未知平台占位');
+    assert.match(page, /gitUsernamePlaceholderFor\(this\.gitPlatform\)/, '页面必须复用平台的占位文案');
     // 只在 HTTPS 下渲染用户名框（SSH 不该出现）
     assert.match(page, /if \(this\.authMode === AUTH_HTTPS\) \{[\s\S]{0,400}用户名（HTTPS 认证）/, '用户名框仅 HTTPS 显示');
   });

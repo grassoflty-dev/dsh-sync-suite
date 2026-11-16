@@ -1,13 +1,17 @@
 /**
- * 空状态提示组件（列表空、AI 无内容等场景共用）。
+ * 空状态提示组件 —— **兼容层**（已由 `components/StateView.ets` 取代）。
  *
- * 设计（`docs/UI-DESIGN.md`）：白底 + 无卡片 + 无 emoji 大图标 + 只有两级文字（正文 / 辅助）。
- * 过去用 48fp emoji + 48vp 上下留白，占掉半屏且字号层级多一级，已删除。
+ * 为什么还留着：`EmptyState` 曾被首页/详情/编辑多处引用，一次性删掉会让未同步改完的页面
+ * 直接编译失败。这里保留原导出与入参（`title` / `hint` / `icon`），内部转调 `StateView`
+ * 的 `empty` 形态，因此**视觉与文案立刻统一**，调用方无需改动。
+ *
+ * 将来可删：等全仓 `grep EmptyState` 只剩本文件与测试时，直接删除本文件，调用方改用
+ * `StateView({ kind: 'empty', title, detail })`。
  *
  * 契约：`docs/CONTRACT.md` §3.4（页面/组件统一风格）。共享层组件 —— 不含任何手写/OCR/PixelMap 代码，
  * Android 与 HarmonyOS 都能编译。
  */
-import { FONT, LINE_HEIGHT, SPACING } from '../common/uiTokens';
+import { StateView } from './StateView';
 
 @Component
 export struct EmptyState {
@@ -24,24 +28,6 @@ export struct EmptyState {
   @Prop icon: string = '';
 
   build() {
-    Column({ space: SPACING.sm }) {
-      Text(this.title)
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontColor($r('app.color.text_primary'))
-        .textAlign(TextAlign.Center)
-        .width('100%')
-      if (this.hint.length > 0) {
-        Text(this.hint)
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .textAlign(TextAlign.Center)
-          .width('100%')
-      }
-    }
-    .width('100%')
-    .padding({ top: SPACING.xl, bottom: SPACING.xl })
-    .justifyContent(FlexAlign.Center)
+    StateView({ kind: 'empty', title: this.title, detail: this.hint })
   }
 }

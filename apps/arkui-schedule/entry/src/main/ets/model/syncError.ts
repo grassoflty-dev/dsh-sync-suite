@@ -7,10 +7,13 @@
  *
  * | level | 含义 | retryable | 用户要做什么 |
  * |---|---|---|---|
- * | `auth` | 401 token 失效 / 403 无权限 | 否 | 去设置页换 token、确认仓库权限 |
+ * | `auth` | 401 用户名/令牌不对、403 无权限 | 否 | 去设置页改用户名与 token、确认仓库权限 |
  * | `conflict` | 分支分叉 / 推送被拒 / 409 | 否 | 先「拉取」再「推送」（应用不自动合并） |
- * | `retry` | 网络不可达 / 超时 / 429 / 5xx | 是 | 直接重试或换网络 |
- * | `fatal` | 404 / 本地磁盘 / 配置不全 / 未知 | 否 | 按 detail 修正配置或环境 |
+ * | `retry` | 网络不可达 / DNS / 超时 / 429 / 5xx | 是 | 直接重试或换网络 |
+ * | `fatal` | 404 / 证书错误 / 本地磁盘 / 配置不全 / 未知 | 否 | 按 detail 修正配置或环境 |
+ *
+ * 每类都给**可操作**的中文建议（401 会点明「Gitee 用户名是登录名不是邮箱」，
+ * 证书错误会点明「应用不会跳过证书校验」），而不是把原始异常原样抛给用户。
  *
  * 两条硬约束（有单测）：
  * 1. **绝不回显凭据**：message 先过 `redactSecrets()`，`Basic xxx` / `Bearer xxx` /
@@ -24,6 +27,8 @@ export type SyncErrorLevel = 'fatal' | 'retry' | 'conflict' | 'auth';
 /** 细化分类键，便于日志与测试断言（不直接展示给用户）。 */
 export type SyncErrorKind =
   | 'network'
+  | 'dns'
+  | 'certificate'
   | 'timeout'
   | 'rate-limit'
   | 'server'
@@ -183,7 +188,26 @@ export function classifySyncError(kindOrStatus: string | number, message: string
     );
   }
 
-  // 2. 鉴权：401 是 token 失效，403 是 token 有效但没权限 —— 都归 auth，文案不同
+  // 1b. 证书：TLS 校验失败与「没连上」不是一回事，必须单独指路（重试不会变好）
+  if (
+    /CERT_|ERR_CERT|certificate|self.?signed|自签名|证书(?:错误|过期|不受信任|链)|SSL handshake|TLS handshake|UNABLE_TO_VERIFY|unable to get local issuer/i.test(
+      raw
+    )
+  ) {
+    return info(
+      'certificate',
+      'fatal',
+      '证书错误（HTTPS 校验未通过）',
+      withRaw(
+        'HTTPS 证书校验没通过（过期 / 域名不匹配 / 自签名 / 系统时间不对）。' +
+          '请让服务端使用受信任证书，并检查手机系统时间；应用不会跳过证书校验。',
+        raw
+      ),
+      false
+    );
+  }
+
+  // 2. 鉴权：401 是用户名/令牌不对，403 是令牌有效但没权限 —— 都归 auth，文案不同
   if (code === 'E_AUTH' || status === 401 || /认证失败|令牌无效|令牌失效|token 无效|未授权/.test(raw)) {
     if (status === 403 || /无权限|权限不足|forbidden/i.test(raw)) {
       return info(
@@ -191,7 +215,8 @@ export function classifySyncError(kindOrStatus: string | number, message: string
         'auth',
         '无权限（403）',
         withRaw(
-          'token 有效，但这个 token 没有该仓库的读写权限：请确认仓库路径/组织权限，或换一个有 repo 权限的 token。',
+          'token 有效，但这个 token 没有该仓库的读写权限：请确认仓库路径/命名空间、组织权限与分支保护规则；' +
+            '自建服务还要确认账号在该仓库有 write 权限。',
           raw
         ),
         false
@@ -200,9 +225,11 @@ export function classifySyncError(kindOrStatus: string | number, message: string
     return info(
       'auth',
       'auth',
-      '认证失败（token 失效）',
+      '认证失败（401：用户名或 token）',
       withRaw(
-        '请到设置页重新填写 token：确认它没有过期，并且具备仓库的 repo 读写权限（GitHub / Gitee 的 Personal Access Token）。',
+        '请到设置页检查用户名与令牌：GitHub 用 x-access-token + PAT；' +
+          'Gitee 的用户名是「登录名」（不是邮箱），留空必然 401；GitLab 用用户名或 oauth2。' +
+          '另确认 token 未过期、有 repo 读写权限、复制时没带空格。',
         raw
       ),
       false
@@ -213,7 +240,10 @@ export function classifySyncError(kindOrStatus: string | number, message: string
       'forbidden',
       'auth',
       '无权限（403）',
-      withRaw('token 有效但没有该仓库的读写权限：请确认仓库路径与组织权限，或换一个有权限的 token。', raw),
+      withRaw(
+        'token 有效但没有该仓库的读写权限：请确认仓库路径/命名空间、组织权限与分支保护规则，或换一个有权限的 token。',
+        raw
+      ),
       false
     );
   }
@@ -303,6 +333,25 @@ export function classifySyncError(kindOrStatus: string | number, message: string
       '同步配置不完整',
       withRaw('同步前需要：仓库地址（HTTPS）、设备标识、token，并等隐藏 Web 同步内核就绪。请到设置页补齐。', raw),
       false
+    );
+  }
+
+  // 7b. DNS：解析不到域名与「连不上」在排查手段上完全不同（先按域名/网络/DNS 查）
+  if (
+    /ENOTFOUND|EAI_AGAIN|EAI_NONAME|getaddrinfo|nodename nor servname|域名解析失败|无法解析域名|域名不存在|未知主机/i.test(
+      raw
+    )
+  ) {
+    return info(
+      'dns',
+      'retry',
+      '域名解析失败（DNS）',
+      withRaw(
+        '本机解析不到仓库域名：请核对域名拼写（gitee.com / github.com / 自建域名）、手机网络与 DNS/VPN；' +
+          '公司网络或自建仓库可能要先连内网。换网络后重试。',
+        raw
+      ),
+      true
     );
   }
 
@@ -408,4 +457,271 @@ export function syncActionLabel(action: string): string {
 /** 是否满足「重试上一次同步」的前置条件（有动作、且不是网络类自动重试中）。 */
 export function canRetrySync(lastSyncAction: string, busy: boolean): boolean {
   return normalizeSyncAction(lastSyncAction).length > 0 && busy !== true;
+}
+
+// ---------------------------------------------------------------- 分支名（A2）
+
+/** 默认分支名（用户没填时用它；与 `docs/DATA-CONTRACT.md` §1 的 main 一致）。 */
+export const DEFAULT_BRANCH: string = 'main';
+
+/** 分支名最大长度（git 自身没有硬上限，这里给界面一个可读的上限）。 */
+const MAX_BRANCH_LENGTH: number = 120;
+
+function trimText(value: string): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+/**
+ * 归一分支名：去首尾空白、去 `refs/heads/` 前缀、去首尾斜杠。
+ *
+ * 只做「明显冗余」的清理；非法字符交给 `validateBranchName` 判断（不静默吞掉用户的输入）。
+ */
+export function normalizeBranchName(raw: string): string {
+  let text: string = trimText(raw);
+  if (text.indexOf('refs/heads/') === 0) {
+    text = text.slice('refs/heads/'.length);
+  }
+  while (text.length > 0 && text.charAt(0) === '/') {
+    text = text.slice(1);
+  }
+  while (text.length > 0 && text.charAt(text.length - 1) === '/') {
+    text = text.slice(0, text.length - 1);
+  }
+  return text;
+}
+
+/**
+ * 校验分支名（git check-ref-format 的可读子集）。
+ *
+ * @returns 空串表示合法；否则返回可直接展示的中文原因
+ */
+export function validateBranchName(raw: string): string {
+  const text: string = normalizeBranchName(raw);
+  if (text.length === 0) {
+    return `分支名不能为空（默认 ${DEFAULT_BRANCH}）`;
+  }
+  if (text.length > MAX_BRANCH_LENGTH) {
+    return `分支名最长 ${MAX_BRANCH_LENGTH} 个字符`;
+  }
+  if (/[\s\u3000]/.test(text)) {
+    return '分支名不能包含空格或制表符';
+  }
+  if (/[~^:?*[\]\\]/.test(text)) {
+    return '分支名不能包含这些字符：~ ^ : ? * [ ] \\';
+  }
+  if (text.indexOf('..') >= 0) {
+    return '分支名不能包含连续的两个点（..）';
+  }
+  if (text.indexOf('//') >= 0) {
+    return '分支名不能包含连续的斜杠（//）';
+  }
+  if (text.charAt(0) === '-') {
+    return '分支名不能以「-」开头';
+  }
+  if (text.charAt(text.length - 1) === '.') {
+    return '分支名不能以「.」结尾';
+  }
+  if (/\.lock$/.test(text)) {
+    return '分支名不能以 .lock 结尾';
+  }
+  if (text.indexOf('@{') >= 0) {
+    return '分支名不能包含「@{」';
+  }
+  if (text === '@') {
+    return '分支名不能是「@」';
+  }
+  const segments: string[] = text.split('/');
+  for (let index = 0; index < segments.length; index++) {
+    const segment: string = segments[index];
+    if (segment.length === 0) {
+      return '分支名的斜杠两侧必须有内容（不能出现空段）';
+    }
+    if (segment === '.' || segment === '..') {
+      return '分支名不能包含「.」或「..」段';
+    }
+  }
+  return '';
+}
+
+// ---------------------------------------------------------------- ahead / behind（A2）
+
+/** ahead/behind 的计算结果（两侧提交集合的差）。 */
+export interface AheadBehind {
+  /** 本地独有提交数（要推送的量）。 */
+  ahead: number;
+  /** 远端独有提交数（要拉取的量）。 */
+  behind: number;
+  /** 两边都有独有提交（真分叉，必须先拉取再推送）。 */
+  diverged: boolean;
+  /** 两侧是否有可比较的提交（都为空时无法判断领先/落后）。 */
+  comparable: boolean;
+}
+
+/**
+ * 由「本地分支提交 sha 列表」和「远端分支提交 sha 列表」算 ahead/behind。
+ *
+ * 纯函数：只看集合差，不读磁盘/不联网。两侧列表都以**新到旧**给出（`git.log` 的顺序），
+ * 但结果与顺序无关；同一 sha 重复出现只算一次。
+ *
+ * 注意：桥里给的是 `git.log` 截断后的列表（默认最多 500 条），因此结果是
+ * **下界**（真实领先数不会更小）——对「要不要推送/拉取」这个判断足够。
+ */
+export function computeAheadBehind(localShas: string[], remoteShas: string[]): AheadBehind {
+  const local: string[] = Array.isArray(localShas) ? localShas : [];
+  const remote: string[] = Array.isArray(remoteShas) ? remoteShas : [];
+  const remoteSet: Record<string, boolean> = {};
+  for (let index = 0; index < remote.length; index++) {
+    const sha: string = trimText(remote[index]);
+    if (sha.length > 0) {
+      remoteSet[sha] = true;
+    }
+  }
+  const localSet: Record<string, boolean> = {};
+  for (let index = 0; index < local.length; index++) {
+    const sha: string = trimText(local[index]);
+    if (sha.length > 0) {
+      localSet[sha] = true;
+    }
+  }
+  let ahead: number = 0;
+  const localKeys: string[] = Object.keys(localSet);
+  for (let index = 0; index < localKeys.length; index++) {
+    if (remoteSet[localKeys[index]] !== true) {
+      ahead++;
+    }
+  }
+  let behind: number = 0;
+  const remoteKeys: string[] = Object.keys(remoteSet);
+  for (let index = 0; index < remoteKeys.length; index++) {
+    if (localSet[remoteKeys[index]] !== true) {
+      behind++;
+    }
+  }
+  const comparable: boolean = localKeys.length > 0 || remoteKeys.length > 0;
+  return { ahead: ahead, behind: behind, diverged: ahead > 0 && behind > 0, comparable: comparable };
+}
+
+/** ahead/behind → 一行中文（空仓库等无法判断时也给可读结论）。 */
+export function describeAheadBehind(info: AheadBehind): string {
+  if (info === null || info === undefined || info.comparable !== true) {
+    return '领先/落后未知（本地或远端还没有提交）';
+  }
+  if (info.ahead === 0 && info.behind === 0) {
+    return '与远端一致';
+  }
+  if (info.ahead > 0 && info.behind === 0) {
+    return `领先远端 ${info.ahead} 个提交`;
+  }
+  if (info.ahead === 0 && info.behind > 0) {
+    return `落后远端 ${info.behind} 个提交`;
+  }
+  return `与远端分叉：领先 ${info.ahead}、落后 ${info.behind}`;
+}
+
+/** 同步状态视图（页面/服务共用一份文案）。 */
+export interface SyncStatusView {
+  /** 本机仓库是否已初始化（首次拉取前为 false）。 */
+  initialized: boolean;
+  /** 当前分支名。 */
+  branch: string;
+  /** 当前 HEAD（完整 sha，空串表示空仓库）。 */
+  head: string;
+  /** 本地独有提交数。 */
+  ahead: number;
+  /** 远端独有提交数。 */
+  behind: number;
+  /** 是否双向分叉。 */
+  diverged: boolean;
+  /** 冲突文件数（应用不 merge，正常应为 0）。 */
+  conflicts: number;
+  /** 工作区改动数。 */
+  changedCount: number;
+  /** 远端是否已配置。 */
+  remoteConfigured: boolean;
+  /** 最近一条提交说明（可空）。 */
+  lastCommitMessage: string;
+}
+
+/** 短 sha（7 位；空串给「（空仓库）」）。 */
+export function shortSha(sha: string): string {
+  const text: string = trimText(sha);
+  if (text.length === 0) {
+    return '（空仓库）';
+  }
+  return text.length > 7 ? text.substring(0, 7) : text;
+}
+
+/**
+ * 同步状态一行文案（A2）：分支 / HEAD / ahead / behind / 冲突 / 本地改动 / 远端。
+ *
+ * 例：`分支 main｜HEAD a1b2c3d｜领先远端 2 个提交｜本地改动 3 处｜冲突 0｜远端 已配置`
+ */
+export function describeSyncStatus(view: SyncStatusView): string {
+  if (view === null || view === undefined || view.initialized !== true) {
+    return '本机仓库尚未初始化（首次「拉取」会自动克隆）';
+  }
+  const branch: string = trimText(view.branch).length > 0 ? trimText(view.branch) : DEFAULT_BRANCH;
+  const parts: string[] = [];
+  parts.push(`分支 ${branch}`);
+  parts.push(`HEAD ${shortSha(view.head)}`);
+  parts.push(
+    describeAheadBehind({
+      ahead: view.ahead,
+      behind: view.behind,
+      diverged: view.diverged === true,
+      comparable: trimText(view.head).length > 0
+    })
+  );
+  parts.push(`本地改动 ${view.changedCount} 处`);
+  parts.push(`冲突 ${view.conflicts}`);
+  parts.push(`远端 ${view.remoteConfigured === true ? '已配置' : '未配置'}`);
+  const message: string = trimText(view.lastCommitMessage);
+  if (message.length > 0) {
+    parts.push(`最近提交 ${message.length > 40 ? message.substring(0, 40) + '…' : message}`);
+  }
+  return parts.join('｜');
+}
+
+/**
+ * 同步状态 → 推送按钮的可用性说明（空串 = 现在可以推）。
+ *
+ * 页面据此禁用「推送」并给一行原因，而不是让用户点了没反应。
+ */
+export function describePushReadiness(view: SyncStatusView): string {
+  if (view === null || view === undefined || view.initialized !== true) {
+    return '先「立即同步」（拉取）完成首次克隆，才能推送';
+  }
+  if (view.diverged === true) {
+    return '与远端已分叉：请先「拉取」，本应用不会强制推送';
+  }
+  if (view.changedCount === 0 && view.ahead === 0) {
+    return '没有新的本地改动可推送';
+  }
+  return '';
+}
+
+/**
+ * 「上次同步」一行：时间 + 动作 + 成败（A2 第 2 条）。
+ *
+ * 例：`上次同步：今天 14:32 · 上次推送成功` /
+ *     `上次同步：今天 14:32 · 上次推送失败：认证失败（401…）`
+ */
+export function describeLastSyncOutcome(
+  lastSyncAt: string,
+  lastSyncError: string,
+  lastSyncAction: string,
+  nowIso: string
+): string {
+  const base: string = describeLastSync(lastSyncAt, nowIso);
+  const action: string = normalizeSyncAction(lastSyncAction);
+  const label: string = action.length > 0 ? syncActionLabel(action) : '同步';
+  const error: string = trimText(lastSyncError);
+  if (error.length > 0) {
+    const detail: string = error.length > 80 ? error.substring(0, 80) + '…' : error;
+    return `${base} · 上次${label}失败：${detail}`;
+  }
+  if (trimText(lastSyncAt).length === 0) {
+    return base;
+  }
+  return `${base} · 上次${label}成功`;
 }

@@ -15,6 +15,20 @@
  * 退到后台后会被系统回收，纯 TS 定时器无法保证按时触发；真要做定时汇总，必须申请长时任务
  * （`continuousTask`）+ 前台通知，或在到点拉起应用后由用户点触发。这里刻意不加
  * 「看起来能用、实际会被回收」的定时器。
+ *
+ * ## 搜索 / 筛选（Wave 2-A）
+ * - 列表顶部：搜索框（标题/正文/OCR/作者，大小写不敏感、多关键词 AND）+ 状态 chips
+ *   （全部/未完成/已完成）+ 作者 chips（来自 `authorsOf`）；
+ * - **与「今日待办|全部未完成」tab 正交**：先按 tab 取数（`scheduleStore.readDay` /
+ *   `openIndexStore.pendingRecords`），再 `applyQuery` 过滤（见 `model/query.ts`，纯逻辑可单测）；
+ * - 列表真正渲染的是 `visibleRecords`；`records` 仍是 tab 级全量（汇总块 / 计数 / AI 面板用它）。
+ *
+ * ## 删除 + 5 秒撤销（Wave 2-A）
+ * - 入口：行尾「删除」按钮（`RecordRow.onDelete`）+ 右栏详情的「删除」（`RecordDetailView.onDelete`）；
+ * - 删除 = 追加一条 `deleted:true` 的同 id 新版本（软删除，见 `model/undoDelete.ts`），读取侧统一过滤；
+ * - 删除后列表下方出现 5 秒倒计时条「已删除 · 撤销（Ns）」：点「撤销」再追加 `deleted:false` 版本，
+ *   记录恢复；超时倒计时条自动消失（墓碑早已落盘，超时不需要补写）；
+ * - 倒计时只是为了给用户一个撤销机会：即使定时器被系统回收（应用退后台），删除结论依然正确。
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
@@ -24,6 +38,9 @@ import type { AiPayload, ScheduleRecord } from '../model/types';
 import { cloneRecord } from '../model/types';
 import { SUMMARY_MAX_POINTS, truncateSummaryForDisplay } from '../model/dailySummary';
 import type { DailySummary, SummaryDisplay } from '../model/dailySummary';
+import { applyQuery, authorsOf, hasKeyword, isFilterActive, makeFilter } from '../model/query';
+import type { QueryFilter } from '../model/query';
+import { UNDO_TTL_MS, UndoDelete, restoreRecord, softDeleteRecord, withoutDeleted } from '../model/undoDelete';
 import { describeError, scheduleStore } from '../services/scheduleStore';
 import { openIndexStore } from '../services/openIndexStore';
 import { summaryStore } from '../services/summaryStore';
@@ -96,6 +113,30 @@ struct Index {
   @State refreshing: boolean = false;
   @State ready: boolean = false;
 
+  // 搜索 / 筛选状态（与 tab 正交：tab 决定数据源，这里只过滤）
+  /** 搜索框原始输入（匹配时才做 trim / 小写 / 空白折叠）。 */
+  @State queryText: string = '';
+  /** 状态筛选：`all` / `open` / `done`（字符串，避免在 .ets 里写联合类型断言）。 */
+  @State statusFilter: string = 'all';
+  /** 作者筛选（空串 = 全部作者；再点一次同一个 chip 取消）。 */
+  @State authorFilter: string = '';
+  /** 作者 chips（来自 `authorsOf(records)`，随 tab/日期变化）。 */
+  @State authorChips: string[] = [];
+  /** 过滤后的列表（列表真正渲染的数据源）。 */
+  @State visibleRecords: ScheduleRecord[] = [];
+  /** 是否有搜索词（决定空态文案用「没有匹配…」还是「没有符合筛选条件…」）。 */
+  @State hasSearchWord: boolean = false;
+  /** 是否有任何筛选条件（关键词 / 状态 / 作者）。 */
+  @State hasActiveFilter: boolean = false;
+
+  // 删除 + 5 秒撤销
+  /** 待撤销删除的记录 id（空串 = 没有 → 倒计时条不渲染）。 */
+  @State undoId: string = '';
+  /** 待撤销记录的标题（倒计时条文案用）。 */
+  @State undoTitle: string = '';
+  /** 剩余毫秒（每 200ms 刷新一次，驱动「撤销（Ns）」重绘）。 */
+  @State undoLeftMs: number = 0;
+
   /** 断点（由 `PageLayout` 回调同步，页面只按 compact / 非 compact 分支）。 */
   @State breakpoint: string = 'compact';
   /** 内容区宽度（vp），宽屏下算侧栏宽度。 */
@@ -140,9 +181,28 @@ struct Index {
   /** 生成失败的一行文案；空串 = 无错误。 */
   @State summaryError: string = '';
 
+  /** 撤销状态机（纯内存，5 秒窗口；墓碑在删除那一刻已落盘）。 */
+  private undoState: UndoDelete = new UndoDelete();
+  /**
+   * 删除时落盘的墓碑版本。
+   *
+   * 撤销以它为底（它是该 id 的最新记录），因此不需要再读盘 —— 读取侧已过滤墓碑，
+   * 从这里恢复字段最省事，也不会把「删除前的快照」和「删除后别人的修改」搞混。
+   */
+  private pendingTombstone: ScheduleRecord | null = null;
+  /** 倒计时定时器 id（-1 = 未启动）。 */
+  private undoTimer: number = -1;
+
   aboutToAppear(): void {
     this.syncHomeFilter();
     this.bootstrap();
+  }
+
+  /** 页面销毁：停掉撤销倒计时（墓碑已落盘，不需要任何补写）。 */
+  aboutToDisappear(): void {
+    this.clearUndoTimer();
+    this.undoState.reset();
+    this.pendingTombstone = null;
   }
 
   /** 隐藏桥就绪：启动自动 pull（节流；失败只提示，不阻塞任何 UI）。 */
@@ -216,7 +276,12 @@ struct Index {
     }
   }
 
-  /** 读存储并刷新列表与状态文案。 */
+  /**
+   * 读存储并刷新列表与状态文案。
+   *
+   * 数据流：tab 取数（`records`）→ 搜索/筛选（`visibleRecords`）。两者正交：
+   * 切 tab / 换日期只换数据源，筛选条件保留；改筛选只重算 `visibleRecords`，不重读磁盘。
+   */
   private reload(): void {
     if (!this.ready) {
       return;
@@ -225,13 +290,16 @@ struct Index {
       if (this.showAllPending) {
         // 数据源：每台设备读自己的 open.jsonl（N 台设备 = N 个小文件）；某台设备缺索引时
         // 在内存里用它的分片重建，绝不写别人的设备目录（契约：每台设备只写自己的目录）。
-        const pending: ScheduleRecord[] = openIndexStore.pendingRecords(this.includeOtherDevices);
+        // 墓碑过滤：本机走 readDay 时已过滤；跨设备的内存重建读的是原始分片，这里再兜一层。
+        const pending: ScheduleRecord[] = withoutDeleted(openIndexStore.pendingRecords(this.includeOtherDevices));
         this.records = pending;
         this.statusText = pending.length === 0 ? '所有日程都已完成' : `共 ${pending.length} 条未完成（跨全部日期${this.includeOtherDevices ? '与全部设备' : ''}）`;
       } else {
-        const day = this.includeOtherDevices
-          ? scheduleStore.readDayAllDevices(this.selectedDate)
-          : scheduleStore.readDay(this.selectedDate);
+        const day: ScheduleRecord[] = withoutDeleted(
+          this.includeOtherDevices
+            ? scheduleStore.readDayAllDevices(this.selectedDate)
+            : scheduleStore.readDay(this.selectedDate)
+        );
         this.records = day;
         let doneCount = 0;
         for (const record of day) {
@@ -245,6 +313,7 @@ struct Index {
       this.records = [];
       this.statusText = `读取日程失败：${describeError(error)}`;
     }
+    this.refreshQuery();
     this.pruneSelection();
   }
 
@@ -277,6 +346,10 @@ struct Index {
   /** 页头副标题：只在有统计意义（或有错误）时显示；空态文案归列表，避免两处重复。 */
   private subtitleText(): string {
     if (this.records.length > 0 || this.statusText.indexOf('失败') >= 0) {
+      // 有筛选条件时补一句「筛选出 K 条」，让「列表比 tab 计数少」有解释
+      if (this.hasActiveFilter && this.records.length > 0) {
+        return `${this.statusText} · 筛选出 ${this.visibleRecords.length} 条`;
+      }
       return this.statusText;
     }
     return '';
@@ -574,6 +647,164 @@ struct Index {
       promptAction.showToast({ message: `保存失败：${describeError(error)}` });
     }
     this.reload();
+  }
+
+  // ------------------------------------------------------------------ 搜索 / 筛选
+
+  /** 当前筛选条件（页面的三个字符串状态 → 纯逻辑层 filter）。 */
+  private currentFilter(): QueryFilter {
+    return makeFilter(this.queryText, this.statusFilter, this.authorFilter);
+  }
+
+  /**
+   * 重算 `visibleRecords` 与作者 chips（tab 取数之后调用；改筛选时只调它，不重读磁盘）。
+   *
+   * 作者 chip 已不在当前数据里（换日期 / 切 tab / 记录被删）时自动取消作者筛选，
+   * 否则会出现「筛选条件看得见、列表却永远为空」的怪异状态。
+   */
+  private refreshQuery(): void {
+    this.authorChips = authorsOf(this.records);
+    if (this.authorFilter.length > 0 && this.authorChips.indexOf(this.authorFilter) < 0) {
+      this.authorFilter = '';
+    }
+    const filter: QueryFilter = this.currentFilter();
+    this.visibleRecords = applyQuery(this.records, filter);
+    this.hasSearchWord = hasKeyword(filter);
+    this.hasActiveFilter = isFilterActive(filter);
+  }
+
+  private onQueryTextChange(value: string): void {
+    this.queryText = value;
+    this.refreshQuery();
+  }
+
+  /** 状态 chip：单选；重复点同一个仍是它本身（不做「点第二次取消」，取消走「全部」）。 */
+  private pickStatus(status: string): void {
+    this.statusFilter = status;
+    this.refreshQuery();
+  }
+
+  /** 作者 chip：再点一次同一个 author 取消筛选。 */
+  private pickAuthor(author: string): void {
+    this.authorFilter = this.authorFilter === author ? '' : author;
+    this.refreshQuery();
+  }
+
+  /** 清空搜索框 + 状态 + 作者（空态里的「清空」与搜索框的「清空」共用）。 */
+  private resetFilters(): void {
+    this.queryText = '';
+    this.authorFilter = '';
+    this.statusFilter = 'all';
+    this.refreshQuery();
+  }
+
+  // ------------------------------------------------------------------ 删除 + 5 秒撤销
+
+  /** 倒计时条上的秒数（向上取整，5 → 0）。 */
+  private undoSeconds(): number {
+    const seconds: number = Math.ceil(this.undoLeftMs / 1000);
+    return seconds > 0 ? seconds : 0;
+  }
+
+  /** 在 tab 级数据里按 id 找记录（列表只渲染它的子集，因此一定能找到）。 */
+  private findRecordById(id: string): ScheduleRecord | null {
+    for (const record of this.records) {
+      if (record.id === id) {
+        return record;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 请求删除：**立刻**追加墓碑（`deleted:true` 的同 id 新版本），然后开 5 秒撤销窗口。
+   *
+   * 选择「立刻落盘 + 撤销再追加」而不是「延迟删除」：删除结果随时可同步、崩溃不丢；
+   * 撤销只是一次普通的反向追加事件，两台设备折叠后结论一致（详见 `model/undoDelete.ts` 文件头）。
+   */
+  private requestDelete(id: string): void {
+    if (!this.ready) {
+      promptAction.showToast({ message: '存储尚未就绪，请稍后再试' });
+      return;
+    }
+    let target: ScheduleRecord | null = this.findRecordById(id);
+    if (target === null) {
+      target = scheduleStore.findByIdAny(id);
+    }
+    if (target === null) {
+      promptAction.showToast({ message: '记录已不存在，列表已刷新' });
+      this.reload();
+      return;
+    }
+    const tombstone: ScheduleRecord = softDeleteRecord(target, nextTsSameDate(target.ts));
+    try {
+      scheduleStore.appendRecord(tombstone);
+    } catch (error) {
+      promptAction.showToast({ message: `删除失败：${describeError(error)}` });
+      return;
+    }
+    // 顶替上一条待撤销项：它已经落盘，视为「已确认」，只需把界面上的倒计时换掉
+    this.undoState.schedule(id, UNDO_TTL_MS);
+    this.pendingTombstone = tombstone;
+    this.undoId = id;
+    const title: string = target.title.trim();
+    this.undoTitle = title.length > 0 ? title : '(未命名日程)';
+    this.undoLeftMs = this.undoState.remainingMs();
+    this.startUndoTimer();
+    this.reload();
+    this.loadSummary();
+  }
+
+  /** 撤销删除：追加 `deleted:false` 的恢复版本（以墓碑为底，字段原样回来）。 */
+  private undoDelete(): void {
+    const id: string = this.undoState.cancel();
+    const tombstone: ScheduleRecord | null = this.pendingTombstone;
+    this.clearUndoTimer();
+    this.undoId = '';
+    this.undoTitle = '';
+    this.undoLeftMs = 0;
+    this.pendingTombstone = null;
+    if (id.length === 0 || tombstone === null) {
+      this.reload();
+      return;
+    }
+    const restored: ScheduleRecord = restoreRecord(tombstone, nextTsSameDate(tombstone.ts));
+    try {
+      scheduleStore.appendRecord(restored);
+      promptAction.showToast({ message: '已撤销删除', duration: 2000 });
+    } catch (error) {
+      promptAction.showToast({ message: `撤销失败：${describeError(error)}`, duration: 3000 });
+    }
+    this.reload();
+    this.loadSummary();
+  }
+
+  /** 超时提交：墓碑早已落盘，这里只关掉撤销机会（不产生任何新写入）。 */
+  private finishPendingDelete(): void {
+    this.undoState.confirm();
+    this.clearUndoTimer();
+    this.undoId = '';
+    this.undoTitle = '';
+    this.undoLeftMs = 0;
+    this.pendingTombstone = null;
+  }
+
+  /** 启动倒计时：200ms 一跳，到 0 自动提交；页面销毁时清掉。 */
+  private startUndoTimer(): void {
+    this.clearUndoTimer();
+    this.undoTimer = setInterval(() => {
+      this.undoLeftMs = this.undoState.remainingMs();
+      if (this.undoLeftMs <= 0) {
+        this.finishPendingDelete();
+      }
+    }, 200);
+  }
+
+  private clearUndoTimer(): void {
+    if (this.undoTimer !== -1) {
+      clearInterval(this.undoTimer);
+      this.undoTimer = -1;
+    }
   }
 
   // ------------------------------------------------------------------ AI 汇总
@@ -977,12 +1208,200 @@ struct Index {
     .alignItems(HorizontalAlign.Start)
   }
 
+  // ------------------------------------------------------------------ 搜索 / 筛选 / 撤销（UI）
+
+  /**
+   * 搜索框 + 状态 chips + 作者 chips。
+   *
+   * 三条互不干扰，任一变化都只重算 `visibleRecords`（不重读磁盘、不改 tab）。
+   */
+  @Builder
+  SearchFilterBar() {
+    Column({ space: SPACING.sm }) {
+      Row({ space: SPACING.sm }) {
+        TextInput({ text: this.queryText, placeholder: '搜索标题/正文/作者' })
+          .fontSize(FONT.body)
+          .placeholderFont({ size: FONT.caption })
+          .height(TOUCH_MIN)
+          .backgroundColor($r('app.color.surface'))
+          .borderRadius(RADIUS.sm)
+          .padding({ left: SPACING.md, right: SPACING.md })
+          .layoutWeight(1)
+          .onChange((value: string) => {
+            this.onQueryTextChange(value);
+          })
+        if (this.queryText.length > 0) {
+          Text('清空')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.brand'))
+            .height(TOUCH_MIN)
+            .padding({ left: SPACING.sm, right: SPACING.sm })
+            .textAlign(TextAlign.Center)
+            .onClick(() => {
+              this.resetFilters();
+            })
+        }
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      Row({ space: SPACING.sm }) {
+        this.StatusChip('全部', 'all')
+        this.StatusChip('未完成', 'open')
+        this.StatusChip('已完成', 'done')
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      if (this.authorChips.length > 0) {
+        Scroll() {
+          Row({ space: SPACING.sm }) {
+            ForEach(
+              this.authorChips,
+              (author: string) => {
+                Text(author)
+                  .fontSize(FONT.caption)
+                  .lineHeight(LINE_HEIGHT.caption)
+                  .fontColor(this.authorFilter === author ? $r('app.color.brand') : $r('app.color.text_secondary'))
+                  .backgroundColor(this.authorFilter === author ? $r('app.color.brand_soft') : $r('app.color.page_background'))
+                  .height(TOUCH_MIN)
+                  .padding({ left: SPACING.md, right: SPACING.md })
+                  .textAlign(TextAlign.Center)
+                  .borderRadius(RADIUS.sm)
+                  .flexShrink(0)
+                  .onClick(() => {
+                    this.pickAuthor(author);
+                  })
+              },
+              (author: string) => `author-chip-${author}`
+            )
+          }
+          .alignItems(VerticalAlign.Center)
+        }
+        .scrollable(ScrollDirection.Horizontal)
+        .scrollBar(BarState.Off)
+        .width('100%')
+        .height(TOUCH_MIN)
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  /** 状态 chip（`all` / `open` / `done`）：选中 = 品牌浅底 + 品牌字色。 */
+  @Builder
+  StatusChip(label: string, value: string) {
+    Text(label)
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .fontColor(this.statusFilter === value ? $r('app.color.brand') : $r('app.color.text_secondary'))
+      .backgroundColor(this.statusFilter === value ? $r('app.color.brand_soft') : $r('app.color.page_background'))
+      .height(TOUCH_MIN)
+      .padding({ left: SPACING.md, right: SPACING.md })
+      .textAlign(TextAlign.Center)
+      .borderRadius(RADIUS.sm)
+      .onClick(() => {
+        this.pickStatus(value);
+      })
+  }
+
+  /**
+   * 空态文案：有搜索词 → 「没有匹配「xxx」的日程」+ 清空；只有筛选 → 「没有符合筛选条件的日程」+ 清空；
+   * 完全没有筛选条件时不渲染（沿用「今日汇总」块与底部「新建」表达的原有空态）。
+   */
+  @Builder
+  EmptyResults() {
+    if (this.hasSearchWord) {
+      Column({ space: SPACING.sm }) {
+        Text(`没有匹配「${this.queryText.trim()}」的日程`)
+          .fontSize(FONT.body)
+          .lineHeight(LINE_HEIGHT.body)
+          .fontColor($r('app.color.text_secondary'))
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+          .textAlign(TextAlign.Start)
+        Text('清空')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.brand'))
+          .height(TOUCH_MIN)
+          .padding({ left: SPACING.sm, right: SPACING.sm })
+          .textAlign(TextAlign.Center)
+          .onClick(() => {
+            this.resetFilters();
+          })
+      }
+      .width('100%')
+      .padding({ top: SPACING.md })
+      .alignItems(HorizontalAlign.Start)
+    } else if (this.hasActiveFilter) {
+      Column({ space: SPACING.sm }) {
+        Text('没有符合筛选条件的日程')
+          .fontSize(FONT.body)
+          .lineHeight(LINE_HEIGHT.body)
+          .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+        Text('清空筛选')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.brand'))
+          .height(TOUCH_MIN)
+          .padding({ left: SPACING.sm, right: SPACING.sm })
+          .textAlign(TextAlign.Center)
+          .onClick(() => {
+            this.resetFilters();
+          })
+      }
+      .width('100%')
+      .padding({ top: SPACING.md })
+      .alignItems(HorizontalAlign.Start)
+    }
+  }
+
+  /**
+   * 删除后的 5 秒撤销条：「已删除 · 标题」+「撤销（Ns）」。
+   *
+   * 只在 `undoId` 非空时渲染；到 0 自动消失（墓碑已落盘，超时不需要补写）。
+   */
+  @Builder
+  UndoBar() {
+    Row({ space: SPACING.sm }) {
+      Text(`已删除 · ${this.undoTitle}`)
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor($r('app.color.text_primary'))
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .layoutWeight(1)
+        .textAlign(TextAlign.Start)
+      Text(`撤销（${this.undoSeconds()}s）`)
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor($r('app.color.brand'))
+        .height(TOUCH_MIN)
+        .padding({ left: SPACING.md, right: SPACING.md })
+        .textAlign(TextAlign.Center)
+        .flexShrink(0)
+        .onClick(() => {
+          this.undoDelete();
+        })
+    }
+    .width('100%')
+    .padding({ left: SPACING.md, right: SPACING.sm })
+    .backgroundColor($r('app.color.brand_soft'))
+    .borderRadius(RADIUS.sm)
+    .alignItems(VerticalAlign.Center)
+  }
+
   /** 列表行（两条断点共用；行自带 1vp 分割线，所以 List space 为 0）。 */
   @Builder
   ListRows() {
     List() {
       ForEach(
-        this.records,
+        this.visibleRecords,
         (item: ScheduleRecord) => {
           ListItem() {
             RecordRow({
@@ -993,6 +1412,9 @@ struct Index {
               },
               onOpen: (id: string) => {
                 this.onRowTap(id);
+              },
+              onDelete: (id: string) => {
+                this.requestDelete(id);
               }
             })
           }
@@ -1005,11 +1427,13 @@ struct Index {
     .scrollBar(BarState.Off)
   }
 
-  /** 紧凑屏列表：空态已由「今日汇总」块与底部「新建」表达，这里不再重复文案。 */
+  /** 列表区：有结果渲染行；无结果时只在「有筛选条件」时显示空态文案。 */
   @Builder
   RecordList() {
-    if (this.records.length > 0) {
+    if (this.visibleRecords.length > 0) {
       this.ListRows()
+    } else {
+      this.EmptyResults()
     }
   }
 
@@ -1039,6 +1463,9 @@ struct Index {
             refreshTick: this.paneTick,
             onEdit: () => {
               this.startEditSelected();
+            },
+            onDelete: () => {
+              this.requestDelete(this.selectedId);
             }
           })
         }
@@ -1068,12 +1495,13 @@ struct Index {
     })
   }
 
-  /** 紧凑屏：日期条 → 模式 → 今日汇总块（列表第一项）→ 列表 → 新建。 */
+  /** 紧凑屏：日期条 → 模式 → 搜索/筛选 → 今日汇总块（列表第一项）→ 列表 → 撤销条 → 新建。 */
   @Builder
   CompactBody() {
     Column({ space: SPACING.md }) {
       this.DateBlock()
       this.ModeTabs()
+      this.SearchFilterBar()
       Divider()
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
@@ -1091,6 +1519,9 @@ struct Index {
             this.refreshing = false;
           });
         })
+        if (this.undoId.length > 0) {
+          this.UndoBar()
+        }
       }
       .width('100%')
       .layoutWeight(1)
@@ -1103,7 +1534,7 @@ struct Index {
 
   /**
    * 宽屏/横屏：左右主从。
-   * 左栏（`masterPaneWidth` 360–420vp）= 日期条 + 模式 + 汇总块 + 列表 + 新建；
+   * 左栏（`masterPaneWidth` 360–420vp）= 日期条 + 模式 + 搜索/筛选 + 汇总块 + 列表 + 撤销条 + 新建；
    * 右栏 = 详情 / 编辑 / 空态（点行切右栏内容，点「新建」右栏直接变表单）。
    */
   @Builder
@@ -1112,6 +1543,7 @@ struct Index {
       Column({ space: SPACING.md }) {
         this.DateBlock()
         this.ModeTabs()
+        this.SearchFilterBar()
         Divider()
           .strokeWidth(DIVIDER)
           .color($r('app.color.divider'))
@@ -1120,6 +1552,9 @@ struct Index {
             this.SummaryCard()
           }
           this.RecordList()
+          if (this.undoId.length > 0) {
+            this.UndoBar()
+          }
         }
         .width('100%')
         .layoutWeight(1)

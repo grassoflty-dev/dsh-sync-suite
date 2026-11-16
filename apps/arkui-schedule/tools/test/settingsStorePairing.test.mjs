@@ -103,7 +103,12 @@ describe('设置页：仓库地址可空保存，但同步/测试连接前强校
     assert.match(SETTINGS_PAGE, /checkSettingsFields\(/, '保存前必须走纯函数整表校验');
     assert.match(SETTINGS_PAGE, /const issues: SettingsFieldIssue\[\] = checkSettingsFields\(/, '收集全部问题而不是只报第一条');
     assert.match(SETTINGS_PAGE, /token: effectiveToken\(this\.token, this\.savedToken\),/, 'token 留空沿用已保存值');
-    assert.match(SETTINGS_PAGE, /platformForRepoUrl\(this\.gitPlatform, this\.repoUrl\)/, '保存前按 URL 纠正平台');
+    // A1：平台不再用 settingsForm 的两值纠正，而是按地址推断四值平台（gitlab/custom 也要保留）
+    assert.match(
+      SETTINGS_PAGE,
+      /resolvePlatformSelection\(\s*this\.repoUrl,\s*this\.gitPlatform,\s*this\.platformTouched\s*\)/,
+      '保存前按 URL 推断/纠正平台（手动选择优先）'
+    );
     assert.match(SETTINGS_PAGE, /repoUrl: repoEmpty \? '' : repoCheck\.url,/, '空地址存空串，不把非法原文写进设置');
   });
 
@@ -119,7 +124,11 @@ describe('设置页：仓库地址可空保存，但同步/测试连接前强校
   });
 
   test('同步区展示上次同步时间、上次错误与重试按钮', () => {
-    assert.match(SETTINGS_PAGE, /Text\(describeLastSync\(this\.lastSyncAt, nowIso\(\)\)\)/);
+    // A2：时间 + 动作 + 成败（describeLastSyncOutcome 内部仍调用 describeLastSync）
+    assert.match(
+      SETTINGS_PAGE,
+      /Text\(describeLastSyncOutcome\(this\.lastSyncAt, this\.lastSyncError, this\.lastSyncAction, nowIso\(\)\)\)/
+    );
     assert.match(SETTINGS_PAGE, /if \(this\.lastSyncError\.length > 0\) \{\s*Text\(`上次错误：\$\{this\.lastSyncError\}`\)/);
     assert.match(SETTINGS_PAGE, /if \(canRetrySync\(this\.lastSyncAction, this\.syncBusy\)\) \{/, '重试按钮必须由上次动作驱动');
     assert.match(SETTINGS_PAGE, /this\.runAction\(this\.lastSyncAction\);/, '重试要重放上一次动作');

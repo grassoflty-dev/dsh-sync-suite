@@ -1,4 +1,4 @@
-﻿/**
+/**
  * GitSyncService — ArkUI-X 日程助手的 Git 同步服务（ArkTS 侧）
  * ============================================================================
  * 结构：
@@ -29,8 +29,14 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { checkSyncPrecondition, describeBridgeFailure } from '../model/syncGuard';
-import { assertHttpsUsername, resolveGitUsername } from '../model/gitAuth';
+import { assertHttpsUsername, describeAuthModeBlocker, resolveGitUsername } from '../model/gitAuth';
 import { AUTH_HTTPS } from '../model/settingsForm';
+import {
+  DEFAULT_BRANCH,
+  describeSyncStatus,
+  validateBranchName
+} from '../model/syncError';
+import type { SyncStatusView } from '../model/syncError';
 import type { SyncPreconditionInput, SyncPreconditionResult } from '../model/syncGuard';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -44,9 +50,9 @@ import {
 // ---------------------------------------------------------------- 对外接口
 
 export interface GitSyncConfig {
-  /** HTTPS 仓库地址（GitHub/Gitee），不支持 SSH */
+  /** HTTPS 仓库地址（GitHub/Gitee/GitLab/自建），不支持 SSH */
   repoUrl: string;
-  /** 分支名，通常 main */
+  /** 分支名，默认 main；可配（A2） */
   branch: string;
   /** 设备标识，匹配 ^[a-z0-9][a-z0-9-]{0,31}$，决定 devices/<deviceId>/ 目录 */
   deviceId: string;
@@ -56,10 +62,12 @@ export interface GitSyncConfig {
   authorName: string;
   /** 提交作者邮箱 */
   authorEmail: string;
-  /** 托管平台：`github` | `gitee`（决定 HTTPS 用户名兜底规则）。旧数据可缺省。 */
+  /** 托管平台：`github` | `gitee` | `gitlab` | `custom`（决定 HTTPS 用户名兜底规则）。旧数据可缺省。 */
   platform?: string;
   /** HTTPS 认证用户名（Gitee 必填 = 登录名）；空串表示未填写。旧数据可缺省。 */
   gitUsername?: string;
+  /** 认证方式：`https`（本版本唯一可用）| `ssh`（会被拦，见 `describeAuthModeBlocker`）。旧数据可缺省。 */
+  authMode?: string;
 }
 
 export interface GitSyncResult {
@@ -74,6 +82,22 @@ export interface GitSyncResult {
    * 成功时为空。
    */
   code?: string;
+  /** 本次操作涉及的分支（成功时给出，供页面展示）。 */
+  branch?: string;
+  /** 本地独有提交数（仅 status 返回）。 */
+  ahead?: number;
+  /** 远端独有提交数（仅 status 返回）。 */
+  behind?: number;
+  /** 冲突条目数（仅 status 返回；应用不 merge，正常为 0）。 */
+  conflicts?: number;
+  /** 本地与远端是否双向分叉（仅 status 返回）。 */
+  diverged?: boolean;
+  /** 工作区改动数（仅 status 返回）。 */
+  changedCount?: number;
+  /** 本机仓库是否已初始化（仅 status 返回）。 */
+  initialized?: boolean;
+  /** 远端是否已配置（仅 status 返回）。 */
+  remoteConfigured?: boolean;
 }
 
 // ---------------------------------------------------------------- 桥协议类型
@@ -185,32 +209,56 @@ interface PreservePayload {
 
 interface StatusPayload {
   initialized?: boolean;
-  branch?: string;
-  head?: string;
-  remoteUrl?: string;
-  repoRoot?: string;
-  changedCount?: number;
-  lastCommit?: CommitPayload;
+  /** 桥用 null 表示「没有值」（未初始化/空仓库），读取时必须过 `textOf`。 */
+  branch?: string | null;
+  head?: string | null;
+  remoteUrl?: string | null;
+  repoRoot?: string | null;
+  changedCount?: number | null;
+  lastCommit?: CommitPayload | null;
+  /** 目标分支（配置里的分支名，可能是本地还没建出来的）。 */
+  targetBranch?: string | null;
+  localBranchExists?: boolean;
+  remoteBranchExists?: boolean;
+  localBranchOid?: string | null;
+  remoteBranchOid?: string | null;
+  /** 本地独有提交数（A2）。 */
+  ahead?: number | null;
+  /** 远端独有提交数（A2）。 */
+  behind?: number | null;
+  diverged?: boolean;
+  comparable?: boolean;
+  /** 冲突条目数（A2；应用不 merge，正常为 0）。 */
+  conflicts?: number | null;
 }
 
 interface PullPayload {
   cloned?: boolean;
-  branch?: string;
-  head?: string;
-  previousHead?: string;
+  branch?: string | null;
+  head?: string | null;
+  previousHead?: string | null;
   fastForward?: boolean;
   alreadyUpToDate?: boolean;
-  url?: string;
+  url?: string | null;
   localPreserved?: PreservePayload;
 }
 
 interface PushPayload {
-  branch?: string;
-  deviceId?: string;
-  files?: number;
-  commit?: string;
+  branch?: string | null;
+  deviceId?: string | null;
+  files?: number | null;
+  /** 没有新改动可提交时桥返回 null。 */
+  commit?: string | null;
   pushed?: boolean;
-  message?: string;
+  message?: string | null;
+  /** 本次推送是否在远端**新建**了分支（A2：首次推送自动建分支）。 */
+  branchCreated?: boolean;
+  /** 本次是否在本地新建了分支引用（空仓库 / 换了新分支名）。 */
+  branchCreatedLocal?: boolean;
+  /** 实际推送的 refspec（`refs/heads/<branch>`）。 */
+  refspec?: string | null;
+  /** 推送是否带 force（恒为 false；仅用于断言）。 */
+  force?: boolean;
 }
 
 interface RemoteProbe {
@@ -581,8 +629,8 @@ export class GitSyncService {
     try {
       const event: BridgeEvent = await this.callBridge('pull', this.configArgs());
       const data: PullPayload = event.data === undefined ? {} : event.data as PullPayload;
-      const branch: string = data.branch === undefined ? this.config.branch : data.branch;
-      const head: string = data.head === undefined ? '' : data.head;
+      const branch: string = GitSyncService.textOf(data.branch, this.branchName());
+      const head: string = GitSyncService.textOf(data.head, '');
       let message: string;
       if (data.cloned === true) {
         message = '已克隆远端仓库（分支 ' + branch + '，HEAD ' + shortSha(head) + '）';
@@ -597,7 +645,7 @@ export class GitSyncService {
       if (preserved.length > 0) {
         message = message + '；' + preserved;
       }
-      const result: GitSyncResult = { ok: true, message: message };
+      const result: GitSyncResult = { ok: true, message: message, branch: branch };
       if (head.length > 0) {
         result.commit = head;
       }
@@ -627,20 +675,27 @@ export class GitSyncService {
       args['message'] = message.length > 0 ? message : '日程同步 ' + new Date().toISOString();
       const event: BridgeEvent = await this.callBridge('push', args);
       const data: PushPayload = event.data === undefined ? {} : event.data as PushPayload;
-      const branch: string = data.branch === undefined ? this.config.branch : data.branch;
-      const commit: string = data.commit === undefined ? '' : data.commit;
-      const fileCount: number = data.files === undefined ? 0 : data.files;
+      const branch: string = GitSyncService.textOf(data.branch, this.branchName());
+      // 桥在没有新改动可提交时返回 commit:null —— 必须当空串处理（否则 .length 抛异常）
+      const commit: string = GitSyncService.textOf(data.commit, '');
+      const fileCount: number = GitSyncService.numberOf(data.files, 0);
       const pushed: boolean = data.pushed !== false;
-      let detail: string = '文件 ' + fileCount.toString() + ' 个';
+      // 无改动 / 首次建分支都要说清楚，不能让用户看着「推送完成」却不知道推了什么
+      let detail: string;
       if (commit.length > 0) {
-        detail = detail + '，提交 ' + shortSha(commit);
+        detail = '提交 ' + shortSha(commit) + '，文件 ' + fileCount.toString() + ' 个';
+      } else if (fileCount === 0) {
+        detail = '没有新的本地改动';
       } else {
-        detail = detail + '，无新提交';
+        detail = '没有新的改动可提交';
       }
-      const result: GitSyncResult = {
-        ok: true,
-        message: (pushed ? '推送完成' : '推送未完成') + '（分支 ' + branch + '，' + detail + '）'
-      };
+      let summary: string = (pushed ? '推送完成' : '推送未完成') + '（分支 ' + branch + '，' + detail + '）';
+      if (data.branchCreated === true) {
+        summary = summary + '；已在远端创建分支 ' + branch;
+      } else if (data.branchCreatedLocal === true) {
+        summary = summary + '；已在本地创建分支 ' + branch;
+      }
+      const result: GitSyncResult = { ok: true, message: summary, branch: branch };
       if (commit.length > 0) {
         result.commit = commit;
       }
@@ -712,8 +767,13 @@ export class GitSyncService {
     return checkSyncPrecondition(input);
   }
 
-  /** 状态：当前分支 / HEAD / 本地改动 / 远端是否可连（真实发一次 info/refs 探测）。 */
-  async status(): Promise<GitSyncResult> {
+  /**
+   * 状态：当前分支 / HEAD / ahead / behind / 冲突 / 本地改动 / 远端是否可连。
+   *
+   * @param withProbe 是否额外发一次真实的 `info/refs` 探测（默认 true）。
+   *                  页面里「同步完成后刷新状态」用 `false`：只看本地仓库，不额外联网。
+   */
+  async status(withProbe: boolean = true): Promise<GitSyncResult> {
     const guard: SyncPreconditionResult = this.precondition(false);
     if (!guard.ok) {
       return rejected('查询失败', guard.message);
@@ -725,26 +785,74 @@ export class GitSyncService {
     try {
       const event: BridgeEvent = await this.callBridge('status', this.configArgs());
       const data: StatusPayload = event.data === undefined ? {} : event.data as StatusPayload;
-      let message: string;
-      if (data.initialized !== true) {
-        message = '本机仓库尚未初始化（首次「拉取」会自动克隆）';
-      } else {
-        const branch: string = data.branch === undefined ? this.config.branch : data.branch;
-        const head: string = data.head === undefined ? '' : data.head;
-        const changed: number = data.changedCount === undefined ? 0 : data.changedCount;
-        const remoteUrl: string = data.remoteUrl === undefined ? '' : data.remoteUrl;
-        message = '分支 ' + branch + '｜HEAD ' + shortSha(head) + '｜本地改动 ' + changed.toString() + ' 处';
-        message = message + '｜远端 ' + (remoteUrl.length > 0 ? '已配置' : '未配置');
-        if (data.lastCommit !== undefined && data.lastCommit.message !== undefined) {
-          message = message + '｜最近提交 ' + data.lastCommit.message;
-        }
+      const view: SyncStatusView = this.statusViewOf(data);
+      const result: GitSyncResult = {
+        ok: true,
+        message: describeSyncStatus(view),
+        branch: view.branch,
+        ahead: view.ahead,
+        behind: view.behind,
+        conflicts: view.conflicts,
+        diverged: view.diverged,
+        changedCount: view.changedCount,
+        initialized: view.initialized,
+        remoteConfigured: view.remoteConfigured
+      };
+      if (withProbe) {
+        const probe: RemoteProbe = await this.probeRemote();
+        result.message = result.message + '｜连接 ' + probe.detail;
       }
-      const probe: RemoteProbe = await this.probeRemote();
-      const result: GitSyncResult = { ok: true, message: message + '｜连接 ' + probe.detail };
       return result;
     } catch (error) {
       return failed('查询失败', error as Object);
     }
+  }
+
+  /**
+   * 桥的 status 载荷 → 纯逻辑视图（页面文案由 `describeSyncStatus` 统一生成）。
+   *
+   * 一律走 `textOf` / `numberOf`：桥里「没有值」是 **null**（`report.branch = null`），
+   * 直接 `.length` 会抛 TypeError（历史上这类异常被 catch 成「查询失败」）。
+   */
+  private statusViewOf(data: StatusPayload): SyncStatusView {
+    const remoteUrl: string = GitSyncService.textOf(data.remoteUrl, '');
+    const targetText: string = GitSyncService.textOf(data.targetBranch, '');
+    const headText: string = GitSyncService.textOf(data.head, '');
+    const currentText: string = GitSyncService.textOf(data.branch, '');
+    let branch: string = this.branchName();
+    if (targetText.length > 0) {
+      branch = targetText;
+    } else if (currentText.length > 0) {
+      branch = currentText;
+    }
+    const lastCommit: CommitPayload | null | undefined = data.lastCommit;
+    let lastCommitMessage: string = '';
+    if (lastCommit !== undefined && lastCommit !== null) {
+      lastCommitMessage = GitSyncService.textOf(lastCommit.message, '');
+    }
+    const view: SyncStatusView = {
+      initialized: data.initialized === true,
+      branch: branch,
+      head: headText,
+      ahead: GitSyncService.numberOf(data.ahead, 0),
+      behind: GitSyncService.numberOf(data.behind, 0),
+      diverged: data.diverged === true,
+      conflicts: GitSyncService.numberOf(data.conflicts, 0),
+      changedCount: GitSyncService.numberOf(data.changedCount, 0),
+      remoteConfigured: remoteUrl.length > 0,
+      lastCommitMessage: lastCommitMessage
+    };
+    return view;
+  }
+
+  /** 桥字段 → 字符串：非字符串（含 null/undefined）一律回落（桥用 null 表示「没有值」）。 */
+  private static textOf(value: string | null | undefined, fallback: string): string {
+    return typeof value === 'string' ? value : fallback;
+  }
+
+  /** 桥字段 → 数字：非有限数字一律回落。 */
+  private static numberOf(value: number | null | undefined, fallback: number): number {
+    return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
   }
 
   // -------------------------------------------------------------- 宿主代理：事件回传
@@ -1080,10 +1188,16 @@ export class GitSyncService {
     return resolveGitUsername(platform, username);
   }
 
+  /** 生效分支名（空值回落 `main`；桥那边也有一层同样的兜底）。 */
+  private branchName(): string {
+    const branch: string = this.config.branch.trim();
+    return branch.length > 0 ? branch : DEFAULT_BRANCH;
+  }
+
   private configArgs(): Record<string, string> {
     const args: Record<string, string> = {
       'repoUrl': this.config.repoUrl,
-      'branch': this.config.branch,
+      'branch': this.branchName(),
       'deviceId': this.config.deviceId,
       'token': this.config.token,
       'authorName': this.config.authorName,
@@ -1102,8 +1216,17 @@ export class GitSyncService {
     if (config.repoUrl.indexOf('https://') !== 0 && config.repoUrl.indexOf('http://') !== 0) {
       return '仓库地址必须以 https:// 开头（本应用不支持 SSH）';
     }
-    if (config.branch.length === 0) {
-      return '请填写分支名（如 main）';
+    // A1：认证方式。SSH 在本版本没有传输层（isomorphic-git 只实现 HTTP(S)），
+    // 必须在发请求前拦住并说明原因，不能装作能同步。
+    const authMode: string = config.authMode === undefined ? AUTH_HTTPS : config.authMode;
+    const authBlocker: string = describeAuthModeBlocker(authMode);
+    if (authBlocker.length > 0) {
+      return authBlocker;
+    }
+    // A2：分支名。空/非法给可读错误（不再只是「请填写分支名」）。
+    const branchProblem: string = validateBranchName(config.branch);
+    if (branchProblem.length > 0) {
+      return branchProblem;
     }
     if (config.deviceId.length === 0) {
       return '请填写设备标识（如 phone-a）';
@@ -1118,7 +1241,7 @@ export class GitSyncService {
     // 否则一定 401。这里在**发请求前**拦住，任何情况下都不打网络。
     const usernameProblem: string | null = assertHttpsUsername(
       config.platform === undefined ? '' : config.platform,
-      AUTH_HTTPS,
+      authMode,
       config.gitUsername === undefined ? '' : config.gitUsername
     );
     if (usernameProblem !== null) {
@@ -1281,8 +1404,8 @@ export class GitSyncService {
 
 // ---------------------------------------------------------------- 结果描述辅助
 
-function describePreserved(preserved: PreservePayload | undefined): string {
-  if (preserved === undefined) {
+function describePreserved(preserved: PreservePayload | null | undefined): string {
+  if (preserved === undefined || preserved === null) {
     return '';
   }
   const restored: number = preserved.restored === undefined ? 0 : preserved.restored.length;

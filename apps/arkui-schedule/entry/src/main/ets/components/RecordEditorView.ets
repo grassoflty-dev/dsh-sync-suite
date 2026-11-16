@@ -17,7 +17,9 @@ import type { Attachment, ScheduleRecord } from '../model/types';
 import { newRecordId, scheduleStore, describeError } from '../services/scheduleStore';
 import { settingsStore } from '../services/settingsStore';
 import { attachmentStore, parseAttachmentList } from '../services/attachmentStore';
+import { loadingText, toastMsFor } from '../common/copy';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
+import { StateView } from './StateView';
 
 const INPUT_HEIGHT: number = 44;
 const BODY_HEIGHT: number = 200;
@@ -146,6 +148,27 @@ export struct RecordEditorView {
   /** 页面从手写板返回时触发回填。 */
   onRefreshTick(): void {
     this.applyPendingInkResult();
+  }
+
+  /**
+   * 三态里的「重试」：清掉错误文案、退回未就绪，再重跑一次「确保存储就绪 → 读记录」。
+   *
+   * 失败的两种来源（`ensureReady` 失败 / `findByIdAny` 失败）都在 `bootstrap()` 里，
+   * 所以重试必须整条链路重来，只 `loadRecord()` 会在存储未就绪时立刻再失败一次。
+   */
+  private retryLoad(): void {
+    this.statusText = '';
+    this.ready = false;
+    this.bootstrap();
+  }
+
+  /** 错误标题：取 `statusText` 冒号前那半句，取不到给通用标题。 */
+  private statusTitle(): string {
+    const cut: number = this.statusText.indexOf('：');
+    if (cut > 0) {
+      return this.statusText.slice(0, cut);
+    }
+    return '读取失败';
   }
 
   private async bootstrap(): Promise<void> {
@@ -311,7 +334,7 @@ export struct RecordEditorView {
       scheduleStore.appendRecord(record);
     } catch (error) {
       this.saving = false;
-      promptAction.showToast({ message: `保存失败：${describeError(error)}`, duration: 4000 });
+      promptAction.showToast({ message: `保存失败：${describeError(error)}`, duration: toastMsFor(true) });
       return;
     }
     this.saving = false;
@@ -499,20 +522,21 @@ export struct RecordEditorView {
             this.AttachmentPreview()
           }
 
-          if (!this.ready) {
-            Text('正在准备存储…')
-              .fontSize(FONT.caption)
-              .lineHeight(LINE_HEIGHT.caption)
-              .fontColor($r('app.color.text_secondary'))
-              .width('100%')
-              .textAlign(TextAlign.Start)
-          } else if (this.statusText.length > 0) {
-            Text(this.statusText)
-              .fontSize(FONT.caption)
-              .lineHeight(LINE_HEIGHT.caption)
-              .fontColor($r('app.color.danger'))
-              .width('100%')
-              .textAlign(TextAlign.Start)
+          if (this.statusText.length > 0) {
+            // 初始化失败 / 记录不存在：行内错误条（原因 + 下一步），给「重试」出口
+            StateView({
+              kind: 'error',
+              title: this.statusTitle(),
+              detail: this.statusText,
+              retryLabel: '重试',
+              compact: true,
+              onRetry: () => {
+                this.retryLoad();
+              }
+            })
+          } else if (!this.ready) {
+            // 正在等存储就绪：行内加载态（与错误态共用同一套三态视觉）
+            StateView({ kind: 'loading', title: loadingText('存储'), compact: true })
           }
         }
         .width('100%')

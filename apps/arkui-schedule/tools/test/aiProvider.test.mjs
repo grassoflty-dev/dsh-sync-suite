@@ -39,16 +39,16 @@ function methodBody(source, signature) {
 }
 
 describe('AI_PROVIDERS：预设表', () => {
-  test('4 个源，顺序固定', () => {
-    assert.equal(AI_PROVIDERS.length, 4);
+  test('6 个源，顺序固定', () => {
+    assert.equal(AI_PROVIDERS.length, 6);
     assert.deepEqual(
       AI_PROVIDERS.map((preset) => preset.id),
-      ['deepseek', 'opencode-go', 'codex', 'custom']
+      ['deepseek', 'opencode-go', 'codex', 'openrouter', 'ollama', 'custom']
     );
   });
 
   test('id 唯一、label 与 keyHint 非空', () => {
-    assert.equal(new Set(AI_PROVIDERS.map((preset) => preset.id)).size, 4);
+    assert.equal(new Set(AI_PROVIDERS.map((preset) => preset.id)).size, 6);
     for (const preset of AI_PROVIDERS) {
       assert.equal(typeof preset.label, 'string');
       assert.ok(preset.label.trim().length > 0, `${preset.id} 少了 label`);
@@ -70,16 +70,47 @@ describe('AI_PROVIDERS：预设表', () => {
     assert.equal(findProvider('deepseek').baseURL, 'https://api.deepseek.com/v1');
     assert.equal(findProvider('opencode-go').baseURL, 'https://opencode.ai/inference/go/v1');
     assert.equal(findProvider('codex').baseURL, 'https://api.openai.com/v1');
+    assert.equal(findProvider('openrouter').baseURL, 'https://openrouter.ai/api/v1');
+    assert.equal(findProvider('ollama').baseURL, 'http://127.0.0.1:11434/v1');
     assert.equal(findProvider('custom').baseURL, '');
     assert.deepEqual(modelsOf('deepseek').map((model) => model.id), ['deepseek-chat', 'deepseek-reasoner']);
     assert.deepEqual(modelsOf('opencode-go').map((model) => model.id), ['deepseek-v4.1-flash', 'deepseek-v4-pro']);
     assert.deepEqual(modelsOf('codex').map((model) => model.id), ['gpt-5.1-codex', 'gpt-5-codex', 'gpt-5.1']);
+    assert.deepEqual(modelsOf('openrouter').map((model) => model.id), [
+      'deepseek/deepseek-chat',
+      'anthropic/claude-3.5-sonnet',
+      'google/gemini-2.0-flash'
+    ]);
+    assert.deepEqual(modelsOf('ollama').map((model) => model.id), ['llama3.2', 'qwen2.5', 'deepseek-r1']);
     assert.equal(findProvider('codex').label, 'Codex API');
+  });
+
+  test('每个预设 2–3 个模型（custom 至少 1 个），标签非空', () => {
+    for (const preset of AI_PROVIDERS) {
+      const count = preset.models.length;
+      if (preset.id === CUSTOM_PROVIDER_ID) {
+        assert.ok(count >= 1, 'custom 至少留一个占位模型');
+      } else {
+        assert.ok(count >= 2 && count <= 3, `${preset.id} 的模型数应在 2–3：${count}`);
+      }
+      for (const model of preset.models) {
+        assert.ok(model.label.trim().length > 0, `${preset.id}/${model.id} 少了 label`);
+      }
+    }
+  });
+
+  test('openrouter 用 provider/model 命名，ollama 是裸模型名', () => {
+    for (const model of modelsOf('openrouter')) {
+      assert.match(model.id, /^[a-z0-9-]+\/[a-z0-9.-]+$/, `OpenRouter 模型名应为 provider/model：${model.id}`);
+    }
+    for (const model of modelsOf('ollama')) {
+      assert.equal(model.id.includes('/'), false, `Ollama 模型名不该带斜杠：${model.id}`);
+    }
   });
 
   test('experimental 只标记 opencode-go', () => {
     assert.equal(findProvider('opencode-go').experimental, true);
-    for (const id of ['deepseek', 'codex', 'custom']) {
+    for (const id of ['deepseek', 'codex', 'openrouter', 'ollama', 'custom']) {
       assert.notEqual(findProvider(id).experimental, true, `${id} 不该是实验源`);
     }
   });
@@ -96,6 +127,12 @@ describe('AI_PROVIDERS：预设表', () => {
     assert.match(findProvider('codex').keyHint, /非 ChatGPT 订阅/);
   });
 
+  test('keyHint：OpenRouter 给取 key 地址，Ollama 说明本地可留空', () => {
+    assert.match(findProvider('openrouter').keyHint, /openrouter\.ai\/keys/);
+    assert.match(findProvider('ollama').keyHint, /本地服务通常不需要 key，留空即可/);
+    assert.match(findProvider('ollama').keyHint, /代理/, '走代理要能填 key，文案要提一句');
+  });
+
   test('每个源都有非空且唯一的模型 id', () => {
     for (const preset of AI_PROVIDERS) {
       assert.ok(preset.models.length >= 1, `${preset.id} 没有模型`);
@@ -107,7 +144,7 @@ describe('AI_PROVIDERS：预设表', () => {
     }
   });
 
-  test('默认源是 deepseek，默认模型与 aiRequest 常量一致', () => {
+  test('默认源是 deepseek（不因新增源而改变），默认模型与 aiRequest 常量一致', () => {
     assert.equal(DEFAULT_PROVIDER_ID, 'deepseek');
     assert.equal(defaultModelOf(DEFAULT_PROVIDER_ID), DEFAULT_AI_MODEL);
   });
@@ -135,6 +172,15 @@ describe('模型归一', () => {
     assert.equal(defaultModelOf('deepseek'), 'deepseek-chat');
     assert.equal(defaultModelOf('opencode-go'), 'deepseek-v4.1-flash');
     assert.equal(defaultModelOf('codex'), 'gpt-5.1-codex');
+    assert.equal(defaultModelOf('openrouter'), 'deepseek/deepseek-chat');
+    assert.equal(defaultModelOf('ollama'), 'llama3.2');
+  });
+
+  test('新源的空模型回退到该源默认模型', () => {
+    assert.equal(resolveModel('openrouter', ''), 'deepseek/deepseek-chat');
+    assert.equal(resolveModel('ollama', '   '), 'llama3.2');
+    assert.equal(resolveModel('openrouter', 'openai/gpt-4o'), 'openai/gpt-4o', '手输的 provider/model 原样保留');
+    assert.equal(resolveModel('ollama', 'mistral:7b'), 'mistral:7b', '本地模型名可带标签');
   });
 
   test('resolveModel 空模型回退该源默认', () => {
@@ -286,7 +332,10 @@ describe('deepseek 接入多源', () => {
   });
 
   test('summarize 新增参数都是可选的（旧调用不受影响）', () => {
-    assert.match(DEEPSEEK, /model\?: string,\s*\n\s*providerId\?: string,\s*\n\s*baseURL\?: string/);
+    assert.match(
+      DEEPSEEK,
+      /model\?: string,\s*\n\s*providerId\?: string,\s*\n\s*baseURL\?: string,\s*\n\s*options\?: AiOptions/
+    );
   });
 
   test('testAiConnection 兼容旧签名（第二参非源 id 按模型名处理）', () => {
@@ -295,7 +344,7 @@ describe('deepseek 接入多源', () => {
 
   test('testAiConnection 真实请求并返回耗时', () => {
     assert.match(DEEPSEEK, /elapsedMs: number;/);
-    assert.match(DEEPSEEK, /let elapsedMs: number = Date\.now\(\) - startedAt;/);
+    assert.match(DEEPSEEK, /let elapsedMs: number = outcome\.elapsedMs;/);
     assert.match(DEEPSEEK, /AI_PROBE_MAX_TOKENS/);
     for (const result of DEEPSEEK.matchAll(/elapsedMs: (\w+)/g)) {
       assert.ok(result[1].length > 0, 'elapsedMs 必须有值');
@@ -308,13 +357,15 @@ describe('deepseek 接入多源', () => {
 });
 
 describe('Key 自助文案（keyHint）', () => {
-  test('四个源的引导文案逐字钉住', () => {
+  test('六个源的引导文案逐字钉住', () => {
     assert.deepEqual(
       AI_PROVIDERS.map((preset) => [preset.id, preset.keyHint]),
       [
         ['deepseek', 'platform.deepseek.com → API keys 创建（sk- 开头），测试最稳'],
         ['opencode-go', 'OpenCode Go 控制台取 key；端点未实测（标「实验」），失败先查 key 与地址'],
         ['codex', 'platform.openai.com → API keys（API Key 模式，非 ChatGPT 订阅）'],
+        ['openrouter', 'openrouter.ai/keys 取 key；模型名是 provider/model 形式'],
+        ['ollama', '本地服务通常不需要 key，留空即可（走代理需填代理的 key）'],
         ['custom', '任意 OpenAI 兼容服务，填 …/v1 地址与 key']
       ]
     );
@@ -355,5 +406,17 @@ describe('hintForProvider：失败后的下一步建议', () => {
     assert.match(hintForProvider('custom', 401), /自定义服务的 key/);
     assert.match(hintForProvider('deepseek', 401), /服务商控制台重新复制/);
     assert.match(hintForProvider('nope', 401), /服务商控制台重新复制/);
+  });
+
+  test('OpenRouter：401 指到 openrouter.ai/keys，404 提示 provider/model 命名', () => {
+    assert.match(hintForProvider('openrouter', 401), /openrouter\.ai\/keys/);
+    assert.match(hintForProvider('openrouter', 404), /provider\/model/);
+  });
+
+  test('Ollama 本地：不可达提示启动服务，401 提示代理，404 提示 /v1 前缀', () => {
+    assert.match(hintForProvider('ollama', 0), /ollama serve/);
+    assert.match(hintForProvider('ollama', -1), /ollama serve/);
+    assert.match(hintForProvider('ollama', 401), /代理/);
+    assert.match(hintForProvider('ollama', 404), /\/v1/);
   });
 });
