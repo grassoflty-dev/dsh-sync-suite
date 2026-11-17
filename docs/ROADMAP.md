@@ -137,7 +137,9 @@
 | **IPv6 真绑定端到端（本机公网 v6:3098）** | pm | ✅ **通过**（health/401/303/200 全绿，probe 5 ok + 1 unknown） | - | 无 |
 | 独立只读评审（安全边界 / 失败语义 / token 出口） | pm/review-remote | ✅ 完成：**有条件通过**，P0=0 / P1=2 / P2=2，见 `docs/REVIEW-remote-security.md` | - | 无 |
 | 评审修复 M1（ipv6 方式起不来）/ M2（上游 cookie 过期不 fail-closed）/ M3（manualUrl token 进 DOM）/ M4（`?k=` 与 `?token=` 不一致） | pm | ✅ 全部已修 + 补测试（见下「评审修复」） | - | 无 |
-| 真机验收（平板已切回家中 WiFi，`192.168.1.10` / USB `6MFBB25C27205131`） | pm/qa-remote-device | 进行中 | 30min | 无（真机独占，单执行者） |
+| 真机验收（平板已切回家中 WiFi，`192.168.1.10` / USB `6MFBB25C27205131`） | pm/qa-remote-device | ✅ 完成（**3 通过 / 1 不通过 / 1 未执行**） | - | 见下「真机验收结论」 |
+| 真机：竖↔横旋转往返 | —— | **待用户动手** | - | 设备无 `wm`/rotate，`uitest` 无 rotate，`snapshot_display` 无旋转参数 → 只能人工把平板转一次再补拍 |
+| 真机缺陷：内嵌 Web 的 WebSocket 握不上（`ERR_WS_UPGRADE -173`） | —— | **待定位（P1）** | - | 见下「WS 缺陷定位」；**先要 DSH 重启让本插件进链路**才能分清是 ArkWeb 还是代理 |
 | 真实 GUI 渲染验证（设置页「配置同步」+「远程访问」两个 section） | —— | **待办（等 DSH 重启）** | - | 用户决定本轮不重启；重启后需人工看一眼设置页渲染，别丢 |
 
 ### 端到端证据（`192.168.1.6:3099` → 真实 DSH `127.0.0.1:3080`）
@@ -240,6 +242,49 @@ probe: unknown 本机检查通过，但公网可达性必须从外网确认
 - **未打 `dist-*` 交付包、未生成发布用 SHA256 清单**；本轮只有 `dist/remote/*.js` 的源码构建产物随仓库提交。
 - 插件在 `~/.dsh/profiles/desktop` 是 **junction 链接**（`link:`），重启 DSH 即加载新 `dist/`；
   **本轮按用户决定不重启**，因此「设置页两个 section 的真实 GUI 渲染」仍未验证（记为上方待办）。
+
+### 真机验收结论（2026-11-17，`6MFBB25C27205131`）
+
+HAP `dist-harmony/arkui-schedule-harmony-debug-signed.hap` **2,881,758 B**
+SHA256 `C2455DBC…0E5D219B`；`hdc install -r` **覆盖安装成功（未卸载）**；`verify-hap 6/6`；全程 **0 JS Crash / 0 FATAL**。
+证据：`docs/VERIFICATION.md`「远程控制页真机验收（2026-11-17）」+ `docs/images/remote-*.jpeg`。
+
+| # | 验收项 | 结论 | 要点 |
+| --- | --- | --- | --- |
+| 1 | 局域网方式打开内嵌 Web | **通过（带缺陷）** | 选「局域网直连」+ `192.168.1.6` + `3080` → 内嵌页渲染出 DSH 完整 UI（非白屏）；但左下持续「连接异常，刷新重试」，hilog `ERR_WS_UPGRADE(-173)` |
+| 2 | 横竖屏往返 | **未执行** | 设备无 `wm`/rotate，`uitest` 无 rotate → 需用户**亲手转一次平板**后补拍 |
+| 3 | 返回栈 | **通过** | 返回后地址/端口/方式都在；两轮进出不重复入栈；首页页头仍只有「今天」+「⚙ 设置」 |
+| 4 | 错误路径（端口 9999） | **通过** | ~50s 后中文「打不开这台电脑上的 DSH 页面 / 页面加载失败（-7）ERR_TIMED_OUT / 重试 / 用浏览器打开」，**-7 而非 -29**（明文 HTTP 未被拦） |
+| 5 | token 缺失 | **不通过（该实例口径不成立）** | 该 3080 实例的 `GET /` 带/不带 token 都 200（只在 WS 层校验），所以「去掉 token 应见 401」在本实例上不成立，不是 App 的问题 |
+
+**顺带发现的两个真实缺陷（已修 / 待定位）**
+
+1. **端口提示文案与语义矛盾（已修）**：真机上「端口」下仍写「0 = 跟 DSH 同端口」，但本轮已把
+   `lan/ipv6/tailscale` 的端口改成必填（0 → 「请先填端口」）。已改 `model/remoteAccess.ts` 的
+   `portField()` 提示与占位符（`placeholder: '3080'`）；设备上那份 HAP 是修改前构建的。
+2. **内嵌 Web 的 WS 握不上（待定位）**：见下节。
+
+### WS 缺陷定位（`ERR_WS_UPGRADE -173`，P1）
+
+真机：内嵌页 HTTP 能加载，WS 握手失败。PC 侧对照（同一台 3080 实例，从本机直连局域网地址）：
+
+```
+GET /?token=<launch>         -> 303 + Set-Cookie
+WS /api/remote.mux 无 cookie -> 401（服务端正常拒绝）
+WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁挂监听也能转发 WS）
+```
+
+即：**服务端不是瓶颈**。同一份上游（`127.0.0.1:3080`）经**我们自己的**旁挂监听（`192.168.1.6:3099`）
+跑 e2e 时 `ws-101` 也是 PASS。因此 `-173` 大概率是 **ArkWeb 在 WS 握手时没带上 DSH 的会话 cookie**
+（或该版本对 `ws://` + 自定义端口的 upgrade 有限制），而不是代理或插件的问题。
+
+下一步（需要 DSH 重启或用户配合，已列入待办）：
+
+1. DSH 重启 → 本插件进链路（桌面 profile 是 junction，重启即生效）；
+2. App 侧用 `@ohos.web.webview` 的 `WebCookieManager` 打印加载后的 cookie 是否存在；
+3. 若确实是 ArkWeb 不带 cookie：本插件的令牌门已支持 `?k=`（评审 M4 顺带支持），
+   可考虑让 `/api/remote.mux` 的 WS 鉴权接受 URL token——但 DSH 页面自己拼的 WS URL
+   不受我们控制，需要评估注入方案。
 
 ### 本轮已定技术结论（评审基线，别再推翻）
 

@@ -855,3 +855,93 @@ hiai.vision/OCR_LIB_MSG: InitLibrary::ocr finish : 205.51 ms
 - 已抽出纯函数 `apps/arkui-schedule/tools/layout-parse.mjs`：`stripAnsi` / `extractJsonArray` / `parseLayoutOutput`
   / `layoutTexts` / `findByText` / `centerOf` / `screenSize`；`device-accept.mjs` 改为调用它。
 - 单测 `tools/test/layoutParse.test.mjs`（9 例，固定样例文本，不依赖真机）：噪声前缀、ANSI、截断、空数组、嵌套摊平、根节点 bounds 用于屏幕尺寸。
+
+## 远程控制页真机验收（2026-11-17）
+
+> 本轮为「按访问方式填字段」新 UI 的首次真机验收。执行人：执行子代理 `pm/qa-remote-device`；时间 2026-11-17 22:21–23:20（Asia/Shanghai）。
+
+### 设备与产物
+
+| 项 | 值 |
+| --- | --- |
+| 设备 | `MLR-AL00`，serial `6MFBB25C27205131`（USB），API 26 |
+| 平板 IP / 电脑 IP | `192.168.1.10` (wlan0) / `192.168.1.6` (WLAN 3)，同一 `/24` |
+| 对照实例 | `http://192.168.1.6:3080/?token=<已脱敏>`（仅此端口，未连其他实例） |
+| 构建 | `powershell -File tools/build-harmony.ps1` → `BUILD SUCCESSFUL in 2 min 59 s`；`node tools/overlay.mjs status` → `[overlay] applied=false` |
+| 签名 | `powershell -File tools/sign-hap.ps1 -Deliver -StorePass <已脱敏>` |
+| HAP | `dist-harmony/arkui-schedule-harmony-debug-signed.hap`，**2,881,758 B** |
+| SHA256 | `C2455DBC5FED2FEC86D9811A865BEA267B099D388688F2080F0E6F9E0E5D219B` |
+| 安装 | `hdc -t 6MFBB25C27205131 install -r <hap>` → `install bundle successfully`（**覆盖安装，全程未 uninstall**） |
+| 装机版本 | `versionName 1.0.0` / `versionCode 1000000`（`bm dump -n com.itwill.schedule`） |
+| 产物断言 | `node tools/verify-hap.mjs --hap dist-harmony/…-signed.hap` → 6/6 通过 |
+
+### 逐条结果
+
+| # | 验收项 | 结论 | 证据 |
+| --- | --- | --- | --- |
+| 1 | 局域网方式打开内嵌 Web，加载出 DSH 界面 | **通过（带已知缺陷）** | 设置 → 远程控制 → 访问方式「局域网直连」+ 局域网地址 `192.168.1.6` + 端口 `3080` → 点「打开远程控制」→ 内嵌页渲染出 DeepSeek Harness 完整 UI（侧边栏「插件 / 自动化任务 / 更多」、工作区 `CodexAirRemote`、`itwillclaude`、用户「久叶草」、主区「探索未至之境」），非白屏、非错误页。**但左下角持续显示「连接异常，刷新重试」**，hilog 有 `ERR_WS_UPGRADE(-173)`，即 HTTP 页面可达、WebSocket 未握上，实际会话不可用 |
+| 2 | 横竖屏往返（竖→横→竖） | **未执行** | 设备无 `wm` / rotation 命令，`uitest uiInput` 无 rotate，`snapshot_display` 无旋转参数（`usage: snapshot_display [-i] [-f] [-w] [-h] [-t] [-m]`）；需**人工物理转动平板**后复测。与 §10 记录的限制一致 |
+| 3 | 返回栈 | **通过** | ① 远程页返回设置页后 `192.168.1.6` / `3080` / 局域网直连 全在（截图 `remote-back-settings.jpeg`）；② 连做 2 次「进入→返回」，每次都能正常回到设置页且值不重置；③ 从设置页再返回一次直接回首页，栈里没有重复设置页；首页页头仍只有「今天」+「⚙ 设置」 |
+| 4 | 错误路径（端口 9999） | **通过** | 端口改 `9999` → 地址预览 `http://192.168.1.6:9999/` → 打开后 WebView 约 **50 s** 超时，页面显示可读中文：「打不开这台电脑上的 DSH 页面」「页面加载失败（**-7**）：ERR_TIMED_OUT」「重试」「用浏览器打开」。ERROR CODE 是 **-7（超时）**，不是 **-29**（明文被拦），也不是白屏/崩溃 |
+| 5 | token 缺失路径 | **不通过** | 局域网方式拼出的 `http://192.168.1.6:3080/` 本身不含 token（App 也提示「地址未包含 token，DSH 可能要求登录」）。打开后**没有**出现 401/登录页，而是完整 DSH UI + 左下「连接异常，刷新重试」。PC 侧对照：带 token 与不带 token 的 `GET /` **都是 200、内容同长 59,207 B**，说明该实例只在 WS/会话层校验 token，HTTP 层不返回 401 —— 「去掉 token 应看到 401/登录提示」这条在本实例上不成立 |
+
+### 截图（`docs/images/`）
+
+| 文件 | 内容 |
+| --- | --- |
+| `remote-settings-lan.jpeg` | 新 UI 远程控制组：访问方式=局域网直连、地址 `192.168.1.6`、端口 `3080`、「地址未包含 token」提示、打开远程控制按钮 |
+| `remote-mode-dropdown.jpeg` | 访问方式下拉 6 项：局域网直连 / Tailscale 组网 / 公网 IPv6 直连 / Cloudflare 隧道 / 手动填地址 / 网易 UU 远程（不可用） |
+| `remote-lan-landscape.jpeg` | 第 1 条：局域网方式内嵌页加载出 DSH 界面（横屏 2560×1600），左下角带「连接异常，刷新重试」 |
+| `remote-no-token.jpeg` | 第 5 条：地址无 token 时仍是 DSH UI + 连接异常，未见 401/登录页 |
+| `remote-back-settings.jpeg` | 第 3 条：从远程页返回后设置项仍在（地址/端口/预览地址） |
+| `remote-error-port.jpeg` | 第 4 条：端口 9999 的中文错误页（`-7` ERR_TIMED_OUT） |
+| `remote-manual-token.jpeg` | 补充对照：手动方式粘贴**带 token 的完整地址**后重开，仍是 DSH UI + 连接异常 |
+| `remote-lan-2026-11-17.jpeg`、`remote-port-required-2026-11-17.jpeg` | **非本轮生成**（22:42 / 22:49，内容与本轮一致但非本次执行所拍），仅作留档，不作为本轮结论依据 |
+
+### hilog 关键行（本机 `hilog -x`，已清空后按步骤重取）
+
+```
+11-17 22:59:22.567 59381 59381 W C03F00/com.itwill.schedule/ArkCompiler: [debugger] DebuggerImpl::NotifyScriptParsed:
+    Script already been parsed: url: entry|entry|1.0.0|src/main/ets/pages/RemoteControl.ts
+11-17 22:59:23.456 59381 59572 I A04510/com.itwill.schedule/chromium: [../../net/url_request/url_request.cc:824]
+    [WebNetwork] URLRequestCanceled error:ERR_WS_UPGRADE(-173) url:ws://192***
+11-17 23:09:36.767 59381 59572 I A04510/com.itwill.schedule/chromium: [arkweb_http_network_transaction_ext.cc:344]
+    [WebNetwork] NetworkTransactionTimeout ip: connectionInfo:unknown receivedBodyBytes: 0 url:h**p://192***
+11-17 23:09:36.772 59612     1 I A04511/com.itwill.schedule:render/chromium: [blank_screen_detector.cc:167]
+    BlankScreenDetector::RunDetectionTask blank screen detected result_count 0
+11-17 23:13:47.086 59381 59572 I A04510/com.itwill.schedule/chromium: [../../net/url_request/url_request.cc:824]
+    [WebNetwork] URLRequestCanceled error:ERR_WS_UPGRADE(-173) url:ws://192***
+```
+
+- `grep -c -iE 'JS Crash|FATAL|jscrash|SIGSEGV|Abort'` → **0**（全程无 JS Crash / FATAL，无崩溃）。
+- 端口 9999 时的 `ERR_WS_UPGRADE` 之外的连连 `NetworkTransactionTimeout` + `blank screen detected` 解释了为什么错误页要等约 50 s：Windows 侧对未监听端口是**丢弃 SYN**而非拒绝，Chromium 只能等超时。
+
+### 遇到的问题（复现要点）
+
+1. **签名口令**：`tools/sign-hap.ps1 -Deliver` 直接跑会 `ERROR: 11014003 Init keystore failed / keystore password was incorrect`。
+   原因：`signing/itwill-debug-v2.*` 只有 `.p12` + `.csr`（缺 `.cer`/`.p7b`）→ 脚本回退 v1，但 `signing/pass.txt` 存的是 **v2** 口令（`-Deliver` 会优先读它）。
+   绕过：显式 `-StorePass <已脱敏>`（v1 口令，见 `signing/README.md`）。建议脚本在回退 v1 时忽略 `pass.txt` 或给出明确提示。
+2. **下滑手势会退出页面**：从 y≈1300（贴近底部手势区）向下滑会被系统当成返回/回桌面，我曾因此从设置页被弹回首页。改用 `uitest uiInput dircFling 3 800 150`（方向 3 = 向下滚，方向 2 = 回顶部）稳定可达远程控制组。
+3. **`uitest uiInput text` 会叠字**：端口字段先有 `0`，连续输入后变成 `30805`，必须点字段 + `keyEvent 2055` 逐字删除再输入；每步都要用 `devecocli ui layout` 复核字段值，不能只看光标。
+4. **疑似并行人工操作**：22:42 / 22:49 出现两张非本轮截图，期间还发生过一次「自动回到首页」和端口多一位；本轮结论一律以 22:59 之后重新截图/取日志的证据为准。
+
+### 未验证 / 边界
+
+- 横竖屏往返（需物理转动平板；命令与判定标准见下）。
+- 「网易 UU 远程（不可用）」只确认下拉项文案与禁用外观，未逐项点检禁用态原因文案。
+- 端口 `1`（Chromium 保留端口，预期 `ERR_UNSAFE_PORT -312`）未单独跑，只跑了 9999。
+- WS 握不上（`ERR_WS_UPGRADE -173`）的根因未定位：带 token 的完整地址同样复现，需下一轮在 DSH 实例侧看 WS 路径/鉴权。
+
+### 复现命令
+
+```powershell
+$hdc = 'D:\A-DevEco\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe'
+# 覆盖安装（严禁 uninstall）
+& $hdc -t 6MFBB25C27205131 install -r apps\arkui-schedule\dist-harmony\arkui-schedule-harmony-debug-signed.hap
+& $hdc -t 6MFBB25C27205131 shell "aa start -a EntryAbility -b com.itwill.schedule"
+# 竖屏/横屏往返（需人工把平板转过来后执行）
+& $hdc -t 6MFBB25C27205131 shell "rm -f /data/local/tmp/r.jpeg; snapshot_display -f /data/local/tmp/r.jpeg"
+& $hdc -t 6MFBB25C27205131 file recv /data/local/tmp/r.jpeg docs\images\remote-lan-portrait.jpeg
+# 错误页证据
+& $hdc -t 6MFBB25C27205131 shell "hilog -r"; & $hdc -t 6MFBB25C27205131 shell "hilog -x" | Select-String -Pattern 'ERR_WS_UPGRADE|blank screen|NetworkTransactionTimeout'
+```

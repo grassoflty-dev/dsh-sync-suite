@@ -98,8 +98,10 @@ function portField(): RemoteModeField {
   const field: RemoteModeField = {
     key: KEY_PORT,
     label: '端口',
-    placeholder: '0',
-    hint: '0 = 跟 DSH 同端口'
+    placeholder: '3080',
+    // 端口在 lan/ipv6/tailscale 下是必填（App 拿不到电脑上的 DSH 端口），所以这里不能再说
+    // 「0 = 跟 DSH 同端口」——真机验收时用户看到那句话会留空，然后按钮变灰（2026-11-17 实测）。
+    hint: '电脑上 DSH 设置 → 远程访问 里显示的那个端口（如 3080）'
   };
   return field;
 }
