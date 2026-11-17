@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 日程数据模型（纯类型，无运行时依赖）。
  *
  * 契约来源：`docs/DATA-CONTRACT.md` §3、`docs/CONTRACT.md` §3.2。
@@ -81,10 +81,54 @@ export interface RegionBox {
 }
 
 /**
- * 复制一条日程记录。
+ * 深拷贝一个 JSON 值：对象/数组逐层新建（不与入参共享引用），标量原样返回。
+ *
+ * 附件子字段未来可能出现嵌套结构（如标注列表），所以按结构递归复制，
+ * 而不是只把已知的几个标量字段抄一遍——漏一个子字段就是一次静默丢数据。
+ */
+function deepCopyJson(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const list: unknown[] = [];
+    for (let index = 0; index < value.length; index++) {
+      list.push(deepCopyJson(value[index]));
+    }
+    return list;
+  }
+  const source = value as Record<string, unknown>;
+  const copy: Record<string, unknown> = {};
+  const keys = Object.keys(source);
+  for (let index = 0; index < keys.length; index++) {
+    const key = keys[index];
+    copy[key] = deepCopyJson(source[key]);
+  }
+  return copy;
+}
+
+/**
+ * 复制附件数组：**新数组 + 每条附件都是新对象**，子字段一个不漏
+ * （`sha256`/`name`/`pageIndex`/`archive`/`entry` 以及未来新增的子字段）。
+ *
+ * 只做浅拷贝（`slice()`）会让「改 clone 的附件」波及原记录；只抄 3 个已知字段会丢掉
+ * `archive`/`entry`（zip 归属与条目名），读侧随即把 zip 附件降级成散图。
+ */
+function cloneAttachments(items: Attachment[]): Attachment[] {
+  const copy: Attachment[] = [];
+  for (let index = 0; index < items.length; index++) {
+    copy.push(deepCopyJson(items[index]) as Attachment);
+  }
+  return copy;
+}
+
+/**
+ * 复制一条日程记录（**深拷贝**：`attachments` 是新数组、每条附件是新对象，与原记录不共享引用）。
  *
  * ArkTS 不支持对象展开（`arkts-no-spread`），因此「基于旧记录改几个字段再追加一行」
- * 必须逐字段复制。这里显式列出全部字段：新增字段时编译器会强制补全，避免漏拷贝。
+ * 必须逐字段复制。这里显式列出 `ScheduleRecord` 的**全部字段**（含 `pageObjects` 等所有可选字段）：
+ * 漏一个就会在「勾完成 / 改正文 / 软删除」这类 clone-then-append 场景里静默丢数据
+ * —— JSONL 只追加，旧版本会被 `foldById` 折叠掉，丢了就找不回来。
  *
  * 未知字段（历史日志里已废弃的扩展字段）由 `model/jsonl` 原样透传：读路径只校验已知字段，
  * 多出来的键既不报错也不丢弃。因此模型层不需要为已删除的功能保留任何字段。
@@ -103,7 +147,11 @@ export function cloneRecord(source: ScheduleRecord): ScheduleRecord {
     copy.ocr_text = source.ocr_text;
   }
   if (source.attachments !== undefined) {
-    copy.attachments = source.attachments;
+    copy.attachments = cloneAttachments(source.attachments);
+  }
+  // 手写板插入的对象层（v2 按页文档 JSON）：漏这一行 = 勾一次完成就永久丢图片/表格/框
+  if (source.pageObjects !== undefined) {
+    copy.pageObjects = source.pageObjects;
   }
   if (source.ai_structured !== undefined) {
     copy.ai_structured = source.ai_structured;

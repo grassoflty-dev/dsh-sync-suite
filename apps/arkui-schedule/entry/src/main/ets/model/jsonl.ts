@@ -4,7 +4,7 @@
  * 契约：`docs/DATA-CONTRACT.md` §3 —— 一行一个 JSON 对象，**只追加，绝不重写历史行**；
  * 读多设备文件后 `parseJsonl` + `foldById` 折叠，同 id 以较晚记录覆盖。
  */
-import type { ScheduleRecord } from './types';
+import type { Attachment, ScheduleRecord } from './types';
 
 /** 附件字段的形状校验结果。 */
 function isAttachmentLike(value: unknown): boolean {
@@ -80,6 +80,37 @@ function describeRecordProblem(value: unknown): string | null {
 }
 
 /**
+ * 规范化一个附件：**已知字段按固定顺序写出，未知子字段原样透传**（排在已知字段之后）。
+ *
+ * 2026-11 起附件是 `{sha256,name,pageIndex,archive,entry}`：`archive` + `entry` 决定
+ * `attachmentStore` 走「按天 zip 解压」，缺了就被当成旧散图引用（`attachments/<name>`）→ 取图失败。
+ * 所以这里不能再压成 3 个字段；`archive`/`entry` **只在存在时写出**，旧数据不会凭空长出新键。
+ *
+ * 校验仍由 `isAttachmentLike` 负责（坏 `sha256`/缺 `name`/非法 `pageIndex` 照旧拒绝），
+ * 本函数只保证「写出去的行能原样读回来」，不放宽任何既有规则。
+ */
+function normalizeAttachment(item: Attachment): Attachment {
+  const source = item as unknown as Record<string, unknown>;
+  const normalized: Record<string, unknown> = {
+    sha256: item.sha256,
+    name: item.name,
+    pageIndex: item.pageIndex
+  };
+  if (item.archive !== undefined) {
+    normalized.archive = item.archive;
+  }
+  if (item.entry !== undefined) {
+    normalized.entry = item.entry;
+  }
+  for (const key of Object.keys(source)) {
+    if (!(key in normalized)) {
+      normalized[key] = source[key];
+    }
+  }
+  return normalized as unknown as Attachment;
+}
+
+/**
  * 按 JSONL 契约的字段顺序重建对象（保证同一记录永远产出同一行文本，便于 diff 与去重）。
  * 未知扩展字段保留在末尾，不丢失未来新增字段。
  */
@@ -97,11 +128,16 @@ function normalizeRecord(record: ScheduleRecord): ScheduleRecord {
   normalized.author = record.author;
   normalized.done = record.done;
   if (record.attachments !== undefined) {
-    normalized.attachments = record.attachments.map((item) => ({
-      sha256: item.sha256,
-      name: item.name,
-      pageIndex: item.pageIndex
-    }));
+    const attachments: Attachment[] = [];
+    for (let i = 0; i < record.attachments.length; i++) {
+      attachments.push(normalizeAttachment(record.attachments[i]));
+    }
+    normalized.attachments = attachments;
+  }
+  // 手写板插入的对象层（v2 按页文档 JSON）：显式写出，保证字段位置固定
+  // （走末尾的「未知字段透传」会把位置交给入参的键序，同一语义的两条记录可能产出不同的行）
+  if (record.pageObjects !== undefined) {
+    normalized.pageObjects = record.pageObjects;
   }
   if (record.ai_structured !== undefined) {
     normalized.ai_structured = record.ai_structured;
