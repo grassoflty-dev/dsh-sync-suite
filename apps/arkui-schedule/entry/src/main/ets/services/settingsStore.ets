@@ -105,6 +105,14 @@ export interface ScheduleSettings {
   remoteIpv6Address: string;
   /** 手动方式的完整地址（可含 `?token=`，只存本机；空串 = 未填）。 */
   remoteManualUrl: string;
+  /**
+   * 「访问令牌（可选）」：`lan` / `ipv6` / `tailscale` 下拼进地址的令牌
+   * （与插件侧 `RemoteSettings.token` 同名同义；空串 = 未设置，地址不带令牌参数）。
+   *
+   * 它是 secret：只存本机 preferences，不进同步载荷、不打印、不回填到输入框
+   * （设置页只用 `maskRemoteToken` 显示"已保存"）。
+   */
+  remoteToken: string;
   /** 上次同步成功的时刻（ISO 8601，空串表示从未同步）。仅用于设置页展示。 */
   lastSyncAt: string;
   /** 上次同步失败的**分级后中文文案**（空串表示上次没有失败）。仅用于设置页展示。 */
@@ -150,6 +158,7 @@ export interface SettingsPatch {
   remoteCloudflareHost?: string;
   remoteIpv6Address?: string;
   remoteManualUrl?: string;
+  remoteToken?: string;
 }
 
 /** 备用源配置（`deepseek` 服务层直接消费；`configured=false` 表示不启用）。 */
@@ -191,6 +200,7 @@ const KEY_REMOTE_TAILSCALE_HOST: string = 'remoteTailscaleHost';
 const KEY_REMOTE_CLOUDFLARE_HOST: string = 'remoteCloudflareHost';
 const KEY_REMOTE_IPV6_ADDRESS: string = 'remoteIpv6Address';
 const KEY_REMOTE_MANUAL_URL: string = 'remoteManualUrl';
+const KEY_REMOTE_TOKEN: string = 'remoteToken';
 const KEY_LAST_SYNC_AT: string = 'lastSyncAt';
 const KEY_LAST_SYNC_ERROR: string = 'lastSyncError';
 const KEY_LAST_SYNC_ACTION: string = 'lastSyncAction';
@@ -322,6 +332,8 @@ export class SettingsStore {
     const remoteCloudflareHost = readString(await prefs.get(KEY_REMOTE_CLOUDFLARE_HOST, ''), '');
     const remoteIpv6Address = readString(await prefs.get(KEY_REMOTE_IPV6_ADDRESS, ''), '');
     const remoteManualUrl = readString(await prefs.get(KEY_REMOTE_MANUAL_URL, ''), '');
+    // 访问令牌（可选）：旧数据没有这个键 → 空串（= 不带令牌，与升级前行为一致）
+    const remoteToken = readString(await prefs.get(KEY_REMOTE_TOKEN, ''), '');
     const lastSyncAt = readString(await prefs.get(KEY_LAST_SYNC_AT, ''), '');
     const lastSyncError = readString(await prefs.get(KEY_LAST_SYNC_ERROR, ''), '');
     const lastSyncAction = readString(await prefs.get(KEY_LAST_SYNC_ACTION, ''), '');
@@ -357,6 +369,7 @@ export class SettingsStore {
       remoteCloudflareHost: remoteCloudflareHost.trim(),
       remoteIpv6Address: remoteIpv6Address.trim(),
       remoteManualUrl: remoteManualUrl.trim(),
+      remoteToken: remoteToken.trim(),
       lastSyncAt: lastSyncAt,
       lastSyncError: lastSyncError,
       lastSyncAction: normalizeSyncAction(lastSyncAction)
@@ -519,6 +532,9 @@ export class SettingsStore {
         patch.remoteIpv6Address === undefined ? current.remoteIpv6Address : patch.remoteIpv6Address.trim(),
       remoteManualUrl:
         patch.remoteManualUrl === undefined ? current.remoteManualUrl : patch.remoteManualUrl.trim(),
+      // 访问令牌（可选）：只去首尾空白（粘贴常带换行）；空串 = 明确"清除令牌"，
+      // 所以设置页**不能**拿空输入框直接覆盖——它必须走「没改就沿用」的通道。
+      remoteToken: patch.remoteToken === undefined ? current.remoteToken : patch.remoteToken.trim(),
       lastSyncAt: current.lastSyncAt,
       lastSyncError: current.lastSyncError,
       lastSyncAction: current.lastSyncAction
@@ -551,6 +567,7 @@ export class SettingsStore {
     await prefs.put(KEY_REMOTE_CLOUDFLARE_HOST, next.remoteCloudflareHost);
     await prefs.put(KEY_REMOTE_IPV6_ADDRESS, next.remoteIpv6Address);
     await prefs.put(KEY_REMOTE_MANUAL_URL, next.remoteManualUrl);
+    await prefs.put(KEY_REMOTE_TOKEN, next.remoteToken);
     await prefs.put(KEY_GIT_USERNAME, next.gitUsername);
     await prefs.put(KEY_LAST_SYNC_AT, next.lastSyncAt);
     await prefs.put(KEY_LAST_SYNC_ERROR, next.lastSyncError);
@@ -601,6 +618,7 @@ export class SettingsStore {
       remoteCloudflareHost: current.remoteCloudflareHost,
       remoteIpv6Address: current.remoteIpv6Address,
       remoteManualUrl: current.remoteManualUrl,
+      remoteToken: current.remoteToken,
       lastSyncAt: patch.lastSyncAt === undefined ? current.lastSyncAt : patch.lastSyncAt,
       lastSyncError: patch.lastSyncError === undefined ? current.lastSyncError : patch.lastSyncError,
       lastSyncAction:

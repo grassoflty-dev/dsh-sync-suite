@@ -4,7 +4,7 @@
  * 职责：
  *   - 判/洗 IPv4、IPv6、主机名；把 host 拼成 URL 或 `host:port` 权限部分；
  *   - 按 `mode` + `settings` 产出"能直接打开的一条地址"，失败则给出中文原因；
- *   - token 的打码/脱敏（`maskToken` / `redactToken` / `withToken`）。
+ *   - token 的打码/脱敏（`maskToken` / `redactToken` / `withToken` / `appendAccessToken`）。
  *
  * 不变式：
  *   1. 失败一律 `{ ok:false, url:'', reason:'…中文…' }`，**绝不**返回半成品地址：
@@ -357,6 +357,32 @@ export function withToken(url, token) {
         return url;
     parsed.searchParams.set('token', trimmed);
     return parsed.toString();
+}
+/**
+ * 「访问令牌（可选）」的出口拼接：把用户粘贴/自动生成的令牌拼成 `?token=…`。
+ *
+ * 与 `withToken` 的分工：`withToken` 是"能加就加，地址不合法就原样返回"的宽容版
+ * （渲染期容错）；本函数是**显式出口**——非空令牌却拼不进去时返回空串，让调用方
+ * fail-closed（宁可报错，也不给一条"看起来带令牌、实际没带"的链接）。
+ *
+ * - 空令牌（含纯空白）→ 原样返回 url（不生成 `?token=` 这种假配置）；
+ * - 非空令牌 → 交给 `withToken`（幂等、只留一个 `token` 参数、保留其它参数与 fragment）；
+ * - 非法 / 非 http(s) 绝对地址 → 空串。
+ */
+export function appendAccessToken(url, token) {
+    const trimmed = typeof token === 'string' ? token.trim() : '';
+    if (trimmed === '')
+        return url;
+    let parsed;
+    try {
+        parsed = new URL(url);
+    }
+    catch {
+        return '';
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+        return '';
+    return withToken(url, trimmed);
 }
 /** 打码展示：前 4 + `…` + 后 4；太短的 token 打码后信息量等于明文，直接 `***`。 */
 export function maskToken(token) {

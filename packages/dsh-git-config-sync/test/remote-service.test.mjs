@@ -360,3 +360,81 @@ test('manualUrl 自带 token 时，getState 里的 url 已脱敏（评审 M3 的
   assert.match(state.status.urls[0].url, /token=\*\*\*/)
   await service.dispose()
 })
+
+/* --------------------------------------------------- 「访问令牌（可选）」 */
+
+/** 用户粘贴的令牌（与自动令牌不同，便于区分出口）。 */
+const PASTED = 'PastedToken-0123456789'
+
+test('saveSettings：token 落盘，getState 只给 tokenSet/tokenMasked，响应 JSON 无明文', async (t) => {
+  const home = await makeHome(t)
+  const service = createRemoteService({ homeDir: home, webServer: { port: 3080 } })
+
+  const saved = await service.saveSettings({ mode: 'lan', lanAddress: LAN, token: PASTED })
+  assert.equal(saved.settings.tokenSet, true)
+  assert.ok(saved.settings.tokenMasked.length > 0, 'tokenMasked 必须有值')
+  assert.equal('token' in saved.settings, false, '设置视图里不允许出现 token 键')
+  assert.equal(JSON.stringify(saved).includes(PASTED), false, 'saveSettings 响应里不许有令牌明文')
+
+  const state = await service.getState()
+  assert.equal(state.settings.tokenSet, true)
+  assert.equal(state.settings.tokenMasked, saved.settings.tokenMasked, '两次读到的打码串必须一致')
+  assert.ok(!state.settings.tokenMasked.includes(PASTED), '打码串不得含明文')
+  assert.equal(JSON.stringify(state).includes(PASTED), false, 'getState 响应里不许有令牌明文')
+
+  const raw = JSON.parse(await readFile(path.join(home, '.dsh', 'git-config-sync', 'remote.json'), 'utf8'))
+  assert.equal(raw.token, PASTED, '令牌必须落盘（重启后仍然生效）')
+  await service.dispose()
+})
+
+test('showLink：优先用粘贴的令牌；清除后回落到自动令牌', async (t) => {
+  const home = await makeHome(t)
+  const auto = 'K'.repeat(43)
+  const service = createRemoteService({
+    homeDir: home,
+    webServer: { port: 3080 },
+    generateToken: () => auto,
+    encodeQr: () => ({ size: 1, modules: [[true]] }),
+  })
+  await service.rotateToken()
+  await service.saveSettings({ mode: 'lan', lanAddress: LAN, port: 3080, token: PASTED })
+
+  const pastedLink = await service.showLink()
+  assert.equal(pastedLink.url, `http://${LAN}:3080/?token=${PASTED}`, '链接里必须是粘贴的那个令牌')
+  assert.equal(pastedLink.url.includes(auto), false, '有粘贴令牌时不得混入自动令牌')
+
+  // 手动方式也能用上粘贴的令牌（其余方式不展示该字段，但归一后仍按同一出口规则走）
+  await service.saveSettings({ token: '' })
+  const stateAfterClear = await service.getState()
+  assert.equal(stateAfterClear.settings.tokenSet, false, '清除后 tokenSet 必须回到 false')
+  assert.equal(stateAfterClear.settings.tokenMasked, '')
+
+  const fallbackLink = await service.showLink()
+  assert.match(fallbackLink.url, /token=K{43}/, '清除粘贴令牌后回落到自动令牌')
+  await service.dispose()
+})
+
+test('showLink：粘贴令牌与自动令牌都为空 → 抛中文「还没有访问令牌，请先生成」', async (t) => {
+  const home = await makeHome(t)
+  const service = createRemoteService({ homeDir: home, webServer: { port: 3080 } })
+  await service.saveSettings({ mode: 'lan', lanAddress: LAN, port: 3080, token: '' })
+  await assert.rejects(() => service.showLink(), /还没有访问令牌，请先生成/)
+  await service.dispose()
+})
+
+test('令牌非法时：错误详情只有长度，message 里没有令牌', async (t) => {
+  const home = await makeHome(t)
+  const service = createRemoteService({ homeDir: home, webServer: { port: 3080 } })
+  const bad = 'bad!token!with!symbols'
+  const error = await service.saveSettings({ token: bad }).then(
+    () => assert.fail('非法令牌必须被拒绝'),
+    (e) => e,
+  )
+  assert.equal(error.code, 'E_VALIDATION')
+  assert.equal(error.details.field, 'token')
+  assert.equal(error.details.length, bad.length)
+  assert.deepEqual(Object.keys(error.details).sort(), ['field', 'length'])
+  assert.equal(JSON.stringify(error.details).includes(bad), false)
+  assert.equal(error.message.includes(bad), false)
+  await service.dispose()
+})

@@ -26,6 +26,7 @@ import {
   normalizeRemoteSettings,
 } from '../dist/remote/accessMode.js'
 import {
+  appendAccessToken,
   buildHttpUrl,
   buildHttpsUrl,
   formatAuthority,
@@ -174,7 +175,7 @@ test('findMode 只认枚举里的精确字符串', () => {
   assert.equal(findMode({ mode: 'lan' }), null)
 })
 
-test('默认设置：关闭、lan、端口跟随 DSH、地址全空', () => {
+test('默认设置：关闭、lan、端口跟随 DSH、地址与令牌全空', () => {
   assert.deepEqual(defaultRemoteSettings(), {
     enabled: false,
     mode: 'lan',
@@ -184,6 +185,7 @@ test('默认设置：关闭、lan、端口跟随 DSH、地址全空', () => {
     cloudflareHost: '',
     ipv6Address: '',
     manualUrl: '',
+    token: '',
   })
 })
 
@@ -275,7 +277,96 @@ test('设置归一：manualUrl 里的 token 在 details 里已打码', () => {
   assert.ok(JSON.stringify(error.details).includes('***'))
 })
 
-test('missingRequiredFields 只报真正空的字符串字段（端口恒有值）', () => {
+test('「访问令牌（可选）」只出现在 lan / ipv6 / tailscale，且排在端口之后', () => {
+  const withTokenField = ['lan', 'ipv6', 'tailscale']
+  for (const mode of REMOTE_MODE_ORDER) {
+    const keys = REMOTE_MODES[mode].fields.map((field) => field.key)
+    const tokenFields = REMOTE_MODES[mode].fields.filter((field) => field.key === 'token')
+    if (!withTokenField.includes(mode)) {
+      assert.equal(tokenFields.length, 0, `${mode}: 不该有 token 字段（令牌由域名/完整地址自带）`)
+      continue
+    }
+    assert.equal(tokenFields.length, 1, `${mode}: 必须恰好一个 token 字段`)
+    assert.equal(keys[keys.length - 1], 'token', `${mode}: token 字段必须排在端口之后（UI 顺序）`)
+    assert.deepEqual(tokenFields[0], {
+      key: 'token',
+      label: '访问令牌（可选）',
+      placeholder: '粘贴电脑上 DSH 地址里的 token',
+      hint: '留空则不带令牌；填了会在链接里追加 ?token=…',
+      required: false,
+    })
+    assert.equal(
+      REMOTE_MODES[mode].fields.filter((field) => field.required).map((field) => field.key).includes('token'),
+      false,
+      `${mode}: 令牌是可选项，不能进必填列表`,
+    )
+  }
+})
+
+test('设置归一：token 空/合法/含空格/非法字符/过短/超长，details 只给长度', () => {
+  const base = baseSettings()
+  const token = 'AbC123+/=_-xyz'
+
+  assert.equal(normalizeRemoteSettings({ token }, base).token, token, '合法令牌原样保存')
+  assert.equal(normalizeRemoteSettings({ token: `  ${token}  ` }, base).token, token, '先 trim 再保存')
+  assert.equal(normalizeRemoteSettings({ token: '' }, base).token, '', '显式空串 = 清空（不追加参数）')
+  assert.equal(normalizeRemoteSettings({ token: '    ' }, base).token, '', '纯空白等同清空')
+  assert.equal(
+    normalizeRemoteSettings({}, baseSettings({ token })).token,
+    token,
+    '缺省（undefined）必须沿用 previous',
+  )
+  assert.equal(normalizeRemoteSettings({ token: 'a'.repeat(8) }, base).token.length, 8, '8 位是下界（含）')
+  assert.equal(normalizeRemoteSettings({ token: 'a'.repeat(512) }, base).token.length, 512, '512 位是上界（含）')
+
+  const bad = ['has space token', 'bad!char', 'short7', 'a'.repeat(513), '中文令牌中文令牌']
+  const message = '访问令牌只允许字母数字与 + / = _ -，长度 8–512'
+  for (const value of bad) {
+    const error = captureError(() => normalizeRemoteSettings({ token: value }, baseSettings()))
+    assert.equal(error.name, 'SyncError')
+    assert.equal(error.code, 'E_VALIDATION')
+    assert.equal(error.message, message)
+    // details 的结构必须是固定的 field + length —— 多一个键都算泄露风险。
+    assert.deepEqual(Object.keys(error.details).sort(), ['field', 'length'])
+    assert.deepEqual(error.details, { field: 'token', length: value.trim().length })
+
+    const trimmed = value.trim()
+    assert.equal(error.message.includes(trimmed), false, 'message 里不得出现令牌值')
+    assert.equal(JSON.stringify(error.details).includes(trimmed), false, 'details 里不得出现令牌值')
+    // 除 message 与 details 之外没有别的可见文本（凭据不会藏在第三处）。
+    const visible = error.message + JSON.stringify(error.details)
+    assert.equal(visible, message + JSON.stringify({ field: 'token', length: trimmed.length }))
+  }
+
+  // 非字符串：也要拒绝，且 details 里同样不给值
+  const notString = captureError(() => normalizeRemoteSettings({ token: 12345 }, baseSettings()))
+  assert.equal(notString.code, 'E_VALIDATION')
+  assert.deepEqual(notString.details, { field: 'token' })
+  assert.equal(String(notString.details.value), 'undefined')
+})
+
+test('appendAccessToken：空令牌原样返回、非空拼 ?token=、非法地址空串', () => {
+  const url = 'http://192.168.1.6:40596/'
+  assert.equal(appendAccessToken(url, ''), url, '空令牌不追加参数')
+  assert.equal(appendAccessToken(url, '   '), url, '纯空白同理')
+  assert.equal(appendAccessToken('http://x/?a=1#f', 'tok'), 'http://x/?a=1&token=tok#f')
+  assert.equal(appendAccessToken('https://example.com/', 'a+b/c='), 'https://example.com/?token=a%2Bb%2Fc%3D')
+  assert.equal(
+    appendAccessToken(url, 'abc+def/123'),
+    withToken(url, 'abc+def/123'),
+    '非空时行为必须与 withToken 一致',
+  )
+
+  const once = appendAccessToken(url, 'dup')
+  assert.equal(appendAccessToken(once, 'dup'), once, '同一令牌重复追加必须幂等')
+  assert.equal((appendAccessToken('http://x/?token=old', 'new').match(/token=/g) || []).length, 1)
+
+  assert.equal(appendAccessToken('不是地址', 'tok'), '', '非法 URL 返回空串（fail-closed）')
+  assert.equal(appendAccessToken('ftp://example.com/', 'tok'), '', '非 http(s) 返回空串')
+  assert.equal(appendAccessToken('', 'tok'), '')
+})
+
+test('missingRequiredFields 只报真正空的字符串字段（端口与令牌恒不算缺失）', () => {
   assert.deepEqual(missingRequiredFields('lan', defaultRemoteSettings()), ['lanAddress'])
   assert.deepEqual(missingRequiredFields('tailscale', defaultRemoteSettings()), ['tailscaleHost'])
   assert.deepEqual(missingRequiredFields('ipv6', defaultRemoteSettings()), ['ipv6Address'])

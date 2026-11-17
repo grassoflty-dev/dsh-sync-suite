@@ -183,6 +183,7 @@ VPN，beta），或自己构建（Go 核心能在鸿蒙上加载，已有人验�
 | `cloudflareHost` | string | `''` | cloudflare | 隧道域名 | 主机名，无协议、无路径、无端口 | `remoteCloudflareHost` |
 | `ipv6Address` | string | `''` | ipv6 | IPv6 地址 | 合法 IPv6 字面量；**不接受方括号** | `remoteIpv6Address` |
 | `manualUrl` | string | `''` | manual | 完整地址 | 只接受 `http(s)://`；可含 token（错误细节里打码） | `remoteManualUrl` |
+| `token` | string | `''` | lan / ipv6 / tailscale | 访问令牌（可选） | `^[A-Za-z0-9+/=_-]{8,512}$`（空串 = 不追加 `?token=`）；错误 details 只给长度，绝不回显令牌 | `remoteToken` |
 
 补充约定：
 - 插件侧 `port: 0` **不是**"随机端口"，而是"服务层解析 `ctx.webServer.port` 后传具体值"；
@@ -190,8 +191,10 @@ VPN，beta），或自己构建（Go 核心能在鸿蒙上加载，已有人验�
   打开 80，等于给一个注定打不开的地址，所以 `port: 0` 直接给「请先填端口」的失败结论，
   `missingFields` 也会把 `port` 报成缺失（`cloudflare` / `manual` 不看端口）；
 - App 侧多一个 `remoteUrl` 键，是「最终打开的地址」缓存（历史字段，保留）；
-- 令牌**不在**上表里：它不属于配置，存在 `~/.dsh/git-config-sync/remote-token.json`（0600），
-  只经二维码 / 「显示链接」出口给本机用户。
+- **自动生成的**令牌**不在**上表里：它不属于配置，存在 `~/.dsh/git-config-sync/remote-token.json`（0600），
+  只经二维码 / 「显示链接」出口给本机用户。上表的 `token` 是用户在 `lan` / `ipv6` / `tailscale`
+  下**手填**的可选令牌（与自动令牌同一出口规则）；它**不进** `remoteGetState`，状态里只给
+  `tokenSet` / `tokenMasked`。
 
 ## 4. 连通性自检（`probe`）
 
@@ -239,6 +242,10 @@ VPN，beta），或自己构建（Go 核心能在鸿蒙上加载，已有人验�
    同机其它进程不该顺手拿到 owner 权限）。
 6. **明文 HTTP**：局域网/隧道内都是 http（Cloudflare 除外，它给 https）。公网暴露（IPv6/隧道）
    **必须**优先选带 TLS 的方案；纯 http 只用于可信内网。
+7. **用户粘贴的令牌与自动生成的令牌同一出口规则**：`lan` / `ipv6` / `tailscale` 的「访问令牌（可选）」
+   与 `remote-token.json` 里的自动令牌走同一条路径——只拼进 `remoteShowLink` 的地址与二维码，
+   **永不**进日志、错误消息、`remoteGetState`（状态里只有 `tokenSet` / `tokenMasked`）、
+   也不渲染进 DOM（输入框是 `password`，初始值恒为空串）；两者都空时直接拒绝生成链接。
 
 ## 6. 未验证清单（每条都给了怎么验）
 

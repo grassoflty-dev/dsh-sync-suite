@@ -129,3 +129,37 @@ test('联调：uu 方式请求链接时 fail-closed（给原因而不是假地�
   assert.equal(link.error.code, 'E_INTERNAL')
   assert.match(link.error.message, /画面串流|不能当隧道|不产生端口/)
 })
+
+test('联调：「访问令牌（可选）」落盘 → getState 只有 tokenSet/tokenMasked，showLink 用粘贴的令牌', async (t) => {
+  const { service, mod } = await makeRpc(t)
+  const PASTED = 'PastedToken-int-0123456789'
+
+  const saved = await service.handleRpc({
+    action: 'remoteSaveSettings',
+    settings: { enabled: false, mode: 'lan', lanAddress: '192.168.1.6', port: 3080, token: PASTED },
+  })
+  assert.equal(saved.ok, true, JSON.stringify(saved))
+  assert.equal(saved.data.settings.tokenSet, true)
+  assert.ok(saved.data.settings.tokenMasked.length > 0)
+  assert.equal('token' in saved.data.settings, false, '设置视图里不允许出现 token 键')
+  assert.equal(JSON.stringify(saved).includes(PASTED), false, 'saveSettings 响应里不许有令牌明文')
+
+  const state = await service.handleRpc({ action: 'remoteGetState' })
+  assert.equal(state.data.settings.tokenSet, true)
+  assert.equal(JSON.stringify(state).includes(PASTED), false, 'getState 响应里不许有令牌明文')
+
+  const link = await service.handleRpc({ action: 'remoteShowLink' })
+  assert.equal(link.ok, true, JSON.stringify(link))
+  assert.equal(link.data.url, 'http://192.168.1.6:3080/?token=' + PASTED, '链接里必须是粘贴的令牌')
+  assert.ok(link.data.qr.size >= 21, '二维码仍然照常生成')
+
+  // 清除粘贴的令牌 → 回落到自动令牌（首次装配已落盘）
+  await service.handleRpc({ action: 'remoteSaveSettings', settings: { token: '' } })
+  const cleared = await service.handleRpc({ action: 'remoteGetState' })
+  assert.equal(cleared.data.settings.tokenSet, false)
+  const auto = JSON.parse(await readFile(mod.paths.tokenFile, 'utf8')).token
+  const fallback = await service.handleRpc({ action: 'remoteShowLink' })
+  assert.equal(fallback.ok, true, JSON.stringify(fallback))
+  assert.ok(fallback.data.url.includes(auto), '清除后必须回落到自动生成的令牌')
+  assert.equal(fallback.data.url.includes(PASTED), false, '清除后旧令牌不得再出现')
+})

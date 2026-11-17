@@ -45,16 +45,20 @@ const {
   REMOTE_MODE_TAILSCALE,
   REMOTE_MODES,
   REMOTE_MODE_UU,
+  REMOTE_TOKEN_INVALID_REASON,
+  appendRemoteToken,
   buildRemoteAccessUrl,
   defaultRemoteAccessConfig,
   findRemoteMode,
   listRemoteModes,
+  maskRemoteToken,
   missingFields,
   normalizeRemoteAccessConfig,
   normalizeRemoteMode,
   normalizeRemotePort,
   remoteModeUsable,
-  serializeRemoteAccessConfig
+  serializeRemoteAccessConfig,
+  validateRemoteToken
 } = await import('../.build/model/remoteAccess.js');
 
 /** 造一份配置（只覆盖关心的字段，其余保持默认）。 */
@@ -138,9 +142,10 @@ describe('方式元数据表：六种方式、可用性、字段键名', () => {
 
   test('方式字段与 §3 表逐字对齐（键名 + 顺序 + 标签）', () => {
     const keysOf = (mode) => REMOTE_MODES[mode].fields.map((field) => field.key);
-    assert.deepEqual(keysOf(REMOTE_MODE_LAN), ['lanAddress', 'port']);
-    assert.deepEqual(keysOf(REMOTE_MODE_IPV6), ['ipv6Address', 'port']);
-    assert.deepEqual(keysOf(REMOTE_MODE_TAILSCALE), ['tailscaleHost', 'port']);
+    // 「访问令牌（可选）」只出现在三种要拼地址的方式里，位置固定在端口之后
+    assert.deepEqual(keysOf(REMOTE_MODE_LAN), ['lanAddress', 'port', 'token']);
+    assert.deepEqual(keysOf(REMOTE_MODE_IPV6), ['ipv6Address', 'port', 'token']);
+    assert.deepEqual(keysOf(REMOTE_MODE_TAILSCALE), ['tailscaleHost', 'port', 'token']);
     assert.deepEqual(keysOf(REMOTE_MODE_CLOUDFLARE), ['cloudflareHost']);
     assert.deepEqual(keysOf(REMOTE_MODE_MANUAL), ['manualUrl']);
     const labels = {};
@@ -155,6 +160,7 @@ describe('方式元数据表：六种方式、可用性、字段键名', () => {
     assert.equal(labels.ipv6Address, 'IPv6 地址');
     assert.equal(labels.manualUrl, '完整地址');
     assert.equal(labels.port, '端口');
+    assert.equal(labels.token, '访问令牌（可选）');
     assert.equal(REMOTE_MODES[REMOTE_MODE_LAN].label, '局域网直连');
     assert.equal(REMOTE_MODES[REMOTE_MODE_UU].label, '网易 UU 远程');
   });
@@ -296,6 +302,7 @@ describe('配置归一：坏 JSON / 未知 mode / 负端口一律回落，不抛
     assert.equal(config.cloudflareHost, '');
     assert.equal(config.ipv6Address, '');
     assert.equal(config.manualUrl, '');
+    assert.equal(config.token, '', '访问令牌默认空串 = 不带令牌');
   });
 
   test('坏 JSON / 空串 / 数组 / 标量 / null 都回落默认值（不抛）', () => {
@@ -347,7 +354,9 @@ describe('配置归一：坏 JSON / 未知 mode / 负端口一律回落，不抛
       mode: 'ipv6',
       ipv6Address: '2409:8a20:4cad:ba20::763c',
       port: 3080,
-      lanAddress: ' 192.168.1.6 '
+      lanAddress: ' 192.168.1.6 ',
+      // 令牌也走同一条归一（trim）：粘贴时常带换行/空格
+      token: '  AbCdEf012345  '
     });
     const once = serializeRemoteAccessConfig(config);
     const twice = serializeRemoteAccessConfig(normalizeRemoteAccessConfig(once));
@@ -361,7 +370,8 @@ describe('配置归一：坏 JSON / 未知 mode / 负端口一律回落，不抛
       tailscaleHost: '',
       cloudflareHost: '',
       ipv6Address: '2409:8a20:4cad:ba20::763c',
-      manualUrl: ''
+      manualUrl: '',
+      token: 'AbCdEf012345'
     });
     // 反序列化后再序列化，内容等价（键顺序固定）
     assert.deepEqual(JSON.parse(serializeRemoteAccessConfig(normalizeRemoteAccessConfig(once))), JSON.parse(once));
@@ -398,5 +408,184 @@ describe('missingFields：报必填字段；端口在 lan/ipv6/tailscale 下也�
 
   test('只填空格不算填（trim 后为空）', () => {
     assert.deepEqual(missingFields('lan', configOf({ mode: 'lan', lanAddress: '   ' })), ['lanAddress']);
+  });
+
+  test('访问令牌是可选字段：空 / 非空都不算「缺字段」', () => {
+    const filled = configOf({ mode: 'lan', lanAddress: '192.168.1.6', port: 3080 });
+    assert.deepEqual(missingFields('lan', filled), [], '没填令牌不该报缺字段');
+    assert.deepEqual(missingFields('lan', { ...filled, token: 'AbCdEf012345' }), [], '填了令牌同样不缺');
+    assert.deepEqual(missingFields('ipv6', configOf({ mode: 'ipv6', ipv6Address: '::1' })), [], 'ipv6 填齐地址与端口即不缺');
+    assert.deepEqual(
+      missingFields('tailscale', configOf({ mode: 'tailscale', tailscaleHost: '100.101.102.103' })),
+      [],
+      'tailscale 填齐地址与端口即不缺'
+    );
+  });
+});
+
+// 访问令牌（可选）与插件侧 `RemoteSettings.token` 是同一套语义：字段名 `token`、只在
+// lan / ipv6 / tailscale 的字段表里、空串 = 不加参数、非空 = `?token=<encodeURIComponent(值)>`。
+// 这里断言的重点除了"能拼对"，还有**失败原因里不能出现令牌值**（secret 纪律）。
+describe('访问令牌（可选）：字段表、校验、拼装、打码', () => {
+  const TOKEN = 'AbCdEf0123456789';
+
+  test('三种方式有 token 字段（端口之后），cloudflare / manual / uu 没有', () => {
+    const hasToken = (mode) => REMOTE_MODES[mode].fields.some((field) => field.key === 'token');
+    for (const mode of [REMOTE_MODE_LAN, REMOTE_MODE_IPV6, REMOTE_MODE_TAILSCALE]) {
+      assert.equal(hasToken(mode), true, `${mode} 必须有「访问令牌（可选）」字段`);
+      const keys = REMOTE_MODES[mode].fields.map((field) => field.key);
+      assert.equal(keys.indexOf('token'), keys.indexOf('port') + 1, `${mode} 的 token 必须紧跟端口（端口之后）`);
+      const field = REMOTE_MODES[mode].fields.find((item) => item.key === 'token');
+      assert.equal(field.label, '访问令牌（可选）');
+      assert.equal(field.placeholder, '粘贴电脑上 DSH 地址里的 token');
+      assert.equal(field.hint, '留空则不带令牌；填了会在链接里追加 ?token=…');
+    }
+    for (const mode of [REMOTE_MODE_CLOUDFLARE, REMOTE_MODE_MANUAL, REMOTE_MODE_UU]) {
+      assert.equal(hasToken(mode), false, `${mode} 不该有 token 字段`);
+    }
+  });
+
+  test('validateRemoteToken：空 / 空白合法；合法字符集与长度通过；其余给中文原因', () => {
+    assert.equal(validateRemoteToken(''), '', '空串 = 不填令牌，合法');
+    assert.equal(validateRemoteToken('   '), '', '只有空白也当没填');
+    assert.equal(validateRemoteToken(TOKEN), '');
+    assert.equal(validateRemoteToken('  ' + TOKEN + '\n'), '', '粘贴带换行/空格要 trim 后再判');
+    assert.equal(validateRemoteToken('abc+def/ghi='), '', 'base64 字符集合法');
+    assert.equal(validateRemoteToken('abc-def_ghi9'), '', 'base64url 字符集合法');
+    assert.equal(validateRemoteToken('a'.repeat(512)), '', '512 位是上限');
+    for (const bad of ['abc123', 'a'.repeat(513), 'abc def ghi', 'token&with=amp', '中文令牌abcdefgh', 'abc\u3000defgh']) {
+      assert.equal(validateRemoteToken(bad), REMOTE_TOKEN_INVALID_REASON, `应判非法：${JSON.stringify(bad)}`);
+    }
+    assert.equal(
+      REMOTE_TOKEN_INVALID_REASON,
+      '访问令牌只允许字母数字与 + / = _ -，长度 8–512',
+      '原因文案与插件侧逐字一致'
+    );
+  });
+
+  test('空令牌：地址原样，不追加任何参数', () => {
+    assertUrl(configOf({ mode: 'lan', lanAddress: '192.168.1.6', port: 3080, token: '' }), 'http://192.168.1.6:3080/');
+    assertUrl(
+      configOf({ mode: 'ipv6', ipv6Address: '2409:8a20:4cad:ba20:1234:5678:9abc:def0', port: 3080, token: '  ' }),
+      'http://[2409:8a20:4cad:ba20:1234:5678:9abc:def0]:3080/'
+    );
+    assertUrl(
+      configOf({ mode: 'tailscale', tailscaleHost: '100.101.102.103', port: 41641, token: '' }),
+      'http://100.101.102.103:41641/'
+    );
+  });
+
+  test('合法令牌：三种方式的地址后追加 ?token=<值>', () => {
+    assertUrl(
+      configOf({ mode: 'lan', lanAddress: '192.168.1.6', port: 3080, token: TOKEN }),
+      `http://192.168.1.6:3080/?token=${TOKEN}`
+    );
+    assertUrl(
+      configOf({ mode: 'ipv6', ipv6Address: '2409:8a20::1', port: 3080, token: TOKEN }),
+      `http://[2409:8a20::1]:3080/?token=${TOKEN}`
+    );
+    assertUrl(
+      configOf({ mode: 'tailscale', tailscaleHost: '100.101.102.103', port: 41641, token: TOKEN }),
+      `http://100.101.102.103:41641/?token=${TOKEN}`
+    );
+  });
+
+  test('令牌要被 encodeURIComponent（`+` / `/` / `=` 不能原样拼进 query）', () => {
+    const built = buildRemoteAccessUrl(
+      configOf({ mode: 'lan', lanAddress: '192.168.1.6', port: 3080, token: 'abc+/def==' })
+    );
+    assert.equal(built.ok, true, built.reason);
+    assert.equal(built.url, 'http://192.168.1.6:3080/?token=abc%2B%2Fdef%3D%3D');
+    assert.equal(built.url.includes('?token=abc+/def=='), false, '特殊字符必须编码，不能原样出现在 query 里');
+  });
+
+  test('appendRemoteToken：已有 query 用 &，且令牌落在 fragment 之前', () => {
+    assert.equal(
+      appendRemoteToken('http://192.168.1.6:3080/', TOKEN),
+      `http://192.168.1.6:3080/?token=${TOKEN}`
+    );
+    assert.equal(
+      appendRemoteToken('http://192.168.1.6:3080/?x=1', TOKEN),
+      `http://192.168.1.6:3080/?x=1&token=${TOKEN}`,
+      '已有 query 必须用 & 追加，不能出现两个 ?'
+    );
+    assert.equal(
+      appendRemoteToken('http://192.168.1.6:3080/#/ui', TOKEN),
+      `http://192.168.1.6:3080/?token=${TOKEN}#/ui`,
+      '令牌必须在 # 之前（否则会被当成片段，发不出去）'
+    );
+    assert.equal(
+      appendRemoteToken('http://192.168.1.6:3080/?x=1#/ui', TOKEN),
+      `http://192.168.1.6:3080/?x=1&token=${TOKEN}#/ui`
+    );
+  });
+
+  test('非法令牌 → ok:false + 中文原因，且原因里不带令牌值', () => {
+    for (const bad of ['abc123', 'abc def ghi', 'abc!defgh', '中文令牌abcdefgh']) {
+      const built = assertUrlFailed(
+        configOf({ mode: 'lan', lanAddress: '192.168.1.6', port: 3080, token: bad }),
+        '访问令牌只允许'
+      );
+      assert.equal(built.reason, REMOTE_TOKEN_INVALID_REASON, '原因就是那条规则说明，不拼接别的上下文');
+      assert.equal(built.reason.includes(bad), false, `原因里绝不能回显令牌值：${JSON.stringify(bad)}`);
+      assert.equal(built.url, '', '失败必须 fail-closed');
+    }
+    // 三种方式一致：ipv6 / tailscale 也不会因为"地址对了"就放过非法令牌
+    assertUrlFailed(configOf({ mode: 'ipv6', ipv6Address: '2409:8a20::1', port: 3080, token: 'short' }), '访问令牌只允许');
+    assertUrlFailed(
+      configOf({ mode: 'tailscale', tailscaleHost: '100.101.102.103', port: 41641, token: 'bad token!!' }),
+      '访问令牌只允许'
+    );
+  });
+
+  test('cloudflare / manual 不吃 token（地址自带参数，残留令牌不污染手填地址）', () => {
+    assertUrl(
+      configOf({ mode: 'cloudflare', cloudflareHost: 'xxx.trycloudflare.com', token: TOKEN }),
+      'https://xxx.trycloudflare.com/'
+    );
+    assertUrl(
+      configOf({ mode: 'manual', manualUrl: 'https://dsh.example.com/?token=abc', token: TOKEN }),
+      'https://dsh.example.com/?token=abc'
+    );
+    // 手动方式连"非法令牌"都不该影响它（token 没有该字段）
+    assertUrl(configOf({ mode: 'manual', manualUrl: 'https://dsh.example.com/', token: 'bad token' }), 'https://dsh.example.com/');
+  });
+
+  test('normalizeRemoteAccessConfig：缺 token / 非字符串 / 坏 JSON 一律回落空串', () => {
+    assert.equal(normalizeRemoteAccessConfig('').token, '', '空串配置 → 空令牌');
+    assert.equal(normalizeRemoteAccessConfig('{"mode":"lan"}').token, '', '旧数据没有 token 字段');
+    assert.equal(normalizeRemoteAccessConfig('{"mode":"lan","token":42}').token, '', '非字符串按空串');
+    assert.equal(normalizeRemoteAccessConfig('{"mode":"lan","token":null}').token, '');
+    assert.equal(normalizeRemoteAccessConfig('not json').token, '', '坏 JSON 也回落（不抛）');
+    assert.equal(
+      normalizeRemoteAccessConfig(`{"mode":"lan","token":"  ${TOKEN}  "}`).token,
+      TOKEN,
+      '令牌去首尾空白'
+    );
+    assert.equal(normalizeRemoteAccessConfig('{"mode":"lan","token":""}').token, '');
+  });
+
+  test('maskRemoteToken：前 4 + … + 后 4；短令牌一律 ***', () => {
+    assert.equal(maskRemoteToken(TOKEN), 'AbCd…6789');
+    assert.equal(maskRemoteToken('a'.repeat(12)), 'aaaa…aaaa');
+    assert.equal(maskRemoteToken('a'.repeat(11)), '***', '小于 12 位一律打码成 ***');
+    assert.equal(maskRemoteToken('abc'), '***');
+    assert.equal(maskRemoteToken(''), '***');
+    assert.equal(maskRemoteToken('   '), '***');
+    assert.equal(maskRemoteToken(undefined), '***', '非字符串也不抛');
+    const masked = maskRemoteToken(TOKEN);
+    assert.equal(masked.includes(TOKEN), false, '打码串不能包含完整令牌');
+    assert.equal(masked.length, 9, '4 + 1 + 4');
+  });
+
+  test('打码后的值永远不会被当成令牌拼进地址（mask 只用于展示）', () => {
+    const masked = maskRemoteToken(TOKEN);
+    const built = buildRemoteAccessUrl(
+      configOf({ mode: 'lan', lanAddress: '192.168.1.6', port: 3080, token: masked })
+    );
+    // `AbCd…6789` 含 `…`（非允许字符）→ 必须被拒，而不是"看起来像令牌就放行"
+    assert.equal(built.ok, false, '打码串不是合法令牌');
+    assert.equal(built.url, '');
+    assert.ok(built.reason.includes('访问令牌只允许'));
   });
 });

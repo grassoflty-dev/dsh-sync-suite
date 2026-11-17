@@ -190,9 +190,12 @@
 ```
 
 - **`remote.json`**：字段集合 = `RemoteSettings`（`enabled` / `mode` / `port` / `lanAddress` /
-  `tailscaleHost` / `cloudflareHost` / `ipv6Address` / `manualUrl`），语义见
+  `tailscaleHost` / `cloudflareHost` / `ipv6Address` / `manualUrl` / `token`），语义见
   `docs/REMOTE-ACCESS-OPTIONS.md` §3。与 `settings.json` **平级但独立**：任一文件写坏/写失败
   不得影响另一域（远程访问坏了同步照常，反之亦然）。
+  - `token` 是**用户粘贴的访问令牌**（可选）：空串 = 不追加参数；非空 = 链接里拼 `?token=`。
+    它是 secret，因此**不进 `remoteGetState`**——状态响应只给 `tokenSet` / `tokenMasked`，
+    与自动生成的令牌走同一个出口（只有 `remoteShowLink` 能取到明文）。
 - **`remote-token.json`**：访问令牌（`crypto.randomBytes(32)` 的 base64url 形态）。
   **永不进 Git 仓库、永不出现在 `remoteGetState` 等状态响应里**（只给 `masked` 打码串），
   唯一明文出口是用户显式点「显示链接/二维码」。

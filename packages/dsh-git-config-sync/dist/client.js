@@ -234,6 +234,11 @@ window.__ModuleLoader__.load({
       "remote.fields.ipv6Address.placeholder": "例如 2408:8207:...（不带方括号）",
       "remote.fields.manualUrl": "完整地址",
       "remote.fields.manualUrl.placeholder": "例如 https://example.com/dsh",
+      "remote.field.token": "访问令牌（可选）",
+      "remote.field.token.hint": "留空则不带令牌；填了会在链接里追加 ?token=…",
+      "remote.token.saved": "已保存访问令牌（{masked}）",
+      "remote.token.clear": "清除令牌",
+      "remote.token.cleared": "已清除",
       "remote.availability.ready": "可用",
       "remote.unsupported": "不可用",
       "remote.needsSetup": "需先准备",
@@ -483,6 +488,11 @@ window.__ModuleLoader__.load({
       "remote.fields.ipv6Address.placeholder": "e.g. 2408:8207:... (no brackets)",
       "remote.fields.manualUrl": "Full URL",
       "remote.fields.manualUrl.placeholder": "e.g. https://example.com/dsh",
+      "remote.field.token": "Access token (optional)",
+      "remote.field.token.hint": "Leave empty to send no token; when filled, ?token=… is appended to the link.",
+      "remote.token.saved": "Access token saved ({masked})",
+      "remote.token.clear": "Clear token",
+      "remote.token.cleared": "Cleared",
       "remote.availability.ready": "Available",
       "remote.unsupported": "Unavailable",
       "remote.needsSetup": "Needs setup",
@@ -2550,7 +2560,9 @@ window.__ModuleLoader__.load({
       // 二维码块是纯白底，块内文字只能用深色（黑白属于二维码本身，不受主题色约束）。
       qrNote: { fontSize: 11.5, color: '#1f1f1f' },
       steps: { margin: 0, paddingLeft: 18, fontSize: 11.5, color: C.labelSecondary, lineHeight: 1.5 },
-      summary: { cursor: 'pointer', fontSize: 11.5, color: C.accent }
+      summary: { cursor: 'pointer', fontSize: 11.5, color: C.accent },
+      // 「已保存访问令牌（…）」徽章 + 「清除令牌」：中性色，不是警告——令牌存在本身是正常状态。
+      tokenSavedRow: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0 }
     }
 
     /** 自检等级 → 现有 tone（ok 绿 / warn 黄 / fail 红 / unknown 灰）。 */
@@ -2586,15 +2598,43 @@ window.__ModuleLoader__.load({
         port: rawPort > 65535 ? 0 : rawPort
       }
       for (let i = 0; i < REMOTE_FIELDS.length; i++) out[REMOTE_FIELDS[i]] = asText(s[REMOTE_FIELDS[i]])
+      // 访问令牌是 secret：表单**永远**从空串开始，绝不把 host 的任何令牌值预填进来
+      // （`RemoteSettingsView` 里也根本没有 `token` 这个字段，只有 tokenSet/tokenMasked）。
+      out.token = ''
       return out
     }
 
-    /** 字段文案：优先 host 文案，其次 remote.fields.* 本地化 key，最后回落到 spec 自带 label。 */
+    /** `remote.fields.<key>` 之外的文案覆盖（令牌字段的 key 用单数 `remote.field.*`，与契约一致）。 */
+    const REMOTE_FIELD_TEXT_KEYS = {
+      token: { label: 'remote.field.token', hint: 'remote.field.token.hint' }
+    }
+
+    /** 字段文案：优先 host 文案，其次本地化 key，最后回落到 spec 自带 label/placeholder/hint。 */
     function remoteFieldText(translate, field, kind) {
-      const key = 'remote.fields.' + String(field && field.key ? field.key : '') + (kind === 'placeholder' ? '.placeholder' : '')
-      const out = translate(key)
-      if (typeof out === 'string' && out !== '' && out !== key) return out
-      return kind === 'placeholder' ? asText(field && field.placeholder) : asText(field && field.label)
+      const key = String(field && field.key ? field.key : '')
+      const overrides = REMOTE_FIELD_TEXT_KEYS[key] || {}
+      const overrideKey = kind === 'placeholder' ? '' : asText(overrides[kind === 'hint' ? 'hint' : 'label'])
+      if (overrideKey !== '') {
+        const out = translate(overrideKey)
+        if (typeof out === 'string' && out !== '' && out !== overrideKey) return out
+      }
+      const localKey = 'remote.fields.' + key + (kind === 'placeholder' ? '.placeholder' : '')
+      const out = translate(localKey)
+      if (typeof out === 'string' && out !== '' && out !== localKey) return out
+      if (kind === 'placeholder') return asText(field && field.placeholder)
+      if (kind === 'hint') return asText(field && field.hint)
+      return asText(field && field.label)
+    }
+
+    /**
+     * 「已保存访问令牌（abcd…wxyz）」文案：模板里没有 `{masked}` 时退化成只给打码串，
+     * 任何情况下都不会回落成令牌明文（明文在客户端本来也拿不到）。
+     */
+    function remoteTokenSavedText(translate, masked) {
+      const key = 'remote.token.saved'
+      const template = translate(key)
+      const text = typeof template === 'string' && template !== '' && template !== key ? template : '{masked}'
+      return text.split('{masked}').join(masked)
     }
 
     /** 数字输入（端口）：只收十进制整数，空值 = 0（跟随 DSH 端口）。 */
@@ -2706,6 +2746,9 @@ window.__ModuleLoader__.load({
       const [link, setLink] = React.useState(seedLink)
       const [probe, setProbe] = React.useState(seedState && seedState.status ? seedState.status.probe : null)
       const [confirmRotate, setConfirmRotate] = React.useState(false)
+      // 令牌输入框是否被用户动过（含「清除令牌」）：
+      // 没动过就不把 token 放进保存请求 —— 否则每次保存都会把已存令牌清空。
+      const [tokenDirty, setTokenDirty] = React.useState(false)
 
       React.useEffect(function () {
         if (seedState !== null) return function () {}
@@ -2733,6 +2776,8 @@ window.__ModuleLoader__.load({
         const next = data && typeof data === 'object' ? data : {}
         setState(next)
         setForm(remoteSettingsOf(next))
+        // 保存/刷新后令牌已落盘：输入框回到空串，脏标记清掉（view 里本来就取不到明文）。
+        setTokenDirty(false)
         if (next.status && next.status.probe) setProbe(next.status.probe)
       }
 
@@ -2775,6 +2820,16 @@ window.__ModuleLoader__.load({
         setFormField('port', safe)
       }
 
+      /**
+       * 「清除令牌」：只把**表单值**置成空串并标记脏，下一次「保存设置」才提交空串
+       * （= 归一里的显式清空）。绝不在这里回填任何令牌内容。
+       */
+      function clearToken() {
+        setTokenDirty(true)
+        setFormField('token', '')
+        setNotice(tr('remote.token.cleared'))
+      }
+
       function doRefresh() {
         runTask('load', async function () {
           const result = await rpcCall('remoteGetState', {})
@@ -2789,8 +2844,10 @@ window.__ModuleLoader__.load({
 
       function doSave() {
         const next = remoteSettingsOf(form)
+        // 用户没动过令牌输入框 → 不提交该键（归一里"缺省"= 沿用 previous，令牌不会被清掉）；
+        // 动过（含点了「清除令牌」）→ 提交原值或空串，空串即"清空令牌"。
+        if (!tokenDirty) delete next.token
         runTask('save', async function () {
-          // 只发 settings：token 由远程域自己管，前端不碰。
           const result = await rpcCall('remoteSaveSettings', { settings: next })
           if (!alive.current) return
           if (!result.ok) {
@@ -2896,6 +2953,10 @@ window.__ModuleLoader__.load({
       // Derived values -------------------------------------------------
       const status = state && state.status && typeof state.status === 'object' ? state.status : {}
       const modes = Array.isArray(state && state.modes) ? state.modes : []
+      // 设置视图（契约：只有 tokenSet / tokenMasked，**没有** token 明文）。
+      const settingsView = state && state.settings && typeof state.settings === 'object' ? state.settings : {}
+      const tokenSaved = settingsView.tokenSet === true
+      const tokenMasked = asText(settingsView.tokenMasked)
       const running = status.running === true
       const tokenInfo = status.token && typeof status.token === 'object' ? status.token : {}
       const conns = status.connections && typeof status.connections === 'object' ? status.connections : {}
@@ -3042,6 +3103,33 @@ window.__ModuleLoader__.load({
               const f = field && typeof field === 'object' ? field : {}
               const key = asText(f.key)
               if (key === '' || key === 'port') return null
+              if (key === 'token') {
+                // 访问令牌：password 输入 + hint +（已保存时）打码徽章与「清除令牌」。
+                // value 只来自表单 state（初始恒为空串），DOM 里因此**永远**不出现令牌明文。
+                return h(
+                  Field,
+                  { key: 'rf-' + fi, label: remoteFieldText(tr, f, 'label'), hint: remoteFieldText(tr, f, 'hint') },
+                  h(Input, {
+                    type: 'password',
+                    autoComplete: 'new-password',
+                    value: asText(form.token),
+                    placeholder: remoteFieldText(tr, f, 'placeholder'),
+                    disabled: anyBusy,
+                    onChange: function (value) {
+                      setTokenDirty(true)
+                      setFormField('token', value)
+                    }
+                  }),
+                  tokenSaved && tokenMasked !== ''
+                    ? h(
+                        'div',
+                        { key: 'token-saved', style: RS.tokenSavedRow },
+                        h(Badge, { text: remoteTokenSavedText(tr, tokenMasked), tone: 'mute' }),
+                        h(Btn, { label: tr('remote.token.clear'), disabled: anyBusy, onClick: clearToken })
+                      )
+                    : null
+                )
+              }
               return h(
                 Field,
                 { key: 'rf-' + fi, label: remoteFieldText(tr, f, 'label'), hint: asText(f.hint) },
@@ -3159,8 +3247,12 @@ window.__ModuleLoader__.load({
               text:
                 tr('remote.status.token') +
                 ': ' +
-                (tokenInfo.exists === true ? asText(tokenInfo.masked) : tr('remote.status.token.none')),
-              tone: tokenInfo.exists === true ? 'info' : 'mute'
+                (tokenInfo.exists === true
+                  ? asText(tokenInfo.masked)
+                  : tokenSaved && tokenMasked !== ''
+                    ? tokenMasked
+                    : tr('remote.status.token.none')),
+              tone: tokenInfo.exists === true || tokenSaved ? 'info' : 'mute'
             })
           ),
           // 这条必须有：让用户明确知道"只绑了具体地址"，不是 0.0.0.0。

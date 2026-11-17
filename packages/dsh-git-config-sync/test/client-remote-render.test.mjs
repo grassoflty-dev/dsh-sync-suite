@@ -47,6 +47,11 @@ const REMOTE_KEYS = [
   'remote.fields.ipv6Address.placeholder',
   'remote.fields.manualUrl',
   'remote.fields.manualUrl.placeholder',
+  'remote.field.token',
+  'remote.field.token.hint',
+  'remote.token.saved',
+  'remote.token.clear',
+  'remote.token.cleared',
   'remote.availability.ready',
   'remote.unsupported',
   'remote.needsSetup',
@@ -281,18 +286,24 @@ function fakeProbe() {
   }
 }
 
-function fakeState() {
+function fakeState(mode = 'lan', settingsOverrides = {}) {
   return {
-    settings: {
-      enabled: true,
-      mode: 'lan',
-      port: 0,
-      lanAddress: '192.168.1.6',
-      tailscaleHost: '',
-      cloudflareHost: '',
-      ipv6Address: '',
-      manualUrl: ''
-    },
+    settings: Object.assign(
+      {
+        enabled: true,
+        mode,
+        port: 0,
+        lanAddress: '192.168.1.6',
+        tailscaleHost: '100.101.102.103',
+        cloudflareHost: 'xxx.trycloudflare.com',
+        ipv6Address: '2409:8a20:4cad:ba20::1',
+        manualUrl: 'https://example.com/dsh',
+        // 设置视图：只有 tokenSet/tokenMasked（契约里没有 token 明文）。
+        tokenSet: false,
+        tokenMasked: ''
+      },
+      settingsOverrides
+    ),
     status: {
       running: true,
       listen: '192.168.1.6:3080',
@@ -317,10 +328,53 @@ function fakeState() {
         unavailableReason: '',
         requires: [],
         fields: [
-          { key: 'lanAddress', label: '局域网地址', placeholder: '192.168.1.6', hint: '留空自动挑选', required: false }
+          { key: 'lanAddress', label: '局域网地址', placeholder: '192.168.1.6', hint: '留空自动挑选', required: false },
+          { key: 'port', label: '端口', placeholder: '0', hint: '0 = 跟 DSH 同端口', required: true },
+          {
+            key: 'token',
+            label: '访问令牌（可选）',
+            placeholder: '粘贴电脑上 DSH 地址里的 token',
+            hint: '留空则不带令牌；填了会在链接里追加 ?token=…',
+            required: false
+          }
         ],
         steps: ['保存设置', '点启动', '用平板扫码'],
         hostsListener: true
+      },
+      {
+        mode: 'ipv6',
+        label: '公网 IPv6',
+        description: '平板用流量也能直连。',
+        availability: 'needs-setup',
+        unavailableReason: '',
+        requires: ['家里宽带已开通公网 IPv6'],
+        fields: [
+          { key: 'ipv6Address', label: 'IPv6 地址', placeholder: '2409:8a20::1', hint: '不要带方括号', required: true },
+          { key: 'port', label: '端口', placeholder: '0', hint: '0 = 跟 DSH 同端口', required: true },
+          {
+            key: 'token',
+            label: '访问令牌（可选）',
+            placeholder: '粘贴电脑上 DSH 地址里的 token',
+            hint: '留空则不带令牌；填了会在链接里追加 ?token=…',
+            required: false
+          }
+        ],
+        steps: ['查到公网 IPv6', '填进来', '用流量试'],
+        hostsListener: true
+      },
+      {
+        mode: 'manual',
+        label: '手动填地址',
+        description: '你自己已有的可用地址。',
+        availability: 'ready',
+        unavailableReason: '',
+        requires: [],
+        // manual 的完整地址自带令牌 → 没有 token 字段。
+        fields: [
+          { key: 'manualUrl', label: '完整地址', placeholder: 'https://example.com/', hint: '必须带 http://', required: true }
+        ],
+        steps: ['填地址', '保存后测试'],
+        hostsListener: false
       },
       {
         mode: 'tailscale',
@@ -330,7 +384,14 @@ function fakeState() {
         unavailableReason: '',
         requires: ['安装 Tailscale 客户端', '登录同一 tailnet'],
         fields: [
-          { key: 'tailscaleHost', label: 'Tailscale 主机', placeholder: 'pc-a.ts.net', hint: '', required: true }
+          { key: 'tailscaleHost', label: 'Tailscale 主机', placeholder: 'pc-a.ts.net', hint: '', required: true },
+          {
+            key: 'token',
+            label: '访问令牌（可选）',
+            placeholder: '粘贴电脑上 DSH 地址里的 token',
+            hint: '留空则不带令牌；填了会在链接里追加 ?token=…',
+            required: false
+          }
         ],
         steps: ['安装 Tailscale 客户端', '登录账号', '回到这里保存并自检'],
         hostsListener: true
@@ -578,4 +639,105 @@ test('RemotePanel：错误隔离——本 section 的 ErrorBox 不来自同步�
   // 这里用「远程 state 里带 lastError」证明：状态里的失败只以中性框出现，不落成 role=alert 的红框。
   assert.equal(nodesOf(tree).filter((node) => node.props.role === 'alert').length, 0)
   assert.ok(textOf(tree).includes('最近错误'), 'lastError 以中性标签展示')
+})
+
+/* -------------------------------------------------------------------------- */
+/* 4) 「访问令牌（可选）」字段                                                  */
+/* -------------------------------------------------------------------------- */
+
+test('RemotePanel：token 字段渲染成 password 输入，初始值为空串，hint 用 remote.field.token.hint', async () => {
+  const { mod } = await loadClient()
+  const sections = renderSections(mod)
+  const remote = sections.find((s) => s.options.id === 'git-config-sync-remote')
+  const tree = renderRemote(remote.component, { seedState: fakeState() })
+  const nodes = nodesOf(tree)
+
+  const passwords = nodes.filter((node) => node.type === 'input' && node.props.type === 'password')
+  assert.equal(passwords.length, 1, 'lan 方式必须恰好一个 password 输入（访问令牌）')
+  assert.equal(passwords[0].props.value, '', '表单初始值必须是空串（不能预填任何令牌）')
+  assert.equal(passwords[0].props.placeholder, '粘贴电脑上 DSH 地址里的 token')
+  assert.equal(passwords[0].props.autoComplete, 'new-password', '不能让浏览器自动填充已保存密码')
+
+  const text = textOf(tree)
+  assert.ok(text.includes(zh['remote.field.token']), '标签必须用 remote.field.token')
+  assert.ok(text.includes(zh['remote.field.token.hint']), 'hint 必须渲染在字段下面')
+  assert.ok(text.includes('访问令牌（可选）'), '中文标签字面量')
+  // 未保存令牌时不出现徽章/清除按钮
+  assert.equal(text.includes('清除令牌'), false)
+})
+
+test('RemotePanel：令牌明文（即使 host 误塞进 settings）绝不进 DOM', async () => {
+  const { mod } = await loadClient()
+  const sections = renderSections(mod)
+  const remote = sections.find((s) => s.options.id === 'git-config-sync-remote')
+  const tree = renderRemote(remote.component, {
+    // 契约里 settings 是 view（没有 token）；这里故意塞一个明文，验证客户端也不会渲染它。
+    seedState: fakeState('lan', { tokenSet: true, tokenMasked: 'rt_p…6789', token: TOKEN_PLAIN }),
+    seedLink: fakeLink()
+  })
+  const dump = serialize(tree)
+  assert.equal(dump.includes(TOKEN_PLAIN), false, '整棵树（含属性）都不得出现令牌明文')
+  assert.equal(textOf(tree).includes(TOKEN_PLAIN), false)
+  // password 输入的值仍然只能是空串（来自表单 state）
+  const passports = nodesOf(tree).filter((node) => node.type === 'input' && node.props.type === 'password')
+  assert.equal(passports.length, 1)
+  assert.equal(passports[0].props.value, '')
+  assert.equal(passports[0].props.defaultValue, undefined)
+})
+
+test('RemotePanel：已保存令牌显示中性徽章（打码）+「清除令牌」，点击不崩且不泄露明文', async () => {
+  const { mod } = await loadClient()
+  const sections = renderSections(mod)
+  const remote = sections.find((s) => s.options.id === 'git-config-sync-remote')
+  const tree = renderRemote(remote.component, {
+    seedState: fakeState('lan', { tokenSet: true, tokenMasked: 'rt_p…6789' })
+  })
+
+  const text = textOf(tree)
+  assert.ok(text.includes('已保存访问令牌（rt_p…6789）'), '必须显示打码徽章')
+  assert.ok(text.includes('清除令牌'), '必须有「清除令牌」按钮')
+
+  const clearBtn = nodesOf(tree).find(
+    (node) => node.type === 'button' && textOf(node).includes('清除令牌')
+  )
+  assert.ok(clearBtn, '找不到「清除令牌」按钮')
+  assert.equal(typeof clearBtn.props.onClick, 'function')
+  assert.doesNotThrow(() => clearBtn.props.onClick(), '点击「清除令牌」只改表单 state，不得抛异常')
+  assert.equal(serialize(tree).includes(TOKEN_PLAIN), false)
+})
+
+test('RemotePanel：令牌字段只出现在 lan/ipv6/tailscale（manual 没有），字段数量随方式变化', async () => {
+  const { mod } = await loadClient()
+  const sections = renderSections(mod)
+  const remote = sections.find((s) => s.options.id === 'git-config-sync-remote')
+
+  const inputCount = (tree) => {
+    const nodes = nodesOf(tree).filter((node) => node.type === 'input')
+    const numbers = nodes.filter((node) => node.props.type === 'number').length
+    const texts = nodes.filter((node) => node.props.type === 'text').length
+    const passwords = nodes.filter((node) => node.props.type === 'password').length
+    // total 只数"字段输入"（不含「允许远程访问」的 checkbox）。
+    return {
+      total: numbers + texts + passwords,
+      numbers,
+      texts,
+      passwords,
+      checkboxes: nodes.filter((node) => node.props.type === 'checkbox').length
+    }
+  }
+
+  const lan = inputCount(renderRemote(remote.component, { seedState: fakeState('lan') }))
+  assert.deepEqual(lan, { total: 3, numbers: 1, texts: 1, passwords: 1, checkboxes: 1 }, 'lan：局域网地址 + 端口 + 令牌')
+
+  const ipv6 = inputCount(renderRemote(remote.component, { seedState: fakeState('ipv6') }))
+  assert.deepEqual(ipv6, { total: 3, numbers: 1, texts: 1, passwords: 1, checkboxes: 1 }, 'ipv6：IPv6 地址 + 端口 + 令牌')
+
+  const tailscale = inputCount(renderRemote(remote.component, { seedState: fakeState('tailscale') }))
+  assert.deepEqual(tailscale, { total: 3, numbers: 1, texts: 1, passwords: 1, checkboxes: 1 }, 'tailscale：主机 + 端口 + 令牌')
+
+  const manual = inputCount(renderRemote(remote.component, { seedState: fakeState('manual') }))
+  assert.deepEqual(manual, { total: 2, numbers: 1, texts: 1, passwords: 0, checkboxes: 1 }, 'manual：只有完整地址（自带令牌），没有令牌字段')
+
+  const manualText = textOf(renderRemote(remote.component, { seedState: fakeState('manual') }))
+  assert.equal(manualText.includes('访问令牌（可选）'), false, 'manual 不该出现令牌字段')
 })

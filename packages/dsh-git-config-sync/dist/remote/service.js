@@ -18,7 +18,7 @@ import os from 'node:os';
 import { RemoteStore } from './store.js';
 import { createRemoteAuthorizer } from './routes.js';
 import { defaultRemoteSettings, listModes, normalizeRemoteSettings } from './accessMode.js';
-import { maskToken, urlForMode, withToken } from './urls.js';
+import { appendAccessToken, maskToken, urlForMode } from './urls.js';
 export const REMOTE_SESSION_COOKIE = 'dsh-remote-session';
 const DEFAULT_PORT_CANDIDATE = 0;
 function safeMessage(error) {
@@ -44,6 +44,20 @@ export function redactUrlForDisplay(raw) {
     catch {
         return '';
     }
+}
+/**
+ * 设置 → 对外视图：把 `token` 明文抽成"是否存在 + 打码"。
+ *
+ * `remoteGetState` / `remoteSaveSettings` 的响应都会被设置页渲染进 DOM 并可能被日志记录，
+ * 所以出口处只留 `tokenSet` / `tokenMasked`；明文唯一的出口是 `showLink()`。
+ */
+export function toSettingsView(settings) {
+    const { token, ...rest } = settings;
+    return {
+        ...rest,
+        tokenSet: token !== '',
+        tokenMasked: token === '' ? '' : maskToken(token),
+    };
 }
 /** 网卡枚举：虚拟网卡（Hyper-V/VMware/WSL/容器/Teredo）在自动挑选时跳过。 */
 const VIRTUAL_IFACE_RE = /(vEthernet|VMware|VirtualBox|Hyper-V|Loopback|Teredo|isatap|docker|veth|br-|WSL|Tailscale)/i;
@@ -361,7 +375,7 @@ export function createRemoteService(options = {}) {
         if (settings.enabled && runtime.handle === null) {
             // no-op：自动启动由 index.ts 在插件挂载时调用一次 start()
         }
-        return { settings, status: status(), modes: listModes() };
+        return { settings: toSettingsView(settings), status: status(), modes: listModes() };
     }
     async function saveSettings(input) {
         const previous = readSettings();
@@ -376,7 +390,7 @@ export function createRemoteService(options = {}) {
             runtime.probe = null;
         if (next.enabled && runtime.handle === null)
             await start();
-        return { settings: next, status: status(), modes: listModes() };
+        return { settings: toSettingsView(next), status: status(), modes: listModes() };
     }
     async function rotateToken() {
         const generate = options.generateToken ?? (() => {
@@ -413,16 +427,30 @@ export function createRemoteService(options = {}) {
         runtime.probe = result;
         return result;
     }
+    /**
+     * 生成一条**含令牌**的可打开地址（唯一明文出口）。
+     *
+     * 令牌优先级：设置里用户粘贴的 `settings.token`（`lan`/`ipv6`/`tailscale` 的
+     * 「访问令牌（可选）」）→ 回落到 `remote-token.json` 里的自动令牌。两者都空则拒绝：
+     * 不生成"看起来能用、其实进不去"的地址。
+     *
+     * 错误消息里只描述"缺令牌"，绝不回显令牌值。
+     */
     async function showLink(mode) {
         const settings = readSettings();
         const target = mode ?? settings.mode;
-        const token = readTokenValue();
-        if (token === null)
+        const pasted = settings.token.trim();
+        const fallback = readTokenValue();
+        const token = pasted !== '' ? pasted : fallback === null ? '' : fallback;
+        if (token === '')
             throw new Error('还没有访问令牌，请先生成');
         const built = urlForMode(target, settings, { lanAddress: pickLanAddress(listLanCandidates()), dshPort: dshPort() ?? 0 });
         if (!built.ok)
             throw new Error(built.reason === '' ? '这种方式暂时生成不出可用地址' : built.reason);
-        const url = withToken(built.url, token);
+        // 非空令牌却拼不进去（地址非法）→ 空串 → 明确报错，不返回无令牌的假链接。
+        const url = appendAccessToken(built.url, token);
+        if (url === '')
+            throw new Error('这种方式暂时生成不出可用地址');
         const qr = options.encodeQr === undefined ? { size: 0, modules: [] } : options.encodeQr(url);
         return { url, qr, note: '' };
     }

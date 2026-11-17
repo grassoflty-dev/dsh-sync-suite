@@ -72,6 +72,7 @@ function modesFixture() {
   ]
 }
 
+/** 设置**视图**（remoteGetState / remoteSaveSettings 的返回形状）：没有 token 明文。 */
 function settingsFixture(overrides) {
   return Object.assign(
     {
@@ -83,9 +84,19 @@ function settingsFixture(overrides) {
       cloudflareHost: '',
       ipv6Address: '',
       manualUrl: '',
+      tokenSet: false,
+      tokenMasked: '',
     },
     overrides || {},
   )
+}
+
+/** 请求侧的 settings（真实客户端只发这些键；令牌是可选项）。 */
+function settingsInputFixture(overrides) {
+  const input = settingsFixture(overrides)
+  delete input.tokenSet
+  delete input.tokenMasked
+  return input
 }
 
 function statusFixture(overrides) {
@@ -159,8 +170,16 @@ function makeFakeRemote(overrides) {
     async saveSettings(input) {
       calls.push({ method: 'saveSettings', input })
       const next = input && typeof input === 'object' ? input : {}
+      // 真实实现的返回是**视图**：令牌只回 tokenSet/tokenMasked，绝不回显明文。
+      const { token, ...rest } = next
+      const hasToken = typeof token === 'string' && token !== ''
       return {
-        settings: settingsFixture(next),
+        settings: settingsFixture(
+          Object.assign({}, rest, {
+            tokenSet: hasToken,
+            tokenMasked: hasToken ? 'rt_p…6789' : '',
+          }),
+        ),
         status: statusFixture({ port: Number(next.port) || 0 }),
         modes: modesFixture(),
       }
@@ -239,13 +258,16 @@ test('未注入 remote：8 个 action 全部 E_INTERNAL（fail-closed，不静�
 /* 2) happy path：8 个 action 的返回形状                                       */
 /* -------------------------------------------------------------------------- */
 
-test('remoteGetState：返回 settings/status/modes（RemoteStateData）', async (t) => {
+test('remoteGetState：返回 settings/status/modes（RemoteStateData，settings 是视图）', async (t) => {
   const remote = makeFakeRemote()
   const service = await setup(t, remote)
   const result = await service.handleRpc({ action: 'remoteGetState' })
   assert.equal(result.ok, true)
   assert.equal(result.data.settings.mode, 'lan')
   assert.equal(result.data.settings.port, 0)
+  assert.equal(result.data.settings.tokenSet, false)
+  assert.equal(result.data.settings.tokenMasked, '')
+  assert.equal('token' in result.data.settings, false, '视图里没有 token 明文键')
   assert.equal(result.data.modes.length, 3)
   assert.equal(result.data.modes[2].mode, 'uu')
   assert.equal(result.data.modes[2].availability, 'unsupported')
@@ -257,10 +279,10 @@ test('remoteGetState：返回 settings/status/modes（RemoteStateData）', async
   )
 })
 
-test('remoteSaveSettings：只透传 payload.settings，返回 RemoteStateData', async (t) => {
+test('remoteSaveSettings：只透传 payload.settings，返回 RemoteStateData（settings 为视图）', async (t) => {
   const remote = makeFakeRemote()
   const service = await setup(t, remote)
-  const settings = settingsFixture({ enabled: true, mode: 'tailscale', port: 3081, tailscaleHost: 'pc-a.ts.net' })
+  const settings = settingsInputFixture({ enabled: true, mode: 'tailscale', port: 3081, tailscaleHost: 'pc-a.ts.net' })
   const result = await service.handleRpc({ action: 'remoteSaveSettings', settings })
   assert.equal(result.ok, true)
   const saved = remote.calls.filter((c) => c.method === 'saveSettings')
@@ -268,7 +290,24 @@ test('remoteSaveSettings：只透传 payload.settings，返回 RemoteStateData',
   assert.deepEqual(saved[0].input, settings, 'settings 必须原样透传给远程域')
   assert.equal(result.data.settings.mode, 'tailscale')
   assert.equal(result.data.settings.port, 3081)
+  assert.equal(result.data.settings.tokenSet, false, '未提交令牌 → tokenSet=false')
+  assert.equal('token' in result.data.settings, false, '设置视图里不允许出现 token 键')
   assert.ok(Array.isArray(result.data.modes))
+})
+
+test('remoteSaveSettings：token 原样透传给远程域，返回的视图里没有明文', async (t) => {
+  const remote = makeFakeRemote()
+  const service = await setup(t, remote)
+  const result = await service.handleRpc({
+    action: 'remoteSaveSettings',
+    settings: settingsInputFixture({ token: TOKEN_PLAIN }),
+  })
+  assert.equal(result.ok, true)
+  const saved = remote.calls.filter((c) => c.method === 'saveSettings')
+  assert.equal(saved[0].input.token, TOKEN_PLAIN, '令牌必须原样透传（RPC 层不做二次加工）')
+  assert.equal(result.data.settings.tokenSet, true)
+  assert.ok(result.data.settings.tokenMasked.length > 0)
+  assert.equal(JSON.stringify(result.data).includes(TOKEN_PLAIN), false, '响应里不许出现令牌明文')
 })
 
 test('remoteStart / remoteStop：返回 RemoteStatus，running 与 listen 互斥', async (t) => {

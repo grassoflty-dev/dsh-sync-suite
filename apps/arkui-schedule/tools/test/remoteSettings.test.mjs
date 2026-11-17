@@ -162,6 +162,75 @@ describe('设置页：远程控制组（DSH 地址 → 打开远程控制）', (
   });
 });
 
+// 「访问令牌（可选）」是 secret：settingsStore 必须**成对**读写（load 读、save 写、
+// saveSyncState 逐字段构造），设置页必须走"只写"通道（已保存的明文只 mask 后上屏，
+// 绝不回填输入框）。这些都是纯文本可判定的契约，用静态断言钉住。
+describe('访问令牌（可选）：settingsStore 成对读写 + 设置页只写通道', () => {
+  test('接口 / SettingsPatch / 键名三处都有 remoteToken', () => {
+    const interfaceBlock = STORE.slice(
+      STORE.indexOf('export interface ScheduleSettings'),
+      STORE.indexOf('/** 同步状态的部分更新')
+    );
+    assert.match(interfaceBlock, /remoteToken: string;/, 'ScheduleSettings 必须有 remoteToken: string');
+    assert.match(STORE, /const KEY_REMOTE_TOKEN: string = 'remoteToken';/, '键名必须是 remoteToken');
+    const patchBlock = STORE.slice(STORE.indexOf('export interface SettingsPatch'), STORE.indexOf('/** 备用源配置'));
+    assert.match(patchBlock, /remoteToken\?: string;/, 'SettingsPatch 必须可只更新 remoteToken');
+  });
+
+  test('load 读 / save 写 / saveSyncState 逐字段构造，三处成对（漏一处会丢令牌）', () => {
+    assert.match(LOAD_BODY, /prefs\.get\(KEY_REMOTE_TOKEN,\s*''\)/, 'load 必须读 KEY_REMOTE_TOKEN，默认空串');
+    assert.match(LOAD_BODY, /remoteToken: remoteToken\.trim\(\)/, 'load 的返回值必须构造 remoteToken（trim）');
+    assert.match(
+      SAVE_BODY,
+      /remoteToken: patch\.remoteToken === undefined \? current\.remoteToken : patch\.remoteToken\.trim\(\)/,
+      'save 必须「未传则沿用、传了则 trim」——不能把空串当默认往里写'
+    );
+    assert.match(SAVE_BODY, /prefs\.put\(KEY_REMOTE_TOKEN, next\.remoteToken\)/, 'save 必须落盘 KEY_REMOTE_TOKEN');
+    assert.match(SYNC_STATE_BODY, /remoteToken: current\.remoteToken,/, 'saveSyncState 的逐字段构造里必须有 remoteToken');
+  });
+
+  test('设置页：password 输入框 + 已保存只显示打码 + 「清除令牌」按钮', () => {
+    assert.match(PAGE, /maskRemoteToken/, '页面必须用 maskRemoteToken 打码');
+    assert.match(PAGE, /if \(this\.remoteUsesToken\(\)\) \{/, '令牌输入框只在方式的 fields 含 token 时渲染');
+    assert.match(
+      REMOTE_GROUP,
+      /TextInput\(\{ text: this\.remoteToken, placeholder: this\.remoteFieldPlaceholder\('token'\) \}\)/,
+      '令牌输入框绑定"这次想改成的值" remoteToken'
+    );
+    assert.match(REMOTE_GROUP, /\.type\(InputType\.Password\)/, '令牌输入框必须是密码类型');
+    assert.match(PAGE, /return '保存后生效';/, '输入框有值时要提示「保存后生效」');
+    assert.match(
+      PAGE,
+      /已保存访问令牌（\$\{maskRemoteToken\(this\.savedRemoteToken\)\}）/,
+      '已保存时显示「已保存访问令牌（<mask>）」'
+    );
+    assert.match(REMOTE_GROUP, /Text\('清除令牌'\)/, '缺「清除令牌」小按钮');
+    assert.match(PAGE, /await settingsStore\.save\(\{ remoteToken: '' \}/, '「清除令牌」必须落盘空串');
+  });
+
+  test('只写通道：明文不回填输入框（输入框只在用户输入时被写）', () => {
+    assert.match(PAGE, /this\.savedRemoteToken = settings\.remoteToken\.trim\(\);/, '已保存令牌只进 private 的 savedRemoteToken');
+    assert.equal(
+      /this\.remoteToken = settings\.remoteToken/.test(PAGE),
+      false,
+      '绝不能把已保存的明文回填到输入框（旁人就该看不到明文）'
+    );
+    assert.equal(
+      /TextInput\(\{ text: this\.savedRemoteToken/.test(PAGE),
+      false,
+      '输入框不能绑定已保存的明文'
+    );
+    assert.match(PAGE, /this\.remoteToken = '';/, '铺表单 / 保存成功后要把输入框清空');
+    // 留空 = 不改：整表保存必须走 effectiveRemoteToken()，否则空输入框会悄悄清掉已保存令牌
+    assert.match(PAGE, /remoteToken: this\.effectiveRemoteToken\(\)/, '整表保存要沿用已保存的令牌');
+    assert.match(
+      PAGE,
+      /return effectiveToken\(this\.remoteToken, this\.savedRemoteToken\);/,
+      '沿用语义与 Git token 同一套实现'
+    );
+  });
+});
+
 describe('model/remoteUrl：纯函数行为（编译产物存在时执行）', () => {
   test(
     'normalizeRemoteUrl：192.168.1.6:3080/?token=abc → http://192.168.1.6:3080/?token=abc 且 hasToken=true',

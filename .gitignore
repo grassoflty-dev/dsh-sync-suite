@@ -39,3 +39,4 @@ apps/arkui-schedule/signing/
 
 # 真机验收截图（本地产物）
 apps/arkui-schedule/.tmp-accept/
+dist-*/

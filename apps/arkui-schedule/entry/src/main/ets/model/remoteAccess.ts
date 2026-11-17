@@ -51,6 +51,22 @@ export const REMOTE_PORT_MAX: number = 65535;
 /** 端口字段的键名（唯一「不必填」的字段：0 是合法值，见文件头差异说明）。 */
 const KEY_PORT: string = 'port';
 
+/** 「访问令牌（可选）」字段的键名（与插件侧 `RemoteSettings.token` 同名，见 §3 表）。 */
+const KEY_TOKEN: string = 'token';
+
+/**
+ * 访问令牌的合法字符集与长度（与插件侧 `RemoteSettings.token` 的落盘校验逐字一致）。
+ *
+ * 只允许 URL 安全的一小撮字符：字母数字 + `+ / = _ -`（base64 / base64url / hex 都能覆盖），
+ * 长度 8–512。**不放宽**：令牌会被 `encodeURIComponent` 后拼进地址，允许空格/引号/`&`/`#`
+ * 只会让「地址看起来对、实际被截断」，不如在这里明确拒绝。
+ */
+export const REMOTE_TOKEN_PATTERN: RegExp = /^[A-Za-z0-9+/=_-]{8,512}$/;
+
+/** 令牌不合法时的中文原因（**只描述规则，永不回显令牌值**）。 */
+export const REMOTE_TOKEN_INVALID_REASON: string =
+  '访问令牌只允许字母数字与 + / = _ -，长度 8–512';
+
 /** 一个方式需要用户填的字段（`key` 与插件侧 `RemoteSettingKey` 同名）。 */
 export interface RemoteModeField {
   /** 字段名，与 `RemoteAccessConfig` 的属性同名。 */
@@ -106,6 +122,23 @@ function portField(): RemoteModeField {
   return field;
 }
 
+/**
+ * 「访问令牌（可选）」字段：只出现在 `lan` / `ipv6` / `tailscale` 的字段表里（端口之后）。
+ *
+ * 与插件侧 `RemoteSettings.token` 同一套语义：空串 = 不追加任何参数；非空 = 地址后追加
+ * `?token=<值>`。`cloudflare` / `manual` / `uu` **没有**这个字段（隧道域名/完整地址自带
+ * 参数，uu 根本不可用），所以不给它们画一个"填了也没用"的输入框。
+ */
+function tokenField(): RemoteModeField {
+  const field: RemoteModeField = {
+    key: KEY_TOKEN,
+    label: '访问令牌（可选）',
+    placeholder: '粘贴电脑上 DSH 地址里的 token',
+    hint: '留空则不带令牌；填了会在链接里追加 ?token=…'
+  };
+  return field;
+}
+
 /** 六种方式的元数据表（键 = 方式枚举值）。 */
 export const REMOTE_MODES: Record<string, RemoteModeSpec> = {
   'lan': {
@@ -122,7 +155,8 @@ export const REMOTE_MODES: Record<string, RemoteModeSpec> = {
         placeholder: '192.168.1.6',
         hint: '电脑在局域网里的 IPv4，可在「设置 → 网络」里看'
       },
-      portField()
+      portField(),
+      tokenField()
     ],
     steps: [
       '在电脑「设置 → 网络」里查看当前 Wi-Fi 的 IPv4 地址。',
@@ -149,7 +183,8 @@ export const REMOTE_MODES: Record<string, RemoteModeSpec> = {
         placeholder: '100.101.102.103',
         hint: '电脑在 Tailscale 里的 100.x 地址或 MagicDNS 名'
       },
-      portField()
+      portField(),
+      tokenField()
     ],
     steps: [
       '电脑上安装 Tailscale 客户端并登录同一个账号。',
@@ -177,7 +212,8 @@ export const REMOTE_MODES: Record<string, RemoteModeSpec> = {
         placeholder: '2409:8a20:4cad:ba20:1234:5678:9abc:def0',
         hint: '只填地址，不要带 [ ] 方括号'
       },
-      portField()
+      portField(),
+      tokenField()
     ],
     steps: [
       '电脑上运行 ipconfig，找「IPv6 地址」里不带「临时」的那条。',
@@ -314,6 +350,14 @@ export interface RemoteAccessConfig {
   ipv6Address: string;
   /** 手动方式的完整地址（可含 `?token=`）。 */
   manualUrl: string;
+  /**
+   * 「访问令牌（可选）」（与插件侧 `RemoteSettings.token` 同名同义）。
+   *
+   * 空串 = 不往地址里追加任何令牌参数；非空 = 拼成 `?token=<值>`（已有 query 时用 `&`）。
+   * 只对 `lan` / `ipv6` / `tailscale` 生效（`cloudflare` / `manual` / `uu` 没有这个字段）。
+   * 它是 secret：**永不**出现在失败原因 / 日志里（`validateRemoteToken` 的原因只描述规则）。
+   */
+  token: string;
 }
 
 /** 默认配置：`lan` + 端口 0 + 所有地址留空（与插件侧 `defaultRemoteSettings` 的字段默认值一致）。 */
@@ -325,7 +369,8 @@ export function defaultRemoteAccessConfig(): RemoteAccessConfig {
     tailscaleHost: '',
     cloudflareHost: '',
     ipv6Address: '',
-    manualUrl: ''
+    manualUrl: '',
+    token: ''
   };
   return config;
 }
@@ -356,6 +401,7 @@ interface RawRemoteAccess {
   cloudflareHost?: string;
   ipv6Address?: string;
   manualUrl?: string;
+  token?: string;
 }
 
 /**
@@ -386,7 +432,9 @@ export function normalizeRemoteAccessConfig(raw: string): RemoteAccessConfig {
     tailscaleHost: readText(parsed.tailscaleHost),
     cloudflareHost: readText(parsed.cloudflareHost),
     ipv6Address: readText(parsed.ipv6Address),
-    manualUrl: readText(parsed.manualUrl)
+    manualUrl: readText(parsed.manualUrl),
+    // 旧数据没有 token 字段 → 空串（= 不带令牌，行为与升级前一致）；非字符串同样按空串
+    token: readText(parsed.token)
   };
   return config;
 }
@@ -405,7 +453,8 @@ export function serializeRemoteAccessConfig(config: RemoteAccessConfig): string 
     tailscaleHost: readText(config.tailscaleHost),
     cloudflareHost: readText(config.cloudflareHost),
     ipv6Address: readText(config.ipv6Address),
-    manualUrl: readText(config.manualUrl)
+    manualUrl: readText(config.manualUrl),
+    token: readText(config.token)
   };
   return JSON.stringify(plain);
 }
@@ -425,6 +474,8 @@ function fieldValue(config: RemoteAccessConfig, key: string): string {
       return readText(config.ipv6Address);
     case 'manualUrl':
       return readText(config.manualUrl);
+    case 'token':
+      return readText(config.token);
     default:
       return '';
   }
@@ -450,6 +501,10 @@ export function missingFields(mode: string, config: RemoteAccessConfig): string[
       usesPort = true;
       continue;
     }
+    if (field.key === KEY_TOKEN) {
+      // 令牌是**可选**字段：空 = 不带令牌（合法），不能算「缺字段」，否则按钮永远飘红
+      continue;
+    }
     if (fieldValue(config, field.key).length === 0) {
       missing.push(field.key);
     }
@@ -458,6 +513,38 @@ export function missingFields(mode: string, config: RemoteAccessConfig): string[
     missing.push(KEY_PORT);
   }
   return missing;
+}
+
+/**
+ * 校验「访问令牌（可选）」（与插件侧 `RemoteSettings.token` 的规则逐字一致）。
+ *
+ * 返回空串 = 合法（**含空串**：不填令牌是合法状态）；否则返回可直接展示的中文原因。
+ * 原因里**绝不能**带令牌值——它是 secret，会随红字/日志/截图外泄（插件侧同一条纪律）。
+ * 这里只 `trim()`（粘贴时常见的换行/空格不算令牌的一部分），中间有空格会被正则挡下。
+ */
+export function validateRemoteToken(raw: string): string {
+  const text: string = typeof raw === 'string' ? raw.trim() : '';
+  if (text.length === 0) {
+    return '';
+  }
+  if (REMOTE_TOKEN_PATTERN.test(text)) {
+    return '';
+  }
+  return REMOTE_TOKEN_INVALID_REASON;
+}
+
+/**
+ * 令牌打码（供 UI 显示「已保存」，形如 `abcd…wxyz`）。
+ *
+ * 太短的令牌（< 12）整串打码成 `***`：留 8 个字符的短令牌只剩 4 位可见，
+ * 遮不住也认不出，不如一律 `***`。打码串**只**用于展示，永远不会被当成令牌使用。
+ */
+export function maskRemoteToken(token: string): string {
+  const text: string = typeof token === 'string' ? token.trim() : '';
+  if (text.length < 12) {
+    return '***';
+  }
+  return `${text.slice(0, 4)}…${text.slice(text.length - 4)}`;
 }
 
 /** 一条「能打开」的地址判定结果；失败时 `url` 恒为空串。 */
@@ -482,6 +569,43 @@ function urlFailed(reason: string): RemoteAccessUrlResult {
 /** `:端口` 段；`port <= 0` 表示不写端口（交给地址自身决定）。 */
 function portSuffix(port: number): string {
   return port > 0 ? `:${port}` : '';
+}
+
+/**
+ * 把令牌追加到已拼好的地址上：`?token=<encodeURIComponent(令牌)>`。
+ *
+ * 两条容易踩的细节：
+ * 1. **已有 query 时用 `&`**（例如地址本身带参数），否则会拼出两个 `?`；
+ * 2. **必须落在 fragment（`#`）之前**，否则 `#` 后的内容会被浏览器当成片段，令牌根本不发出去。
+ *
+ * 独立导出是刻意为之：`buildRemoteAccessUrl` 目前只产出不带 query 的地址（`lan`/`ipv6`/
+ * `tailscale` 都是 `http://host:port/`），但这两条规则必须能被单测直接验证。
+ */
+export function appendRemoteToken(url: string, token: string): string {
+  const pair: string = `token=${encodeURIComponent(token)}`;
+  const hashIndex: number = url.indexOf('#');
+  const head: string = hashIndex < 0 ? url : url.slice(0, hashIndex);
+  const tail: string = hashIndex < 0 ? '' : url.slice(hashIndex);
+  const separator: string = head.indexOf('?') >= 0 ? '&' : '?';
+  return `${head}${separator}${pair}${tail}`;
+}
+
+/**
+ * 给一种方式的地址收尾：空令牌原样返回，非空令牌先校验再追加。
+ *
+ * 令牌非法时 `ok:false` + 中文原因（原因里没有令牌值）——宁可让用户改令牌，
+ * 也不拼一条「令牌被截断、打开后 401」的地址。
+ */
+function withRemoteToken(url: string, config: RemoteAccessConfig): RemoteAccessUrlResult {
+  const token: string = readText(config.token);
+  if (token.length === 0) {
+    return urlPassed(url);
+  }
+  const problem: string = validateRemoteToken(token);
+  if (problem.length > 0) {
+    return urlFailed(problem);
+  }
+  return urlPassed(appendRemoteToken(url, token));
 }
 
 /**
@@ -551,7 +675,7 @@ function stripBrackets(text: string): string {
 }
 
 /**
- * 按当前配置拼出一条可打开的地址（token 由用户地址自带，这里不拼）。
+ * 按当前配置拼出一条可打开的地址。
  *
  * 各方式的期望产物（与 `docs/REMOTE-ACCESS-OPTIONS.md` §2 逐条对应）：
  * - `lan`        → `http://<lanAddress>:<port>/`（端口必填，`port<=0` 直接失败）；
@@ -560,6 +684,11 @@ function stripBrackets(text: string): string {
  * - `cloudflare` → `https://<cloudflareHost>/`（隧道对外恒 443，端口不参与）；
  * - `manual`     → 复用 `normalizeRemoteUrl`（补 `http://`、校验 scheme/host/端口、识别 token）；
  * - `uu`         → `ok:false` + `unavailableReason`（画面串流，不产生端口/虚拟网卡）。
+ *
+ * 令牌（`config.token`，可选）**只**对 `lan` / `ipv6` / `tailscale` 生效：非空时在拼好的地址后
+ * 追加 `?token=<encodeURIComponent(值)>`（已有 query 用 `&`，且落在 `#` 之前）；空串不加任何参数。
+ * `cloudflare` / `manual` / `uu` 没有这个字段（前两者地址自带参数），`token` 一律不参与——
+ * 这样「切到 manual 后残留的 token」不会污染用户手填的完整地址。
  *
  * 未知 mode 已由 `normalizeRemoteMode` 回落 `lan`，因此不会走到「不认识的方式」分支。
  */
@@ -613,7 +742,7 @@ export function buildRemoteAccessUrl(config: RemoteAccessConfig): RemoteAccessUr
       // 与 §3 表一致：未指定地址 `::` 不能当访问地址（它只是「任意网卡」的写法）
       return urlFailed('IPv6 地址不可用：不能用未指定地址（::），请填网卡上的具体 IPv6');
     }
-    return urlPassed(`http://[${address}]${portSuffix(port)}/`);
+    return withRemoteToken(`http://[${address}]${portSuffix(port)}/`, config);
   }
 
   if (mode === REMOTE_MODE_TAILSCALE) {
@@ -629,7 +758,7 @@ export function buildRemoteAccessUrl(config: RemoteAccessConfig): RemoteAccessUr
     if (problem.length > 0) {
       return urlFailed(`Tailscale 地址不可用：${problem}`);
     }
-    return urlPassed(`http://${host}${portSuffix(port)}/`);
+    return withRemoteToken(`http://${host}${portSuffix(port)}/`, config);
   }
 
   // 剩下就是 lan（默认方式）
@@ -649,5 +778,5 @@ export function buildRemoteAccessUrl(config: RemoteAccessConfig): RemoteAccessUr
     // 与 §3 表一致：通配地址是「所有网卡」，不是能打开的地址
     return urlFailed('局域网地址不可用：不能用通配地址（0.0.0.0 / ::），请填网卡上的具体 IPv4');
   }
-  return urlPassed(`http://${address}${portSuffix(port)}/`);
+  return withRemoteToken(`http://${address}${portSuffix(port)}/`, config);
 }

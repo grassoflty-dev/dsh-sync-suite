@@ -49,6 +49,18 @@ export interface RemoteSettings {
   ipv6Address: string
   /** 手动方式的完整地址（含协议；可含 token）。 */
   manualUrl: string
+  /**
+   * 「访问令牌（可选）」：用户在 `lan` / `ipv6` / `tailscale` 下粘贴的令牌。
+   *
+   * 语义（两端逐字共用，见 `docs/REMOTE-ACCESS-OPTIONS.md` §3）：
+   *   - 空串 = 不往地址里追加任何令牌参数（地址原样打开）；
+   *   - 非空 = 拼成 `?token=<值>`（与令牌门解析的 `token` 参数一致；`?k=` 是等价别名）。
+   *
+   * **保密**：它是 secret——永不进日志/错误消息，**也不进 `remoteGetState`**；
+   * 状态里只给 `RemoteSettingsView.tokenSet` / `tokenMasked`，明文只允许出现在
+   * `remoteShowLink` 的返回里（与自动生成的令牌同一出口规则）。
+   */
+  token: string
 }
 
 /** 设置项的字段名（RPC 归一、App 侧、UI 表单三处共用）。 */
@@ -61,7 +73,19 @@ export const REMOTE_SETTING_KEYS = [
   'cloudflareHost',
   'ipv6Address',
   'manualUrl',
+  'token',
 ] as const
+
+/**
+ * 对外暴露的设置视图（`remoteGetState` 用）：把 `token` 抽成"是否存在 + 打码"，
+ * 保证状态响应里不可能出现令牌明文。
+ */
+export interface RemoteSettingsView extends Omit<RemoteSettings, 'token'> {
+  /** 是否已保存访问令牌（只给布尔，不给值）。 */
+  tokenSet: boolean
+  /** 打码串（如 `abcd…wxyz`）；未保存为空串。 */
+  tokenMasked: string
+}
 
 export type RemoteSettingKey = (typeof REMOTE_SETTING_KEYS)[number]
 
@@ -150,7 +174,8 @@ export interface RemoteStatus {
 
 /** `remoteGetState` 返回体。 */
 export interface RemoteStateData {
-  settings: RemoteSettings
+  /** 设置视图：**不含** `token` 明文（只有 `tokenSet` / `tokenMasked`）。 */
+  settings: RemoteSettingsView
   status: RemoteStatus
   /** 方式元数据（UI 直接渲染，避免前端再写一份语义）。 */
   modes: RemoteModeSpec[]

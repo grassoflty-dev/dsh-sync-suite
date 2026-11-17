@@ -101,6 +101,10 @@ dsh plugin --profile web remove dsh-git-config-sync
 | `manual` 手动地址 | 可用 | 只做地址归一与自检，不代管监听 |
 | `uu` 网易 UU 远程 | **不可用** | 画面串流不是隧道，UI 里是 disabled + 明示原因（不做假开关） |
 
+`lan` / `ipv6` / `tailscale` 三种方式各有一个**可选**字段「访问令牌（可选）」：留空则拼出的地址
+和以前完全一样；填了（`^[A-Za-z0-9+/=_-]{8,512}$`）就在「显示二维码与链接」里追加 `?token=…`，
+与自动生成的令牌同一出口规则——状态响应只给 `tokenSet`/`tokenMasked`，永不回显明文。
+
 安全边界（实现细节见 `docs/REMOTE-ACCESS-OPTIONS.md` §5、独立评审见 `docs/REVIEW-remote-security.md`）：
 
 - 令牌 `crypto.randomBytes(32)` 落 `~/.dsh/git-config-sync/remote-token.json`（0600）；

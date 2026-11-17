@@ -21,4 +21,5 @@ export const REMOTE_SETTING_KEYS = [
     'cloudflareHost',
     'ipv6Address',
     'manualUrl',
+    'token',
 ];

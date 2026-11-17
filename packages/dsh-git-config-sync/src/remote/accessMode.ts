@@ -10,8 +10,9 @@
  *   2. 归一一律 fail-closed：字段缺省才沿用 `previous`，显式 `''` 才清空，其余非法
  *      一律抛 `SyncError('E_VALIDATION')`；绝不把坏值悄悄吞成默认值（否则用户会
  *      以为保存成功，实际监听/建链必然失败）。
- *   3. 错误 `details` 里的值可原样给出（这些字段不含 secret），唯一例外是 `manualUrl`：
- *      含 `token=` 时先把值打码再放进 details。
+ *   3. 错误 `details` 里的值可原样给出（这些字段不含 secret），例外有两个：`manualUrl`
+ *      含 `token=` 时先把值打码再放进 details；`token` 字段则**只给 `length`**，
+ *      连长度以外的任何形态都不放进 details/message（它是 secret，见 `types.ts` 纪律 3）。
  *   4. 本文件只 import `engine/errors.ts`（`types.ts` 纪律 1 允许的纯工具），不碰同步实现。
  *
  * 可用性来自本轮调研，**结论不许在此推翻**：
@@ -62,6 +63,7 @@ const FIELD_LABELS: Record<RemoteSettingKey, string> = {
   cloudflareHost: '隧道域名',
   ipv6Address: 'IPv6 地址',
   manualUrl: '完整地址',
+  token: '访问令牌（可选）',
 }
 
 /** 端口字段在所有"要起监听"的方式里都是必填项（0 = 跟 DSH 同端口，所以恒有值）。 */
@@ -74,6 +76,27 @@ function portField(): RemoteModeField {
     required: true,
   }
 }
+
+/**
+ * 「访问令牌（可选）」字段：只出现在 `lan` / `ipv6` / `tailscale` 三种"插件自己拼地址"的方式。
+ *
+ * 为什么 `cloudflare` / `manual` / `uu` 没有它：隧道域名与手动完整地址由用户给定，
+ * 令牌要么由 DSH 的登录页要、要么已经写在完整地址里，再拼一个 `?token=` 只会打不开。
+ *
+ * `required: false` 是硬约束：留空 = 不追加任何参数（与升级前行为完全一致）。
+ */
+function tokenField(): RemoteModeField {
+  return {
+    key: 'token',
+    label: FIELD_LABELS.token,
+    placeholder: '粘贴电脑上 DSH 地址里的 token',
+    hint: '留空则不带令牌；填了会在链接里追加 ?token=…',
+    required: false,
+  }
+}
+
+/** 访问令牌的合法形态：base64 / base64url 字符集，长度 8–512（与 App 侧 `REMOTE_TOKEN_PATTERN` 逐字一致）。 */
+const TOKEN_PATTERN = /^[A-Za-z0-9+/=_-]{8,512}$/
 
 export const REMOTE_MODES: Readonly<Record<RemoteAccessMode, RemoteModeInfo>> = {
   lan: {
@@ -92,6 +115,7 @@ export const REMOTE_MODES: Readonly<Record<RemoteAccessMode, RemoteModeInfo>> = 
         required: true,
       },
       portField(),
+      tokenField(),
     ],
     steps: [
       '在电脑「设置 → 网络」里查看当前 Wi-Fi 的 IPv4 地址。',
@@ -121,6 +145,7 @@ export const REMOTE_MODES: Readonly<Record<RemoteAccessMode, RemoteModeInfo>> = 
         required: true,
       },
       portField(),
+      tokenField(),
     ],
     steps: [
       '电脑上安装 Tailscale 客户端并登录同一个账号。',
@@ -152,6 +177,7 @@ export const REMOTE_MODES: Readonly<Record<RemoteAccessMode, RemoteModeInfo>> = 
         required: true,
       },
       portField(),
+      tokenField(),
     ],
     steps: [
       '电脑上运行 ipconfig，找「IPv6 地址」里不带「临时」的那条。',
@@ -259,6 +285,8 @@ export function defaultRemoteSettings(): RemoteSettings {
     cloudflareHost: '',
     ipv6Address: '',
     manualUrl: '',
+    // 空串 = 不追加 `?token=`（与升级前拼出的地址完全一致）。
+    token: '',
   }
 }
 
@@ -405,6 +433,27 @@ export function normalizeRemoteSettings(input: unknown, previous: RemoteSettings
       })
     }
     next[field] = checked.value
+  }
+
+  if (record.token !== undefined) {
+    const raw = record.token
+    if (typeof raw !== 'string') {
+      // 非字符串也不回显值：令牌是 secret，details 里只给字段名。
+      throw new SyncError('E_VALIDATION', `${FIELD_LABELS.token}必须是字符串`, { field: 'token' })
+    }
+    const trimmed = raw.trim()
+    if (trimmed === '') {
+      // 显式空串 = 用户清掉了令牌（合法操作）：地址不再追加任何参数。
+      next.token = ''
+    } else if (!TOKEN_PATTERN.test(trimmed)) {
+      // **绝不**把令牌值放进 details/message——只给长度，够定位问题又不泄露。
+      throw new SyncError('E_VALIDATION', '访问令牌只允许字母数字与 + / = _ -，长度 8–512', {
+        field: 'token',
+        length: trimmed.length,
+      })
+    } else {
+      next.token = trimmed
+    }
   }
 
   return next

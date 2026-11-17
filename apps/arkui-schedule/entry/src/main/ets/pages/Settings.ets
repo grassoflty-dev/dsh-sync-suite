@@ -8,7 +8,8 @@
  * 远程控制组（最后一个功能组，排在「关于」之前）：
  * 1. 「访问方式」六选一（`model/remoteAccess.ts` 的 `REMOTE_MODES`，与插件侧同一套枚举与字段）；
  * 2. 按方式的 `fields` 渲染输入（局域网 / IPv6 → 地址+端口，Tailscale → 主机+端口，
- *    Cloudflare → 域名，手动 → 完整地址），`unsupported`（网易 UU 远程）只显示原因、不给假开关；
+ *    Cloudflare → 域名，手动 → 完整地址；`lan`/`ipv6`/`tailscale` 另有「访问令牌（可选）」
+ *    密码框，已保存的令牌只打码显示、不回填明文），`unsupported`（网易 UU 远程）只显示原因、不给假开关；
  * 3. 「DSH 地址」是最终要打开的地址（`lan`/`ipv6`/`tailscale`/`cloudflare` 由字段自动拼出来，
  *    `manual` 就是手输那一行）；点「打开远程控制」时 `buildRemoteAccessUrl` 拼地址、`normalizeRemoteUrl`
  *    再归一，`settingsStore.save` 落盘（含方式与各字段）后才 `router.pushUrl` 到内嵌页
@@ -62,6 +63,7 @@ import {
   buildRemoteAccessUrl,
   defaultRemoteAccessConfig,
   findRemoteMode,
+  maskRemoteToken,
   normalizeRemoteMode,
   normalizeRemotePort
 } from '../model/remoteAccess';
@@ -258,6 +260,14 @@ struct Settings {
   @State remoteIpv6Address: string = '';
   /** 手动方式的完整地址（与「DSH 地址」那一行共用同一份值，见 `manualUrl` 的取值逻辑）。 */
   @State remoteManualUrl: string = '';
+  /**
+   * 「访问令牌（可选）」的**输入框值**（只写通道）。
+   *
+   * 这里只存「用户这次想改成的新令牌」，**永不**回填已保存的明文：已保存的令牌在
+   * `savedRemoteToken`（private，不给输入框），页面只用 `maskRemoteToken` 显示「已保存」。
+   * 输入框留空 = 不改（沿用已保存的令牌），见 `effectiveRemoteToken()`。
+   */
+  @State remoteToken: string = '';
 
   /** 从列表页跳转过来时要自动执行的同步动作（pull / push / status）。 */
   private autoAction: string = '';
@@ -266,6 +276,13 @@ struct Settings {
   private disposed: boolean = false;
   /** 已保存的 token：输入框留空时沿用（用户「不改 token」不该被拦）。 */
   private savedToken: string = '';
+  /**
+   * 已保存的「访问令牌」（明文，页面内部只用于 mask 显示与"沿用"语义）。
+   *
+   * 刻意不是 `@State`：它**不进任何输入框**，改动它也不需要触发重绘（mask 显示读的是方法）。
+   * 声明成普通字段能提醒后来者：这个值只允许 mask 后上屏。
+   */
+  private savedRemoteToken: string = '';
   /** 最近一次同步状态结果（只在页面内部用于派生「推送是否就绪」的说明行）。 */
   private lastStatusResult: GitSyncResult | null = null;
   /** 页面主滚动容器：校验失败时滚回顶部，让红色汇总与第一个错误字段进入视野。 */
@@ -373,6 +390,10 @@ struct Settings {
     this.remoteIpv6Address = settings.remoteIpv6Address;
     // 旧版本只存过 remoteUrl：仍是 manual 方式的唯一来源，不能丢
     this.remoteManualUrl = settings.remoteManualUrl.length > 0 ? settings.remoteManualUrl : settings.remoteUrl;
+    // 访问令牌：读到的明文只留在 savedRemoteToken（供 mask 显示 / 拼地址 / 「没改就沿用」），
+    // **不回填输入框**——输入框只存"用户这次想改成的值"，留空即"不改"。
+    this.savedRemoteToken = settings.remoteToken.trim();
+    this.remoteToken = '';
     // 升级迁移（**只在首次铺表单时做一次**）：老数据只有 `remoteUrl`、没有任何方式字段。
     // 若按默认的 `lan` 走，「局域网地址」是空的 → 原来能打开的地址会突然点不动。
     // 因此把它当成「手动填的完整地址」打开；用户点一次「打开远程控制」后方式就落盘成 manual。
@@ -579,7 +600,10 @@ struct Settings {
         remoteTailscaleHost: this.remoteTailscaleHost,
         remoteCloudflareHost: this.remoteCloudflareHost,
         remoteIpv6Address: this.remoteIpv6Address,
-        remoteManualUrl: this.remoteManualUrl
+        remoteManualUrl: this.remoteManualUrl,
+        // 访问令牌：输入框留空 = 沿用已保存的（**不能**把空串写进去，那等于悄悄清除令牌）；
+        // 想清除只有「清除令牌」那一个入口。
+        remoteToken: this.effectiveRemoteToken()
       };
       const saved = await settingsStore.save(patch, context);
       if (this.disposed) {
@@ -1162,6 +1186,77 @@ struct Settings {
   }
 
   /**
+   * 当前方式有没有「访问令牌（可选）」字段（只有 `lan` / `ipv6` / `tailscale` 有）。
+   *
+   * 判据来自 `REMOTE_MODES[mode].fields`，不在页面里另写一份方式名单：插件侧改字段表时
+   * 这里自动跟上，不会出现「模型说有、页面不画」或反向的漂移。
+   */
+  private remoteUsesToken(): boolean {
+    for (const field of this.remoteSpec().fields) {
+      if (field.key === 'token') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 已保存的访问令牌是否存在（空串 = 未设置）。 */
+  private hasSavedRemoteToken(): boolean {
+    return this.savedRemoteToken.trim().length > 0;
+  }
+
+  /**
+   * 最终要用的访问令牌：输入框有值就用它（用户正在改成新的），否则沿用已保存的。
+   *
+   * 与 `effectiveToken`（Git token）同一套语义：留空 ≠ 清除，清除必须点「清除令牌」。
+   */
+  private effectiveRemoteToken(): string {
+    return effectiveToken(this.remoteToken, this.savedRemoteToken);
+  }
+
+  /**
+   * 令牌状态小字：输入框有值 → 「保存后生效」；否则已保存 → 「已保存访问令牌（打码）」。
+   *
+   * 打码走 `maskRemoteToken`（前 4 + … + 后 4，太短一律 `***`），**明文永不上屏**。
+   */
+  private remoteTokenStatus(): string {
+    if (this.remoteToken.trim().length > 0) {
+      return '保存后生效';
+    }
+    if (this.hasSavedRemoteToken()) {
+      return `已保存访问令牌（${maskRemoteToken(this.savedRemoteToken)}）`;
+    }
+    return '';
+  }
+
+  /**
+   * 「清除令牌」：把已保存的令牌置空并立即落盘（与「仅手写笔输入」同样是即时生效项）。
+   *
+   * 失败时把内存里的旧值放回去，避免界面显示"已清除"但下次读盘又冒出来。
+   */
+  private async clearRemoteToken(): Promise<void> {
+    const previous: string = this.savedRemoteToken;
+    const context = getContext(this) as common.UIAbilityContext;
+    this.savedRemoteToken = '';
+    this.remoteToken = '';
+    this.remoteUrlError = '';
+    try {
+      await settingsStore.save({ remoteToken: '' }, context);
+      if (this.disposed) {
+        return;
+      }
+      this.refreshRemotePreview();
+      promptAction.showToast({ message: '已清除访问令牌', duration: toastMsFor(false) });
+    } catch (error) {
+      if (this.disposed) {
+        return;
+      }
+      this.savedRemoteToken = previous;
+      this.remoteUrlError = `访问令牌保存失败：${describeError(error)}`;
+    }
+  }
+
+  /**
    * 方式字段 + 「DSH 地址」当前值 → 完整配置。
    *
    * `manual` 的完整地址优先取手输框（`remoteManualUrl`），为空时退回「DSH 地址」那一行：
@@ -1177,6 +1272,8 @@ struct Settings {
     config.ipv6Address = this.remoteIpv6Address.trim();
     const manual: string = this.remoteManualUrl.trim();
     config.manualUrl = manual.length > 0 ? manual : this.remoteUrl.trim();
+    // 令牌：输入框优先、留空沿用已保存值（`lan`/`ipv6`/`tailscale` 才参与拼装）
+    config.token = this.effectiveRemoteToken();
     return config;
   }
 
@@ -1268,6 +1365,9 @@ struct Settings {
       await settingsStore.save({ remoteUrl: check.url });
       // 访问方式与各字段再存一次：第一条已经把「能打开的地址」落盘，即使第二条写入失败，
       // 用户下次进设置页仍有可用地址（不会两样都丢）。
+      // 令牌走「输入框优先、留空沿用已保存」的语义：这里传的是真正拼进地址的那个值，
+      // 所以「打开远程控制」也顺手把刚填的令牌保存下来（不会出现地址带新令牌、字段还是旧的）。
+      const nextRemoteToken: string = this.effectiveRemoteToken();
       await settingsStore.save({
         remoteMode: this.remoteMode,
         remoteLanAddress: this.remoteLanAddress,
@@ -1275,8 +1375,11 @@ struct Settings {
         remoteTailscaleHost: this.remoteTailscaleHost,
         remoteCloudflareHost: this.remoteCloudflareHost,
         remoteIpv6Address: this.remoteIpv6Address,
-        remoteManualUrl: this.remoteManualUrl
+        remoteManualUrl: this.remoteManualUrl,
+        remoteToken: nextRemoteToken
       });
+      this.savedRemoteToken = nextRemoteToken;
+      this.remoteToken = '';
     } catch (error) {
       if (this.disposed) {
         return;
@@ -2081,6 +2184,50 @@ struct Settings {
           .strokeWidth(DIVIDER)
           .color($r('app.color.divider'))
         this.HintLine(this.remoteFieldHint('port'))
+      }
+
+      // 「访问令牌（可选）」：只出现在 lan / ipv6 / tailscale 的字段表里（端口之后）。
+      // 密码框里**只**是"用户这次想改成的值"（`remoteToken`）；已保存的令牌不回填，
+      // 只用打码小字说明"已保存"，这样旁边有人看屏幕也看不到明文。
+      if (this.remoteUsesToken()) {
+        this.FieldLabel(this.remoteFieldLabel('token'))
+        TextInput({ text: this.remoteToken, placeholder: this.remoteFieldPlaceholder('token') })
+          .type(InputType.Password)
+          .width('100%')
+          .height(TOUCH_MIN + SPACING.xs)
+          .fontSize(FONT.body)
+          .backgroundColor($r('app.color.page_background'))
+          .borderRadius(RADIUS.none)
+          .padding({ left: 0, right: 0 })
+          .onChange((value: string) => {
+            this.remoteToken = value;
+            this.remoteUrlError = '';
+            this.refreshRemotePreview();
+          })
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+        this.HintLine(this.remoteFieldHint('token'))
+        if (this.remoteTokenStatus().length > 0) {
+          Text(this.remoteTokenStatus())
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.text_secondary'))
+            .width('100%')
+            .textAlign(TextAlign.Start)
+        }
+        if (this.hasSavedRemoteToken()) {
+          Text('清除令牌')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.brand'))
+            .height(TOUCH_MIN)
+            .padding({ left: SPACING.md, right: SPACING.md })
+            .textAlign(TextAlign.Center)
+            .onClick(() => {
+              this.clearRemoteToken();
+            })
+        }
       }
 
       if (this.remoteMode === REMOTE_MODE_MANUAL) {
