@@ -1,0 +1,921 @@
+/**
+ * 远程访问域（`src/remote/**`）：**旁挂监听 + 反向代理（HTTP + WebSocket）**。
+ *
+ * 为什么是"旁挂"而不是改 DSH 自己的监听（踩坑记录，来自已安装的
+ * `@feiyang666/dsh-mobile-remote@2.0.1` 的 `lib/lanproxy.js` 注释，只读参考、未 import）：
+ *   · 新版 DSH 的 webserver 只接受"一块具体网卡的 IPv4 字面量"，`0.0.0.0` 直接抛错退出；
+ *   · 真把宿主改绑到 `192.168.x.x`，本机 `127.0.0.1` 的监听随之消失 —— 桌面端窗口、
+ *     固定加载 `http://127.0.0.1:<port>` 的官方桌面端会立刻白屏；
+ *   · 官方桌面端用 `--port 0` 由系统分配端口，patch 里重述 port 会让端口漂移。
+ * 因此本文件**只多开一个独立端口的监听**，DSH 侧监听一个字节都不动。
+ *
+ * 分层纪律（违反即返工）：
+ *   1. 本文件**不** import `src/engine/**`、`src/schedule/**` 的任何实现：远程访问是旁挂件，
+ *      起不来只允许影响远程访问，不许连累配置同步与日程。依赖仅限 `node:` 内置模块。
+ *   2. 一切失败 **fail-closed**：地址非法 / 绑定失败 / 上游不可达 / 鉴权钩子抛错 /
+ *      上游拒绝升级 → 一律当作"不可用"（抛 RemoteStartError 或回 403/502），绝不把
+ *      请求放行到别处。
+ *   3. **token 明文永不进错误消息与日志**：错误里只出现 scheme//host/path，查询串与
+ *      userinfo 一律打码（`safeUrlText` / `scrubSecrets`），日志只写 errno 码（`codeOf`）。
+ *
+ * 认证与路由**不在本文件**：本文件只提供 `authorize` 这一个门禁钩子，**HTTP 请求与
+ * WebSocket upgrade 都必须过它**（upgrade 若绕过授权，等于开一条免令牌通道 —— DSH 的
+ * `/api/remote.mux` 就是 WS）；自身**不做**任何 token 解析、不认任何特殊路径、不签发
+ * 任何 cookie。（安全红线：绝不做"裸 GET / 自动补 token 并下发 cookie"这种事。）
+ */
+import http, { STATUS_CODES } from 'node:http';
+/**
+ * 启动失败。调用方必须 catch 后降级（"远程访问不可用"），不许让它冒到插件启动路径。
+ * 消息已保证不含 token 明文与查询串。
+ */
+export class RemoteStartError extends Error {
+    code;
+    address;
+    port;
+    /** 底层 errno 码（如 `EADDRINUSE`）；无则空串。 */
+    detail;
+    constructor(code, message, info = {}) {
+        super(message);
+        this.name = 'RemoteStartError';
+        this.code = code;
+        this.address = info.address ?? '';
+        this.port = info.port ?? 0;
+        this.detail = info.detail ?? '';
+    }
+}
+/** IPv4 点分四段解析：拒绝前导零、非数字、越界（`192.168.1.256` 必须假）。 */
+function parseIpv4(addr) {
+    const parts = addr.split('.');
+    if (parts.length !== 4)
+        return null;
+    const octets = [];
+    for (const part of parts) {
+        // 只允许十进制且无前导零（避免 `010` 被当成八进制这类歧义）
+        if (!/^(0|[1-9]\d{0,2})$/.test(part))
+            return null;
+        const value = Number(part);
+        if (value > 255)
+            return null;
+        octets.push(value);
+    }
+    return [octets[0], octets[1], octets[2], octets[3]];
+}
+/**
+ * 纯函数：该地址能不能作为**局域网旁挂监听**的绑定地址。
+ *
+ * 通过 = 具体、单播、非回环、非链路本地、非"任意地址"的 IPv4。
+ * 拒绝：
+ *   · 非 IPv4 文本（`::1`、`::ffff:192.168.1.6`、`localhost`、空串、带空白/端口/掩码）；
+ *   · 非法字面量（`abc`、`192.168.1.256`、`192.168.01.6`）；
+ *   · `0.0.0.0` 与 `0.0.0.0/8`（"任意地址"，等于把 DSH 摊到所有网卡）；
+ *   · `127.0.0.0/8`（回环：旁挂监听绑回环没有意义，且会与 DSH 自己的监听打架）；
+ *   · `169.254.0.0/16`（链路本地/APIPA：地址不稳定，绑上也会随时失效）；
+ *   · `224.0.0.0/4` 组播、`240.0.0.0/4` 保留、`255.255.255.255` 广播。
+ *
+ * 故意**不**限制在 RFC1918 私网：`100.64.0.0/10`（Tailscale/CGNAT）与部分企业网段
+ * 也是合法可绑的单播地址，收紧会造成"地址正常却绑不上"的假故障。
+ */
+export function isBindableLanAddress(addr) {
+    if (typeof addr !== 'string' || addr === '')
+        return false;
+    const parsed = parseIpv4(addr);
+    if (parsed === null)
+        return false;
+    const [a, b] = parsed;
+    if (a === 0)
+        return false; // 0.0.0.0/8：任意地址
+    if (a === 127)
+        return false; // 回环
+    if (a === 169 && b === 254)
+        return false; // 链路本地 / APIPA
+    if (a >= 224)
+        return false; // 组播 + 保留 + 广播
+    return true;
+}
+/**
+ * 会被打码的查询参数名（错误/日志出口统一复用）。
+ * 写成数组是为了只有一处词表：新增敏感名不用改正则。
+ */
+const SECRET_QUERY_KEYS = [
+    'token',
+    'secret',
+    'password',
+    'passwd',
+    'pwd',
+    'cookie',
+    'session',
+    'auth',
+    'ticket',
+    'access_token',
+    'refresh_token',
+    'apikey',
+    'api_key',
+];
+const SECRET_QUERY_PATTERN = new RegExp(`([?&](?:${SECRET_QUERY_KEYS.join('|')})=)[^&\\s"'#]+`, 'gi');
+/** 把文本里的 token 类查询参数与 URL userinfo 打码（错误/日志出口统一走这里）。 */
+export function scrubSecrets(text) {
+    return String(text ?? '')
+        .replace(SECRET_QUERY_PATTERN, '$1***')
+        .replace(/(\/\/)[^/@\s]+@/g, '$1***@');
+}
+/** 只保留 `scheme//host/path`，剔除查询串与 userinfo —— 永不回显 token。 */
+function safeUrlText(raw) {
+    try {
+        const url = new URL(raw);
+        const auth = url.username !== '' || url.password !== '' ? '***@' : '';
+        return `${url.protocol}//${auth}${url.host}${url.pathname}${url.search !== '' ? '?…' : ''}`;
+    }
+    catch {
+        return '<非法地址>';
+    }
+}
+/** 绑定地址在错误消息里的安全写法（截断 + 去空白，避免把畸形输入整段回显）。 */
+function describeAddress(addr) {
+    if (typeof addr !== 'string')
+        return '（非字符串）';
+    const clipped = addr.slice(0, 64).replace(/\s+/g, ' ');
+    return clipped === '' ? '（空串）' : clipped;
+}
+/** 只取 errno 码；日志里绝不带原始 message（message 可能夹带 URL/凭据）。 */
+function codeOf(error) {
+    if (typeof error === 'object' && error !== null) {
+        const code = error.code;
+        if (typeof code === 'string' && code !== '')
+            return code;
+        const name = error.name;
+        if (typeof name === 'string' && name !== '')
+            return name;
+    }
+    return 'E_REMOTE';
+}
+function normalizeIp(ip) {
+    const text = typeof ip === 'string' ? ip.replace(/^::ffff:/, '') : '';
+    return text === '0:0:0:0:0:0:0:1' ? '::1' : text;
+}
+/** 逐跳头：不转发（由我们自己这一跳重新决定）。 */
+const REQUEST_HOP_BY_HOP = new Set([
+    'connection',
+    'keep-alive',
+    'proxy-connection',
+    'transfer-encoding',
+    'upgrade',
+    'te',
+    'trailer',
+    'expect',
+    'proxy-authenticate',
+    'proxy-authorization',
+]);
+/**
+ * 回传客户端时**必须**剔除的响应头。
+ *
+ * - `set-*`：上游 cookie 就是本机 owner 身份，漏给平板等于把 owner 权限交出去；
+ *   本监听永远不代发上游 cookie。
+ * - 其余是逐跳头，由我们这一跳重新决定。
+ */
+const RESPONSE_STRIP = new Set([
+    'connection',
+    'keep-alive',
+    'proxy-connection',
+    'transfer-encoding',
+    'upgrade',
+    'te',
+    'trailer',
+    'set-cookie',
+    'set-cookie2',
+]);
+/** 101 应答只剔 cookie；Connection/Upgrade/Sec-WebSocket-Accept 必须原样保留。 */
+const UPGRADE_RESPONSE_STRIP = new Set(['set-cookie', 'set-cookie2']);
+/** 解析并校验 `RemoteUpstream.baseUrl`；不合法一律 RemoteStartError。 */
+function parseUpstream(upstream) {
+    if (upstream === null || typeof upstream !== 'object') {
+        throw new RemoteStartError('E_REMOTE_INVALID_UPSTREAM', '缺少上游地址（RemoteUpstream.baseUrl）');
+    }
+    const raw = upstream.baseUrl;
+    if (typeof raw !== 'string' || raw.trim() === '') {
+        throw new RemoteStartError('E_REMOTE_INVALID_UPSTREAM', '上游地址为空');
+    }
+    let url;
+    try {
+        url = new URL(raw.trim());
+    }
+    catch {
+        throw new RemoteStartError('E_REMOTE_INVALID_UPSTREAM', `上游地址非法：${safeUrlText(raw)}`);
+    }
+    if (url.protocol !== 'http:') {
+        throw new RemoteStartError('E_REMOTE_INVALID_UPSTREAM', `上游只支持 http://（本监听用 node:http 直连本机）；收到：${safeUrlText(raw)}`);
+    }
+    const hostname = url.hostname.replace(/^\[|\]$/g, '');
+    if (hostname === '') {
+        throw new RemoteStartError('E_REMOTE_INVALID_UPSTREAM', `上游地址缺少主机：${safeUrlText(raw)}`);
+    }
+    const port = url.port !== '' ? Number(url.port) : 80;
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+        throw new RemoteStartError('E_REMOTE_INVALID_UPSTREAM', `上游端口非法：${String(url.port)}`);
+    }
+    return {
+        hostname,
+        port,
+        basePath: url.pathname === '/' ? '' : url.pathname.replace(/\/+$/, ''),
+        hostHeader: url.host,
+        headers: upstream.headers,
+    };
+}
+/** 把客户端 path+query 拼到上游 basePath 之后（保留原样，不做规范化）。 */
+function upstreamPath(basePath, requestUrl) {
+    const raw = typeof requestUrl === 'string' && requestUrl !== '' ? requestUrl : '/';
+    const withSlash = raw.startsWith('/') ? raw : `/${raw}`;
+    return `${basePath}${withSlash}`;
+}
+/** 解析动态上游头（可异步）；只保留字符串值，拒绝 host / x-forwarded-*。 */
+async function resolveUpstreamHeaders(target) {
+    const source = target.headers;
+    if (source === undefined)
+        return {};
+    const value = typeof source === 'function' ? await source() : source;
+    if (value === null || typeof value !== 'object')
+        return {};
+    const out = {};
+    for (const [key, raw] of Object.entries(value)) {
+        if (typeof raw !== 'string')
+            continue;
+        const lower = key.toLowerCase();
+        if (lower === 'host' || lower.startsWith('x-forwarded-'))
+            continue;
+        out[lower] = raw;
+    }
+    return out;
+}
+/** 组装转发给上游的请求头（host 改写 + x-forwarded-* 追加 + 静态/门禁头）。 */
+function outboundHeaders(req, target, extraHeaders) {
+    const out = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+        if (value === undefined)
+            continue;
+        if (REQUEST_HOP_BY_HOP.has(key))
+            continue;
+        out[key] = value;
+    }
+    const ip = normalizeIp(req.socket?.remoteAddress);
+    if (ip !== '') {
+        const prev = req.headers['x-forwarded-for'];
+        const prevText = Array.isArray(prev) ? prev.join(', ') : prev;
+        out['x-forwarded-for'] = typeof prevText === 'string' && prevText !== '' ? `${prevText}, ${ip}` : ip;
+    }
+    out['x-forwarded-proto'] = 'http';
+    const originalHost = req.headers.host;
+    if (typeof originalHost === 'string' && originalHost !== '')
+        out['x-forwarded-host'] = originalHost;
+    if (extraHeaders !== undefined) {
+        for (const [key, value] of Object.entries(extraHeaders)) {
+            const lower = key.toLowerCase();
+            // host 与 x-forwarded-* 由本监听决定，调用方也不许覆盖（防伪造）
+            if (lower === 'host' || lower.startsWith('x-forwarded-'))
+                continue;
+            out[lower] = value;
+        }
+    }
+    out.host = target.hostHeader;
+    return out;
+}
+/** 回环 authority 判定（``127.0.0.1[:port]`` / `localhost[:port]` / `[::1][:port]`）。 */
+function isLoopbackHost(hostname) {
+    const lower = hostname.toLowerCase();
+    return lower === '127.0.0.1' || lower === 'localhost' || lower === '::1' || lower === '[::1]' || lower === '0.0.0.0';
+}
+/**
+ * 把 `location` 里的本机地址改写为**外部** authority（默认开启）。
+ *
+ * 上游看清楚平板访问的是 `192.168.1.6:3081`，但它自己生成的 302 只会写
+ * `http://127.0.0.1:<上游端口>/…`；不改写平板就会跳到它自己的 localhost。
+ * 相对 `location` 不动（浏览器按外部 origin 解析，本来就是对的）。
+ */
+function rewriteLocation(value, externalAuthority, upstreamHost) {
+    if (typeof value !== 'string' || value === '' || externalAuthority === '')
+        return value;
+    let parsed;
+    try {
+        parsed = new URL(value);
+    }
+    catch {
+        return value; // 相对 location：无需改写
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+        return value;
+    const host = parsed.hostname.toLowerCase();
+    const isUpstream = host === upstreamHost.toLowerCase();
+    if (!isUpstream && !isLoopbackHost(host))
+        return value;
+    return `http://${externalAuthority}${parsed.pathname}${parsed.search}${parsed.hash}`;
+}
+/** 组装回传给客户端的响应头（剔 cookie/逐跳头，按需改写 location，保留多值）。 */
+function inboundHeaders(up, externalAuthority, upstreamHost, rewrite) {
+    const out = {};
+    for (let i = 0; i < up.rawHeaders.length; i += 2) {
+        const key = up.rawHeaders[i];
+        if (key === undefined)
+            continue;
+        const lower = key.toLowerCase();
+        if (RESPONSE_STRIP.has(lower))
+            continue;
+        let value = up.rawHeaders[i + 1] ?? '';
+        if (rewrite && lower === 'location')
+            value = rewriteLocation(value, externalAuthority, upstreamHost);
+        const prev = out[lower];
+        if (prev === undefined)
+            out[lower] = value;
+        else if (Array.isArray(prev))
+            prev.push(value);
+        else
+            out[lower] = [prev, value];
+    }
+    return out;
+}
+/** 把上游的 101 应答原样序列化成字节（rawHeaders 逐条保留，只剔 cookie）。 */
+function serializeResponseHead(res) {
+    const status = res.statusCode ?? 101;
+    const reason = res.statusMessage !== undefined && res.statusMessage !== ''
+        ? res.statusMessage
+        : STATUS_CODES[status] ?? 'Switching Protocols';
+    const lines = [`HTTP/1.1 ${String(status)} ${reason}`];
+    for (let i = 0; i < res.rawHeaders.length; i += 2) {
+        const key = res.rawHeaders[i];
+        if (key === undefined)
+            continue;
+        if (UPGRADE_RESPONSE_STRIP.has(key.toLowerCase()))
+            continue;
+        lines.push(`${key}: ${res.rawHeaders[i + 1] ?? ''}`);
+    }
+    return `${lines.join('\r\n')}\r\n\r\n`;
+}
+function destroyQuietly(target) {
+    if (target === null || target === undefined)
+        return;
+    try {
+        if (typeof target.destroy === 'function')
+            target.destroy();
+    }
+    catch {
+        /* 已经断了 */
+    }
+}
+function enableNoDelay(socket) {
+    const maybe = socket;
+    if (typeof maybe.setNoDelay === 'function') {
+        try {
+            maybe.setNoDelay(true);
+        }
+        catch {
+            /* 非 TCP socket 忽略 */
+        }
+    }
+}
+/** 这些头在最小应答里由本监听自己决定，调用方传了也不生效。 */
+const PLAIN_RESPONSE_RESERVED = new Set(['content-length', 'connection', 'transfer-encoding', 'keep-alive']);
+/** 普通 HTTP 应答（fail-closed 专用；正文里绝不出现上游地址或 token）。 */
+function respondPlain(res, status, text, close = false, extraHeaders) {
+    if (res.headersSent || res.writableEnded) {
+        destroyQuietly(res);
+        return;
+    }
+    const body = Buffer.from(text, 'utf8');
+    const headers = {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+        'content-length': String(body.length),
+    };
+    if (close)
+        headers.connection = 'close';
+    if (extraHeaders !== undefined) {
+        for (const [key, value] of Object.entries(extraHeaders)) {
+            const lower = key.toLowerCase();
+            if (PLAIN_RESPONSE_RESERVED.has(lower))
+                continue;
+            headers[lower] = value;
+        }
+    }
+    try {
+        res.writeHead(status, headers);
+        res.end(body);
+    }
+    catch {
+        destroyQuietly(res);
+    }
+}
+/** 直接往裸 socket 写一个应答（Upgrade 通道没有 ServerResponse 可用）。 */
+function writeRawResponse(socket, status, text, extraHeaders) {
+    const body = Buffer.from(text, 'utf8');
+    const headers = {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+        'content-length': String(body.length),
+    };
+    if (extraHeaders !== undefined) {
+        for (const [key, value] of Object.entries(extraHeaders)) {
+            const lower = key.toLowerCase();
+            if (PLAIN_RESPONSE_RESERVED.has(lower))
+                continue;
+            headers[lower] = value; // 门禁给的 content-type 等覆盖默认值（不写重名头）
+        }
+    }
+    headers.connection = 'close';
+    let head = `HTTP/1.1 ${String(status)} ${STATUS_CODES[status] ?? 'Error'}\r\n`;
+    for (const [key, value] of Object.entries(headers))
+        head += `${key}: ${value}\r\n`;
+    head += '\r\n';
+    try {
+        socket.write(head);
+        socket.write(body);
+        socket.end();
+    }
+    catch {
+        destroyQuietly(socket);
+    }
+    // 给 flush 一点时间再断，避免客户端只看到 RST
+    setTimeout(() => destroyQuietly(socket), 50).unref();
+}
+const RESPOND_DEFAULT_STATUS = 401;
+const RESPOND_DEFAULT_BODY = 'unauthorized\n';
+function collectStringRecord(source) {
+    const out = {};
+    if (source === null || source === undefined || typeof source !== 'object')
+        return out;
+    for (const [key, value] of Object.entries(source)) {
+        if (typeof value === 'string')
+            out[key.toLowerCase()] = value;
+    }
+    return out;
+}
+function normalizeStatus(value) {
+    return Number.isInteger(value) && value >= 100 && value <= 599
+        ? value
+        : RESPOND_DEFAULT_STATUS;
+}
+/**
+ * 归一化门禁钩子的返回值：任何不认识的东西 = 拒绝（fail-closed）。
+ *
+ * 兼容三种写法：布尔、`{ kind: 'allow' | 'respond', … }`（推荐）、
+ * 以及早期的 `{ allow: boolean, intercept?: boolean }`（等价于 allow/respond）。
+ */
+function normalizeDecision(raw) {
+    const denied = {
+        kind: 'respond',
+        status: RESPOND_DEFAULT_STATUS,
+        headers: {},
+        body: RESPOND_DEFAULT_BODY,
+        upstreamHeaders: {},
+    };
+    if (raw === true)
+        return { ...denied, kind: 'allow' };
+    if (raw === false || raw === undefined || raw === null)
+        return denied;
+    if (typeof raw !== 'object')
+        return denied;
+    const value = raw;
+    const upstreamHeaders = collectStringRecord(value.upstreamHeaders);
+    const allowed = value.kind === 'allow' || (value.kind === undefined && value.allow === true);
+    if (allowed) {
+        return { ...denied, kind: 'allow', upstreamHeaders };
+    }
+    return {
+        kind: 'respond',
+        status: normalizeStatus(value.status),
+        headers: collectStringRecord(value.headers),
+        body: typeof value.body === 'string' ? value.body : RESPOND_DEFAULT_BODY,
+        upstreamHeaders: {},
+    };
+}
+/** 由请求构造门禁输入（对端 IP 必须带上，限速按同 IP 粒度）。 */
+function buildAuthorizeInput(req) {
+    const headers = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+        if (value === undefined)
+            continue;
+        headers[key.toLowerCase()] = Array.isArray(value) ? value.join(', ') : String(value);
+    }
+    return {
+        method: req.method ?? 'GET',
+        url: typeof req.url === 'string' && req.url !== '' ? req.url : '/',
+        headers,
+        remoteAddress: normalizeIp(req.socket?.remoteAddress),
+    };
+}
+/**
+ * 起旁挂监听：只 bind `opts.bindAddress`，把 HTTP 与 WebSocket 转发到 `opts.upstream`。
+ *
+ * 失败一律抛 `RemoteStartError`（调用方 catch 后降级）；**不会**产生未捕获异常，
+ * 也不会留下半开的监听（失败路径会 close server 并销毁已接受的 socket）。
+ */
+export async function startRemoteListener(options) {
+    if (!options || typeof options !== 'object') {
+        throw new RemoteStartError('E_REMOTE_INVALID_OPTIONS', '缺少启动参数');
+    }
+    const port = options.port;
+    if (!Number.isInteger(port) || port < 0 || port > 65535) {
+        throw new RemoteStartError('E_REMOTE_INVALID_PORT', `监听端口必须是 0..65535 的整数，收到 ${String(port)}`, {
+            port: Number.isInteger(port) ? port : 0,
+        });
+    }
+    const listenPort = port;
+    const bindAddress = options.bindAddress;
+    if (!isBindableLanAddress(bindAddress)) {
+        throw new RemoteStartError('E_REMOTE_INVALID_ADDRESS', `绑定地址必须是具体局域网 IPv4（排除 127/8、169.254/16、0.0.0.0、多播/广播与 IPv6）：${describeAddress(bindAddress)}`, { address: typeof bindAddress === 'string' ? bindAddress.slice(0, 64) : '', port: listenPort });
+    }
+    const address = bindAddress;
+    const target = parseUpstream(options.upstream);
+    const rewriteRedirects = options.rewriteRedirects !== false;
+    const log = (message) => {
+        if (typeof options.log !== 'function')
+            return;
+        try {
+            options.log(scrubSecrets(message));
+        }
+        catch {
+            /* 日志永远不许影响服务 */
+        }
+    };
+    const sockets = new Set();
+    let total = 0;
+    let rejected = 0;
+    let closed = false;
+    let lastError = null;
+    /** 记录运行期失败：只留 errno 码 + 固定短语，绝不带 URL/头/凭据。 */
+    const noteFailure = (scope, error) => {
+        const code = codeOf(error);
+        lastError = { code, message: `${scope}失败（${code}）` };
+        log(`[remote] ${lastError.message}`);
+    };
+    const server = http.createServer();
+    // 长连接（SSE / WebSocket）不能被默认 keep-alive 超时误杀
+    server.keepAliveTimeout = 65_000;
+    server.headersTimeout = 70_000;
+    /** 释放端口：关 server + 断所有活动 socket（含已升级隧道），幂等。 */
+    const shutdown = async () => {
+        if (closed)
+            return;
+        closed = true;
+        const drained = new Promise((resolve) => {
+            try {
+                server.close(() => resolve());
+            }
+            catch {
+                resolve();
+            }
+        });
+        for (const socket of sockets)
+            destroyQuietly(socket);
+        sockets.clear();
+        await new Promise((resolve) => {
+            // 兜底：close 回调在极端情况下可能不来，2s 后强制返回（socket 已在上面断掉）
+            const timer = setTimeout(() => resolve(), 2_000);
+            timer.unref();
+            let settled = false;
+            const done = () => {
+                if (settled)
+                    return;
+                settled = true;
+                clearTimeout(timer);
+                resolve();
+            };
+            drained.then(done, done);
+        });
+    };
+    /**
+     * 客户端看到的 authority（**只取请求的 `Host` 头**；云隧道下就是
+     * `xxx.trycloudflare.com`）。Host 缺失/为空返回空串 → location 保持原值不改写。
+     */
+    const externalAuthority = (req) => {
+        const host = req.headers.host;
+        return typeof host === 'string' ? host : '';
+    };
+    /** HTTP 反向代理：method/path/query/headers/body 透传，状态码/头/正文回传。 */
+    const runRequest = async (req, res) => {
+        // 门禁可能是异步的：先暂停入站流，避免决策期间把 body 全缓冲进内存
+        req.pause();
+        try {
+            if (closed) {
+                rejected += 1;
+                respondPlain(res, 503, 'remote listener closed\n', true);
+                return;
+            }
+            if (typeof options.authorize !== 'function') {
+                await forwardRequest(req, res, undefined);
+                return;
+            }
+            let gate;
+            try {
+                gate = normalizeDecision(await options.authorize(buildAuthorizeInput(req), { res }));
+            }
+            catch (error) {
+                rejected += 1;
+                noteFailure('鉴权钩子', error);
+                respondPlain(res, 403, 'forbidden\n', true);
+                return;
+            }
+            if (gate.kind === 'respond') {
+                // 调用方可能已经自己写完了响应（/__dsh_remote/* 自有接口）：不重复写、不转发
+                if (res.headersSent || res.writableEnded)
+                    return;
+                if (gate.status >= 400) {
+                    rejected += 1;
+                    log(`[remote] 拒绝请求：HTTP ${String(gate.status)}`);
+                }
+                respondPlain(res, gate.status, gate.body, true, gate.headers);
+                return;
+            }
+            await forwardRequest(req, res, gate.upstreamHeaders);
+        }
+        catch (error) {
+            noteFailure('代理请求', error);
+            respondPlain(res, 502, 'remote upstream unavailable\n', true);
+        }
+    };
+    /** 放行之后真正转发（含动态上游头解析）。 */
+    const forwardRequest = async (req, res, gateHeaders) => {
+        let staticHeaders;
+        try {
+            staticHeaders = await resolveUpstreamHeaders(target);
+        }
+        catch (error) {
+            noteFailure('上游头解析', error);
+            respondPlain(res, 502, 'remote upstream unavailable\n', true);
+            return;
+        }
+        const extra = { ...staticHeaders, ...(gateHeaders ?? {}) };
+        const authority = externalAuthority(req);
+        let upstreamReq;
+        try {
+            upstreamReq = http.request({
+                protocol: 'http:',
+                hostname: target.hostname,
+                port: target.port,
+                method: req.method ?? 'GET',
+                path: upstreamPath(target.basePath, req.url),
+                headers: outboundHeaders(req, target, extra),
+                // agent:false → 每个请求独占一条上游连接，close() 之后不会留下池化 socket
+                agent: false,
+            });
+        }
+        catch (error) {
+            noteFailure('代理请求', error);
+            respondPlain(res, 502, 'remote upstream unavailable\n', true);
+            return;
+        }
+        upstreamReq.on('response', (up) => {
+            if (closed) {
+                destroyQuietly(up);
+                destroyQuietly(upstreamReq);
+                rejected += 1;
+                respondPlain(res, 503, 'remote listener closed\n', true);
+                return;
+            }
+            try {
+                const headers = inboundHeaders(up, authority, target.hostname, rewriteRedirects);
+                res.writeHead(up.statusCode ?? 502, headers);
+            }
+            catch (error) {
+                noteFailure('上游应答', error);
+                destroyQuietly(up);
+                respondPlain(res, 502, 'remote upstream unavailable\n', true);
+                return;
+            }
+            up.on('error', () => {
+                destroyQuietly(res);
+            });
+            up.pipe(res);
+        });
+        upstreamReq.on('error', (error) => {
+            if (res.writableEnded)
+                return;
+            noteFailure('代理请求', error);
+            respondPlain(res, 502, 'remote upstream unavailable\n', true);
+        });
+        // 客户端先断（关页面/关 App）→ 立刻掐掉上游，避免悬挂连接
+        res.on('close', () => {
+            if (!res.writableFinished)
+                destroyQuietly(upstreamReq);
+        });
+        req.on('error', () => destroyQuietly(upstreamReq));
+        req.pipe(upstreamReq);
+    };
+    /**
+     * WebSocket（以及任何 Upgrade 协议）隧道：
+     * 用 `http.request({ headers: { Connection: 'Upgrade', Upgrade: … } })` 打到上游，
+     * 等到 `upgrade` 事件拿到上游 socket，再把 101 原样回给客户端并双向 pipe 原始字节。
+     */
+    const runUpgrade = async (req, rawSocket, head) => {
+        const socket = rawSocket;
+        socket.pause();
+        if (closed) {
+            rejected += 1;
+            destroyQuietly(socket);
+            return;
+        }
+        let upstreamHeaders = {};
+        if (typeof options.authorize === 'function') {
+            let gate;
+            try {
+                gate = normalizeDecision(await options.authorize(buildAuthorizeInput(req), { socket }));
+            }
+            catch (error) {
+                rejected += 1;
+                noteFailure('鉴权钩子', error);
+                writeRawResponse(socket, 403, 'forbidden\n');
+                return;
+            }
+            if (gate.kind === 'respond') {
+                // WS 握手必须被门禁挡住：回最小应答后立刻断开，**绝不**建上游隧道
+                if (gate.status >= 400) {
+                    rejected += 1;
+                    log(`[remote] 拒绝升级请求：HTTP ${String(gate.status)}`);
+                }
+                writeRawResponse(socket, gate.status, gate.body, gate.headers);
+                return;
+            }
+            upstreamHeaders = gate.upstreamHeaders;
+        }
+        let staticHeaders;
+        try {
+            staticHeaders = await resolveUpstreamHeaders(target);
+        }
+        catch (error) {
+            noteFailure('上游头解析', error);
+            writeRawResponse(socket, 502, 'remote upstream unavailable\n');
+            return;
+        }
+        const extra = { ...staticHeaders, ...upstreamHeaders };
+        const upgradeValue = req.headers.upgrade;
+        const headers = outboundHeaders(req, target, extra);
+        headers.connection = 'Upgrade';
+        headers.upgrade = typeof upgradeValue === 'string' && upgradeValue !== '' ? upgradeValue : 'websocket';
+        let upstreamReq;
+        try {
+            upstreamReq = http.request({
+                protocol: 'http:',
+                hostname: target.hostname,
+                port: target.port,
+                method: req.method ?? 'GET',
+                path: upstreamPath(target.basePath, req.url),
+                headers,
+                agent: false,
+            });
+        }
+        catch (error) {
+            noteFailure('升级握手', error);
+            writeRawResponse(socket, 502, 'remote upstream unavailable\n');
+            return;
+        }
+        // 握手兜底超时：上游既不升级也不应答时，不让 socket 无限挂着
+        upstreamReq.setTimeout(15_000, () => {
+            upstreamReq.destroy(new Error('upgrade handshake timeout'));
+        });
+        upstreamReq.on('upgrade', (upRes, rawUpSocket, upHead) => {
+            const upSocket = rawUpSocket;
+            enableNoDelay(socket);
+            enableNoDelay(upSocket);
+            // 1) 先回 101（原样字节，保留 Sec-WebSocket-Accept 等）
+            try {
+                socket.write(serializeResponseHead(upRes));
+            }
+            catch {
+                destroyQuietly(upSocket);
+                destroyQuietly(socket);
+                return;
+            }
+            // 2) 握手期已读到的残留字节：上游→客户端 与 客户端→上游 各自先冲出去
+            if (upHead !== undefined && upHead.length > 0) {
+                try {
+                    socket.write(upHead);
+                }
+                catch {
+                    destroyQuietly(upSocket);
+                    destroyQuietly(socket);
+                    return;
+                }
+            }
+            if (head !== undefined && head.length > 0) {
+                try {
+                    upSocket.write(head);
+                }
+                catch {
+                    destroyQuietly(upSocket);
+                    destroyQuietly(socket);
+                    return;
+                }
+            }
+            // 3) 双向裸字节隧道
+            socket.pipe(upSocket);
+            upSocket.pipe(socket);
+            socket.resume();
+            // 4) 任一侧错误/关闭 → 两侧都销毁，避免半开连接与端口残留
+            const teardown = () => {
+                destroyQuietly(upSocket);
+                destroyQuietly(socket);
+            };
+            upSocket.on('error', teardown);
+            socket.on('error', teardown);
+            upSocket.on('close', () => {
+                if (!socket.destroyed)
+                    destroyQuietly(socket);
+            });
+            socket.on('close', () => {
+                if (!upSocket.destroyed)
+                    destroyQuietly(upSocket);
+            });
+        });
+        // 上游没同意升级（200/4xx…）：fail-closed，不把 body 当隧道数据转发
+        upstreamReq.on('response', (upRes) => {
+            noteFailure('升级握手', { name: `HTTP_${String(upRes.statusCode)}` });
+            try {
+                upRes.resume();
+            }
+            catch {
+                /* ignore */
+            }
+            writeRawResponse(socket, 502, 'remote upstream refused upgrade\n');
+        });
+        upstreamReq.on('error', (error) => {
+            noteFailure('升级握手', error);
+            writeRawResponse(socket, 502, 'remote upstream unavailable\n');
+        });
+        socket.on('error', () => {
+            destroyQuietly(upstreamReq);
+        });
+        upstreamReq.end();
+    };
+    server.on('request', (req, res) => {
+        void runRequest(req, res).catch(() => {
+            destroyQuietly(res);
+        });
+    });
+    server.on('upgrade', (req, socket, head) => {
+        const stream = socket;
+        void runUpgrade(req, stream, head).catch(() => {
+            destroyQuietly(stream);
+        });
+    });
+    server.on('connection', (socket) => {
+        total += 1;
+        sockets.add(socket);
+        enableNoDelay(socket);
+        socket.on('close', () => {
+            sockets.delete(socket);
+        });
+    });
+    server.on('clientError', (_error, socket) => {
+        const stream = socket;
+        try {
+            stream.end('HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\r\n');
+        }
+        catch {
+            destroyQuietly(stream);
+        }
+    });
+    try {
+        await new Promise((resolve, reject) => {
+            const onError = (error) => {
+                server.removeListener('listening', onListening);
+                reject(new RemoteStartError('E_REMOTE_BIND_FAILED', `监听 ${address}:${String(listenPort)} 失败：${codeOf(error)}`, { address, port: listenPort, detail: codeOf(error) }));
+            };
+            const onListening = () => {
+                server.removeListener('error', onError);
+                resolve();
+            };
+            server.once('error', onError);
+            server.once('listening', onListening);
+            try {
+                server.listen(listenPort, address);
+            }
+            catch (error) {
+                server.removeListener('error', onError);
+                server.removeListener('listening', onListening);
+                reject(new RemoteStartError('E_REMOTE_BIND_FAILED', `监听 ${address}:${String(listenPort)} 失败：${codeOf(error)}`, { address, port: listenPort, detail: codeOf(error) }));
+            }
+        });
+    }
+    catch (error) {
+        await shutdown(); // 不留半开监听
+        throw error;
+    }
+    const bound = server.address();
+    if (bound === null || typeof bound === 'string') {
+        await shutdown();
+        throw new RemoteStartError('E_REMOTE_BIND_FAILED', `监听 ${address}:${String(listenPort)} 未返回具体地址`, {
+            address,
+            port: listenPort,
+        });
+    }
+    const info = bound;
+    // 监听成功之后的运行时错误只记日志（不能让进程因未处理 'error' 崩溃）
+    server.on('error', (error) => {
+        noteFailure(`监听 ${address}:${String(info.port)}`, error);
+    });
+    return {
+        port: info.port,
+        address: info.address,
+        close: shutdown,
+        stats: () => ({ active: sockets.size, total, rejected }),
+        get lastError() {
+            return lastError;
+        },
+    };
+}
