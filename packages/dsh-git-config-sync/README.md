@@ -87,7 +87,38 @@ dsh plugin --profile web remove dsh-git-config-sync
 - 远端条目的同名 secret 字段在快照里被替换为 `__SECRET__`；恢复时用本地同名字段回填，本地没有则跳过并标记「需本地填写」。
 - 插件清单只同步元数据（包名/版本/来源/启用状态），**不下载代码、不删本地独有插件、不降级**。
 
-### 2.1 `insert:` 多行块限制（重要）
+### 2.1 远程访问（新增，设置页独立 section「远程访问」）
+
+让平板/手机打开本机 DSH。**默认关闭**，且只绑**具体**地址（IPv4 或 IPv6），绝不绑 `0.0.0.0`
+（DSH 的 host-webserver 会在配置加载期拒掉通配地址，绑了 profile 就起不来）。
+
+| 访问方式 | 判定 | 说明 |
+| --- | --- | --- |
+| `lan` 局域网直连 | 可用（默认） | 插件在具体局域网 IPv4 上旁挂监听，反代回 `127.0.0.1:<DSH 端口>`；平板零安装 |
+| `ipv6` 公网直连 | 需准备 | 绑具体公网 IPv6；需要运营商给 v6 + 光猫放行入站 + 地址稳定（自检会剔除 Temporary 地址） |
+| `cloudflare` 隧道 | 需准备 | 本机跑 `cloudflared` 出站隧道；quick tunnel 零账号但域名每次变，WS 支持需实测 |
+| `tailscale` | 需准备 | PC 侧成熟；平板必须装**鸿蒙原生**客户端（卓易通里装的安卓 Tailscale **不能**给宿主 App 用） |
+| `manual` 手动地址 | 可用 | 只做地址归一与自检，不代管监听 |
+| `uu` 网易 UU 远程 | **不可用** | 画面串流不是隧道，UI 里是 disabled + 明示原因（不做假开关） |
+
+安全边界（实现细节见 `docs/REMOTE-ACCESS-OPTIONS.md` §5、独立评审见 `docs/REVIEW-remote-security.md`）：
+
+- 令牌 `crypto.randomBytes(32)` 落 `~/.dsh/git-config-sync/remote-token.json`（0600）；
+  `?token=` / `?k=` / 会话 cookie 三个入口，命中 `?token=` 时**本层**换 cookie 并 303 到干净地址，绝不转发上游；
+- 上游 DSH 的 `dsh-auth-*` 会话由代理**注入请求头**，响应里的 `Set-Cookie` 一律剥掉（不下发给客户端）；
+- 同 IP 失败限速（429 + `Retry-After`）；日志/错误消息/状态响应永不出现令牌明文，
+  明文只走设置页的「显示二维码与链接」；
+- 连通性自检 17 项，`unknown` 永不降级成 `ok`（`external-reachability` 恒 `unknown`，公网可达性必须从外网人工确认）。
+
+RPC（与同步共用 `/dsh-git-config-sync/rpc`）：`remoteGetState` / `remoteSaveSettings` / `remoteStart` /
+`remoteStop` / `remoteRotateToken` / `remoteProbe` / `remoteShowLink` / `remoteDetectLan`。
+
+端到端验证脚本：`tools/e2e-remote.mjs`（局域网/WS）、`tools/e2e-ipv6.mjs`（公网 IPv6 真绑定），
+用法见脚本头注释（token 走环境变量，不落盘）。
+
+
+
+### 2.2 `insert:` 多行块限制（重要）
 
 `cordis.patch.yml` 里的 `insert:` 条目在同步时按**整块**处理：块内第一个 `id` 作为条目 key，
 合并/覆盖时整块文本替换。因此：
