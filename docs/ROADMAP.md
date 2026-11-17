@@ -115,7 +115,29 @@
 - 分叉（本机与远端各有提交）是唯一真实冲突面：桥把它映射为 `FastForward` / `PushRejected`
   中文错误，`classifySyncError` 归到 `conflict` 档并提示「先拉取再推送」。
 
-## 进行中（本轮：远程访问，2026-11-17 起）
+## 进行中（第 4 轮，2026-11-18）
+
+> 本轮全部为**不依赖真机**的产出（平板离线，`hdc list targets` = `[Empty]`）。
+> 四条线并行，文件归属切干净：`Settings.ets` 只归 B（主题），A/C 只提供面板组件、由 pm 统一挂载。
+
+| 任务 | 负责人 | 状态 | ETA | 阻塞 |
+| --- | --- | --- | --- | --- |
+| A. 导出/导入（Markdown + JSON 导出、append-only 导入、dry-run） | pm/exec-export-import | 进行中 | - | 无（不依赖真机） |
+| B. 深色模式 + 大字号（`model/theme.ts` 统一 token、静态色值校验、×1.5 布局断言） | pm/exec-theme-dark | 进行中 | - | 无 |
+| C. AI 多源 fallback（`model/aiFallback.ts` 决策表、默认关、诊断脱敏） | pm/exec-ai-fallback | 进行中 | - | 无 |
+| D. 插件差异预览 + 回滚两步确认（`engine/diff.ts`、`previewDiff`/`rollbackPreview`、客户端入口） | pm/exec-plugin-diff | 进行中 | - | 无 |
+| 挂载 A/C 面板到 `Settings.ets` + 全量回归 + 分批提交 | pm | 排队 | - | 等 A/B/C 落地 |
+| 只读评审：导入去重语义 / fallback 决策表 / 回滚写盘 | 待派 reviewer | 排队 | - | 等实现落地 |
+| 真机：装最新 HAP + 竖↔横旋转往返 | —— | **阻塞** | - | 平板 `[Empty]`，需用户接回 USB 或开无线调试 |
+| 重启后复测（插件进链路 / 设置页两 section / 内嵌 Web WS） | —— | **待用户重启 DSH** | - | 脚本就绪：`tools/post-restart-check.mjs`；清单 `docs/RESTART-CHECKLIST.md` |
+
+## 进行中（第 3 轮，已收口）
+
+| 任务 | 负责人 | 状态 | 证据 |
+| --- | --- | --- | --- |
+| `token`（访问令牌，可选）字段：插件 + App + 文档 | pm/exec-token-plugin, exec-token-app | ✅ 完成（114 + 89 例绿） | `docs/REMOTE-ACCESS-OPTIONS.md` §3/§5、`DATA-CONTRACT.md` §7 |
+| 重启后一键自检 + 清单 | pm | ✅ 完成 | `tools/post-restart-check.mjs`、`docs/RESTART-CHECKLIST.md` |
+| `dist-*` 交付包 + SHA256（非 Release） | pm | ✅ 完成 | `dist-20261118-0744/` |
 
 > 上一轮（B3/表格 OCR/Wave3 等）的任务行已随交付归档，见本文上半部分的阶段表与 `docs/VERIFICATION.md`。
 > 本轮由 `pm` 统一拆解；**单一规划层**（releaseplanner 已退役，其三条执行线跑完后交接给 pm）。
