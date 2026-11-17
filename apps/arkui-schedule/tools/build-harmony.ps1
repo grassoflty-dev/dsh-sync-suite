@@ -86,6 +86,7 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 # and the HAP would silently ship without the handwriting page. tools/overlay.mjs copies the
 # harmony tree over src/main/ and records a reversible manifest; it is restored after the build.
 $overlay = Join-Path $projectRoot 'tools\overlay.mjs'
+$overlayBad = $false
 & node $overlay apply
 if ($LASTEXITCODE -ne 0) { throw "overlay apply failed (exit $LASTEXITCODE)" }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -139,10 +140,28 @@ try {
   # Restore the shared tree as soon as the build process is done (also on Ctrl-C / timeout),
   # so a hung pipe or an interrupted run can never leave the overlay materialized.
   & node $overlay restore
-  if ($LASTEXITCODE -ne 0) { Write-Warning "overlay restore failed (exit $LASTEXITCODE)" }
+  $restoreCode = $LASTEXITCODE
   $status = (& node $overlay status) -join ' '
   Write-Host "overlay: $status"
-  if ($status -notmatch 'applied=false') { Write-Warning "overlay may still be applied - run: node tools/overlay.mjs restore" }
+  # HARD FAILURE (not a warning): a leftover overlay makes every later source-level test read
+  # the harmony tree and silently poisons the working copy. This has burned us twice.
+  if ($restoreCode -ne 0) {
+    Write-Host "overlay restore failed (exit $restoreCode)" -ForegroundColor Red
+    $overlayBad = $true
+  } elseif ($status -notmatch 'applied=false') {
+    & node $overlay restore | Out-Host
+    $status2 = (& node $overlay status) -join ' '
+    if ($status2 -notmatch 'applied=false') {
+      Write-Host "overlay is still applied after restore - refusing to continue" -ForegroundColor Red
+      $overlayBad = $true
+    } else {
+      Write-Host "overlay restored on retry"
+    }
+  }
+}
+if ($overlayBad) {
+  Write-Host "Exit code: 3 (overlay not restored; working copy is dirty)" -ForegroundColor Red
+  exit 3
 }
 Write-Host ""
 Write-Host "Exit code: $code"
