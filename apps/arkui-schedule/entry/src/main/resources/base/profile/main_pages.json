@@ -3,6 +3,7 @@
     "pages/Index",
     "pages/Edit",
     "pages/Detail",
-    "pages/Settings"
+    "pages/Settings",
+    "pages/RemoteControl"
   ]
 }

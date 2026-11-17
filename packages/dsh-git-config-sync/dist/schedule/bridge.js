@@ -108,6 +108,15 @@ export class ScheduleBridge {
             result.note = refresh.note;
         return result;
     }
+    /**
+     * 读路径的"尽力刷新"入口：干净工作副本才 `pull --rebase`，任何失败都降级成 `note`。
+     *
+     * 抽成公开方法是为了让跨天聚合（`dsh_dots`）复用同一套刷新语义，
+     * 而不是再写一份 status/pull 的判定（两处判定迟早会漂移）。
+     */
+    async refreshForRead() {
+        return this.tryRefresh();
+    }
     /** 读某天的记录（不带来源设备，只要记录本身）。 */
     async read(deviceIdOrAll, date) {
         const detailed = await this.readDetailed(deviceIdOrAll, date);

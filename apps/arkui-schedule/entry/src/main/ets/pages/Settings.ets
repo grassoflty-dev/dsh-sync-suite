@@ -1,9 +1,14 @@
 /**
- * 设置页：三组（同步 / AI / 关于），长说明收进 `?` 弹层。
+ * 设置页：五组（同步 / AI 汇总 / 手写 / 远程控制 / 关于），长说明收进 `?` 弹层。
  * （同步组因为「分支 / 推送 / 状态」三项新需求变长，次要项继续收在组头「更多」里。）
  *
  * 本页仍做四件事（逻辑未改）：内嵌隐藏 Web 跑 isomorphic-git、注册代理、按钮触发
  * pull/push/status、保存前做表单校验。
+ *
+ * 远程控制组（最后一个功能组，排在「关于」之前）：填电脑上的 DSH Web 地址
+ * （如 `http://192.168.1.6:3080/?token=…`），点「打开远程控制」时先 `normalizeRemoteUrl`
+ * 归一、再 `settingsStore.save({ remoteUrl })` 落盘，最后 `router.pushUrl` 到内嵌页
+ * （`routeToRemote()` + params.url）。地址里的 token 只存本机，不进同步载荷。
  *
  * 同步组（A1/A2 之后）：
  * - 仓库地址 / 用户名 / token / **分支** / 设备标识 + 作者名；
@@ -27,6 +32,7 @@ import { common } from '@kit.AbilityKit';
 import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { nowIso } from '../common/date';
+import { toastMsFor } from '../common/copy';
 import { getFeatures } from '../common/features';
 import { isHarmonyOS } from '../common/platform';
 import { normalizeDeviceId, settingsStore } from '../services/settingsStore';
@@ -36,6 +42,8 @@ import { GitSyncService } from '../services/GitSyncService';
 import type { GitSyncConfig, GitSyncResult } from '../services/GitSyncService';
 import { describeRepoProbe, repoProbeUrl, validateRepoUrl } from '../model/repoUrl';
 import type { RepoUrlCheck } from '../model/repoUrl';
+import { normalizeRemoteUrl, routeToRemote } from '../model/remoteUrl';
+import type { RemoteUrlCheck } from '../model/remoteUrl';
 import {
   AUTH_HTTPS,
   AUTH_SSH,
@@ -205,6 +213,10 @@ struct Settings {
   @State includeOtherDevices: boolean = false;
   /** 仅手写笔输入（手写板开关：开 → 手指不能写；切换即落盘，手写页读同一份设置）。 */
   @State penOnlyInput: boolean = false;
+  /** 电脑上的 DSH Web 地址（「远程控制」内嵌加载；地址可能含 token，只存本机）。 */
+  @State remoteUrl: string = '';
+  /** 远程控制地址的内联错误（非法地址 / 保存失败），非空时按钮上方显示红字。 */
+  @State remoteUrlError: string = '';
 
   /** 从列表页跳转过来时要自动执行的同步动作（pull / push / status）。 */
   private autoAction: string = '';
@@ -308,6 +320,7 @@ struct Settings {
     this.gitPlatform = normalizePlatform(settings.gitPlatform);
     this.authMode = normalizeAuthMode(settings.authMode);
     this.penOnlyInput = settings.penOnlyInput;
+    this.remoteUrl = settings.remoteUrl;
     this.lastSyncAt = settings.lastSyncAt;
     this.lastSyncError = settings.lastSyncError;
     this.lastSyncAction = normalizeSyncAction(settings.lastSyncAction);
@@ -485,7 +498,10 @@ struct Settings {
         gitPlatform: platform === GITEE_PLATFORM ? GITEE_PLATFORM : PLATFORM_GITHUB,
         authMode: this.authMode,
         // HTTPS 用户名（Gitee 必填登录名；GitHub 留空由同步层回落 x-access-token）
-        gitUsername: this.gitUsername.trim()
+        gitUsername: this.gitUsername.trim(),
+        // 远程控制地址也随整表保存：否则「保存设置」后 applySettings 会把刚输入的值退回旧值。
+        // 这里存原文，点「打开远程控制」时再由 normalizeRemoteUrl 归一。
+        remoteUrl: this.remoteUrl
       };
       const saved = await settingsStore.save(patch, context);
       if (this.disposed) {
@@ -991,6 +1007,63 @@ struct Settings {
     // A2：动作成功后刷新一次本地状态（领先/落后/冲突），失败不影响已经展示的结果
     if (succeeded) {
       await this.refreshStatus(true);
+    }
+  }
+
+  // ------------------------------------------------------------------ 远程控制
+
+  /**
+   * 「地址未包含 token」的橙色次要提示（**不是**错误）。
+   *
+   * 地址为空、或地址本身就不合法时不显示：非法由红色 `ErrorText` 表达，两种提示不打架。
+   */
+  private remoteTokenHint(): string {
+    if (this.remoteUrl.trim().length === 0) {
+      return '';
+    }
+    const check: RemoteUrlCheck = normalizeRemoteUrl(this.remoteUrl);
+    if (!check.ok || check.hasToken) {
+      return '';
+    }
+    return '地址未包含 token，DSH 可能要求登录';
+  }
+
+  /**
+   * 「打开远程控制」：先归一地址 → 落盘 → 再跳内嵌页。
+   *
+   * 顺序是刻意的：先保存再跳转，远程控制页拿到的一定是已经落盘的新地址；
+   * 地址非法时只标红、**不**跳转（不要打开一个注定不可达的内嵌 Web）。
+   */
+  private async openRemote(): Promise<void> {
+    const check: RemoteUrlCheck = normalizeRemoteUrl(this.remoteUrl);
+    if (!check.ok) {
+      // 红字直接用 model/remoteUrl 给的中文原因（缺协议/有空格/不完整），空则退回通用提示
+      const reason: string = check.reason.trim();
+      this.remoteUrlError = reason.length > 0 ? `地址不可用：${reason}` : '地址不可用：请先填写电脑上的 DSH 地址';
+      return;
+    }
+    this.remoteUrlError = '';
+    this.remoteUrl = check.url;
+    try {
+      // 只写远程控制这一项（SettingsPatch 未出现的字段保持原值）
+      await settingsStore.save({ remoteUrl: check.url });
+    } catch (error) {
+      if (this.disposed) {
+        return;
+      }
+      this.remoteUrlError = `远程地址保存失败：${describeError(error)}`;
+      return;
+    }
+    if (this.disposed) {
+      return;
+    }
+    promptAction.showToast({ message: '已保存', duration: toastMsFor(false) });
+    try {
+      router.pushUrl({ url: routeToRemote(), params: { url: check.url } });
+    } catch (error) {
+      if (!this.disposed) {
+        this.remoteUrlError = `打开远程控制失败：${describeError(error)}`;
+      }
     }
   }
 
@@ -1612,6 +1685,79 @@ struct Settings {
     .alignItems(HorizontalAlign.Start)
   }
 
+  /**
+   * 远程控制组：DSH 地址输入框 + 一行说明 + 「打开远程控制」主按钮。
+   *
+   * 地址存在 preferences（`remoteUrl`），点击时先归一（`normalizeRemoteUrl`）再落盘，
+   * 最后才跳 `routeToRemote()` 指到的内嵌 Web 页（参数 url）。
+   */
+  @Builder
+  RemoteGroup() {
+    Column({ space: SPACING.md }) {
+      Text('远程控制')
+        .fontSize(FONT.body)
+        .lineHeight(LINE_HEIGHT.body)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+
+      this.FieldLabel('DSH 地址')
+      TextInput({ text: this.remoteUrl, placeholder: 'http://192.168.1.6:3080/?token=…' })
+        .width('100%')
+        .height(TOUCH_MIN + SPACING.xs)
+        .fontSize(FONT.body)
+        .backgroundColor($r('app.color.page_background'))
+        .borderRadius(RADIUS.none)
+        .padding({ left: 0, right: 0 })
+        .onChange((value: string) => {
+          this.remoteUrl = value;
+          this.remoteUrlError = '';
+        })
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+      if (this.remoteUrlError.length > 0) {
+        this.ErrorText(this.remoteUrlError)
+      } else {
+        this.HintLine('平板需与电脑在同一局域网；地址含 token，只存本机')
+      }
+
+      // 缺 token：橙色次要提示（不是错误，DSH 仍可能直接可用）
+      if (this.remoteTokenHint().length > 0) {
+        Text(this.remoteTokenHint())
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.warning'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+      }
+
+      Button('打开远程控制')
+        .width('100%')
+        .height(48)
+        .fontSize(FONT.body)
+        .backgroundColor($r('app.color.brand'))
+        .fontColor($r('app.color.text_inverse'))
+        .borderRadius(RADIUS.sm)
+        // 空地址禁用（提示写在按钮下方，用户知道先做什么）
+        .enabled(this.remoteUrl.trim().length > 0)
+        .onClick(() => {
+          this.openRemote();
+        })
+      if (this.remoteUrl.trim().length === 0) {
+        Text('先填写电脑上的 DSH 地址')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
   /** 关于组：版本+上次同步 / 平台信息 / 隐私? / 权限?。 */
   @Builder
   AboutGroup() {
@@ -1687,7 +1833,7 @@ struct Settings {
       })
   }
 
-  /** 紧凑屏：四组自上而下。 */
+  /** 紧凑屏：五组自上而下。 */
   @Builder
   CompactBody() {
     Column({ space: SPACING.md }) {
@@ -1703,6 +1849,10 @@ struct Settings {
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
           this.PenGroup()
+          Divider()
+            .strokeWidth(DIVIDER)
+            .color($r('app.color.divider'))
+          this.RemoteGroup()
           Divider()
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
@@ -1723,7 +1873,7 @@ struct Settings {
     .height('100%')
   }
 
-  /** 宽屏/横屏：左（同步 + 手写 + 关于）/ 右（AI），底部统一保存。 */
+  /** 宽屏/横屏：左（同步 + 手写 + 远程控制 + 关于）/ 右（AI），底部统一保存。 */
   @Builder
   WideBody() {
     Column({ space: SPACING.md }) {
@@ -1737,6 +1887,10 @@ struct Settings {
                 .strokeWidth(DIVIDER)
                 .color($r('app.color.divider'))
               this.PenGroup()
+              Divider()
+                .strokeWidth(DIVIDER)
+                .color($r('app.color.divider'))
+              this.RemoteGroup()
               Divider()
                 .strokeWidth(DIVIDER)
                 .color($r('app.color.divider'))
@@ -2071,7 +2225,7 @@ struct Settings {
     Stack({ alignContent: Alignment.Center }) {
       PageLayout({
         title: '设置',
-        subtitle: this.saveHint.length > 0 ? this.saveHint : '同步 / AI / 关于',
+        subtitle: this.saveHint.length > 0 ? this.saveHint : '同步 / AI / 手写 / 远程 / 关于',
         onBack: () => {
           router.back();
         },

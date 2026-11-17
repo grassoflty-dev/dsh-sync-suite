@@ -79,6 +79,13 @@ export interface ScheduleSettings {
   authMode: string;
   /** 仅手写笔输入：true 时手写板拒绝手指、只接受手写笔（默认 false；旧数据缺字段 = false）。 */
   penOnlyInput: boolean;
+  /**
+   * 电脑上的 DSH Web 地址（设置页「远程控制」内嵌加载那个地址）。
+   *
+   * 地址里可能带 `?token=…`，所以**只存本机 preferences**，不进同步载荷、不打印。
+   * 空串 = 未填写（旧数据没有该字段 → `''`）。
+   */
+  remoteUrl: string;
   /** 上次同步成功的时刻（ISO 8601，空串表示从未同步）。仅用于设置页展示。 */
   lastSyncAt: string;
   /** 上次同步失败的**分级后中文文案**（空串表示上次没有失败）。仅用于设置页展示。 */
@@ -116,6 +123,7 @@ export interface SettingsPatch {
   gitUsername?: string;
   authMode?: string;
   penOnlyInput?: boolean;
+  remoteUrl?: string;
 }
 
 /** 备用源配置（`deepseek` 服务层直接消费；`configured=false` 表示不启用）。 */
@@ -149,6 +157,7 @@ const KEY_GIT_PLATFORM: string = 'gitPlatform';
 const KEY_GIT_USERNAME: string = 'gitUsername';
 const KEY_AUTH_MODE: string = 'authMode';
 const KEY_PEN_ONLY_INPUT: string = 'penOnlyInput';
+const KEY_REMOTE_URL: string = 'remoteUrl';
 const KEY_LAST_SYNC_AT: string = 'lastSyncAt';
 const KEY_LAST_SYNC_ERROR: string = 'lastSyncError';
 const KEY_LAST_SYNC_ACTION: string = 'lastSyncAction';
@@ -269,6 +278,8 @@ export class SettingsStore {
     const authMode = readString(await prefs.get(KEY_AUTH_MODE, AUTH_HTTPS), AUTH_HTTPS);
     // 旧数据没有这个键 → false（手指 + 笔都能写，与升级前行为一致）
     const penOnlyInput = readBoolean(await prefs.get(KEY_PEN_ONLY_INPUT, false), false);
+    // 远程控制地址：旧数据没有这个键 → 空串（「打开远程控制」按钮此时禁用）
+    const remoteUrl = readString(await prefs.get(KEY_REMOTE_URL, ''), '');
     const lastSyncAt = readString(await prefs.get(KEY_LAST_SYNC_AT, ''), '');
     const lastSyncError = readString(await prefs.get(KEY_LAST_SYNC_ERROR, ''), '');
     const lastSyncAction = readString(await prefs.get(KEY_LAST_SYNC_ACTION, ''), '');
@@ -296,6 +307,7 @@ export class SettingsStore {
       gitUsername: gitUsername.trim(),
       authMode: normalizeAuthMode(authMode),
       penOnlyInput: penOnlyInput,
+      remoteUrl: remoteUrl,
       lastSyncAt: lastSyncAt,
       lastSyncError: lastSyncError,
       lastSyncAction: normalizeSyncAction(lastSyncAction)
@@ -442,6 +454,8 @@ export class SettingsStore {
       gitUsername: patch.gitUsername === undefined ? current.gitUsername : patch.gitUsername.trim(),
       authMode: patch.authMode === undefined ? current.authMode : normalizeAuthMode(patch.authMode),
       penOnlyInput: patch.penOnlyInput === undefined ? current.penOnlyInput : patch.penOnlyInput === true,
+      // 远程控制地址：只去首尾空白，不做 URL 归一（归一在 model/remoteUrl 的 normalizeRemoteUrl）
+      remoteUrl: patch.remoteUrl === undefined ? current.remoteUrl : patch.remoteUrl.trim(),
       lastSyncAt: current.lastSyncAt,
       lastSyncError: current.lastSyncError,
       lastSyncAction: current.lastSyncAction
@@ -466,6 +480,7 @@ export class SettingsStore {
     await prefs.put(KEY_GIT_USERNAME, next.gitUsername);
     await prefs.put(KEY_AUTH_MODE, next.authMode);
     await prefs.put(KEY_PEN_ONLY_INPUT, next.penOnlyInput);
+    await prefs.put(KEY_REMOTE_URL, next.remoteUrl);
     await prefs.put(KEY_GIT_USERNAME, next.gitUsername);
     await prefs.put(KEY_LAST_SYNC_AT, next.lastSyncAt);
     await prefs.put(KEY_LAST_SYNC_ERROR, next.lastSyncError);
@@ -508,6 +523,7 @@ export class SettingsStore {
       gitUsername: current.gitUsername,
       authMode: current.authMode,
       penOnlyInput: current.penOnlyInput,
+      remoteUrl: current.remoteUrl,
       lastSyncAt: patch.lastSyncAt === undefined ? current.lastSyncAt : patch.lastSyncAt,
       lastSyncError: patch.lastSyncError === undefined ? current.lastSyncError : patch.lastSyncError,
       lastSyncAction:

@@ -9,7 +9,8 @@
  *   aiPayload.ts —— 每日汇总载荷与提示词（照搬 App 契约）
  *   aiRequest.ts —— OpenAI 兼容请求与错误文案（Node 侧，零依赖 fetch）
  *   bridge.ts    —— Git 工作副本 + 读/写/汇总的实现
- *   tools.ts     —— 注册给模型的三个工具
+ *   dots.ts      —— `dsh_dots` 快照（跨设备跨天聚合 + 只填可证字段的 DSH 状态）
+ *   tools.ts     —— 注册给模型的四个工具
  */
 export * from './types.js'
 export * from './clock.js'
@@ -18,4 +19,5 @@ export * from './paths.js'
 export * from './aiPayload.js'
 export * from './aiRequest.js'
 export * from './bridge.js'
+export * from './dots.js'
 export * from './tools.js'

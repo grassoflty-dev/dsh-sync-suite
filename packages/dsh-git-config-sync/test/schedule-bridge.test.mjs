@@ -400,12 +400,12 @@ test('工具层：schedule_add / schedule_list / schedule_summary 经设置读�
     },
   }
   const names = registerScheduleTools(ctx, { paths, allowLocalRepo: true, now: NOW })
-  assert.deepEqual(names, ['schedule_list', 'schedule_add', 'schedule_summary'])
+  assert.deepEqual(names, ['schedule_list', 'schedule_add', 'schedule_summary', 'dsh_dots'])
   assert.deepEqual(
     registered.map((tool) => tool.name),
     names,
   )
-  assert.equal(ctx.effects.length, 3, '每个工具注册都要挂在 ctx.effect 上')
+  assert.equal(ctx.effects.length, 4, '每个工具注册都要挂在 ctx.effect 上')
 
   const addTool = registered.find((tool) => tool.name === 'schedule_add')
   const listTool = registered.find((tool) => tool.name === 'schedule_list')
@@ -487,9 +487,9 @@ test('index.apply：有 tools 服务时注册三个日程工具，没有时只�
   assert.deepEqual(withTools.state.injectDeps, ['tools'], '用 ctx.inject 延迟注入可选依赖')
   assert.deepEqual(
     withTools.state.registered.map((tool) => tool.name),
-    ['schedule_list', 'schedule_add', 'schedule_summary'],
+    ['schedule_list', 'schedule_add', 'schedule_summary', 'dsh_dots'],
   )
-  assert.equal(withTools.state.effects.length, 5, '2 个 RPC effect + 3 个工具 effect')
+  assert.equal(withTools.state.effects.length, 6, '2 个 RPC effect + 4 个工具 effect')
 
   const noTools = makeCtx(false)
   index.apply(noTools.ctx, {

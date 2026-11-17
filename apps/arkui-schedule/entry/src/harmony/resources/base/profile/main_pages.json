@@ -4,6 +4,7 @@
     "pages/Edit",
     "pages/Detail",
     "pages/Settings",
-    "pages/Handwriting"
+    "pages/Handwriting",
+    "pages/RemoteControl"
   ]
 }
