@@ -489,7 +489,7 @@ test('index.apply：有 tools 服务时注册三个日程工具，没有时只�
     withTools.state.registered.map((tool) => tool.name),
     ['schedule_list', 'schedule_add', 'schedule_summary', 'dsh_dots'],
   )
-  assert.equal(withTools.state.effects.length, 6, '2 个 RPC effect + 4 个工具 effect')
+  assert.equal(withTools.state.effects.length, 8, '2 个 RPC effect + 2 个远程访问 effect + 4 个工具 effect')
 
   const noTools = makeCtx(false)
   index.apply(noTools.ctx, {
@@ -498,7 +498,8 @@ test('index.apply：有 tools 服务时注册三个日程工具，没有时只�
     dshVersion: 'test-1',
   })
   assert.equal(noTools.state.registered.length, 0)
-  assert.equal(noTools.state.effects.length, 2, '没有 tools 服务时行为与之前完全一致')
+  // 远程访问域的装配与 tools 无关：它有自己的 dispose/autostart 两个 effect。
+  assert.equal(noTools.state.effects.length, 4, '没有 tools 服务时仍是 2 个 RPC effect + 2 个远程 effect')
 
   const disabled = makeCtx(true)
   index.apply(disabled.ctx, {
@@ -508,7 +509,7 @@ test('index.apply：有 tools 服务时注册三个日程工具，没有时只�
     scheduleTools: false,
   })
   assert.equal(disabled.state.registered.length, 0, 'scheduleTools:false 可整机关掉日程工具')
-  assert.equal(disabled.state.effects.length, 2)
+  assert.equal(disabled.state.effects.length, 4, '关掉日程工具不影响远程访问的 effect')
 })
 
 test('自由函数：addSchedule 越界拒绝、listSchedule 与 summarySchedule 可用', async (t) => {

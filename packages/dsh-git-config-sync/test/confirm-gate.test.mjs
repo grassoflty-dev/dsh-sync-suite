@@ -240,7 +240,7 @@ test('index.ts：inject 声明与 ctx.effect 注册 / 清理（Cordis 函数插�
   assert.equal(routes[0].kind, 'exact')
   assert.equal(routes[0].path, '/dsh-git-config-sync/rpc')
   assert.equal(typeof routes[0].handler, 'function')
-  assert.equal(effects.length, 2, '路由与 dispose 各自包在 ctx.effect 里')
+  assert.equal(effects.length, 4, '路由 + RPC dispose + 远程 dispose + 远程 autostart 各自包在 ctx.effect 里')
 
   // ctx.connection.requestRejection 会被 handler 首先调用
   const noConn = await invokeHandler(routes[0].handler, makeRequest(JSON.stringify({ action: 'getState' })))

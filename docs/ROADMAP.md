@@ -115,16 +115,103 @@
 - 分叉（本机与远端各有提交）是唯一真实冲突面：桥把它映射为 `FastForward` / `PushRejected`
   中文错误，`classifySyncError` 归到 `conflict` 档并提示「先拉取再推送」。
 
-## 进行中
+## 进行中（本轮：远程访问，2026-11-17 起）
+
+> 上一轮（B3/表格 OCR/Wave3 等）的任务行已随交付归档，见本文上半部分的阶段表与 `docs/VERIFICATION.md`。
+> 本轮由 `pm` 统一拆解；**单一规划层**（releaseplanner 已退役，其三条执行线跑完后交接给 pm）。
 
 | 任务 | 负责人 | 状态 | ETA | 阻塞 |
 | --- | --- | --- | --- | --- |
-| B3 完成流程（对象填白/占位符/完成反馈） | hw | 进行中 | 30min | 无 |
-| C 表格逐格 OCR（cellRegions/crop/逐格识别/Markdown） | hw | 进行中 | 45min | 等 B3 合流 |
-| 表格 OCR 几何逻辑评审 | reviewer | 进行中 | 20min | 无 |
-| B2-2 真机验（选图/压缩/zip 条目） | qa | ✅ 已验（fd 解码 + 归档，见 `docs/images/insert-image-2026-11-16.png`） | - | 无 |
-| Wave 3 导出/归档/分页/缩略图 | 待派 | 排队 | - | 排在 C 之后 |
-| Wave 5 APK 去重 + verify-hap --apk | 待派 | 排队 | - | 等 Wave 3 |
+| A–E 五路调研（源码对照 / UU / Tailscale 鸿蒙 / IPv6 / 零自建） | pm/research-a…e | ✅ 完成，结论入 `docs/RESEARCH-*.md` | - | 无 |
+| `src/remote/types.ts` 契约（8 字段 / 6 方式 / 状态 / 自检 / 服务接口） | pm | ✅ 完成 | - | 无 |
+| `src/remote/accessMode.ts` + `urls.ts`（6 方式元数据、字段归一、URL 生成） | pm/exec-remote-model | ✅ 完成（25 例 / 233 断言） | - | 无 |
+| `src/remote/probe.ts`（连通性自检，`external-reachability` 恒 unknown） | pm/exec-remote-probe | ✅ 完成（32 例全绿） | - | 无 |
+| 客户端「远程访问」独立 section + `remote*` RPC 8 个 action + locale | pm/exec-remote-ui | ✅ 完成（rpc 14 例 / render 10 例） | - | 无 |
+| `src/remote/store.ts`（remote.json / remote-token.json，0600 + 原子写） | pm | ✅ 完成 | - | 无 |
+| `src/remote/routes.ts`（`/__dsh_remote/*` + 令牌门 + 上游 cookie 注入） | pm | ✅ 完成（19 例全绿） | - | 无 |
+| `src/remote/service.ts` + `src/index.ts` 挂载（失败隔离、autostart、轮换） | pm | ✅ 完成（14 例全绿） | - | 无 |
+| `listener.ts` / `auth.ts` / `qr.ts`（旁挂监听 + 令牌门状态机 + 零依赖 QR） | releaseplanner/remotelisten,remoteauth | ✅ 已落盘（listener 21 例 / auth 51 例 / qr 见 `remote-qr`） | - | 交接单待发 |
+| App 设置页「访问方式 + 各方式字段」+ IPv6 地址支持 | pm/exec-app-remote | 进行中（remoteAccess 59 例已绿） | 20min | 无 |
+| `docs/REMOTE-ACCESS-OPTIONS.md` + DATA-CONTRACT §7 | pm | ✅ 完成 | - | 无 |
+| **端到端验证（真实 DSH 3080 实例）** | pm | ✅ **13/13 通过**（含 WS 101） | - | 无 |
+| **IPv6 真绑定端到端（本机公网 v6:3098）** | pm | ✅ **通过**（health/401/303/200 全绿，probe 5 ok + 1 unknown） | - | 无 |
+| 独立只读评审（安全边界 / 失败语义 / token 出口） | pm/review-remote | ✅ 完成：**有条件通过**，P0=0 / P1=2 / P2=2，见 `docs/REVIEW-remote-security.md` | - | 无 |
+| 评审修复 M1（ipv6 方式起不来）/ M2（上游 cookie 过期不 fail-closed）/ M3（manualUrl token 进 DOM）/ M4（`?k=` 与 `?token=` 不一致） | pm | ✅ 全部已修 + 补测试（见下「评审修复」） | - | 无 |
+| 真机验收（平板切回家中 WiFi 后） | 待派 qa | 排队 | - | **需 lead 叫用户切回家里 WiFi**（hdc 串行） |
+| 真实 GUI 渲染验证（设置页两个 section） | —— | 阻塞 | - | 需重启 DSH，会杀掉当前会话 → 交 lead 决定时机 |
+
+### 端到端证据（`192.168.1.6:3099` → 真实 DSH `127.0.0.1:3080`）
+
+一次性脚本 `.tmp/e2e-remote.mjs`（不进仓库）跑出 13/13：
+
+```
+PASS  start                    {"lastError":null,"listen":"192.168.1.6:3099"}
+PASS  health-200               {"ok":true,"app":"dsh-remote","mode":"lan"}
+PASS  health-no-secret
+PASS  root-401                 status=401
+PASS  api-401-json             status=401
+PASS  showLink-has-token       qr=37
+PASS  token-303                status=303 set-cookie=1
+PASS  cookie-not-upstream      no dsh-auth-* leaked
+PASS  root-200-proxied         status=200 bytes=57970
+PASS  no-upstream-cookie-leak
+PASS  ws-101                   status=101        ← /api/remote.mux 的 WebSocket upgrade 真通
+PASS  bad-token-401            status=401
+PASS  bad-token-not-echoed
+```
+
+结论：**局域网直连（不需要 IPv6）+ 令牌门 + HTTP/WS 反代 + 二维码**这条主链已在真实 DSH 上打通；
+上游 `dsh-auth-*` 会话 cookie 未下发给客户端；错误令牌不回显。
+
+复现：`DSH_UPSTREAM_TOKEN=<launch token> node packages/dsh-git-config-sync/tools/e2e-remote.mjs`
+（脚本在包内 `tools/`，读 env 里的 token，不落盘）。
+
+### IPv6 真绑定端到端（`[2409:8a20:4cad:ba20:d2c0:3d53:7540:763c]:3098`）
+
+`node packages/dsh-git-config-sync/tools/e2e-ipv6.mjs`（env: `DSH_UPSTREAM_TOKEN` + `V6`）：
+
+```
+start: {"running":true,"listen":"2409:8a20:4cad:ba20:d2c0:3d53:7540:763c:3098","err":null}
+health over v6: 200 {"ok":true,"app":"dsh-remote","mode":"ipv6"}
+root without token: 401
+token exchange: 303 cookie-set: true
+authorized root: 200 bytes: 57970
+probe: unknown 本机检查通过，但公网可达性必须从外网确认
+  ok      dsh-port-known         DSH 监听端口：3080
+  ok      dsh-loopback-reachable 本机能连上 127.0.0.1:3080
+  ok      v6-global              找到 1 个稳定的全局 IPv6 地址：2409:8a20:…:763c
+  ok      v6-stable              地址稳定（不是临时隐私地址）
+  ok      dsh-bound-v6           能连上 [2409:…:763c]:3098（本机自连）
+  ok      firewall-inbound       已找到入站放行规则：Node.js JavaScript Runtime
+  unknown external-reachability  本机无法自证公网可达；请用平板在外网打开确认
+```
+
+即：**公网 IPv6 直连这条路在本机真的跑起来了**（绑具体 v6、令牌门、反代、自检），
+只剩「外网是否可达」必须人工从外网验证（自检如实给 `unknown`，不假阳性）。
+
+### 评审修复（`docs/REVIEW-remote-security.md` 的 4 条）
+
+| 编号 | 问题 | 修法 | 回归 |
+| --- | --- | --- | --- |
+| M1 (P1) | `ipv6` 方式永远起不来：listener 只认局域网 IPv4 | `listener.ts` 新增 `isBindableIpv6Address` / `isBindableAddress`（放行 `2000::/3` 与 `fc00::/7`；拒 `::`/`::1`/`fe80::/10`/`ff00::/8`/`::ffff:`/带方括号/带 zone），启动校验改用它；`service` 侧透传 v6 字面量 | `remote-service.test.mjs` 新增 ipv6 启动用例 + 地址分类表；**真机级 e2e-ipv6 通过** |
+| M2 (P1) | 上游 `dsh-auth-*` 过期后仍直送上游（客户端收到莫名 401） | `service.ts` 的 `upstreamCookie` 闭包同时判 `expiresAt`，过期即 `null` → `routes` 回 503（fail-closed） | 既有 503 用例 + 后台 6h 刷新定时器 |
+| M3 (P2) | `manualUrl` 自带 token 时经 `status.urls` 渲染进 DOM | 新增 `redactUrlForDisplay`，`status.urls` 一律脱敏（`token=***`）；明文仍只走 `showLink` | `remote-service.test.mjs` 两条（函数级 + `getState` 端到端） |
+| M4 (P2) | `auth.ts` 的 `TOKEN_PARAM='k'` 与门只认 `?token=` 矛盾 | `routes.ts` 同时接受 `token` 与 `k`（同时出现视为歧义输入直接拒），303 时两个都删 | `remote-routes.test.mjs` 三条（`?k=` 等价、歧义拒绝、strip 两者） |
+
+### 本轮已定技术结论（评审基线，别再推翻）
+
+1. **局域网监听**：自建 `http.Server` 绑**具体局域网 IPv4**，反代到 `127.0.0.1:<dshPort>`，改写 `Host`/`Origin`
+   过 DSH 信任围栏。**绝不绑 `0.0.0.0`**——asar 实证：`webserver: host … is not a concrete IPv4 or IPv6
+   address literal`，通配地址在加载期被拒。
+2. **上游身份**：`ctx.connection.authenticatedUrl(baseUrl)` 在 DSH 0.2.2-rc.3 上**存在且可用**
+   （asar 命中 `ConnectionPlugin.authenticatedUrl`），据此换取上游 `dsh-auth-*` cookie 由代理注入；
+   该 cookie **绝不下发给平板**（否则等于交出 owner 会话）。拿不到该 API 时 fail-closed，不降级。
+3. **UU 远程 = 不可用**（画面串流，无端口映射）；**卓易通里的安卓 Tailscale = 不可用**（宿主导航不走容器 netns）；
+   `uu` 在 UI 里是 disabled 选项 + 明确原因，**不做假开关**。
+4. **IPv6 直连可行**：本机有公网 `2409:8a20:4cad:ba20::/60`，DSH 的 `host` 接受具体 v6 字面量；
+   自检必须剔除 `Temporary` 地址，且 `external-reachability` **恒为 `unknown`**（不许假阳性）。
+5. **Cloudflare quick tunnel** 零账号可试，WS(101) 官方无明文 → 只能实测，故标 `needs-setup`。
+6. **`port: 0` = 跟随 DSH 监听端口**（默认），不是随机端口。
 
 ## 子代理协作约定（本项目，用户 2026-11-16 明确授权）
 

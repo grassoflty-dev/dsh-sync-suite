@@ -38,6 +38,8 @@ export const DOTS_MAX_DAYS = 90;
 export const DOTS_TOP_TITLES = 3;
 /** 坏行定位最多保留几条（`totals.skipped` 的计数不截断）。 */
 export const DOTS_SKIPPED_DETAIL_LIMIT = 20;
+/** 快照的格式版本（`docs/DSH-DOTS.md` §2.1 的 `v`，前向兼容靠它）。 */
+export const DOTS_SNAPSHOT_VERSION = 1;
 /* -------------------------------------------------------------------------- */
 /* 参数与日期窗口                                                              */
 /* -------------------------------------------------------------------------- */
@@ -260,6 +262,7 @@ export async function collectDotsSnapshot(options) {
         ? sanitizeProbedStatus(await options.dsh({ gitBridge: true, deviceId: aggregate.deviceId }))
         : buildDshStatus({ gitBridge: true, version: options.version ?? detectDshVersion() });
     const snapshot = {
+        v: DOTS_SNAPSHOT_VERSION,
         generatedAt: aggregate.generatedAt,
         deviceId: aggregate.deviceId,
         days: aggregate.days,
@@ -299,6 +302,7 @@ export function emptyDotsSnapshot(options) {
         ? options.note.trim()
         : `最近 ${clampDays(options.days)} 天没有可聚合的日程数据（日程用空数组，不是错误）`;
     return {
+        v: DOTS_SNAPSHOT_VERSION,
         generatedAt: nowIso(now()),
         deviceId: typeof options.deviceId === 'string' ? options.deviceId : '',
         days: [],

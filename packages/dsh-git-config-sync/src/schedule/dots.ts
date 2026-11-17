@@ -416,6 +416,7 @@ export async function collectDotsSnapshot(options: DotsSnapshotOptions): Promise
       ? sanitizeProbedStatus(await options.dsh({ gitBridge: true, deviceId: aggregate.deviceId }))
       : buildDshStatus({ gitBridge: true, version: options.version ?? detectDshVersion() })
   const snapshot: DotsSnapshot = {
+    v: DOTS_SNAPSHOT_VERSION,
     generatedAt: aggregate.generatedAt,
     deviceId: aggregate.deviceId,
     days: aggregate.days,
@@ -482,6 +483,7 @@ export function emptyDotsSnapshot(options: EmptyDotsSnapshotOptions): DotsSnapsh
       ? options.note.trim()
       : `最近 ${clampDays(options.days)} 天没有可聚合的日程数据（日程用空数组，不是错误）`
   return {
+    v: DOTS_SNAPSHOT_VERSION,
     generatedAt: nowIso(now()),
     deviceId: typeof options.deviceId === 'string' ? options.deviceId : '',
     days: [],

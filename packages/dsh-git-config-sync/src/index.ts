@@ -16,6 +16,8 @@
  * 所有注册都包在 `ctx.effect(...)` 里，便于插件卸载时释放路由、预览缓存与工具注册。
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { createRemoteModule } from './remote/index.js'
+import type { RemoteModule } from './remote/index.js'
 import { createHttpHandler, createRpcService } from './rpc.js'
 import type { ConnectionLike, RpcService } from './rpc.js'
 import { registerScheduleTools } from './schedule/tools.js'
@@ -32,6 +34,8 @@ export interface PluginConfig {
   allowLocalRepo?: boolean
   /** 注册日程工具（默认 true）；关掉后只剩配置同步 RPC。 */
   scheduleTools?: boolean
+  /** 启用远程访问域（默认 true）。关掉后 `remote*` action 一律 E_INTERNAL。 */
+  remoteAccess?: boolean
 }
 
 interface WebServerLike {
@@ -40,11 +44,17 @@ interface WebServerLike {
     path: string
     handler: (req: IncomingMessage, res: ServerResponse) => void
   }): (() => void) | void
+  /** DSH 自己实际监听的端口（`WebServer.port`，asar 已验证存在）。0/未监听时读不到。 */
+  port?: number
 }
 
 export interface HostContext {
   webServer: WebServerLike
-  connection?: ConnectionLike
+  /**
+   * DSH 的 connection 服务。除鉴权围栏外，还提供 `authenticatedUrl()`——
+   * 远程访问靠它换本机 DSH 会话（取不到就 fail-closed，不降级成无鉴权转发）。
+   */
+  connection?: ConnectionLike & { authenticatedUrl?(baseUrl: string): string }
   effect(effect: () => (() => void) | void, label?: string): unknown
   /** 宿主 `tools` 服务（可选）。 */
   tools?: ToolsServiceLike
@@ -88,11 +98,26 @@ function mountScheduleTools(ctx: HostContext, options: ScheduleToolOptions): voi
 }
 
 export function apply(ctx: HostContext, config: PluginConfig = {}): void {
+  // 远程访问域：**独立的失败面**——装配失败只是没有远程访问，配置同步/日程工具照常。
+  let remote: RemoteModule | null = null
+  if (config.remoteAccess !== false) {
+    try {
+      remote = createRemoteModule({
+        homeDir: config.homeDir,
+        ...(ctx.connection === undefined ? {} : { connection: ctx.connection }),
+        webServer: ctx.webServer,
+      })
+    } catch {
+      remote = null
+    }
+  }
+
   const service: RpcService = createRpcService({
     homeDir: config.homeDir,
     profileDir: config.profileDir,
     dshVersion: config.dshVersion,
     allowLocalRepo: config.allowLocalRepo === true,
+    ...(remote === null ? {} : { remote: remote.service }),
   })
   const handler = createHttpHandler(service, ctx.connection)
 
@@ -106,6 +131,28 @@ export function apply(ctx: HostContext, config: PluginConfig = {}): void {
     },
     'dsh-git-config-sync: dispose rpc service',
   )
+
+  if (remote !== null) {
+    const remoteModule = remote
+    ctx.effect(
+      () => () => {
+        void remoteModule.service.dispose()
+      },
+      'dsh-git-config-sync: dispose remote service',
+    )
+    // 用户上次开了开关 → 本次挂载后自动起监听。
+    // 刻意 fire-and-forget 且吞错：监听起不来只写 status.lastError，不许冒到插件启动路径。
+    ctx.effect(
+      () => {
+        void remoteModule.service
+          .getState()
+          .then((state) => (state.settings.enabled ? remoteModule.service.start() : undefined))
+          .catch(() => undefined)
+        return () => undefined
+      },
+      'dsh-git-config-sync: remote autostart',
+    )
+  }
 
   if (config.scheduleTools !== false) {
     mountScheduleTools(ctx, {

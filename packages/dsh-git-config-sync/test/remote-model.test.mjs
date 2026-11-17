@@ -1,0 +1,520 @@
+/**
+ * 远程访问方式「纯逻辑模型 + 地址归一」的回归测试。
+ *
+ * 覆盖：
+ *   1. 六种方式元数据：availability / bindKind / 必填字段 / 步骤数 / 字段占位符；
+ *      关键判定文案（uu 的"画面串流不产生端口"、tailscale 的"卓易通不能让本机 App 走它"）；
+ *   2. `normalizeRemoteSettings`：缺省沿用、显式清空、逐字段非法（含 details 打码）；
+ *   3. `urlForMode` 六种方式（IPv6 方括号、cloudflare 无端口、lan 无地址报错）；
+ *   4. `withToken` 幂等、`maskToken` / `redactToken`（含 %2B 编码形态）；
+ *   5. IPv4 / IPv6 / 主机名归一的边界。
+ *
+ * 断言纪律：**任何**错误消息与 details 都不许出现 token 明文（见最后一组用例）。
+ * 运行：先编译（见任务说明），再 `node --test test/remote-model.test.mjs`。
+ */
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+import {
+  REMOTE_MODE_ORDER,
+  REMOTE_MODES,
+  defaultRemoteSettings,
+  findMode,
+  isModeUsable,
+  listModes,
+  missingRequiredFields,
+  normalizeRemoteSettings,
+} from '../dist/remote/accessMode.js'
+import {
+  buildHttpUrl,
+  buildHttpsUrl,
+  formatAuthority,
+  maskToken,
+  normalizeHostname,
+  normalizeIpv4,
+  normalizeIpv6,
+  redactToken,
+  urlForMode,
+  withToken,
+} from '../dist/remote/urls.js'
+
+/** 每条方式：可用性、绑定点、必填字段（顺序即 UI 顺序）。 */
+const EXPECTED_MODES = {
+  lan: ['ready', 'lan', ['lanAddress', 'port']],
+  tailscale: ['needs-setup', 'tailnet', ['tailscaleHost', 'port']],
+  ipv6: ['needs-setup', 'ipv6', ['ipv6Address', 'port']],
+  cloudflare: ['needs-setup', 'loopback', ['cloudflareHost', 'port']],
+  manual: ['ready', 'none', ['manualUrl']],
+  uu: ['unsupported', 'none', []],
+}
+
+const CTX = { lanAddress: '192.168.1.6', dshPort: 40596 }
+
+function baseSettings(overrides = {}) {
+  return { ...defaultRemoteSettings(), port: 40596, ...overrides }
+}
+
+/** 抓 SyncError（JS 侧只认 code/name，不需要 import 引擎实现）。 */
+function captureError(fn) {
+  try {
+    fn()
+  } catch (error) {
+    return error
+  }
+  assert.fail('这里应当抛出 E_VALIDATION')
+}
+
+function expectValidation(fn, messagePart) {
+  const error = captureError(fn)
+  assert.equal(error.name, 'SyncError')
+  assert.equal(error.code, 'E_VALIDATION')
+  assert.ok(
+    error.message.includes(messagePart),
+    `消息里应包含「${messagePart}」，实际是：${error.message}`,
+  )
+  return error
+}
+
+test('六种方式的可用性/绑定点/必填字段与调研结论一致', () => {
+  assert.deepEqual(REMOTE_MODE_ORDER, ['lan', 'tailscale', 'ipv6', 'cloudflare', 'manual', 'uu'])
+  assert.equal(listModes().length, 6)
+  assert.deepEqual(
+    listModes().map((spec) => spec.mode),
+    [...REMOTE_MODE_ORDER],
+    'listModes 顺序必须等于 REMOTE_MODE_ORDER',
+  )
+
+  for (const mode of REMOTE_MODE_ORDER) {
+    const spec = REMOTE_MODES[mode]
+    const [availability, bindKind, requiredKeys] = EXPECTED_MODES[mode]
+    assert.equal(spec.mode, mode, `${mode}: mode 字段`)
+    assert.equal(spec.availability, availability, `${mode}: availability`)
+    assert.equal(spec.bindKind, bindKind, `${mode}: bindKind`)
+    assert.deepEqual(
+      spec.fields.filter((field) => field.required).map((field) => field.key),
+      requiredKeys,
+      `${mode}: 必填字段`,
+    )
+    assert.equal(isModeUsable(mode), availability !== 'unsupported', `${mode}: 可用性判定`)
+    assert.ok(spec.label.length > 0, `${mode}: label 不能为空`)
+    assert.ok(spec.description.length > 0, `${mode}: description 不能为空`)
+    assert.ok(spec.description.length <= 40, `${mode}: description 超过 40 字`)
+    for (const field of spec.fields) {
+      assert.ok(field.label.length > 0, `${mode}.${field.key}: label 不能为空`)
+      assert.ok(field.placeholder.length > 0, `${mode}.${field.key}: placeholder 不能为空`)
+      assert.ok(field.hint.length > 0, `${mode}.${field.key}: hint 不能为空`)
+    }
+  }
+
+  assert.equal(isModeUsable('uu'), false)
+  assert.equal(isModeUsable('lan'), true)
+  assert.equal(isModeUsable('manual'), true)
+})
+
+test('uu 判定为不可用，原因是"画面串流不产生端口"', () => {
+  const uu = REMOTE_MODES.uu
+  assert.equal(uu.availability, 'unsupported')
+  assert.deepEqual(uu.fields, [])
+  assert.deepEqual(uu.steps, [])
+  assert.equal(uu.hostsListener, false)
+  assert.ok(uu.unavailableReason.includes('画面串流'))
+  assert.ok(uu.unavailableReason.includes('远程桌面'))
+  assert.ok(uu.unavailableReason.includes('不产生端口或虚拟网卡'))
+  assert.ok(uu.unavailableReason.includes('没法让 App 打开一个网址'))
+  assert.ok(uu.unavailableReason.includes('端口映射'))
+})
+
+test('tailscale 需要平板装鸿蒙原生客户端，并点明卓易通路线不可用', () => {
+  const spec = REMOTE_MODES.tailscale
+  assert.equal(spec.availability, 'needs-setup')
+  assert.equal(spec.bindKind, 'tailnet')
+  assert.equal(spec.hostsListener, true)
+  const requiresText = spec.requires.join('｜')
+  assert.ok(requiresText.includes('卓易通'), 'requires 必须提到卓易通')
+  assert.ok(requiresText.includes('不能'), 'requires 必须写明"不能"')
+  assert.ok(requiresText.includes('App'), 'requires 必须点明本机 App 走不了')
+  assert.ok(requiresText.includes('鸿蒙'), 'requires 必须要求鸿蒙原生客户端')
+  assert.ok(requiresText.includes('HarmoTail'), 'requires 应给出可核对的客户端名')
+  assert.ok(spec.steps.length >= 3 && spec.steps.length <= 6)
+})
+
+test('步骤数与"是否起监听"符合契约', () => {
+  assert.ok(REMOTE_MODES.lan.steps.length >= 2 && REMOTE_MODES.lan.steps.length <= 3)
+  assert.equal(REMOTE_MODES.manual.steps.length, 2)
+  assert.equal(REMOTE_MODES.uu.steps.length, 0)
+  assert.ok(REMOTE_MODES.ipv6.steps.length >= 3 && REMOTE_MODES.ipv6.steps.length <= 6)
+  assert.ok(REMOTE_MODES.cloudflare.steps.length >= 3 && REMOTE_MODES.cloudflare.steps.length <= 6)
+  assert.equal(REMOTE_MODES.lan.hostsListener, true)
+  assert.equal(REMOTE_MODES.ipv6.hostsListener, true)
+  assert.equal(REMOTE_MODES.cloudflare.hostsListener, true)
+  assert.equal(REMOTE_MODES.manual.hostsListener, false)
+})
+
+test('字段占位符与端口 hint 按契约给出', () => {
+  const field = (mode, key) => REMOTE_MODES[mode].fields.find((item) => item.key === key)
+  assert.equal(field('lan', 'lanAddress').placeholder, '192.168.1.6')
+  assert.equal(field('tailscale', 'tailscaleHost').placeholder, '100.101.102.103')
+  assert.equal(field('cloudflare', 'cloudflareHost').placeholder, 'xxx.trycloudflare.com')
+  assert.equal(field('ipv6', 'ipv6Address').placeholder, '2409:8a20:4cad:ba20:1234:5678:9abc:def0')
+  assert.equal(field('manual', 'manualUrl').placeholder, 'https://example.com/?token=…')
+  assert.equal(field('lan', 'port').hint, '0 = 跟 DSH 同端口')
+  assert.equal(field('lan', 'port').required, true)
+  assert.equal(field('ipv6', 'port').required, true)
+})
+
+test('findMode 只认枚举里的精确字符串', () => {
+  assert.equal(findMode('lan').mode, 'lan')
+  assert.equal(findMode('uu').mode, 'uu')
+  assert.equal(findMode('telnet'), null)
+  assert.equal(findMode('LAN'), null)
+  assert.equal(findMode(' lan'), null)
+  assert.equal(findMode(''), null)
+  assert.equal(findMode(null), null)
+  assert.equal(findMode(123), null)
+  assert.equal(findMode({ mode: 'lan' }), null)
+})
+
+test('默认设置：关闭、lan、端口跟随 DSH、地址全空', () => {
+  assert.deepEqual(defaultRemoteSettings(), {
+    enabled: false,
+    mode: 'lan',
+    port: 0,
+    lanAddress: '',
+    tailscaleHost: '',
+    cloudflareHost: '',
+    ipv6Address: '',
+    manualUrl: '',
+  })
+})
+
+test('设置归一：缺省沿用 previous、显式空串才清空', () => {
+  const base = baseSettings({
+    enabled: true,
+    mode: 'ipv6',
+    lanAddress: '192.168.1.6',
+    tailscaleHost: '100.1.2.3',
+    cloudflareHost: 'a.trycloudflare.com',
+    ipv6Address: '2409:8a20::1',
+    manualUrl: 'https://example.com/',
+  })
+
+  const kept = normalizeRemoteSettings({}, base)
+  assert.deepEqual(kept, base)
+  assert.notEqual(kept, base, '应当返回新对象，不修改 previous')
+  assert.equal(base.mode, 'ipv6', 'previous 不能被就地改动')
+
+  const cleared = normalizeRemoteSettings({ lanAddress: '', ipv6Address: '', manualUrl: '', port: 0 }, base)
+  assert.equal(cleared.lanAddress, '')
+  assert.equal(cleared.ipv6Address, '')
+  assert.equal(cleared.manualUrl, '')
+  assert.equal(cleared.port, 0)
+  assert.equal(cleared.mode, 'ipv6', '未提供的 mode 必须沿用 previous')
+  assert.equal(cleared.enabled, true)
+
+  assert.equal(normalizeRemoteSettings({ lanAddress: '  192.168.1.6  ' }, base).lanAddress, '192.168.1.6')
+  assert.equal(normalizeRemoteSettings({ cloudflareHost: 'XXX.TryCloudflare.COM' }, base).cloudflareHost, 'xxx.trycloudflare.com')
+  assert.equal(normalizeRemoteSettings({ ipv6Address: '2409:8A20:0:0:0:0:0:1' }, base).ipv6Address, '2409:8a20::1')
+  assert.equal(normalizeRemoteSettings({ enabled: false }, base).enabled, false)
+  assert.equal(normalizeRemoteSettings({ mode: 'manual' }, base).mode, 'manual')
+})
+
+test('设置归一：结构非法一律 E_VALIDATION', () => {
+  const base = baseSettings()
+  expectValidation(() => normalizeRemoteSettings(null, base), '必须是对象')
+  expectValidation(() => normalizeRemoteSettings([], base), '必须是对象')
+  expectValidation(() => normalizeRemoteSettings('lan', base), '必须是对象')
+  expectValidation(() => normalizeRemoteSettings({ enabled: 'yes' }, base), '布尔')
+  expectValidation(() => normalizeRemoteSettings({ enabled: 1 }, base), '布尔')
+  expectValidation(() => normalizeRemoteSettings({ mode: 'telnet' }, base), 'mode')
+  expectValidation(() => normalizeRemoteSettings({ mode: 'LAN' }, base), 'mode')
+  expectValidation(() => normalizeRemoteSettings({ mode: '' }, base), 'mode')
+})
+
+test('设置归一：端口必须是 0–65535 的整数', () => {
+  const base = baseSettings()
+  const tooBig = expectValidation(() => normalizeRemoteSettings({ port: 70000 }, base), '0–65535')
+  assert.equal(tooBig.details.field, 'port')
+  assert.equal(tooBig.details.allowed.min, 0)
+  assert.equal(tooBig.details.allowed.max, 65535)
+  expectValidation(() => normalizeRemoteSettings({ port: -1 }, base), '0–65535')
+  expectValidation(() => normalizeRemoteSettings({ port: 1.5 }, base), '整数')
+  expectValidation(() => normalizeRemoteSettings({ port: '40596' }, base), '整数')
+  expectValidation(() => normalizeRemoteSettings({ port: Number.NaN }, base), '整数')
+  assert.equal(normalizeRemoteSettings({ port: 0 }, base).port, 0)
+  assert.equal(normalizeRemoteSettings({ port: 65535 }, base).port, 65535)
+})
+
+test('设置归一：地址字段逐项校验，details 带 field/value', () => {
+  const base = baseSettings()
+
+  const wildcard = expectValidation(() => normalizeRemoteSettings({ lanAddress: '0.0.0.0' }, base), '局域网地址')
+  assert.equal(wildcard.details.field, 'lanAddress')
+  assert.equal(wildcard.details.value, '0.0.0.0')
+  expectValidation(() => normalizeRemoteSettings({ lanAddress: 'example.com' }, base), '局域网地址')
+  expectValidation(() => normalizeRemoteSettings({ ipv6Address: '[2409:8a20::1]' }, base), '方括号')
+  expectValidation(() => normalizeRemoteSettings({ ipv6Address: 'eth0' }, base), 'IPv6')
+  expectValidation(() => normalizeRemoteSettings({ cloudflareHost: 'https://x.trycloudflare.com' }, base), '隧道域名')
+  expectValidation(() => normalizeRemoteSettings({ cloudflareHost: 'x.trycloudflare.com:443' }, base), '隧道域名')
+  expectValidation(() => normalizeRemoteSettings({ tailscaleHost: '100.1.2.3/status' }, base), 'Tailscale 地址')
+  expectValidation(() => normalizeRemoteSettings({ manualUrl: 'javascript:alert(1)' }, base), '完整地址')
+  expectValidation(() => normalizeRemoteSettings({ manualUrl: 'example.com' }, base), '完整地址')
+  expectValidation(() => normalizeRemoteSettings({ lanAddress: 123 }, base), '字符串')
+})
+
+test('设置归一：manualUrl 里的 token 在 details 里已打码', () => {
+  const base = baseSettings()
+  const token = 'tok-abcdefghijklmnop-1234567890'
+  const error = captureError(() =>
+    normalizeRemoteSettings({ manualUrl: `ftp://files.example.com/?token=${token}` }, base),
+  )
+  assert.equal(error.code, 'E_VALIDATION')
+  assert.equal(error.details.field, 'manualUrl')
+  assert.ok(!String(error.details.value).includes(token), 'details 里不能有 token 明文')
+  assert.ok(String(error.details.value).includes('token=***'))
+  assert.ok(!error.message.includes(token), 'message 里不能有 token 明文')
+  assert.ok(JSON.stringify(error.details).includes('***'))
+})
+
+test('missingRequiredFields 只报真正空的字符串字段（端口恒有值）', () => {
+  assert.deepEqual(missingRequiredFields('lan', defaultRemoteSettings()), ['lanAddress'])
+  assert.deepEqual(missingRequiredFields('tailscale', defaultRemoteSettings()), ['tailscaleHost'])
+  assert.deepEqual(missingRequiredFields('ipv6', defaultRemoteSettings()), ['ipv6Address'])
+  assert.deepEqual(missingRequiredFields('cloudflare', defaultRemoteSettings()), ['cloudflareHost'])
+  assert.deepEqual(missingRequiredFields('manual', defaultRemoteSettings()), ['manualUrl'])
+  assert.deepEqual(missingRequiredFields('uu', defaultRemoteSettings()), [])
+  assert.deepEqual(missingRequiredFields('lan', baseSettings({ lanAddress: '192.168.1.6' })), [])
+  assert.deepEqual(missingRequiredFields('lan', baseSettings({ lanAddress: '   ' })), ['lanAddress'])
+})
+
+test('normalizeIpv4 的边界', () => {
+  assert.equal(normalizeIpv4('192.168.1.6').ok, true)
+  assert.equal(normalizeIpv4('192.168.1.6').value, '192.168.1.6')
+  assert.equal(normalizeIpv4('  192.168.1.6  ').value, '192.168.1.6')
+  assert.equal(normalizeIpv4('0.0.0.0').ok, false)
+  assert.ok(normalizeIpv4('0.0.0.0').reason.includes('通配'))
+  assert.equal(normalizeIpv4('255.255.255.255').ok, false)
+  assert.equal(normalizeIpv4('1.2.3.4.5').ok, false)
+  assert.equal(normalizeIpv4('999.1.1.1').ok, false)
+  assert.equal(normalizeIpv4('192.168.01.1').ok, false)
+  assert.equal(normalizeIpv4('192.168.1').ok, false)
+  assert.equal(normalizeIpv4('').ok, false)
+  assert.equal(normalizeIpv4('   ').ok, false)
+  assert.equal(normalizeIpv4(null).ok, false)
+  assert.equal(normalizeIpv4(42).ok, false)
+  assert.equal(normalizeIpv4('localhost').ok, false)
+  assert.equal(normalizeIpv4('fe80::1').ok, false)
+  // 失败时统一是"空值 + 中文原因"，不会返回半成品
+  assert.equal(normalizeIpv4('999.1.1.1').value, '')
+  assert.ok(normalizeIpv4('999.1.1.1').reason.length > 0)
+})
+
+test('normalizeIpv6 的边界（输出不带方括号）', () => {
+  assert.equal(normalizeIpv6('::1').ok, true)
+  assert.equal(normalizeIpv6('::1').value, '::1')
+  assert.equal(normalizeIpv6('2409:8A20:4CAD:BA20:1234:5678:9ABC:DEF0').value, '2409:8a20:4cad:ba20:1234:5678:9abc:def0')
+  assert.equal(normalizeIpv6('2409:8a20:0:0:0:0:0:1').value, '2409:8a20::1')
+  assert.equal(normalizeIpv6('fe80::1').ok, true)
+  assert.equal(normalizeIpv6('::ffff:192.168.1.1').ok, true)
+
+  assert.equal(normalizeIpv6('[::1]').ok, false)
+  assert.ok(normalizeIpv6('[2409:8a20::1]').reason.includes('方括号'))
+  assert.equal(normalizeIpv6('[2409:8a20::1]').value, '')
+  assert.equal(normalizeIpv6('fe80::1%eth0').ok, false)
+  assert.ok(normalizeIpv6('fe80::1%eth0').reason.includes('%'))
+  assert.equal(normalizeIpv6('1:2:3:4:5:6:7').ok, false)
+  assert.equal(normalizeIpv6('1:2:3:4:5:6:7:8:9').ok, false)
+  assert.equal(normalizeIpv6('2409::8a20::1').ok, false)
+  assert.equal(normalizeIpv6('12345::1').ok, false)
+  assert.equal(normalizeIpv6('192.168.1.6').ok, false)
+  assert.equal(normalizeIpv6('').ok, false)
+  assert.equal(normalizeIpv6('   ').ok, false)
+  assert.equal(normalizeIpv6(null).ok, false)
+})
+
+test('normalizeHostname 的边界（无协议/路径/端口，小写输出）', () => {
+  assert.equal(normalizeHostname('Example.COM').ok, true)
+  assert.equal(normalizeHostname('Example.COM').value, 'example.com')
+  assert.equal(normalizeHostname(' 100.101.102.103 ').value, '100.101.102.103')
+  assert.equal(normalizeHostname('100.101.102.103').ok, true)
+  assert.equal(normalizeHostname('mypc').ok, true)
+
+  assert.equal(normalizeHostname('https://example.com').ok, false)
+  assert.ok(normalizeHostname('https://example.com').reason.includes('http'))
+  assert.equal(normalizeHostname('example.com/path').ok, false)
+  assert.equal(normalizeHostname('example.com?x=1').ok, false)
+  assert.equal(normalizeHostname('example.com:443').ok, false)
+  assert.equal(normalizeHostname('999.1.1.1').ok, false)
+  assert.equal(normalizeHostname('exa_mple.com').ok, false)
+  assert.equal(normalizeHostname('-bad.example.com').ok, false)
+  assert.equal(normalizeHostname('example.com.').ok, false)
+  assert.equal(normalizeHostname('').ok, false)
+  assert.equal(normalizeHostname('   ').ok, false)
+  assert.equal(normalizeHostname(null).ok, false)
+})
+
+test('formatAuthority / buildHttpUrl / buildHttpsUrl 的拼装规则', () => {
+  assert.equal(formatAuthority('2409:8a20::1'), '[2409:8a20::1]')
+  assert.equal(formatAuthority('192.168.1.6'), '192.168.1.6')
+  assert.equal(formatAuthority('example.com'), 'example.com')
+  assert.equal(buildHttpUrl('192.168.1.6', 40596), 'http://192.168.1.6:40596/')
+  assert.equal(buildHttpUrl('2409:8a20::1', 40596), 'http://[2409:8a20::1]:40596/')
+  assert.equal(buildHttpUrl('192.168.1.6', 0), 'http://192.168.1.6/')
+  assert.equal(buildHttpUrl('192.168.1.6', 40596, '/chat'), 'http://192.168.1.6:40596/chat')
+  assert.equal(buildHttpsUrl('xxx.trycloudflare.com'), 'https://xxx.trycloudflare.com/')
+  assert.equal(buildHttpsUrl('xxx.trycloudflare.com', '/chat'), 'https://xxx.trycloudflare.com/chat')
+})
+
+test('urlForMode: lan 用设置里的地址，缺失时回退 ctx 网卡地址，都没有则报错', () => {
+  const fromContext = urlForMode('lan', baseSettings(), CTX)
+  assert.equal(fromContext.ok, true)
+  assert.equal(fromContext.url, 'http://192.168.1.6:40596/')
+  assert.equal(fromContext.reason, '')
+
+  const fromSettings = urlForMode('lan', baseSettings({ lanAddress: '192.168.1.7' }), CTX)
+  assert.equal(fromSettings.url, 'http://192.168.1.7:40596/')
+
+  const noPortSetting = urlForMode('lan', baseSettings({ port: 0 }), CTX)
+  assert.equal(noPortSetting.url, 'http://192.168.1.6:40596/', 'port=0 时应跟随 dshPort')
+
+  const missing = urlForMode('lan', baseSettings(), { lanAddress: null, dshPort: 40596 })
+  assert.equal(missing.ok, false)
+  assert.equal(missing.url, '')
+  assert.ok(missing.reason.includes('还没有可用的局域网地址，请先选择本机网卡地址'))
+
+  const wildcard = urlForMode('lan', baseSettings({ lanAddress: '0.0.0.0' }), CTX)
+  assert.equal(wildcard.ok, false)
+  assert.equal(wildcard.url, '')
+})
+
+test('urlForMode: ipv6 地址裹方括号、非法地址报错', () => {
+  const ok = urlForMode('ipv6', baseSettings({ ipv6Address: '2409:8a20:4cad:ba20::1' }), CTX)
+  assert.equal(ok.ok, true)
+  assert.equal(ok.url, 'http://[2409:8a20:4cad:ba20::1]:40596/')
+
+  const empty = urlForMode('ipv6', baseSettings(), CTX)
+  assert.equal(empty.ok, false)
+  assert.equal(empty.url, '')
+
+  const bracketed = urlForMode('ipv6', baseSettings({ ipv6Address: '[2409:8a20::1]' }), CTX)
+  assert.equal(bracketed.ok, false)
+  assert.equal(bracketed.url, '')
+  assert.ok(bracketed.reason.includes('方括号'))
+})
+
+test('urlForMode: tailscale 走 http，cloudflare 走 https 且不带端口', () => {
+  const tailscale = urlForMode('tailscale', baseSettings({ tailscaleHost: '100.101.102.103' }), CTX)
+  assert.equal(tailscale.ok, true)
+  assert.equal(tailscale.url, 'http://100.101.102.103:40596/')
+
+  const magicDns = urlForMode('tailscale', baseSettings({ tailscaleHost: 'MyPc.tailnet.ts.net' }), CTX)
+  assert.equal(magicDns.url, 'http://mypc.tailnet.ts.net:40596/')
+
+  const emptyTailscale = urlForMode('tailscale', baseSettings(), CTX)
+  assert.equal(emptyTailscale.ok, false)
+  assert.equal(emptyTailscale.url, '')
+
+  const cloudflare = urlForMode(
+    'cloudflare',
+    baseSettings({ cloudflareHost: 'XXX.trycloudflare.com', port: 40596 }),
+    CTX,
+  )
+  assert.equal(cloudflare.ok, true)
+  assert.equal(cloudflare.url, 'https://xxx.trycloudflare.com/')
+  assert.ok(!cloudflare.url.includes('40596'), 'cloudflare 地址里不能出现端口')
+
+  const badCloudflare = urlForMode('cloudflare', baseSettings({ cloudflareHost: 'http://x.trycloudflare.com' }), CTX)
+  assert.equal(badCloudflare.ok, false)
+  assert.equal(badCloudflare.url, '')
+})
+
+test('urlForMode: manual 透传（缺协议补 http://），uu 恒不可用', () => {
+  const full = urlForMode('manual', baseSettings({ manualUrl: 'https://example.com/dsh/?x=1' }), CTX)
+  assert.equal(full.ok, true)
+  assert.equal(full.url, 'https://example.com/dsh/?x=1')
+
+  const bare = urlForMode('manual', baseSettings({ manualUrl: 'example.com:8888/x' }), CTX)
+  assert.equal(bare.ok, true)
+  assert.equal(bare.url, 'http://example.com:8888/x')
+
+  const empty = urlForMode('manual', baseSettings(), CTX)
+  assert.equal(empty.ok, false)
+  assert.equal(empty.url, '')
+  assert.ok(empty.reason.includes('完整地址'))
+
+  const badScheme = urlForMode('manual', baseSettings({ manualUrl: 'ftp://example.com/' }), CTX)
+  assert.equal(badScheme.ok, false)
+  assert.equal(badScheme.url, '')
+  assert.ok(badScheme.reason.includes('http'))
+
+  const uu = urlForMode('uu', baseSettings(), CTX)
+  assert.equal(uu.ok, false)
+  assert.equal(uu.url, '')
+  assert.equal(uu.reason, REMOTE_MODES.uu.unavailableReason)
+})
+
+test('withToken 幂等、只留一个 token、保留其它参数与 fragment', () => {
+  const url = 'http://192.168.1.6:40596/?a=1#frag'
+  const once = withToken(url, 'abc+def/123')
+  assert.ok(once.includes('token=abc%2Bdef%2F123'), `实际：${once}`)
+  assert.ok(once.includes('a=1'), '其它查询参数必须保留')
+  assert.ok(once.endsWith('#frag'), 'fragment 必须在末尾')
+  assert.equal(withToken(once, 'abc+def/123'), once, '同一 token 重复调用必须幂等')
+
+  const replaced = withToken(once, 'newtoken')
+  assert.equal((replaced.match(/token=/g) || []).length, 1, '不能出现第二个 token 参数')
+  assert.ok(replaced.includes('token=newtoken'))
+  assert.ok(!replaced.includes('abc'))
+  assert.ok(replaced.endsWith('#frag'))
+
+  const doubled = withToken('http://192.168.1.6:40596/?token=old&token=older', 'new')
+  assert.equal((doubled.match(/token=/g) || []).length, 1, '旧的重复 token 必须被清掉')
+
+  assert.equal(withToken('https://example.com/', ''), 'https://example.com/', '空 token 不追加参数')
+  assert.equal(withToken('https://example.com/', '   '), 'https://example.com/')
+})
+
+test('maskToken 打码规则', () => {
+  assert.equal(maskToken('abcdefghijkl'), 'abcd…ijkl')
+  assert.equal(maskToken('123456789012'), '1234…9012')
+  assert.equal(maskToken('abcdefghijk'), '***', '长度 < 12 一律 ***')
+  assert.equal(maskToken('short'), '***')
+  assert.equal(maskToken(''), '***')
+  assert.ok(!maskToken('abcdefghijkl').includes('abcdefghijkl'))
+})
+
+test('redactToken 覆盖明文与 URL 编码形态（含 %2B / %2b）', () => {
+  const token = 'a+b/c=d?e&f'
+  const encoded = encodeURIComponent(token)
+  const lower = encoded.replace(/%[0-9A-F]{2}/g, (match) => match.toLowerCase())
+
+  const text = `链接 https://x/?token=${encoded} ，原样 ${token} ，小写 ${lower}`
+  const redacted = redactToken(text, token)
+  assert.ok(!redacted.includes(encoded), '编码形态必须被替换')
+  assert.ok(!redacted.includes(token), '明文形态必须被替换')
+  assert.ok(!redacted.includes(lower), '小写百分号形态必须被替换')
+  assert.ok(redacted.includes('token=***'))
+  assert.ok(redacted.includes('https://x/?token=***'))
+
+  assert.equal(redactToken(text, ''), text, '空 token 不做替换')
+  assert.equal(redactToken('nothing here', token), 'nothing here')
+})
+
+test('错误路径统一是 ok:false + 空 url，且消息里没有 token 明文', () => {
+  const token = 'tok-secret-abcdefghijklmnop'
+  const cases = [
+    urlForMode('lan', baseSettings(), { lanAddress: null, dshPort: 40596 }),
+    urlForMode('ipv6', baseSettings(), CTX),
+    urlForMode('tailscale', baseSettings(), CTX),
+    urlForMode('cloudflare', baseSettings(), CTX),
+    urlForMode('manual', baseSettings(), CTX),
+    urlForMode('uu', baseSettings(), CTX),
+    urlForMode('manual', baseSettings({ manualUrl: `ftp://x/?token=${token}` }), CTX),
+  ]
+  for (const result of cases) {
+    assert.equal(result.ok, false)
+    assert.equal(result.url, '')
+    assert.ok(result.reason.length > 0, '失败必须给出中文原因')
+    assert.ok(!result.reason.includes(token))
+    assert.ok(!result.url.includes(token))
+  }
+})

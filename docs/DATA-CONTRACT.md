@@ -177,3 +177,28 @@
 手机只写 `devices/<自己>/schedules/*.jsonl`、`summaries/*.json`、`open.jsonl` 与 `attachments/<date>.zip`，提交推送到同一远端；
 其它设备目录只读。冲突策略：设备目录互不重叠，不需要 merge；同 id 记录按 ts 折叠；同日汇总按 `generatedAt` 取新。
 电脑端由 `dsh-git-config-sync` 的 `schedule_*` 工具只写 `devices/<pcId>/schedules/`（见 `docs/SCHEDULE-BRIDGE.md`）。
+
+## 7. 远程访问域（`src/remote/**`，本机，不进 repo）
+
+**与 Git 仓库零交集**：远程访问域不写 `devices/<id>/` 下任何文件，也不同步到远端。
+它只碰本机状态目录下的两个**新增**文件：
+
+```
+%USERPROFILE%\.dsh\git-config-sync\
+  remote.json          # 远程访问设置（8 字段，无 secret），0600
+  remote-token.json    # { token, createdAt }，0600
+```
+
+- **`remote.json`**：字段集合 = `RemoteSettings`（`enabled` / `mode` / `port` / `lanAddress` /
+  `tailscaleHost` / `cloudflareHost` / `ipv6Address` / `manualUrl`），语义见
+  `docs/REMOTE-ACCESS-OPTIONS.md` §3。与 `settings.json` **平级但独立**：任一文件写坏/写失败
+  不得影响另一域（远程访问坏了同步照常，反之亦然）。
+- **`remote-token.json`**：访问令牌（`crypto.randomBytes(32)` 的 base64url 形态）。
+  **永不进 Git 仓库、永不出现在 `remoteGetState` 等状态响应里**（只给 `masked` 打码串），
+  唯一明文出口是用户显式点「显示链接/二维码」。
+- **不落盘的部分**：监听地址、连接数、被拒次数、最近自检结果、最近错误 —— 全部只在内存，
+  重启清零。避免状态文件成为第二事实来源。
+- **边界**：`src/remote/**` 不 import `src/engine/**`（`engine/errors.ts`、`engine/paths.ts`
+  这类纯工具除外）与 `src/schedule/**` 的实现；反向同样不许。
+- **失败隔离**：远程监听起不来（端口占用/地址不可用/拿不到上游身份）只写
+  `status.lastError`，绝不让插件激活失败或影响同步 RPC。

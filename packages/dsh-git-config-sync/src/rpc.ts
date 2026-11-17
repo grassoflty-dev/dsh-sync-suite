@@ -30,6 +30,17 @@ import type {
   SyncSettings,
   SyncStatus,
 } from './engine/types.js'
+// 只 import 远程访问域的**类型**契约（不 import remote/index.ts）：
+// RPC 层与远程运行时编译解耦，也避免两边并行开发时互相拖死构建。
+import type {
+  LanCandidate,
+  RemoteAccessMode,
+  RemoteLink,
+  RemoteProbeResult,
+  RemoteServiceLike,
+  RemoteStateData,
+  RemoteStatus,
+} from './remote/types.js'
 
 export interface RpcServiceOptions {
   homeDir?: string
@@ -40,6 +51,12 @@ export interface RpcServiceOptions {
   hooks?: RpcHooks
   /** 单次网络命令超时（毫秒，默认 ≤8000）；测试可注入更小值。 */
   networkTimeoutMs?: number
+  /**
+   * 远程访问服务（可选）。未注入时所有 `remote*` action 一律 fail-closed，
+   * 返回 `E_INTERNAL 远程访问服务未挂载`，绝不静默返回空状态
+   * （否则 UI 会把"没装服务"误显示成"未启用"）。
+   */
+  remote?: RemoteServiceLike
 }
 
 export interface RpcService {
@@ -398,6 +415,77 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
     return await rollbackSnapshot(restoreContext(), { confirm: payload.confirm, snapshotId })
   }
 
+  /* ------------------------------------------------------------------ */
+  /* 远程访问（remote.* action）                                          */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 取远程访问服务。未注入即抛 E_INTERNAL（fail-closed），不做"看起来没开"的空返回。
+   */
+  function requireRemote(): RemoteServiceLike {
+    const remote = options.remote
+    if (remote === undefined) throw new SyncError('E_INTERNAL', '远程访问服务未挂载')
+    return remote
+  }
+
+  /**
+   * 归一 `payload.mode`：只认契约里的 6 个值，其余（含缺省/非字符串/拼错）一律 undefined，
+   * 交给远程域按"当前设置的方式"处理。这里不猜、不兜底成 lan。
+   */
+  function asRemoteMode(value: unknown): RemoteAccessMode | undefined {
+    switch (value) {
+      case 'lan':
+      case 'tailscale':
+      case 'ipv6':
+      case 'cloudflare':
+      case 'manual':
+      case 'uu':
+        return value
+      default:
+        return undefined
+    }
+  }
+
+  /**
+   * token 纪律（契约）：明文 token 只允许出现在 `remoteShowLink` 的返回体里
+   * （用户显式点「显示二维码与链接」时的唯一出口）。因此本文件所有 remote 动作
+   * 构建错误时**不得**回显入参（尤其 `settings.manualUrl`，它可含 token），
+   * 下面的实现只透传远程域自己抛出的错误，不自己拼任何含载荷的 message。
+   */
+  async function remoteGetState(): Promise<RemoteStateData> {
+    return await requireRemote().getState()
+  }
+
+  async function remoteSaveSettings(payload: Record<string, unknown>): Promise<RemoteStateData> {
+    // 只把 `payload.settings` 原样交给远程域（字段归一与校验由它负责，RPC 层不重复实现）。
+    return await requireRemote().saveSettings(payload.settings)
+  }
+
+  async function remoteStart(): Promise<RemoteStatus> {
+    // start/stop 与现有写操作同一串行队列：两个监听动作绝不会并发。
+    return await requireRemote().start()
+  }
+
+  async function remoteStop(): Promise<RemoteStatus> {
+    return await requireRemote().stop()
+  }
+
+  async function remoteRotateToken(): Promise<RemoteStatus> {
+    return await requireRemote().rotateToken()
+  }
+
+  async function remoteProbe(payload: Record<string, unknown>): Promise<RemoteProbeResult> {
+    return await requireRemote().probe(asRemoteMode(payload.mode))
+  }
+
+  async function remoteShowLink(payload: Record<string, unknown>): Promise<RemoteLink> {
+    return await requireRemote().showLink(asRemoteMode(payload.mode))
+  }
+
+  async function remoteDetectLan(): Promise<{ candidates: LanCandidate[] }> {
+    return { candidates: requireRemote().detectLan() }
+  }
+
   async function handleRpc(body: unknown): Promise<RpcResponse> {
     try {
       if (disposed) throw new SyncError('E_INTERNAL', 'RPC 服务已释放')
@@ -421,6 +509,23 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
           return ok(await enqueue(async () => ({ snapshots: snapshots.list() })))
         case 'rollback':
           return ok(await enqueue(() => rollback(payload)))
+        // ---- 远程访问：与同步动作同一条串行队列（start/stop 不许并发） ----
+        case 'remoteGetState':
+          return ok(await enqueue(remoteGetState))
+        case 'remoteSaveSettings':
+          return ok(await enqueue(() => remoteSaveSettings(payload)))
+        case 'remoteStart':
+          return ok(await enqueue(remoteStart))
+        case 'remoteStop':
+          return ok(await enqueue(remoteStop))
+        case 'remoteRotateToken':
+          return ok(await enqueue(remoteRotateToken))
+        case 'remoteProbe':
+          return ok(await enqueue(() => remoteProbe(payload)))
+        case 'remoteShowLink':
+          return ok(await enqueue(() => remoteShowLink(payload)))
+        case 'remoteDetectLan':
+          return ok(await enqueue(remoteDetectLan))
         default:
           throw new SyncError('E_UNKNOWN_ACTION', `未知 action：${action}`, { action })
       }

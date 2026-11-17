@@ -12,8 +12,17 @@
  *   fragment（`#` 之后）里的 `?token=` 不算 query，不置 `hasToken`；
  * - 失败时 `url` 一律为空串（fail-closed：调用方拿到空串就不会去打开一个注定不可达的内嵌 Web）。
  *
- * 不支持：IPv6 字面量（`http://[::1]:3080`）、带账号密码的地址 —— 内网 DSH 用 IPv4 即可，
- * 这两类会落到「地址不完整」的拒绝分支。
+ * IPv6 字面量（`http://[2409:8a20:…:763c]:3080/`）：**本轮起支持**。
+ * 之前只认 IPv4 是因为「内网 DSH 用 IPv4 即可」；现在多了「公网 IPv6 直连」这条访问方式
+ * （`docs/REMOTE-ACCESS-OPTIONS.md` §2.2：不需要 DNS、也不需要 trustedHosts，平板用
+ * `http://[地址]:端口/?token=…` 直接开），所以方括号形态必须能过。规则：
+ * - 方括号内必须是**合法 IPv6 形态**（十六进制段 + 至多一个 `::`，允许内嵌 IPv4 尾段如
+ *   `::ffff:192.168.1.1`），且 `]` 之后只能是「空」或 `:端口`；
+ * - 成功时 `url` **保留方括号**（URL 里的 IPv6 必须裹起来，去掉就打不开）；
+ * - 仍拒绝：裸 IPv6（没方括号却有多冒号）、未闭合 `[`、`[]`、带账号密码（`@`）、空格、
+ *   非 http(s) —— 这些都会落到「地址不完整」的拒绝分支。
+ *
+ * 带账号密码的地址（`http://user:pass@host`）依然不支持（内嵌 Web 不需要，也不该存明文密码）。
  */
 
 /** 归一/校验结果。`ok=false` 时只有 `reason` 有意义（`url` 为空串）。 */
@@ -44,6 +53,85 @@ const HOST_RE: RegExp = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /** 端口：1–5 位十进制（只校验形态，不校验 65535 上限）。 */
 const PORT_RE: RegExp = /^[0-9]{1,5}$/;
+
+/** IPv6 的一段十六进制（1–4 位）。 */
+const IPV6_GROUP_RE: RegExp = /^[0-9A-Fa-f]{1,4}$/;
+
+/** IPv4 的一段十进制（1–3 位，≤255，不补前导零）。 */
+const IPV4_OCTET_RE: RegExp = /^(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$/;
+
+/** 是否合法的 IPv4 字面量（只用于 IPv6 尾段的内嵌判定）。 */
+function isIpv4Literal(text: string): boolean {
+  const parts: string[] = text.split('.');
+  if (parts.length !== 4) {
+    return false;
+  }
+  for (const part of parts) {
+    if (!IPV4_OCTET_RE.test(part)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** 一段（`::` 切开后的一侧）里有多少个十六进制组；不合法返回 -1。 */
+function ipv6GroupCount(segment: string): number {
+  if (segment.length === 0) {
+    return 0;
+  }
+  const parts: string[] = segment.split(':');
+  for (const part of parts) {
+    if (!IPV6_GROUP_RE.test(part)) {
+      return -1;
+    }
+  }
+  return parts.length;
+}
+
+/**
+ * 是否合法的 IPv6 **字面量形态**（不含方括号）。
+ *
+ * 只做形态判定，不做「这个地址能不能用」的语义判定（通配 / 回环 / 全局由调用方自己判断）：
+ * - 允许内嵌 IPv4 尾段（`::ffff:192.168.1.1`）；
+ * - 至多一个 `::`，且它至少压缩掉一组（`1:2:3:4:5:6:7::8` 这种越界写法拒绝）；
+ * - 不带 `%eth0` 这类 zone id（WebView / 浏览器用不了，放过去只会在平板上失败）。
+ */
+export function isIpv6Literal(raw: string): boolean {
+  const text: string = typeof raw === 'string' ? raw : '';
+  if (text.length === 0) {
+    return false;
+  }
+  if (text.indexOf('%') >= 0) {
+    return false;
+  }
+  let expanded: string = text;
+  const lastColon: number = text.lastIndexOf(':');
+  if (lastColon >= 0 && text.slice(lastColon + 1).indexOf('.') >= 0) {
+    // 尾部是内嵌 IPv4：换成两段十六进制再按组数判定（`::ffff:1.2.3.4`）
+    const tail: string = text.slice(lastColon + 1);
+    if (!isIpv4Literal(tail)) {
+      return false;
+    }
+    expanded = `${text.slice(0, lastColon)}:0:0`;
+  } else if (text.indexOf('.') >= 0) {
+    // 有点但没冒号 / 点不在尾段：都不是 IPv6（纯 IPv4 也不该被当成 IPv6）
+    return false;
+  }
+  const halves: string[] = expanded.split('::');
+  if (halves.length > 2) {
+    return false;
+  }
+  if (halves.length === 2) {
+    const head: number = ipv6GroupCount(halves[0]);
+    const tail: number = ipv6GroupCount(halves[1]);
+    if (head < 0 || tail < 0) {
+      return false;
+    }
+    // `::` 至少要压缩掉一组，否则 8 组写法还带 `::` 是越界的
+    return head + tail < 8;
+  }
+  return ipv6GroupCount(expanded) === 8;
+}
 
 /** 失败文案（与需求逐字一致，测试与设置页红字都按这些串断言）。 */
 const REASON_EMPTY: string = '请先填写电脑上的 DSH 地址';
@@ -131,6 +219,32 @@ export function normalizeRemoteUrl(raw: string): RemoteUrlCheck {
   }
 
   // 3) host[:port]：端口只允许数字，host 不允许 `@` / 空白 / 其它怪字符
+  //    IPv6 字面量单独走一条分支：`[` 开头就必须有配对的 `]`，括号里必须是合法 IPv6，
+  //    `]` 之后只允许 `:端口`（多一个字符都归到「地址不完整」）。
+  if (authority.startsWith('[')) {
+    const close: number = authority.indexOf(']');
+    if (close < 0) {
+      // `http://[::1:3080`：方括号没闭合
+      return failed(REASON_INCOMPLETE);
+    }
+    const inner: string = authority.slice(1, close);
+    if (!isIpv6Literal(inner)) {
+      // `[]`、`[1:2:3]`、`[gggg::1]`、`[::1::2]` 一律拒绝
+      return failed(REASON_INCOMPLETE);
+    }
+    const after: string = authority.slice(close + 1);
+    if (after.length > 0) {
+      if (!after.startsWith(':')) {
+        return failed(REASON_INCOMPLETE);
+      }
+      if (!PORT_RE.test(after.slice(1))) {
+        return failed(REASON_INCOMPLETE);
+      }
+    }
+    const ipv6Url: string = `${scheme}://${rest}`;
+    return passed(ipv6Url, queryHasToken(rest), hadScheme);
+  }
+
   let hostPart: string = authority;
   const colon: number = authority.lastIndexOf(':');
   if (colon >= 0) {

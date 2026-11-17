@@ -5,10 +5,14 @@
  * 本页仍做四件事（逻辑未改）：内嵌隐藏 Web 跑 isomorphic-git、注册代理、按钮触发
  * pull/push/status、保存前做表单校验。
  *
- * 远程控制组（最后一个功能组，排在「关于」之前）：填电脑上的 DSH Web 地址
- * （如 `http://192.168.1.6:3080/?token=…`），点「打开远程控制」时先 `normalizeRemoteUrl`
- * 归一、再 `settingsStore.save({ remoteUrl })` 落盘，最后 `router.pushUrl` 到内嵌页
- * （`routeToRemote()` + params.url）。地址里的 token 只存本机，不进同步载荷。
+ * 远程控制组（最后一个功能组，排在「关于」之前）：
+ * 1. 「访问方式」六选一（`model/remoteAccess.ts` 的 `REMOTE_MODES`，与插件侧同一套枚举与字段）；
+ * 2. 按方式的 `fields` 渲染输入（局域网 / IPv6 → 地址+端口，Tailscale → 主机+端口，
+ *    Cloudflare → 域名，手动 → 完整地址），`unsupported`（网易 UU 远程）只显示原因、不给假开关；
+ * 3. 「DSH 地址」是最终要打开的地址（`lan`/`ipv6`/`tailscale`/`cloudflare` 由字段自动拼出来，
+ *    `manual` 就是手输那一行）；点「打开远程控制」时 `buildRemoteAccessUrl` 拼地址、`normalizeRemoteUrl`
+ *    再归一，`settingsStore.save` 落盘（含方式与各字段）后才 `router.pushUrl` 到内嵌页
+ *    （`routeToRemote()` + params.url）。地址里的 token 只存本机，不进同步载荷。
  *
  * 同步组（A1/A2 之后）：
  * - 仓库地址 / 用户名 / token / **分支** / 设备标识 + 作者名；
@@ -44,6 +48,29 @@ import { describeRepoProbe, repoProbeUrl, validateRepoUrl } from '../model/repoU
 import type { RepoUrlCheck } from '../model/repoUrl';
 import { normalizeRemoteUrl, routeToRemote } from '../model/remoteUrl';
 import type { RemoteUrlCheck } from '../model/remoteUrl';
+import {
+  REMOTE_AVAILABILITY_NEEDS_SETUP,
+  REMOTE_AVAILABILITY_UNSUPPORTED,
+  REMOTE_MODE_CLOUDFLARE,
+  REMOTE_MODE_IPV6,
+  REMOTE_MODE_LAN,
+  REMOTE_MODE_MANUAL,
+  REMOTE_MODE_ORDER,
+  REMOTE_MODE_TAILSCALE,
+  REMOTE_MODES,
+  REMOTE_MODE_UU,
+  buildRemoteAccessUrl,
+  defaultRemoteAccessConfig,
+  findRemoteMode,
+  normalizeRemoteMode,
+  normalizeRemotePort
+} from '../model/remoteAccess';
+import type {
+  RemoteAccessConfig,
+  RemoteAccessUrlResult,
+  RemoteModeField,
+  RemoteModeSpec
+} from '../model/remoteAccess';
 import {
   AUTH_HTTPS,
   AUTH_SSH,
@@ -217,6 +244,20 @@ struct Settings {
   @State remoteUrl: string = '';
   /** 远程控制地址的内联错误（非法地址 / 保存失败），非空时按钮上方显示红字。 */
   @State remoteUrlError: string = '';
+  /** 远程访问方式（`lan`/`tailscale`/`ipv6`/`cloudflare`/`manual`/`uu`，见 `model/remoteAccess.ts`）。 */
+  @State remoteMode: string = REMOTE_MODE_LAN;
+  /** 局域网方式要填的具体 IPv4。 */
+  @State remoteLanAddress: string = '';
+  /** 端口输入框的原始文本（`InputType.Number` 仍按文本回调；空串/非法 → 0 = 跟 DSH 同端口）。 */
+  @State remotePortText: string = '0';
+  /** Tailscale 方式要填的 100.x 地址或 MagicDNS 名。 */
+  @State remoteTailscaleHost: string = '';
+  /** Cloudflare 隧道域名（不带 https://、不带路径）。 */
+  @State remoteCloudflareHost: string = '';
+  /** 公网 IPv6 地址（不带方括号；拼地址时由 `buildRemoteAccessUrl` 补 `[ ]`）。 */
+  @State remoteIpv6Address: string = '';
+  /** 手动方式的完整地址（与「DSH 地址」那一行共用同一份值，见 `manualUrl` 的取值逻辑）。 */
+  @State remoteManualUrl: string = '';
 
   /** 从列表页跳转过来时要自动执行的同步动作（pull / push / status）。 */
   private autoAction: string = '';
@@ -229,6 +270,8 @@ struct Settings {
   private lastStatusResult: GitSyncResult | null = null;
   /** 页面主滚动容器：校验失败时滚回顶部，让红色汇总与第一个错误字段进入视野。 */
   private pageScroller: Scroller = new Scroller();
+  /** 远程控制的「旧数据 → manual」迁移是否已经做过（只做一次，见 `applySettings`）。 */
+  private remoteMigrated: boolean = false;
 
   aboutToAppear(): void {
     this.platformText = isHarmonyOS() ? 'HarmonyOS' : 'Android';
@@ -321,6 +364,33 @@ struct Settings {
     this.authMode = normalizeAuthMode(settings.authMode);
     this.penOnlyInput = settings.penOnlyInput;
     this.remoteUrl = settings.remoteUrl;
+    // 远程访问方式与各字段（旧数据没有这些键 → lan / 0 / 空串，由 settingsStore 归一）
+    this.remoteMode = normalizeRemoteMode(settings.remoteMode);
+    this.remoteLanAddress = settings.remoteLanAddress;
+    this.remotePortText = String(normalizeRemotePort(settings.remotePort));
+    this.remoteTailscaleHost = settings.remoteTailscaleHost;
+    this.remoteCloudflareHost = settings.remoteCloudflareHost;
+    this.remoteIpv6Address = settings.remoteIpv6Address;
+    // 旧版本只存过 remoteUrl：仍是 manual 方式的唯一来源，不能丢
+    this.remoteManualUrl = settings.remoteManualUrl.length > 0 ? settings.remoteManualUrl : settings.remoteUrl;
+    // 升级迁移（**只在首次铺表单时做一次**）：老数据只有 `remoteUrl`、没有任何方式字段。
+    // 若按默认的 `lan` 走，「局域网地址」是空的 → 原来能打开的地址会突然点不动。
+    // 因此把它当成「手动填的完整地址」打开；用户点一次「打开远程控制」后方式就落盘成 manual。
+    // 用 `remoteMigrated` 兜住：否则用户主动选了「局域网直连」再点保存，会被这段迁移拽回手动方式。
+    if (!this.remoteMigrated) {
+      this.remoteMigrated = true;
+      if (
+        this.remoteMode === REMOTE_MODE_LAN &&
+        settings.remoteUrl.trim().length > 0 &&
+        settings.remoteLanAddress.trim().length === 0 &&
+        settings.remoteTailscaleHost.trim().length === 0 &&
+        settings.remoteCloudflareHost.trim().length === 0 &&
+        settings.remoteIpv6Address.trim().length === 0 &&
+        settings.remoteManualUrl.trim().length === 0
+      ) {
+        this.remoteMode = REMOTE_MODE_MANUAL;
+      }
+    }
     this.lastSyncAt = settings.lastSyncAt;
     this.lastSyncError = settings.lastSyncError;
     this.lastSyncAction = normalizeSyncAction(settings.lastSyncAction);
@@ -501,7 +571,15 @@ struct Settings {
         gitUsername: this.gitUsername.trim(),
         // 远程控制地址也随整表保存：否则「保存设置」后 applySettings 会把刚输入的值退回旧值。
         // 这里存原文，点「打开远程控制」时再由 normalizeRemoteUrl 归一。
-        remoteUrl: this.remoteUrl
+        remoteUrl: this.remoteUrl,
+        // 访问方式与各方式字段一并落盘（与 remoteUrl 成对，缺一项下次进设置页就会退回默认）
+        remoteMode: this.remoteMode,
+        remoteLanAddress: this.remoteLanAddress,
+        remotePort: normalizeRemotePort(Number.parseInt(this.remotePortText.trim(), 10)),
+        remoteTailscaleHost: this.remoteTailscaleHost,
+        remoteCloudflareHost: this.remoteCloudflareHost,
+        remoteIpv6Address: this.remoteIpv6Address,
+        remoteManualUrl: this.remoteManualUrl
       };
       const saved = await settingsStore.save(patch, context);
       if (this.disposed) {
@@ -1012,6 +1090,133 @@ struct Settings {
 
   // ------------------------------------------------------------------ 远程控制
 
+  /** 按枚举值取方式元数据（未知/空已由 `normalizeRemoteMode` 回落 `lan`）。 */
+  private remoteSpecOf(mode: string): RemoteModeSpec {
+    const spec: RemoteModeSpec | null = findRemoteMode(normalizeRemoteMode(mode));
+    return spec === null ? REMOTE_MODES[REMOTE_MODE_LAN] : spec;
+  }
+
+  /** 当前「访问方式」的元数据（下拉框文案、字段、可用性都从这里读，页面不另写一份）。 */
+  private remoteSpec(): RemoteModeSpec {
+    return this.remoteSpecOf(this.remoteMode);
+  }
+
+  /** 当前方式在「访问方式」下拉框里的下标（找不到 → 0 = 局域网直连）。 */
+  private remoteModeIndex(): number {
+    const index: number = REMOTE_MODE_ORDER.indexOf(this.remoteSpec().mode);
+    return index < 0 ? 0 : index;
+  }
+
+  /** 下拉框第 index 项的文案（`unsupported` 项明确标「不可用」，不做假开关）。 */
+  private remoteModeOptionLabel(index: number): string {
+    if (index < 0 || index >= REMOTE_MODE_ORDER.length) {
+      return '';
+    }
+    const spec: RemoteModeSpec = this.remoteSpecOf(REMOTE_MODE_ORDER[index]);
+    return spec.availability === REMOTE_AVAILABILITY_UNSUPPORTED ? `${spec.label}（不可用）` : spec.label;
+  }
+
+  /** 端口输入框的文本 → 合法端口（非数字/负数 → 0 = 跟 DSH 同端口）。 */
+  private remotePortValue(): number {
+    return normalizeRemotePort(Number.parseInt(this.remotePortText.trim(), 10));
+  }
+
+  /** 某个方式字段的元数据（标签/占位符/提示都来自 `REMOTE_MODES`，不在页面里重复）。 */
+  private remoteField(key: string): RemoteModeField {
+    for (const field of this.remoteSpec().fields) {
+      if (field.key === key) {
+        return field;
+      }
+    }
+    const fallback: RemoteModeField = { key: key, label: '', placeholder: '', hint: '' };
+    return fallback;
+  }
+
+  private remoteFieldLabel(key: string): string {
+    return this.remoteField(key).label;
+  }
+
+  private remoteFieldPlaceholder(key: string): string {
+    return this.remoteField(key).placeholder;
+  }
+
+  private remoteFieldHint(key: string): string {
+    return this.remoteField(key).hint;
+  }
+
+  /**
+   * 方式可用性提示：`unsupported` 给原因、`needs-setup` 给第一条前置条件、`ready` 空串。
+   *
+   * 12fp 的小字在 `uiTokens` 里没有对应令牌（只有 14/16/20 三级），所以统一用 `FONT.caption`
+   * 的中性色（`text_secondary`）——「小一号、灰一点」的意图保留，字号不与设计令牌打架。
+   */
+  private remoteAvailabilityHint(): string {
+    const spec: RemoteModeSpec = this.remoteSpec();
+    if (spec.availability === REMOTE_AVAILABILITY_UNSUPPORTED) {
+      return spec.unavailableReason;
+    }
+    if (spec.availability === REMOTE_AVAILABILITY_NEEDS_SETUP && spec.requires.length > 0) {
+      return `需先准备：${spec.requires[0]}`;
+    }
+    return '';
+  }
+
+  /**
+   * 方式字段 + 「DSH 地址」当前值 → 完整配置。
+   *
+   * `manual` 的完整地址优先取手输框（`remoteManualUrl`），为空时退回「DSH 地址」那一行：
+   * 旧版本只存过 `remoteUrl`，这样升级后不会丢用户原来填的地址。
+   */
+  private remoteAccessConfig(): RemoteAccessConfig {
+    const config: RemoteAccessConfig = defaultRemoteAccessConfig();
+    config.mode = normalizeRemoteMode(this.remoteMode);
+    config.lanAddress = this.remoteLanAddress.trim();
+    config.port = this.remotePortValue();
+    config.tailscaleHost = this.remoteTailscaleHost.trim();
+    config.cloudflareHost = this.remoteCloudflareHost.trim();
+    config.ipv6Address = this.remoteIpv6Address.trim();
+    const manual: string = this.remoteManualUrl.trim();
+    config.manualUrl = manual.length > 0 ? manual : this.remoteUrl.trim();
+    return config;
+  }
+
+  /**
+   * 方式字段一变就重算「DSH 地址」那一行（它就是最终要打开的链接，用户看得到拼出来的结果）。
+   *
+   * `manual` 不重算：那一行就是用户正在手输的完整地址，边打边归一（补 `http://`）会把光标顶走。
+   * `uu` 清空：它拼不出地址，「打开远程控制」按钮必须跟着禁用，而不是「点了才报错」。
+   */
+  private refreshRemotePreview(): void {
+    const mode: string = normalizeRemoteMode(this.remoteMode);
+    if (mode === REMOTE_MODE_MANUAL) {
+      return;
+    }
+    if (mode === REMOTE_MODE_UU) {
+      this.remoteUrl = '';
+      return;
+    }
+    const built: RemoteAccessUrlResult = buildRemoteAccessUrl(this.remoteAccessConfig());
+    this.remoteUrl = built.ok ? built.url : '';
+  }
+
+  /** 选择访问方式；`unsupported` 只显示原因（按钮随之禁用），不做假开关。 */
+  private pickRemoteMode(index: number): void {
+    const picked: string = index >= 0 && index < REMOTE_MODE_ORDER.length ? REMOTE_MODE_ORDER[index] : REMOTE_MODE_LAN;
+    this.remoteMode = normalizeRemoteMode(picked);
+    this.remoteUrlError = '';
+    if (this.remoteMode === REMOTE_MODE_MANUAL) {
+      // 切到手动方式时把当前地址接管进手输框（反向也补一次），用户不用重新敲一遍；
+      // 两者只在这一行上来回同步，别处不会悄悄改「完整地址」。
+      if (this.remoteManualUrl.trim().length === 0) {
+        this.remoteManualUrl = this.remoteUrl;
+      } else if (this.remoteUrl.trim().length === 0) {
+        this.remoteUrl = this.remoteManualUrl;
+      }
+      return;
+    }
+    this.refreshRemotePreview();
+  }
+
   /**
    * 「地址未包含 token」的橙色次要提示（**不是**错误）。
    *
@@ -1029,12 +1234,22 @@ struct Settings {
   }
 
   /**
-   * 「打开远程控制」：先归一地址 → 落盘 → 再跳内嵌页。
+   * 「打开远程控制」：按访问方式拼地址 → 归一 → 落盘 → 再跳内嵌页。
    *
    * 顺序是刻意的：先保存再跳转，远程控制页拿到的一定是已经落盘的新地址；
-   * 地址非法时只标红、**不**跳转（不要打开一个注定不可达的内嵌 Web）。
+   * 拼不出地址（缺字段 / `uu` 不可用）或地址非法时只标红、**不**跳转
+   * （不要打开一个注定不可达的内嵌 Web）。
    */
   private async openRemote(): Promise<void> {
+    const config: RemoteAccessConfig = this.remoteAccessConfig();
+    const built: RemoteAccessUrlResult = buildRemoteAccessUrl(config);
+    if (!built.ok) {
+      // 方式侧的中文原因（缺字段 / 隧道域名带路径 / uu 不可用）
+      const why: string = built.reason.trim();
+      this.remoteUrlError = why.length > 0 ? `地址不可用：${why}` : '地址不可用：请先填写电脑上的 DSH 地址';
+      return;
+    }
+    this.remoteUrl = built.url;
     const check: RemoteUrlCheck = normalizeRemoteUrl(this.remoteUrl);
     if (!check.ok) {
       // 红字直接用 model/remoteUrl 给的中文原因（缺协议/有空格/不完整），空则退回通用提示
@@ -1044,9 +1259,24 @@ struct Settings {
     }
     this.remoteUrlError = '';
     this.remoteUrl = check.url;
+    if (this.remoteMode === REMOTE_MODE_MANUAL) {
+      // 手动方式的「完整地址」以归一后的地址为准，避免存一份 `192.168.1.6:3080` 半成品
+      this.remoteManualUrl = check.url;
+    }
     try {
       // 只写远程控制这一项（SettingsPatch 未出现的字段保持原值）
       await settingsStore.save({ remoteUrl: check.url });
+      // 访问方式与各字段再存一次：第一条已经把「能打开的地址」落盘，即使第二条写入失败，
+      // 用户下次进设置页仍有可用地址（不会两样都丢）。
+      await settingsStore.save({
+        remoteMode: this.remoteMode,
+        remoteLanAddress: this.remoteLanAddress,
+        remotePort: config.port,
+        remoteTailscaleHost: this.remoteTailscaleHost,
+        remoteCloudflareHost: this.remoteCloudflareHost,
+        remoteIpv6Address: this.remoteIpv6Address,
+        remoteManualUrl: this.remoteManualUrl
+      });
     } catch (error) {
       if (this.disposed) {
         return;
@@ -1686,10 +1916,12 @@ struct Settings {
   }
 
   /**
-   * 远程控制组：DSH 地址输入框 + 一行说明 + 「打开远程控制」主按钮。
+   * 远程控制组：访问方式（六选一）+ 该方式的字段 + 最终「DSH 地址」+ 打开按钮。
    *
-   * 地址存在 preferences（`remoteUrl`），点击时先归一（`normalizeRemoteUrl`）再落盘，
-   * 最后才跳 `routeToRemote()` 指到的内嵌 Web 页（参数 url）。
+   * 方式元数据（文案 / 字段 / 可用性 / 前置条件）全部来自 `model/remoteAccess.ts`，
+   * 与插件侧 `src/remote/accessMode.ts` 是同一份语义——页面只负责画，不另写一套解释。
+   * 「DSH 地址」那一行既是最终链接的预览（lan/ipv6/tailscale/cloudflare 自动拼），
+   * 也是 `manual` 方式的手输框；存的仍是 `remoteUrl`（历史键，保留）。
    */
   @Builder
   RemoteGroup() {
@@ -1702,7 +1934,161 @@ struct Settings {
         .width('100%')
         .textAlign(TextAlign.Start)
 
-      this.FieldLabel('DSH 地址')
+      // 访问方式：6 项（顺序 = REMOTE_MODE_ORDER，uu 排末尾并标「不可用」）
+      this.FieldLabel('访问方式')
+      Select([
+        { value: this.remoteModeOptionLabel(0) },
+        { value: this.remoteModeOptionLabel(1) },
+        { value: this.remoteModeOptionLabel(2) },
+        { value: this.remoteModeOptionLabel(3) },
+        { value: this.remoteModeOptionLabel(4) },
+        { value: this.remoteModeOptionLabel(5) }
+      ])
+        .selected(this.remoteModeIndex())
+        .value(this.remoteSpec().label)
+        .font({ size: FONT.body })
+        .optionFont({ size: FONT.body })
+        .selectedOptionFont({ size: FONT.body })
+        .width('100%')
+        .height(TOUCH_MIN + SPACING.xs)
+        .onSelect((index: number) => {
+          this.pickRemoteMode(index);
+        })
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+
+      // 一句话说明 + 可用性（unsupported 显示原因、needs-setup 显示第一条前置条件）
+      Text(this.remoteSpec().description)
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+      if (this.remoteAvailabilityHint().length > 0) {
+        Text(this.remoteAvailabilityHint())
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+      }
+
+      // ---- 各方式的字段（标签/占位符/提示都取自 REMOTE_MODES.fields）----
+      if (this.remoteMode === REMOTE_MODE_LAN) {
+        this.FieldLabel(this.remoteFieldLabel('lanAddress'))
+        TextInput({ text: this.remoteLanAddress, placeholder: this.remoteFieldPlaceholder('lanAddress') })
+          .width('100%')
+          .height(TOUCH_MIN + SPACING.xs)
+          .fontSize(FONT.body)
+          .backgroundColor($r('app.color.page_background'))
+          .borderRadius(RADIUS.none)
+          .padding({ left: 0, right: 0 })
+          .onChange((value: string) => {
+            this.remoteLanAddress = value;
+            this.remoteUrlError = '';
+            this.refreshRemotePreview();
+          })
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+        this.HintLine(this.remoteFieldHint('lanAddress'))
+      }
+
+      if (this.remoteMode === REMOTE_MODE_IPV6) {
+        this.FieldLabel(this.remoteFieldLabel('ipv6Address'))
+        TextInput({ text: this.remoteIpv6Address, placeholder: this.remoteFieldPlaceholder('ipv6Address') })
+          .width('100%')
+          .height(TOUCH_MIN + SPACING.xs)
+          .fontSize(FONT.body)
+          .backgroundColor($r('app.color.page_background'))
+          .borderRadius(RADIUS.none)
+          .padding({ left: 0, right: 0 })
+          .onChange((value: string) => {
+            this.remoteIpv6Address = value;
+            this.remoteUrlError = '';
+            this.refreshRemotePreview();
+          })
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+        this.HintLine(this.remoteFieldHint('ipv6Address'))
+      }
+
+      if (this.remoteMode === REMOTE_MODE_TAILSCALE) {
+        this.FieldLabel(this.remoteFieldLabel('tailscaleHost'))
+        TextInput({ text: this.remoteTailscaleHost, placeholder: this.remoteFieldPlaceholder('tailscaleHost') })
+          .width('100%')
+          .height(TOUCH_MIN + SPACING.xs)
+          .fontSize(FONT.body)
+          .backgroundColor($r('app.color.page_background'))
+          .borderRadius(RADIUS.none)
+          .padding({ left: 0, right: 0 })
+          .onChange((value: string) => {
+            this.remoteTailscaleHost = value;
+            this.remoteUrlError = '';
+            this.refreshRemotePreview();
+          })
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+        this.HintLine(this.remoteFieldHint('tailscaleHost'))
+      }
+
+      if (this.remoteMode === REMOTE_MODE_CLOUDFLARE) {
+        this.FieldLabel(this.remoteFieldLabel('cloudflareHost'))
+        TextInput({ text: this.remoteCloudflareHost, placeholder: this.remoteFieldPlaceholder('cloudflareHost') })
+          .width('100%')
+          .height(TOUCH_MIN + SPACING.xs)
+          .fontSize(FONT.body)
+          .backgroundColor($r('app.color.page_background'))
+          .borderRadius(RADIUS.none)
+          .padding({ left: 0, right: 0 })
+          .onChange((value: string) => {
+            this.remoteCloudflareHost = value;
+            this.remoteUrlError = '';
+            this.refreshRemotePreview();
+          })
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+        this.HintLine(this.remoteFieldHint('cloudflareHost'))
+      }
+
+      // 端口：只有要起监听的方式才填（cloudflare 对外恒 443，manual 由地址自带端口）
+      if (
+        this.remoteMode === REMOTE_MODE_LAN ||
+        this.remoteMode === REMOTE_MODE_IPV6 ||
+        this.remoteMode === REMOTE_MODE_TAILSCALE
+      ) {
+        this.FieldLabel(this.remoteFieldLabel('port'))
+        TextInput({ text: this.remotePortText, placeholder: this.remoteFieldPlaceholder('port') })
+          // 纯数字键盘；ArkTS 里输入类型写在属性上（`.type(InputType.Number)`），
+          // 等价于给输入框声明 inputType=Number。
+          .type(InputType.Number)
+          .width('100%')
+          .height(TOUCH_MIN + SPACING.xs)
+          .fontSize(FONT.body)
+          .backgroundColor($r('app.color.page_background'))
+          .borderRadius(RADIUS.none)
+          .padding({ left: 0, right: 0 })
+          .onChange((value: string) => {
+            this.remotePortText = value;
+            this.remoteUrlError = '';
+            this.refreshRemotePreview();
+          })
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+        this.HintLine(this.remoteFieldHint('port'))
+      }
+
+      if (this.remoteMode === REMOTE_MODE_MANUAL) {
+        // 手动方式的「完整地址」就是下面「DSH 地址」那一行（同一个值，不画两个输入框）
+        this.FieldLabel(this.remoteFieldLabel('manualUrl'))
+      } else {
+        this.FieldLabel('DSH 地址')
+      }
       TextInput({ text: this.remoteUrl, placeholder: 'http://192.168.1.6:3080/?token=…' })
         .width('100%')
         .height(TOUCH_MIN + SPACING.xs)
@@ -1712,6 +2098,10 @@ struct Settings {
         .padding({ left: 0, right: 0 })
         .onChange((value: string) => {
           this.remoteUrl = value;
+          // 手动方式下这一行就是「完整地址」字段：两份状态同步，拼地址与落盘才不会打架
+          if (this.remoteMode === REMOTE_MODE_MANUAL) {
+            this.remoteManualUrl = value;
+          }
           this.remoteUrlError = '';
         })
       Divider()

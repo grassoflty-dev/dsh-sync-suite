@@ -26,6 +26,7 @@
 import http, { STATUS_CODES } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo, Socket } from 'node:net'
+import { isIPv6 } from 'node:net'
 import type { Duplex } from 'node:stream'
 
 /** 动态上游头：静态对象，或每次请求都调用的函数（DSH 会话 cookie 会过期，需要可刷新）。 */
@@ -102,7 +103,7 @@ export type RemoteAuthorize = (
 export interface RemoteListenerOptions {
   /** 对外端口；0 = 由 OS 分配（实际值见句柄 `port`）。 */
   port: number
-  /** 必须是**具体**局域网 IPv4（见 `isBindableLanAddress`）。 */
+  /** 必须是**具体**单播地址：局域网 IPv4（见 `isBindableLanAddress`），或公网 IPv6（见 `isBindableIpv6Address`）。 */
   bindAddress: string
   /** 转发目标。 */
   upstream: RemoteUpstream
@@ -204,6 +205,43 @@ export function isBindableLanAddress(addr: string): boolean {
   if (a === 169 && b === 254) return false // 链路本地 / APIPA
   if (a >= 224) return false // 组播 + 保留 + 广播
   return true
+}
+
+/**
+ * 纯函数：该地址能不能作为**公网 IPv6 直连**的绑定地址。
+ *
+ * 为什么需要它：`ipv6` 访问方式要把监听直接绑在具体的公网 v6 字面量上（不需要 DNS、
+ * 不需要 trustedHosts）。listener 原来只认局域网 IPv4，会让 `ipv6` 方式永远起不来
+ * （独立评审 M1）。这里补齐 v6 的判定，规则与 `isBindableLanAddress` 同构：
+ *
+ * 拒绝：带方括号 / 带 `%zone` / 空串 / 非 v6 文本 / `::`（未指定）/ `::1`（回环）/
+ *       `fe80::/10`（链路本地，换网就失效）/ `ff00::/8`（组播）/ IPv4 映射写法。
+ * 允许：`2000::/3` 全局单播（公网直连的主场景）与 `fc00::/7` ULA（内网 v6 也合法可绑）。
+ */
+export function isBindableIpv6Address(addr: string): boolean {
+  if (typeof addr !== 'string' || addr === '') return false
+  if (addr.startsWith('[') || addr.endsWith(']')) return false
+  if (addr.includes('%')) return false
+  if (!isIPv6(addr)) return false
+  const lower = addr.toLowerCase()
+  if (lower === '::' || lower === '::1') return false
+  // IPv4 映射（::ffff:a.b.c.d）在 URL/Host 语义上歧义，不作为绑定目标
+  if (lower.startsWith('::ffff:')) return false
+  const first = lower.split(':')[0] ?? ''
+  const hextet = first === '' ? 0 : Number.parseInt(first.padEnd(4, '0'), 16)
+  // ff00::/8 组播
+  if ((hextet & 0xff00) === 0xff00) return false
+  // fe80::/10 链路本地
+  if ((hextet & 0xffc0) === 0xfe80) return false
+  // 只放行 2000::/3（全局单播）与 fc00::/7（ULA）
+  if ((hextet & 0xe000) === 0x2000) return true
+  if ((hextet & 0xfe00) === 0xfc00) return true
+  return false
+}
+
+/** 通用判定：具体、单播、非回环、非通配的 IPv4 或 IPv6（listener 的实际门槛）。 */
+export function isBindableAddress(addr: string): boolean {
+  return isBindableLanAddress(addr) || isBindableIpv6Address(addr)
 }
 
 /**
@@ -669,10 +707,10 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
   }
   const listenPort = port as number
   const bindAddress: unknown = options.bindAddress
-  if (!isBindableLanAddress(bindAddress as string)) {
+  if (!isBindableAddress(bindAddress as string)) {
     throw new RemoteStartError(
       'E_REMOTE_INVALID_ADDRESS',
-      `绑定地址必须是具体局域网 IPv4（排除 127/8、169.254/16、0.0.0.0、多播/广播与 IPv6）：${describeAddress(bindAddress)}`,
+      `绑定地址必须是具体的 IPv4 或 IPv6 单播地址（排除 127/8、169.254/16、0.0.0.0、::、回环、链路本地、多播）：${describeAddress(bindAddress)}`,
       { address: typeof bindAddress === 'string' ? bindAddress.slice(0, 64) : '', port: listenPort },
     )
   }

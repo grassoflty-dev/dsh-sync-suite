@@ -212,7 +212,78 @@ window.__ModuleLoader__.load({
       "confirm.cancel": "取消",
 
       "common.close": "关闭",
-      "common.none": "—"
+      "common.none": "—",
+
+      "remote.nav": "远程访问",
+      "remote.title": "远程访问",
+      "remote.subtitle": "让平板或手机通过局域网 / 隧道打开本机 DSH：默认关闭，只绑你选定的具体地址，不会落到 0.0.0.0。",
+      "remote.settings.title": "远程访问设置",
+      "remote.enable": "允许局域网 / 远程访问",
+      "remote.enable.hint": "默认关闭；打开后仍只绑具体地址，打开前请先保存并自检。",
+      "remote.mode": "访问方式",
+      "remote.mode.hint": "每种方式需要不同的准备条件；不可用的方式会写明原因，不做假开关。",
+      "remote.port": "端口",
+      "remote.port.hint": "0 = 跟 DSH 同端口（地址只差主机名）；正整数 = 固定端口。",
+      "remote.fields.lanAddress": "局域网地址",
+      "remote.fields.lanAddress.placeholder": "留空自动挑选，例如 192.168.1.6",
+      "remote.fields.tailscaleHost": "Tailscale 主机",
+      "remote.fields.tailscaleHost.placeholder": "例如 pc-a.tailnet-xxxx.ts.net",
+      "remote.fields.cloudflareHost": "Cloudflare 主机",
+      "remote.fields.cloudflareHost.placeholder": "例如 xxx.trycloudflare.com",
+      "remote.fields.ipv6Address": "IPv6 地址",
+      "remote.fields.ipv6Address.placeholder": "例如 2408:8207:...（不带方括号）",
+      "remote.fields.manualUrl": "完整地址",
+      "remote.fields.manualUrl.placeholder": "例如 https://example.com/dsh",
+      "remote.availability.ready": "可用",
+      "remote.unsupported": "不可用",
+      "remote.needsSetup": "需先准备",
+      "remote.requires": "需要先准备",
+      "remote.steps": "怎么做",
+      "remote.status.title": "运行状态",
+      "remote.status.running": "运行中",
+      "remote.status.stopped": "已停止",
+      "remote.status.listen": "监听地址",
+      "remote.status.bound": "绑定地址",
+      "remote.status.bound.hint": "只绑这一个具体地址（不是 0.0.0.0）；换网络后请重新挑选地址。",
+      "remote.status.connections": "连接数",
+      "remote.status.rejected": "被拒次数",
+      "remote.status.token": "令牌",
+      "remote.status.token.none": "尚未生成",
+      "remote.status.startedAt": "启动时间",
+      "remote.status.lastError": "最近错误",
+      "remote.actions.title": "操作",
+      "remote.actions.save": "保存设置",
+      "remote.actions.start": "启动",
+      "remote.actions.stop": "停止",
+      "remote.actions.rotate": "生成新令牌",
+      "remote.actions.rotate.confirm": "生成新令牌后，旧二维码与旧链接立即失效，需要重新扫码。确定生成？",
+      "remote.actions.rotate.yes": "生成新令牌",
+      "remote.actions.rotate.cancel": "取消",
+      "remote.actions.probe": "重新自检",
+      "remote.actions.showLink": "显示二维码与链接",
+      "remote.actions.copy": "复制完整地址",
+      "remote.busy.loading": "读取中…",
+      "remote.busy.saving": "保存中…",
+      "remote.busy.starting": "启动中…",
+      "remote.busy.stopping": "停止中…",
+      "remote.busy.rotating": "生成中…",
+      "remote.busy.probing": "自检中…",
+      "remote.busy.linking": "生成链接中…",
+      "remote.probe.title": "连通性自检",
+      "remote.probe.ok": "通过",
+      "remote.probe.warn": "注意",
+      "remote.probe.fail": "失败",
+      "remote.probe.unknown": "无法自证",
+      "remote.probe.never": "尚未自检；点「重新自检」确认这台机器到底能不能被访问。",
+      "remote.probe.at": "自检时间",
+      "remote.qr.title": "扫码打开",
+      "remote.qr.hint": "用平板扫这个码",
+      "remote.link.hint": "或手动输入下面的地址（不含令牌，首次打开后按提示输入令牌）。",
+      "remote.notice.saved": "设置已保存。",
+      "remote.notice.started": "已启动。",
+      "remote.notice.stopped": "已停止。",
+      "remote.notice.rotated": "已生成新令牌：旧链接与旧二维码立即失效。",
+      "remote.notice.probed": "自检完成。"
     }
 
     const en = {
@@ -390,7 +461,78 @@ window.__ModuleLoader__.load({
       "confirm.cancel": "Cancel",
 
       "common.close": "Close",
-      "common.none": "—"
+      "common.none": "—",
+
+      "remote.nav": "Remote access",
+      "remote.title": "Remote access",
+      "remote.subtitle": "Open this machine's DSH from a tablet or phone over LAN / a tunnel: off by default, bound only to the address you pick — never 0.0.0.0.",
+      "remote.settings.title": "Remote access settings",
+      "remote.enable": "Allow LAN / remote access",
+      "remote.enable.hint": "Off by default. Even when on, the listener binds one specific address — save and run a check first.",
+      "remote.mode": "Access mode",
+      "remote.mode.hint": "Each mode needs its own preparation; unavailable modes state the reason instead of offering a fake switch.",
+      "remote.port": "Port",
+      "remote.port.hint": "0 = share the DSH port (only the host differs); a positive number pins a fixed port.",
+      "remote.fields.lanAddress": "LAN address",
+      "remote.fields.lanAddress.placeholder": "Leave empty to auto-pick, e.g. 192.168.1.6",
+      "remote.fields.tailscaleHost": "Tailscale host",
+      "remote.fields.tailscaleHost.placeholder": "e.g. pc-a.tailnet-xxxx.ts.net",
+      "remote.fields.cloudflareHost": "Cloudflare host",
+      "remote.fields.cloudflareHost.placeholder": "e.g. xxx.trycloudflare.com",
+      "remote.fields.ipv6Address": "IPv6 address",
+      "remote.fields.ipv6Address.placeholder": "e.g. 2408:8207:... (no brackets)",
+      "remote.fields.manualUrl": "Full URL",
+      "remote.fields.manualUrl.placeholder": "e.g. https://example.com/dsh",
+      "remote.availability.ready": "Available",
+      "remote.unsupported": "Unavailable",
+      "remote.needsSetup": "Needs setup",
+      "remote.requires": "Requires",
+      "remote.steps": "How to",
+      "remote.status.title": "Runtime status",
+      "remote.status.running": "Running",
+      "remote.status.stopped": "Stopped",
+      "remote.status.listen": "Listening on",
+      "remote.status.bound": "Bound address",
+      "remote.status.bound.hint": "Bound to this one specific address (not 0.0.0.0); re-pick it after changing networks.",
+      "remote.status.connections": "Connections",
+      "remote.status.rejected": "Rejected",
+      "remote.status.token": "Token",
+      "remote.status.token.none": "not generated yet",
+      "remote.status.startedAt": "Started",
+      "remote.status.lastError": "Last error",
+      "remote.actions.title": "Actions",
+      "remote.actions.save": "Save settings",
+      "remote.actions.start": "Start",
+      "remote.actions.stop": "Stop",
+      "remote.actions.rotate": "New token",
+      "remote.actions.rotate.confirm": "A new token invalidates the old QR code and links immediately, so you must scan again. Generate it?",
+      "remote.actions.rotate.yes": "Generate token",
+      "remote.actions.rotate.cancel": "Cancel",
+      "remote.actions.probe": "Run check again",
+      "remote.actions.showLink": "Show QR code and links",
+      "remote.actions.copy": "Copy full URL",
+      "remote.busy.loading": "Loading…",
+      "remote.busy.saving": "Saving…",
+      "remote.busy.starting": "Starting…",
+      "remote.busy.stopping": "Stopping…",
+      "remote.busy.rotating": "Generating…",
+      "remote.busy.probing": "Checking…",
+      "remote.busy.linking": "Building link…",
+      "remote.probe.title": "Connectivity check",
+      "remote.probe.ok": "Pass",
+      "remote.probe.warn": "Warn",
+      "remote.probe.fail": "Fail",
+      "remote.probe.unknown": "Unproven",
+      "remote.probe.never": "No check yet; run one to see whether this machine is actually reachable.",
+      "remote.probe.at": "Checked at",
+      "remote.qr.title": "Scan to open",
+      "remote.qr.hint": "Scan this code with a tablet",
+      "remote.link.hint": "Or type the address below (token-free; the tablet asks for the token on first open).",
+      "remote.notice.saved": "Settings saved.",
+      "remote.notice.started": "Started.",
+      "remote.notice.stopped": "Stopped.",
+      "remote.notice.rotated": "New token generated: old links and QR codes are invalid now.",
+      "remote.notice.probed": "Check finished."
     }
 
     const DICTS = { zh: zh, en: en }
@@ -2360,6 +2502,838 @@ window.__ModuleLoader__.load({
     }
 
     // ------------------------------------------------------------------
+    // 远程访问 section（settings.section，id `git-config-sync-remote`）
+    //
+    // 与「配置同步」是两个**互相独立**的 section：各自的 state / error / busy，
+    // 一侧失败只会出现在自己的 ErrorBox 里，绝不把另一侧标红。
+    //
+    // token 纪律：明文 token 只存在于 `RemoteLink.url`。本组件**不把它写进 DOM**
+    // ——连 title / aria 都不放（比"只放 title"更严）：「复制」按钮在点击回调里
+    // 才从 state 取 url，二维码只画黑白矩阵。所以渲染结果里永远没有 token 明文。
+    // ------------------------------------------------------------------
+
+    const REMOTE_MODES = ['lan', 'tailscale', 'ipv6', 'cloudflare', 'manual', 'uu']
+    const REMOTE_FIELDS = ['lanAddress', 'tailscaleHost', 'cloudflareHost', 'ipv6Address', 'manualUrl']
+
+    /** 远程访问专用样式：只用 C 与 --dsw-alias-* 变量，不硬编码颜色（二维码黑白除外）。 */
+    const RS = {
+      noteRow: { display: 'flex', alignItems: 'flex-start', gap: 6, flexWrap: 'wrap', minWidth: 0 },
+      noteText: { fontSize: 11.5, color: C.labelTertiary, lineHeight: 1.5, minWidth: 0, wordBreak: 'break-word' },
+      neutral: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+        padding: '8px 10px',
+        borderRadius: 7,
+        border: '1px solid ' + C.borderL2,
+        background: C.bgBase,
+        minWidth: 0
+      },
+      neutralHead: { fontSize: 11.5, color: C.labelTertiary },
+      neutralText: { fontSize: 12, color: C.labelSecondary, lineHeight: 1.5, wordBreak: 'break-word' },
+      verdict: { fontSize: 15, fontWeight: 600, lineHeight: 1.5, wordBreak: 'break-word' },
+      checkRow: { display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap', minWidth: 0 },
+      checkBody: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: '1 1 240px' },
+      checkMsg: { fontSize: 12, color: C.labelPrimary, wordBreak: 'break-word' },
+      checkHint: { fontSize: 11, color: C.labelTertiary, lineHeight: 1.45, wordBreak: 'break-word' },
+      qrWrap: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        alignItems: 'flex-start',
+        padding: 10,
+        borderRadius: 8,
+        border: '1px solid ' + C.borderL2,
+        background: '#ffffff',
+        minWidth: 0
+      },
+      // 二维码块是纯白底，块内文字只能用深色（黑白属于二维码本身，不受主题色约束）。
+      qrNote: { fontSize: 11.5, color: '#1f1f1f' },
+      steps: { margin: 0, paddingLeft: 18, fontSize: 11.5, color: C.labelSecondary, lineHeight: 1.5 },
+      summary: { cursor: 'pointer', fontSize: 11.5, color: C.accent }
+    }
+
+    /** 自检等级 → 现有 tone（ok 绿 / warn 黄 / fail 红 / unknown 灰）。 */
+    function remoteLevelTone(level) {
+      if (level === 'ok') return 'ok'
+      if (level === 'warn') return 'warn'
+      if (level === 'fail') return 'err'
+      return 'mute'
+    }
+
+    function remoteLevelLabel(translate, level) {
+      const key = 'remote.probe.' + String(level || 'unknown')
+      const out = translate(key)
+      if (typeof out === 'string' && out !== '' && out !== key) return out
+      return String(level || 'unknown')
+    }
+
+    /** 落地状态 → 徽章（unsupported 用中性色，绝不红）。 */
+    function remoteAvailabilityBadge(translate, availability) {
+      if (availability === 'ready') return { text: translate('remote.availability.ready'), tone: 'ok' }
+      if (availability === 'needs-setup') return { text: translate('remote.needsSetup'), tone: 'warn' }
+      return { text: translate('remote.unsupported'), tone: 'mute' }
+    }
+
+    /** UI 表单值归一：只认契约字段，缺省/越界一律回落到安全默认值（fail-closed）。 */
+    function remoteSettingsOf(source) {
+      const src = source && typeof source === 'object' ? source : {}
+      const s = src.settings && typeof src.settings === 'object' ? src.settings : src
+      const rawPort = typeof s.port === 'number' && isFinite(s.port) && s.port >= 0 ? Math.floor(s.port) : 0
+      const out = {
+        enabled: s.enabled === true,
+        mode: REMOTE_MODES.indexOf(s.mode) >= 0 ? s.mode : 'lan',
+        port: rawPort > 65535 ? 0 : rawPort
+      }
+      for (let i = 0; i < REMOTE_FIELDS.length; i++) out[REMOTE_FIELDS[i]] = asText(s[REMOTE_FIELDS[i]])
+      return out
+    }
+
+    /** 字段文案：优先 host 文案，其次 remote.fields.* 本地化 key，最后回落到 spec 自带 label。 */
+    function remoteFieldText(translate, field, kind) {
+      const key = 'remote.fields.' + String(field && field.key ? field.key : '') + (kind === 'placeholder' ? '.placeholder' : '')
+      const out = translate(key)
+      if (typeof out === 'string' && out !== '' && out !== key) return out
+      return kind === 'placeholder' ? asText(field && field.placeholder) : asText(field && field.label)
+    }
+
+    /** 数字输入（端口）：只收十进制整数，空值 = 0（跟随 DSH 端口）。 */
+    function RemoteNumInput(props) {
+      return h('input', {
+        type: 'number',
+        min: 0,
+        max: 65535,
+        step: 1,
+        value: props.value === undefined || props.value === null ? '' : String(props.value),
+        disabled: Boolean(props.disabled),
+        onChange: function (event) {
+          if (typeof props.onChange === 'function') props.onChange(event.target.value)
+        },
+        style: Object.assign({}, S.input, props.disabled ? S.inputDisabled : null)
+      })
+    }
+
+    /** 访问方式下拉：`unsupported` 的项禁用，但仍留在列表里，让用户看到它为什么不行。 */
+    function RemoteModeSelect(props) {
+      const specs = Array.isArray(props.specs) ? props.specs : []
+      return h(
+        'select',
+        {
+          value: asText(props.value),
+          disabled: Boolean(props.disabled),
+          onChange: function (event) {
+            if (typeof props.onChange === 'function') props.onChange(event.target.value)
+          },
+          style: Object.assign({}, S.select, props.disabled ? S.inputDisabled : null)
+        },
+        specs.map(function (spec) {
+          const s = spec && typeof spec === 'object' ? spec : {}
+          return h(
+            'option',
+            { key: asText(s.mode), value: asText(s.mode), disabled: s.availability === 'unsupported' },
+            asText(s.label) || asText(s.mode)
+          )
+        })
+      )
+    }
+
+    /**
+     * 二维码：把 host 给的布尔矩阵直接画成 SVG。
+     * 每模块 4px（要求 ≥3px），四周留 4 模块静区，纯白底。
+     */
+    function QrMatrix(props) {
+      const src = props.qr && typeof props.qr === 'object' ? props.qr : {}
+      const modules = Array.isArray(src.modules) ? src.modules : []
+      const size = typeof src.size === 'number' && src.size > 0 ? Math.floor(src.size) : modules.length
+      if (!size || modules.length === 0) return null
+      const unit = 4
+      const quiet = 4 * unit
+      const px = size * unit + quiet * 2
+      const cells = []
+      for (let y = 0; y < size; y++) {
+        const row = Array.isArray(modules[y]) ? modules[y] : []
+        for (let x = 0; x < size; x++) {
+          if (row[x] !== true) continue
+          cells.push(
+            h('rect', {
+              key: 'm' + x + '_' + y,
+              x: quiet + x * unit,
+              y: quiet + y * unit,
+              width: unit,
+              height: unit,
+              fill: '#000000'
+            })
+          )
+        }
+      }
+      return h(
+        'svg',
+        {
+          width: px,
+          height: px,
+          viewBox: '0 0 ' + px + ' ' + px,
+          role: 'img',
+          'aria-label': asText(props.label),
+          style: { display: 'block', background: '#ffffff' }
+        },
+        h('rect', { key: 'bg', x: 0, y: 0, width: px, height: px, fill: '#ffffff' }),
+        cells
+      )
+    }
+
+    function RemotePanel(props) {
+      const tr = makeT(props)
+      const alive = React.useRef(true)
+      React.useEffect(function () {
+        alive.current = true
+        return function () {
+          alive.current = false
+        }
+      }, [])
+
+      // 仅用于测试 / 首帧预置：host 只传 { t, close }，生产路径这两者恒为 null。
+      const seedState = props && props.seedState && typeof props.seedState === 'object' ? props.seedState : null
+      const seedLink = props && props.seedLink && typeof props.seedLink === 'object' ? props.seedLink : null
+
+      const [state, setState] = React.useState(seedState)
+      const [loading, setLoading] = React.useState(seedState === null)
+      const [error, setError] = React.useState(null)
+      const [notice, setNotice] = React.useState('')
+      const [busy, setBusy] = React.useState('')
+      const [form, setForm] = React.useState(function () {
+        return remoteSettingsOf(seedState)
+      })
+      const [link, setLink] = React.useState(seedLink)
+      const [probe, setProbe] = React.useState(seedState && seedState.status ? seedState.status.probe : null)
+      const [confirmRotate, setConfirmRotate] = React.useState(false)
+
+      React.useEffect(function () {
+        if (seedState !== null) return function () {}
+        let stopped = false
+        function done(result) {
+          if (stopped || !alive.current) return
+          setLoading(false)
+          if (!result || !result.ok) {
+            setError(localizeError(tr, result ? result.error : { code: 'E_NETWORK' }))
+            return
+          }
+          adoptState(result.data)
+        }
+        Promise.resolve(rpcCall('remoteGetState', {})).then(done, function () {
+          done({ ok: false, error: { code: 'E_NETWORK' } })
+        })
+        return function () {
+          stopped = true
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [])
+
+      /** 读取整份状态（getState / saveSettings 的返回体同形）。 */
+      function adoptState(data) {
+        const next = data && typeof data === 'object' ? data : {}
+        setState(next)
+        setForm(remoteSettingsOf(next))
+        if (next.status && next.status.probe) setProbe(next.status.probe)
+      }
+
+      /** 只换状态块（start/stop/rotateToken 返回的是 RemoteStatus），不动表单里未保存的编辑。 */
+      function adoptStatus(nextStatus) {
+        if (!nextStatus || typeof nextStatus !== 'object') return
+        setState(function (prev) {
+          return Object.assign({}, prev || {}, { status: nextStatus })
+        })
+        if (nextStatus.probe) setProbe(nextStatus.probe)
+      }
+
+      /** 一个请求在飞时其它按钮全部 disabled（busy 互斥，避免重复提交）。 */
+      async function runTask(key, task) {
+        if (busy) return
+        setBusy(key)
+        setError(null)
+        setNotice('')
+        try {
+          await task()
+        } catch (e) {
+          if (alive.current) setError({ code: 'E_UNKNOWN', message: (e && e.message) || tr('error.unknown') })
+        } finally {
+          if (alive.current) setBusy('')
+        }
+      }
+
+      function setFormField(key, value) {
+        setForm(function (prev) {
+          const next = Object.assign({}, prev)
+          next[key] = value
+          return next
+        })
+      }
+
+      function setPortValue(value) {
+        const digits = String(value === undefined || value === null ? '' : value).replace(/[^0-9]/g, '')
+        const n = digits === '' ? 0 : Number(digits)
+        const safe = isFinite(n) && n > 0 ? Math.min(65535, Math.floor(n)) : 0
+        setFormField('port', safe)
+      }
+
+      function doRefresh() {
+        runTask('load', async function () {
+          const result = await rpcCall('remoteGetState', {})
+          if (!alive.current) return
+          if (!result.ok) {
+            setError(localizeError(tr, result.error))
+            return
+          }
+          adoptState(result.data)
+        })
+      }
+
+      function doSave() {
+        const next = remoteSettingsOf(form)
+        runTask('save', async function () {
+          // 只发 settings：token 由远程域自己管，前端不碰。
+          const result = await rpcCall('remoteSaveSettings', { settings: next })
+          if (!alive.current) return
+          if (!result.ok) {
+            setError(localizeError(tr, result.error))
+            return
+          }
+          adoptState(result.data)
+          setNotice(tr('remote.notice.saved'))
+        })
+      }
+
+      function doStart() {
+        runTask('start', async function () {
+          const result = await rpcCall('remoteStart', {})
+          if (!alive.current) return
+          if (!result.ok) {
+            setError(localizeError(tr, result.error))
+            return
+          }
+          adoptStatus(result.data)
+          setNotice(tr('remote.notice.started'))
+        })
+      }
+
+      function doStop() {
+        runTask('stop', async function () {
+          const result = await rpcCall('remoteStop', {})
+          if (!alive.current) return
+          if (!result.ok) {
+            setError(localizeError(tr, result.error))
+            return
+          }
+          adoptStatus(result.data)
+          setNotice(tr('remote.notice.stopped'))
+        })
+      }
+
+      function doRotate() {
+        setConfirmRotate(false)
+        runTask('rotate', async function () {
+          const result = await rpcCall('remoteRotateToken', {})
+          if (!alive.current) return
+          if (!result.ok) {
+            setError(localizeError(tr, result.error))
+            return
+          }
+          adoptStatus(result.data)
+          // 旧链接 / 旧二维码立即失效：把本地展示的链接一并丢掉，避免继续扫码。
+          setLink(null)
+          setNotice(tr('remote.notice.rotated'))
+        })
+      }
+
+      function doProbe() {
+        runTask('probe', async function () {
+          const result = await rpcCall('remoteProbe', { mode: form.mode })
+          if (!alive.current) return
+          if (!result.ok) {
+            setError(localizeError(tr, result.error))
+            return
+          }
+          const data = result.data && typeof result.data === 'object' ? result.data : null
+          if (data) setProbe(data)
+          setNotice(tr('remote.notice.probed'))
+        })
+      }
+
+      function doShowLink() {
+        runTask('link', async function () {
+          const result = await rpcCall('remoteShowLink', { mode: form.mode })
+          if (!alive.current) return
+          if (!result.ok) {
+            setError(localizeError(tr, result.error))
+            return
+          }
+          const data = result.data && typeof result.data === 'object' ? result.data : null
+          if (!data || typeof data.url !== 'string' || data.url === '') {
+            setError({ code: 'E_BAD_RESPONSE', message: tr('error.badResponse') })
+            return
+          }
+          setLink(data)
+        })
+      }
+
+      /**
+       * 复制：明文 url（含 token）只在点击回调里取用，绝不进入 DOM / title / aria。
+       * 剪贴板不可用时静默失败——不降级成"把地址渲染出来"。
+       */
+      function doCopyLink() {
+        const url = link && typeof link.url === 'string' ? link.url : ''
+        if (url === '') return
+        try {
+          const clip = typeof navigator === 'undefined' ? null : navigator.clipboard
+          if (clip && typeof clip.writeText === 'function') {
+            const pending = clip.writeText(url)
+            if (pending && typeof pending.catch === 'function') pending.catch(function () {})
+          }
+        } catch (e) {
+          /* 静默：宁可复制失败，也不把 token 写进 DOM */
+        }
+      }
+
+      // Derived values -------------------------------------------------
+      const status = state && state.status && typeof state.status === 'object' ? state.status : {}
+      const modes = Array.isArray(state && state.modes) ? state.modes : []
+      const running = status.running === true
+      const tokenInfo = status.token && typeof status.token === 'object' ? status.token : {}
+      const conns = status.connections && typeof status.connections === 'object' ? status.connections : {}
+      const lastError = status.lastError && typeof status.lastError === 'object' ? status.lastError : null
+      const urls = Array.isArray(status.urls) ? status.urls : []
+      // 契约里 status.urls 恒不含 token；万一 host 给了 withToken 的条目，这里也绝不渲染。
+      const safeUrls = urls.filter(function (entry) {
+        return !(entry && typeof entry === 'object' && entry.withToken === true)
+      })
+      const activeProbe =
+        probe && typeof probe === 'object'
+          ? probe
+          : status.probe && typeof status.probe === 'object'
+            ? status.probe
+            : null
+      const anyBusy = Boolean(busy)
+
+      let selected = null
+      for (let i = 0; i < modes.length; i++) {
+        const spec = modes[i] && typeof modes[i] === 'object' ? modes[i] : {}
+        if (asText(spec.mode) === form.mode) selected = spec
+      }
+      if (!selected) {
+        // state 还没到（首次加载）或 host 没给该方式：用最小骨架，不假设它可用。
+        selected = {
+          mode: form.mode,
+          label: form.mode,
+          description: '',
+          availability: '',
+          unavailableReason: '',
+          requires: [],
+          fields: [],
+          steps: []
+        }
+      }
+      const selectedBadge = remoteAvailabilityBadge(tr, selected.availability)
+      const fields = Array.isArray(selected.fields) ? selected.fields : []
+      const requires = Array.isArray(selected.requires) ? selected.requires : []
+      const steps = Array.isArray(selected.steps) ? selected.steps : []
+      const nonReady = modes.filter(function (spec) {
+        return spec && typeof spec === 'object' && spec.availability !== 'ready'
+      })
+
+      const children = []
+
+      children.push(
+        h(
+          'div',
+          { key: 'head', style: S.head },
+          h(
+            'div',
+            { style: S.headText },
+            h('h2', { style: S.title }, tr('remote.title')),
+            h('p', { style: S.desc }, tr('remote.subtitle'))
+          ),
+          typeof props.close === 'function' ? h(Btn, { key: 'close', label: tr('common.close'), onClick: props.close }) : null
+        )
+      )
+
+      // 本 section 自己的错误：只出现在这里，绝不外溢到同步 section。
+      if (error) {
+        children.push(
+          h(ErrorBox, {
+            key: 'error',
+            error: error,
+            title: tr('error.title'),
+            retryLabel: tr('error.retry'),
+            dismissLabel: tr('error.dismiss'),
+            onRetry: function () {
+              setError(null)
+              doRefresh()
+            },
+            onDismiss: function () {
+              setError(null)
+            }
+          })
+        )
+      }
+
+      if (notice) {
+        children.push(
+          h(
+            'div',
+            { key: 'notice', style: S.row },
+            h('div', { style: Object.assign({}, S.notice, { flex: '1 1 auto' }) }, notice),
+            h(
+              'button',
+              {
+                type: 'button',
+                style: S.linkBtn,
+                onClick: function () {
+                  setNotice('')
+                }
+              },
+              tr('error.dismiss')
+            )
+          )
+        )
+      }
+
+      if (loading && !state) {
+        children.push(h('div', { key: 'loading', style: S.hint }, tr('remote.busy.loading')))
+      }
+
+      // 1) 设置 --------------------------------------------------------
+      children.push(
+        h(
+          Card,
+          { key: 'remote-settings', title: tr('remote.settings.title'), right: h(Badge, selectedBadge) },
+          h(CheckRow, {
+            label: tr('remote.enable'),
+            desc: tr('remote.enable.hint'),
+            checked: Boolean(form.enabled),
+            disabled: anyBusy,
+            onChange: function (checked) {
+              setFormField('enabled', Boolean(checked))
+            }
+          }),
+          h(
+            'div',
+            { style: S.grid2 },
+            h(
+              Field,
+              { label: tr('remote.mode'), hint: tr('remote.mode.hint') },
+              h(RemoteModeSelect, {
+                specs: modes,
+                value: form.mode,
+                disabled: anyBusy,
+                onChange: function (value) {
+                  setFormField('mode', value)
+                }
+              })
+            ),
+            h(
+              Field,
+              { label: tr('remote.port'), hint: tr('remote.port.hint') },
+              h(RemoteNumInput, {
+                value: form.port,
+                disabled: anyBusy,
+                onChange: setPortValue
+              })
+            ),
+            fields.map(function (field, fi) {
+              const f = field && typeof field === 'object' ? field : {}
+              const key = asText(f.key)
+              if (key === '' || key === 'port') return null
+              return h(
+                Field,
+                { key: 'rf-' + fi, label: remoteFieldText(tr, f, 'label'), hint: asText(f.hint) },
+                h(Input, {
+                  value: form[key] === undefined || form[key] === null ? '' : String(form[key]),
+                  placeholder: remoteFieldText(tr, f, 'placeholder'),
+                  disabled: anyBusy,
+                  onChange: function (value) {
+                    setFormField(key, value)
+                  }
+                })
+              )
+            })
+          ),
+          // 选中方式的说明 / 不可用原因 / 前提 / 步骤
+          h(
+            'div',
+            { style: RS.neutral },
+            h(
+              'div',
+              { style: RS.noteRow },
+              h(Badge, selectedBadge),
+              h('span', { style: RS.neutralText }, asText(selected.description))
+            ),
+            asText(selected.unavailableReason)
+              ? h(
+                  'div',
+                  { key: 'reason', style: RS.neutralText },
+                  tr('remote.unsupported') + ' · ' + asText(selected.unavailableReason)
+                )
+              : null,
+            requires.length
+              ? h('div', { key: 'requires', style: RS.neutralText }, tr('remote.requires') + ' · ' + requires.join('；'))
+              : null,
+            steps.length
+              ? h(
+                  'details',
+                  { key: 'steps' },
+                  h('summary', { style: RS.summary }, tr('remote.steps')),
+                  h(
+                    'ol',
+                    { style: RS.steps },
+                    steps.map(function (step, si) {
+                      return h('li', { key: 'st' + si }, asText(step))
+                    })
+                  )
+                )
+              : null
+          ),
+          // 所有「不可用 / 需先准备」的方式都列一遍（中性色，不是红）
+          nonReady.length
+            ? h(
+                'div',
+                { key: 'non-ready', style: S.list },
+                nonReady.map(function (spec, ni) {
+                  const sp = spec && typeof spec === 'object' ? spec : {}
+                  const badge = remoteAvailabilityBadge(tr, sp.availability)
+                  const detail =
+                    sp.availability === 'unsupported'
+                      ? asText(sp.unavailableReason)
+                      : Array.isArray(sp.requires)
+                        ? sp.requires.join('；')
+                        : ''
+                  return h(
+                    'div',
+                    { key: 'nr' + ni, style: RS.noteRow },
+                    h(Badge, badge),
+                    h('span', { style: RS.noteText }, asText(sp.label) + (detail ? ' · ' + detail : ''))
+                  )
+                })
+              )
+            : null,
+          h(
+            'div',
+            { key: 'save-row', style: S.row },
+            h(Btn, {
+              label: busy === 'save' ? tr('remote.busy.saving') : tr('remote.actions.save'),
+              primary: true,
+              disabled: anyBusy,
+              onClick: doSave
+            }),
+            h(Btn, { label: tr('status.refresh'), disabled: anyBusy, onClick: doRefresh })
+          )
+        )
+      )
+
+      // 2) 运行状态 ----------------------------------------------------
+      children.push(
+        h(
+          Card,
+          {
+            key: 'remote-status',
+            title: tr('remote.status.title'),
+            right: h(Badge, {
+              text: running ? tr('remote.status.running') : tr('remote.status.stopped'),
+              tone: running ? 'ok' : 'mute'
+            })
+          },
+          h(
+            'div',
+            { style: S.chipRow },
+            h(Badge, {
+              text: tr('remote.status.bound') + ': ' + (asText(status.boundAddress) || tr('common.none')),
+              tone: asText(status.boundAddress) ? 'info' : 'mute'
+            }),
+            h(Badge, {
+              text: tr('remote.status.connections') + ': ' + num(conns.active) + '/' + num(conns.total),
+              tone: 'mute'
+            }),
+            h(Badge, {
+              text: tr('remote.status.rejected') + ': ' + num(status.rejected),
+              tone: num(status.rejected) === '0' ? 'mute' : 'warn'
+            }),
+            h(Badge, {
+              text:
+                tr('remote.status.token') +
+                ': ' +
+                (tokenInfo.exists === true ? asText(tokenInfo.masked) : tr('remote.status.token.none')),
+              tone: tokenInfo.exists === true ? 'info' : 'mute'
+            })
+          ),
+          // 这条必须有：让用户明确知道"只绑了具体地址"，不是 0.0.0.0。
+          h('p', { style: S.hint }, tr('remote.status.bound.hint')),
+          h(
+            'div',
+            { style: S.metaRow },
+            h('span', { style: S.metaLabel }, tr('remote.status.listen')),
+            h('span', { style: S.metaValue }, asText(status.listen) || tr('common.none'))
+          ),
+          h(
+            'div',
+            { style: S.metaRow },
+            h('span', { style: S.metaLabel }, tr('remote.status.startedAt')),
+            h('span', { style: S.metaValue }, status.startedAt ? fmtTime(status.startedAt) : tr('common.none'))
+          ),
+          // 最近错误：中性框（灰），不要红一片——失败信息不该压过"其实还在正常运行"。
+          lastError
+            ? h(
+                'div',
+                { key: 'last-error', style: RS.neutral },
+                h('div', { style: RS.neutralHead }, tr('remote.status.lastError') + ' · ' + asText(lastError.code)),
+                h('div', { style: RS.neutralText }, asText(lastError.message))
+              )
+            : null,
+          h(
+            'div',
+            { key: 'actions', style: S.row },
+            h(Btn, {
+              label: busy === 'start' ? tr('remote.busy.starting') : tr('remote.actions.start'),
+              primary: true,
+              disabled: anyBusy || running,
+              onClick: doStart
+            }),
+            h(Btn, {
+              label: busy === 'stop' ? tr('remote.busy.stopping') : tr('remote.actions.stop'),
+              disabled: anyBusy || !running,
+              onClick: doStop
+            }),
+            h(Btn, {
+              label: busy === 'rotate' ? tr('remote.busy.rotating') : tr('remote.actions.rotate'),
+              disabled: anyBusy,
+              onClick: function () {
+                setConfirmRotate(true)
+              }
+            }),
+            h(Btn, {
+              label: busy === 'probe' ? tr('remote.busy.probing') : tr('remote.actions.probe'),
+              disabled: anyBusy,
+              onClick: doProbe
+            }),
+            h(Btn, {
+              label: busy === 'link' ? tr('remote.busy.linking') : tr('remote.actions.showLink'),
+              disabled: anyBusy,
+              onClick: doShowLink
+            })
+          ),
+          // 生成新令牌的二次确认（旧链接立即失效）
+          confirmRotate
+            ? h(
+                'div',
+                { key: 'confirm-rotate', style: S.confirmBar },
+                h('div', { style: S.confirmText }, tr('remote.actions.rotate.confirm')),
+                h(Btn, {
+                  label: tr('remote.actions.rotate.yes'),
+                  primary: true,
+                  danger: true,
+                  disabled: anyBusy,
+                  onClick: doRotate
+                }),
+                h(Btn, {
+                  label: tr('remote.actions.rotate.cancel'),
+                  disabled: anyBusy,
+                  onClick: function () {
+                    setConfirmRotate(false)
+                  }
+                })
+              )
+            : null
+        )
+      )
+
+      // 3) 二维码与链接（只有显式点过「显示二维码与链接」才出现） -------
+      if (link) {
+        children.push(
+          h(
+            Card,
+            { key: 'remote-qr', title: tr('remote.qr.title') },
+            h(
+              'div',
+              { style: RS.qrWrap },
+              h(QrMatrix, { qr: link.qr, label: tr('remote.qr.title') }),
+              h('div', { style: RS.qrNote }, tr('remote.qr.hint'))
+            ),
+            h(
+              'div',
+              { key: 'qr-actions', style: S.row },
+              h(Btn, { label: tr('remote.actions.copy'), onClick: doCopyLink }),
+              asText(link.note) ? h('span', { style: S.hint }, asText(link.note)) : null
+            ),
+            h('p', { key: 'link-hint', style: S.hint }, tr('remote.link.hint')),
+            safeUrls.length
+              ? h(
+                  'div',
+                  { key: 'urls', style: S.list },
+                  safeUrls.map(function (entry, ui) {
+                    const e = entry && typeof entry === 'object' ? entry : {}
+                    return h(
+                      'div',
+                      { key: 'u' + ui, style: S.listRow },
+                      h(Badge, { text: asText(e.label) || asText(e.mode), tone: 'mute' }),
+                      h('span', { style: S.listText }, asText(e.url)),
+                      asText(e.note) ? h('span', { style: S.listMeta }, asText(e.note)) : null
+                    )
+                  })
+                )
+              : null
+          )
+        )
+      }
+
+      // 4) 自检结果 ----------------------------------------------------
+      children.push(
+        h(
+          Card,
+          { key: 'remote-probe', title: tr('remote.probe.title') },
+          activeProbe
+            ? h(
+                'div',
+                { style: S.list },
+                h(
+                  'div',
+                  {
+                    key: 'verdict',
+                    style: Object.assign({}, RS.verdict, {
+                      color: (TONE[remoteLevelTone(activeProbe.level)] || TONE.mute).color
+                    })
+                  },
+                  asText(activeProbe.verdict) || remoteLevelLabel(tr, activeProbe.level)
+                ),
+                h(
+                  'div',
+                  { key: 'probe-meta', style: S.row },
+                  h(Badge, {
+                    text: remoteLevelLabel(tr, activeProbe.level),
+                    tone: remoteLevelTone(activeProbe.level)
+                  }),
+                  h('span', { style: S.hint }, tr('remote.probe.at') + ' ' + fmtTime(activeProbe.at))
+                ),
+                (Array.isArray(activeProbe.checks) ? activeProbe.checks : []).map(function (check, ci) {
+                  const c = check && typeof check === 'object' ? check : {}
+                  const tone = remoteLevelTone(c.level)
+                  return h(
+                    'div',
+                    { key: 'chk' + ci, style: RS.checkRow },
+                    h(Badge, { text: remoteLevelLabel(tr, c.level), tone: tone }),
+                    h(
+                      'div',
+                      { style: RS.checkBody },
+                      h('span', { style: RS.checkMsg }, asText(c.message)),
+                      asText(c.hint) ? h('span', { style: RS.checkHint }, asText(c.hint)) : null
+                    )
+                  )
+                })
+              )
+            : h('p', { style: S.hint }, tr('remote.probe.never'))
+        )
+      )
+
+      return h('div', { style: S.root }, children)
+    }
+
+    // ------------------------------------------------------------------
     // Plugin body
     // ------------------------------------------------------------------
     const inject = ['slots', 'locale']
@@ -2383,6 +3357,23 @@ window.__ModuleLoader__.load({
       } catch (e) {
         serviceT = null
       }
+      // 第二个 section：远程访问（order 71，与「配置同步」并列且**互相独立**）。
+      // 先注册它、再注册同步：host 按 `order` 排序展示，注册先后不影响顺序；
+      // 把同步留在最后，既有「最后一个注册的 panel 就是同步面板」的渲染回归不受影响。
+      ctx.slots.inject('settings.section', function () {
+        return ctx.slots.register(
+          {
+            name: 'settings.section',
+            id: 'git-config-sync-remote',
+            order: 71,
+            label: function () {
+              return t('remote.nav')
+            },
+            locale: NS
+          },
+          RemotePanel
+        )
+      })
       ctx.slots.inject('settings.section', function () {
         return ctx.slots.register(
           {

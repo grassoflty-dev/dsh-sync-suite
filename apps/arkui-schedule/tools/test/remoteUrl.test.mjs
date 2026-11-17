@@ -5,11 +5,13 @@
 //
 // 重点：这个地址是**用户手输的不可信输入**（缺协议、夹空格、协议乱写、只有 `http://`），
 // 规则必须 fail-closed 且给中文原因；通过时只补协议、其余（端口/路径/query/token 值）原样保留。
+// 本轮新增：IPv6 字面量（`http://[2409:…:763c]:3080/`）从「拒绝」改为「接受」——「公网 IPv6 直连」
+// 是 App 支持的访问方式之一，方括号里的形态与 `]` 之后的端口都要校验，非法 IPv6 仍然拒绝。
 // 该模块没有任何 import，因此不需要 registerHooks 补 `.js` 后缀。
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
-const { normalizeRemoteUrl, routeToRemote } = await import('../.build/model/remoteUrl.js');
+const { isIpv6Literal, normalizeRemoteUrl, routeToRemote } = await import('../.build/model/remoteUrl.js');
 
 /** 断言「拒绝」：ok=false、url 为空串、reason 逐字匹配。 */
 function assertRejected(raw, reason) {
@@ -103,6 +105,89 @@ describe('normalizeRemoteUrl：空、空格、残缺地址', () => {
     assertRejected('http://192.168.1.6:/x', REASON_INCOMPLETE);
     assertRejected('http://:3080', REASON_INCOMPLETE);
     assertRejected('http://user:pass@192.168.1.6:3080', REASON_INCOMPLETE);
+  });
+});
+
+describe('normalizeRemoteUrl：IPv6 字面量（本轮从拒绝改为接受）', () => {
+  test('公网 IPv6 + 端口 + token：整条通过，方括号保留，hasToken 识别', () => {
+    const check = assertAccepted(
+      'http://[2409:8a20:4cad:ba20:1234:5678:9abc:def0]:3080/?token=abc',
+      'http://[2409:8a20:4cad:ba20:1234:5678:9abc:def0]:3080/?token=abc'
+    );
+    assert.equal(check.hasToken, true);
+    assert.equal(check.hadScheme, true);
+  });
+
+  test('压缩写法 `[::…]`（`::` 内嵌）也通过', () => {
+    assertAccepted('http://[2409:8a20:4cad:ba20::763c]:3080/', 'http://[2409:8a20:4cad:ba20::763c]:3080/');
+    assertAccepted('https://[::1]:8443/dsh/ui', 'https://[::1]:8443/dsh/ui');
+  });
+
+  test('回环 `[::1]`：带端口 / 不带端口都通过', () => {
+    assertAccepted('http://[::1]:3080/', 'http://[::1]:3080/');
+    assertAccepted('http://[::1]', 'http://[::1]');
+  });
+
+  test('缺协议：`[::1]:3080/` 自动补 http://（hadScheme=false）', () => {
+    const check = assertAccepted('[::1]:3080/', 'http://[::1]:3080/');
+    assert.equal(check.hadScheme, false);
+    assert.equal(check.hasToken, false);
+  });
+
+  test('内嵌 IPv4 尾段（`::ffff:a.b.c.d`）与完整 8 组写法都接受', () => {
+    assertAccepted('http://[::ffff:192.168.1.1]:3080/?token=x', 'http://[::ffff:192.168.1.1]:3080/?token=x');
+    assertAccepted(
+      'http://[2409:8a20:4cad:ba20:1234:5678:9abc:def0]:3080/',
+      'http://[2409:8a20:4cad:ba20:1234:5678:9abc:def0]:3080/'
+    );
+  });
+
+  test('协议大小写归一，方括号与地址原样保留', () => {
+    assertAccepted('HTTP://[::1]:3080/', 'http://[::1]:3080/');
+  });
+
+  test('幂等：IPv6 归一结果再归一，url 不变', () => {
+    const first = normalizeRemoteUrl('http://[2409:8a20::763c]:3080/?token=x');
+    assert.equal(first.ok, true);
+    const second = normalizeRemoteUrl(first.url);
+    assert.equal(second.ok, true);
+    assert.equal(second.url, first.url);
+    assert.equal(second.hasToken, true);
+  });
+
+  test('非法 IPv6（5 条以上）：一律落到「地址不完整」', () => {
+    for (const raw of [
+      'http://[1:2:3]:3080', // 组数不足 8 且没有 `::`
+      'http://[::1::2]:3080', // 两个 `::`
+      'http://[gggg::1]:3080', // 非十六进制
+      'http://[12345::1]:3080', // 单组超过 4 位
+      'http://[1:2:3:4:5:6:7:8:9]:3080', // 组数超过 8
+      'http://[::ffff:999.1.1.1]:3080', // 内嵌 IPv4 越界
+      'http://[::1]:3080:9' // `]` 之后多一段端口
+    ]) {
+      assertRejected(raw, REASON_INCOMPLETE);
+    }
+  });
+
+  test('裸 IPv6 / 未闭合 / 空方括号 / 带 @ / 端口非数字：仍然拒绝', () => {
+    assertRejected('http://2409:8a20:4cad:ba20::763c:3080', REASON_INCOMPLETE);
+    assertRejected('http://[::1:3080', REASON_INCOMPLETE);
+    assertRejected('http://[]:3080', REASON_INCOMPLETE);
+    assertRejected('http://user@[::1]:3080', REASON_INCOMPLETE);
+    assertRejected('http://[::1]:abc', REASON_INCOMPLETE);
+    assertRejected('http://[::1]x', REASON_INCOMPLETE);
+    assertRejected('http://[::1] :3080', REASON_SPACE);
+  });
+
+  test('isIpv6Literal：形态判定（不借 URL 实现）', () => {
+    assert.equal(isIpv6Literal('::1'), true);
+    assert.equal(isIpv6Literal('2409:8a20:4cad:ba20:1234:5678:9abc:def0'), true);
+    assert.equal(isIpv6Literal('::ffff:1.2.3.4'), true);
+    assert.equal(isIpv6Literal('::'), true, '未指定地址 `::` 形态合法');
+    assert.equal(isIpv6Literal(''), false);
+    assert.equal(isIpv6Literal('1.2.3.4'), false, '纯 IPv4 不是 IPv6');
+    assert.equal(isIpv6Literal('1:2:3'), false);
+    assert.equal(isIpv6Literal('fe80::1%eth0'), false, '带 zone id 不接受');
   });
 });
 

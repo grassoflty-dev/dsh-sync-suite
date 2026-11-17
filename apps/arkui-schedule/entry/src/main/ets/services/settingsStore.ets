@@ -30,6 +30,7 @@ import {
 } from '../model/aiProvider';
 import { AUTH_HTTPS, PLATFORM_GITHUB, normalizeAuthMode, normalizePlatform } from '../model/settingsForm';
 import { normalizeSyncAction } from '../model/syncError';
+import { REMOTE_MODE_LAN, normalizeRemoteMode, normalizeRemotePort } from '../model/remoteAccess';
 
 /** 设备标识默认值：首次启动即 `phone-a`，可在设置页修改。 */
 export const DEFAULT_DEVICE_ID: string = 'phone-a';
@@ -86,6 +87,24 @@ export interface ScheduleSettings {
    * 空串 = 未填写（旧数据没有该字段 → `''`）。
    */
   remoteUrl: string;
+  /**
+   * 远程访问方式：`lan` | `tailscale` | `ipv6` | `cloudflare` | `manual` | `uu`
+   * （未知/空 → `lan`；与插件侧 `RemoteSettings.mode` 同一套枚举，见
+   * `docs/REMOTE-ACCESS-OPTIONS.md` §3）。
+   */
+  remoteMode: string;
+  /** 局域网方式要填的具体 IPv4（空串 = 未填）。旧数据缺字段 = `''`。 */
+  remoteLanAddress: string;
+  /** 旁挂监听端口：`0` = 跟 DSH 同端口（默认 0，负数/超范围归一，非法值回 0）。 */
+  remotePort: number;
+  /** Tailscale 方式要填的 100.x 地址或 MagicDNS 名（空串 = 未填）。 */
+  remoteTailscaleHost: string;
+  /** Cloudflare 隧道域名（不带 `https://`、不带路径；空串 = 未填）。 */
+  remoteCloudflareHost: string;
+  /** 公网 IPv6 地址（**不带**方括号；空串 = 未填）。 */
+  remoteIpv6Address: string;
+  /** 手动方式的完整地址（可含 `?token=`，只存本机；空串 = 未填）。 */
+  remoteManualUrl: string;
   /** 上次同步成功的时刻（ISO 8601，空串表示从未同步）。仅用于设置页展示。 */
   lastSyncAt: string;
   /** 上次同步失败的**分级后中文文案**（空串表示上次没有失败）。仅用于设置页展示。 */
@@ -124,6 +143,13 @@ export interface SettingsPatch {
   authMode?: string;
   penOnlyInput?: boolean;
   remoteUrl?: string;
+  remoteMode?: string;
+  remoteLanAddress?: string;
+  remotePort?: number;
+  remoteTailscaleHost?: string;
+  remoteCloudflareHost?: string;
+  remoteIpv6Address?: string;
+  remoteManualUrl?: string;
 }
 
 /** 备用源配置（`deepseek` 服务层直接消费；`configured=false` 表示不启用）。 */
@@ -158,6 +184,13 @@ const KEY_GIT_USERNAME: string = 'gitUsername';
 const KEY_AUTH_MODE: string = 'authMode';
 const KEY_PEN_ONLY_INPUT: string = 'penOnlyInput';
 const KEY_REMOTE_URL: string = 'remoteUrl';
+const KEY_REMOTE_MODE: string = 'remoteMode';
+const KEY_REMOTE_LAN_ADDRESS: string = 'remoteLanAddress';
+const KEY_REMOTE_PORT: string = 'remotePort';
+const KEY_REMOTE_TAILSCALE_HOST: string = 'remoteTailscaleHost';
+const KEY_REMOTE_CLOUDFLARE_HOST: string = 'remoteCloudflareHost';
+const KEY_REMOTE_IPV6_ADDRESS: string = 'remoteIpv6Address';
+const KEY_REMOTE_MANUAL_URL: string = 'remoteManualUrl';
 const KEY_LAST_SYNC_AT: string = 'lastSyncAt';
 const KEY_LAST_SYNC_ERROR: string = 'lastSyncError';
 const KEY_LAST_SYNC_ACTION: string = 'lastSyncAction';
@@ -280,6 +313,15 @@ export class SettingsStore {
     const penOnlyInput = readBoolean(await prefs.get(KEY_PEN_ONLY_INPUT, false), false);
     // 远程控制地址：旧数据没有这个键 → 空串（「打开远程控制」按钮此时禁用）
     const remoteUrl = readString(await prefs.get(KEY_REMOTE_URL, ''), '');
+    // 远程访问方式与字段：旧数据没有这些键 → lan / 0 / 空串；未知值按 §3 表归一，
+    // 绝不把坏值原样带到页面上（否则设置页会显示一个不存在的访问方式）。
+    const remoteModeRaw = readString(await prefs.get(KEY_REMOTE_MODE, REMOTE_MODE_LAN), REMOTE_MODE_LAN);
+    const remoteLanAddress = readString(await prefs.get(KEY_REMOTE_LAN_ADDRESS, ''), '');
+    const remotePortRaw = readNumber(await prefs.get(KEY_REMOTE_PORT, 0), 0);
+    const remoteTailscaleHost = readString(await prefs.get(KEY_REMOTE_TAILSCALE_HOST, ''), '');
+    const remoteCloudflareHost = readString(await prefs.get(KEY_REMOTE_CLOUDFLARE_HOST, ''), '');
+    const remoteIpv6Address = readString(await prefs.get(KEY_REMOTE_IPV6_ADDRESS, ''), '');
+    const remoteManualUrl = readString(await prefs.get(KEY_REMOTE_MANUAL_URL, ''), '');
     const lastSyncAt = readString(await prefs.get(KEY_LAST_SYNC_AT, ''), '');
     const lastSyncError = readString(await prefs.get(KEY_LAST_SYNC_ERROR, ''), '');
     const lastSyncAction = readString(await prefs.get(KEY_LAST_SYNC_ACTION, ''), '');
@@ -308,6 +350,13 @@ export class SettingsStore {
       authMode: normalizeAuthMode(authMode),
       penOnlyInput: penOnlyInput,
       remoteUrl: remoteUrl,
+      remoteMode: normalizeRemoteMode(remoteModeRaw),
+      remoteLanAddress: remoteLanAddress.trim(),
+      remotePort: normalizeRemotePort(remotePortRaw),
+      remoteTailscaleHost: remoteTailscaleHost.trim(),
+      remoteCloudflareHost: remoteCloudflareHost.trim(),
+      remoteIpv6Address: remoteIpv6Address.trim(),
+      remoteManualUrl: remoteManualUrl.trim(),
       lastSyncAt: lastSyncAt,
       lastSyncError: lastSyncError,
       lastSyncAction: normalizeSyncAction(lastSyncAction)
@@ -456,6 +505,20 @@ export class SettingsStore {
       penOnlyInput: patch.penOnlyInput === undefined ? current.penOnlyInput : patch.penOnlyInput === true,
       // 远程控制地址：只去首尾空白，不做 URL 归一（归一在 model/remoteUrl 的 normalizeRemoteUrl）
       remoteUrl: patch.remoteUrl === undefined ? current.remoteUrl : patch.remoteUrl.trim(),
+      // 远程访问方式与字段：方式按枚举归一（未知 → lan），端口夹到 0–65535，地址字段只去空白；
+      // 注意**不清空** remoteUrl：它是历史缓存键，「保存设置」不该把已能打开的地址抹掉。
+      remoteMode: normalizeRemoteMode(patch.remoteMode === undefined ? current.remoteMode : patch.remoteMode),
+      remoteLanAddress:
+        patch.remoteLanAddress === undefined ? current.remoteLanAddress : patch.remoteLanAddress.trim(),
+      remotePort: normalizeRemotePort(patch.remotePort === undefined ? current.remotePort : patch.remotePort),
+      remoteTailscaleHost:
+        patch.remoteTailscaleHost === undefined ? current.remoteTailscaleHost : patch.remoteTailscaleHost.trim(),
+      remoteCloudflareHost:
+        patch.remoteCloudflareHost === undefined ? current.remoteCloudflareHost : patch.remoteCloudflareHost.trim(),
+      remoteIpv6Address:
+        patch.remoteIpv6Address === undefined ? current.remoteIpv6Address : patch.remoteIpv6Address.trim(),
+      remoteManualUrl:
+        patch.remoteManualUrl === undefined ? current.remoteManualUrl : patch.remoteManualUrl.trim(),
       lastSyncAt: current.lastSyncAt,
       lastSyncError: current.lastSyncError,
       lastSyncAction: current.lastSyncAction
@@ -481,6 +544,13 @@ export class SettingsStore {
     await prefs.put(KEY_AUTH_MODE, next.authMode);
     await prefs.put(KEY_PEN_ONLY_INPUT, next.penOnlyInput);
     await prefs.put(KEY_REMOTE_URL, next.remoteUrl);
+    await prefs.put(KEY_REMOTE_MODE, next.remoteMode);
+    await prefs.put(KEY_REMOTE_LAN_ADDRESS, next.remoteLanAddress);
+    await prefs.put(KEY_REMOTE_PORT, next.remotePort);
+    await prefs.put(KEY_REMOTE_TAILSCALE_HOST, next.remoteTailscaleHost);
+    await prefs.put(KEY_REMOTE_CLOUDFLARE_HOST, next.remoteCloudflareHost);
+    await prefs.put(KEY_REMOTE_IPV6_ADDRESS, next.remoteIpv6Address);
+    await prefs.put(KEY_REMOTE_MANUAL_URL, next.remoteManualUrl);
     await prefs.put(KEY_GIT_USERNAME, next.gitUsername);
     await prefs.put(KEY_LAST_SYNC_AT, next.lastSyncAt);
     await prefs.put(KEY_LAST_SYNC_ERROR, next.lastSyncError);
@@ -524,6 +594,13 @@ export class SettingsStore {
       authMode: current.authMode,
       penOnlyInput: current.penOnlyInput,
       remoteUrl: current.remoteUrl,
+      remoteMode: current.remoteMode,
+      remoteLanAddress: current.remoteLanAddress,
+      remotePort: current.remotePort,
+      remoteTailscaleHost: current.remoteTailscaleHost,
+      remoteCloudflareHost: current.remoteCloudflareHost,
+      remoteIpv6Address: current.remoteIpv6Address,
+      remoteManualUrl: current.remoteManualUrl,
       lastSyncAt: patch.lastSyncAt === undefined ? current.lastSyncAt : patch.lastSyncAt,
       lastSyncError: patch.lastSyncError === undefined ? current.lastSyncError : patch.lastSyncError,
       lastSyncAction:

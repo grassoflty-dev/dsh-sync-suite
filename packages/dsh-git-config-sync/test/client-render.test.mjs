@@ -185,12 +185,14 @@ test('Card/Field 不得再用 arguments 取 children（React 不会这样传）'
 test('设置面板真实渲染出仓库表单、同步范围与操作按钮', async () => {
   const { mod } = await loadClient()
   const { tree, registered } = renderPanel(mod)
-  assert.equal(registered.length, 1)
-  assert.equal(registered[0].name, 'settings.section')
-  assert.equal(registered[0].id, 'git-config-sync')
-  assert.equal(registered[0].order, 70)
-  assert.equal(registered[0].locale, 'git-config-sync')
-  assert.equal(typeof registered[0].label, 'function')
+  // 现在有两个 section（同步 + 远程访问）：按 id 取同步那个，不再假设只有一个。
+  assert.equal(registered.length, 2, '同步与远程访问各一个 settings.section')
+  const sync = registered.find((entry) => entry.id === 'git-config-sync')
+  assert.ok(sync !== undefined, '必须有 id=git-config-sync 的 section')
+  assert.equal(sync.name, 'settings.section')
+  assert.equal(sync.order, 70)
+  assert.equal(sync.locale, 'git-config-sync')
+  assert.equal(typeof sync.label, 'function')
 
   const { counts, labels, buttonLabels, inputs, selects } = collect(tree)
 
