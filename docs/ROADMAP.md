@@ -137,8 +137,8 @@
 | **IPv6 真绑定端到端（本机公网 v6:3098）** | pm | ✅ **通过**（health/401/303/200 全绿，probe 5 ok + 1 unknown） | - | 无 |
 | 独立只读评审（安全边界 / 失败语义 / token 出口） | pm/review-remote | ✅ 完成：**有条件通过**，P0=0 / P1=2 / P2=2，见 `docs/REVIEW-remote-security.md` | - | 无 |
 | 评审修复 M1（ipv6 方式起不来）/ M2（上游 cookie 过期不 fail-closed）/ M3（manualUrl token 进 DOM）/ M4（`?k=` 与 `?token=` 不一致） | pm | ✅ 全部已修 + 补测试（见下「评审修复」） | - | 无 |
-| 真机验收（平板切回家中 WiFi 后） | 待派 qa | 排队 | - | **需 lead 叫用户切回家里 WiFi**（hdc 串行） |
-| 真实 GUI 渲染验证（设置页两个 section） | —— | 阻塞 | - | 需重启 DSH，会杀掉当前会话 → 交 lead 决定时机 |
+| 真机验收（平板已切回家中 WiFi，`192.168.1.10` / USB `6MFBB25C27205131`） | pm/qa-remote-device | 进行中 | 30min | 无（真机独占，单执行者） |
+| 真实 GUI 渲染验证（设置页「配置同步」+「远程访问」两个 section） | —— | **待办（等 DSH 重启）** | - | 用户决定本轮不重启；重启后需人工看一眼设置页渲染，别丢 |
 
 ### 端到端证据（`192.168.1.6:3099` → 真实 DSH `127.0.0.1:3080`）
 
@@ -202,6 +202,44 @@ probe: unknown 本机检查通过，但公网可达性必须从外网确认
 | M2 (P1) | 上游 `dsh-auth-*` 过期后仍直送上游（客户端收到莫名 401） | `service.ts` 的 `upstreamCookie` 闭包同时判 `expiresAt`，过期即 `null` → `routes` 回 503（fail-closed） | 既有 503 用例 + 后台 6h 刷新定时器 |
 | M3 (P2) | `manualUrl` 自带 token 时经 `status.urls` 渲染进 DOM | 新增 `redactUrlForDisplay`，`status.urls` 一律脱敏（`token=***`）；明文仍只走 `showLink` | `remote-service.test.mjs` 两条（函数级 + `getState` 端到端） |
 | M4 (P2) | `auth.ts` 的 `TOKEN_PARAM='k'` 与门只认 `?token=` 矛盾 | `routes.ts` 同时接受 `token` 与 `k`（同时出现视为歧义输入直接拒），303 时两个都删 | `remote-routes.test.mjs` 三条（`?k=` 等价、歧义拒绝、strip 两者） |
+
+### 本轮交付面（2026-11-17）
+
+**代码（已提交，工作树 clean）**
+
+| 提交 | 内容 |
+| --- | --- |
+| `5fce8dc` | 远程访问域主体：`src/remote/**`（types/routes/store/service/index + accessMode/urls/probe）、`src/index.ts` 挂载、`src/rpc.ts` 8 个 action、`src/client.js` 远程 section、`locale/*`、`dist/**`、App 侧 `model/remoteAccess.ts` + `remoteUrl` IPv6 + `Settings.ets` + `settingsStore.ets`、文档与测试 |
+| `67b6126` | ROADMAP：全量验证数字、IPv6 真绑定证据、评审修复表 |
+| `d211e15` | （交接）`src/remote/listener.ts` + `auth.ts` + `qr.ts` + 各自测试与 `dist` |
+| `fec8345` | （交接）App「远程控制」页面 `pages/RemoteControl.ets` + `model/remoteUrl.ts` |
+
+**新增能力清单**
+
+- 插件：6 种访问方式（`lan` / `ipv6` / `cloudflare` / `tailscale` / `manual` / `uu`）的配置模型与可用性标注；
+  旁挂监听（绑具体 IPv4/IPv6，**绝不 0.0.0.0**）+ HTTP/WS 反代；令牌门（`randomBytes(32)`、`?token=`/`?k=`/cookie、
+  常量时间比较、同 IP 失败限速、上游 `dsh-auth-*` 只注入不下发）；零依赖二维码；17 项连通性自检；
+  设置页独立 section「远程访问」（id `git-config-sync-remote`、order 71，与同步 section 状态隔离）；8 个 RPC action。
+- App：`model/remoteAccess.ts`（与插件同一套字段语义）、`remoteUrl` 支持 IPv6 字面量、设置页按方式渲染字段、
+  端口在 `lan/ipv6/tailscale` 下必填（用户拍板维持）。
+- 文档：`docs/REMOTE-ACCESS-OPTIONS.md`（可行性矩阵 / 字段表 / 自检表 / 安全边界 / 未验证清单）、
+  `docs/DATA-CONTRACT.md` §7、`docs/RESEARCH-{A,B,C,D,E}-*.md`、`docs/REVIEW-remote-security.md`。
+
+**测试数字（最后一轮，2026-11-17 22:1x）**
+
+- 全仓：`node --test "packages/*/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"`
+  → **1459 例 / 1458 pass / 0 fail / 1 skip**（skip：`HTTP_PROXY` 接管导致 listener fetch 用例跳过）。
+- `node apps/arkui-schedule/tools/validate-app.mjs` → **8/8**。
+- 插件 `tsc -p tsconfig.json --noEmit` → **exit 0**；`node scripts/build.mjs` 可重复产出、commit 后无 dist 漂移。
+- 端到端（真实 DSH）：LAN `13/13`（含 WS 101）；公网 IPv6 `PASS`（含 probe 5×ok + 1×unknown）。
+- 独立评审：`docs/REVIEW-remote-security.md` P0=0 / P1=2 / P2=2，**四条全部已修 + 有回归测试**。
+
+**发布状态（重要）**
+
+- **未发 Release**（未获 lead 批准）。
+- **未打 `dist-*` 交付包、未生成发布用 SHA256 清单**；本轮只有 `dist/remote/*.js` 的源码构建产物随仓库提交。
+- 插件在 `~/.dsh/profiles/desktop` 是 **junction 链接**（`link:`），重启 DSH 即加载新 `dist/`；
+  **本轮按用户决定不重启**，因此「设置页两个 section 的真实 GUI 渲染」仍未验证（记为上方待办）。
 
 ### 本轮已定技术结论（评审基线，别再推翻）
 
