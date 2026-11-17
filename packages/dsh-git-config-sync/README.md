@@ -74,7 +74,7 @@ dsh plugin --profile web remove dsh-git-config-sync
 | 仓库配置 | 平台（GitHub / Gitee / 自定义，影响地址提示与 HTTPS 默认用户名）、仓库地址、认证方式（HTTPS Token / SSH）、用户名（HTTPS 用；Gitee 必填登录名）、设备标识、分支 |
 | 同步范围 | `cordis.patch.yml` 条目、provider 定义、插件清单（MERGE-only）、MCP，默认全选 |
 | 状态徽标 | 可达性、分支、本地提交数、仓库提交 sha、待上传 / 待下载数、冲突、最近提交（sha+message+time）、最近同步时间、状态错误 |
-| 操作 | 保存设置、测试连接、推送、拉取预览、执行覆盖（未预览或未勾选条目时禁用）、刷新状态 |
+| 操作 | 保存设置、测试连接、推送、拉取预览、查看差异、回滚到上次快照（两步确认）、执行覆盖（未预览或未勾选条目时禁用）、刷新状态 |
 | 预览 | 按源设备分组；逐条差异（本地 vs 远端，等宽、可折叠、限高滚动）；采纳远端 / 保留本地切换；`manual` 条目默认不勾选并标注「需本地填写」 |
 | 插件清单 | MERGE-only 四组计数与明细：可安装/升级、保持、跳过、不降级；`install` 只写待安装计划，不执行 pnpm |
 | 快照 | 写前恢复快照列表（id / time / reason / bytes），回滚需二次确认 |
@@ -143,6 +143,24 @@ RPC（与同步共用 `/dsh-git-config-sync/rpc`）：`remoteGetState` / `remote
       name: 'plugin-b'
 ```
 
+### 2.3 差异预览与回滚两步确认（新增）
+
+同步前/还原前先看清楚会改什么，再动手：
+
+- **查看差异**：对比「本地工作副本（上次推送的内容）vs 当前 profile」，给出
+  「N 个文件变更（+A / -M 行）」一句结论，按 `新增 / 修改 / 删除` 分组，每行显示
+  `path` + `+N/-M` + 字节变化（`before → after`）；有 hunk 的文件可展开等宽、限高滚动的
+  前后文（hunk 正文硬上限 200 行，超出标注「仅显示前 200 行」）。二进制或 >512KB 的文件
+  只给统计。**空差异显示「没有差异」**，不是空白区域。
+- **回滚到上次快照**：两步确认——第 1 步列出最近一份快照并点「查看这次回滚会改什么」
+  （调 `rollbackPreview`，只读、走 manifest sha256 校验），第 2 步看到文件级 diff 与
+  「将写入」的文件后才点「确认回滚（不可撤销）」（调 `rollback {confirm:true}`）。
+  任一步失败都停在当前步骤、显示 `code + message`，**不做任何写盘**。
+
+两个新 action 都是只读的：不创建快照、不写 profile、不写 `state.json`、不写插件待安装计划。
+`apply` / `rollback` 的 `confirm:true` 门禁与校验规则**完全没变**（新入口只是把 `rollback`
+拆成"先预览、再确认"两步）。契约、方向语义与 fail-closed 清单见 `docs/PLUGIN-DIFF.md`。
+
 ---
 
 ## 3. RPC 契约
@@ -172,6 +190,8 @@ Body: { action, ...payload }
 | `apply` | `{confirm:true, previewId, sourceDevice, entries:string[]}` | `{applied:[{id,fileSha256,blockSha256,path}], skipped, snapshotId, verified:true}` |
 | `listSnapshots` | `{}` | `{snapshots}` |
 | `rollback` | `{snapshotId, confirm:true}` | `{restored, verified:true}` |
+| `previewDiff` | `{sourceDevice?}`（缺省 = 本机） | `{sourceDevice, local, summary, hunks}`（只读） |
+| `rollbackPreview` | `{snapshotId}` | `{snapshotId, createdAt, reason, files, summary, willRestore}`（只读） |
 
 错误码：`E_VALIDATION`、`E_CONFIRM_REQUIRED`、`E_UNKNOWN_ACTION`、`E_NOT_FOUND`、`E_GIT`、
 `E_AUTH`、`E_CONFLICT`、`E_SHA_MISMATCH`、`E_IO`。

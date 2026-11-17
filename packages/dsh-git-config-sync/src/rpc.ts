@@ -6,19 +6,21 @@
  * 未知 action → E_UNKNOWN_ACTION；参数非法 → E_VALIDATION。
  */
 import { existsSync } from 'node:fs'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import path from 'node:path'
 import { collectLocal, isFileInScope, pluginsOf, serializeManifest, SYNC_FILE_NAMES } from './engine/collect.js'
 import type { CollectResult } from './engine/collect.js'
+import { diffFiles, diffText } from './engine/diff.js'
+import type { DiffSummary, UnifiedHunk } from './engine/diff.js'
 import { SyncError, errorMessage, isSyncError, toRpcError } from './engine/errors.js'
 import { GitRepo } from './engine/git.js'
 import type { StatePaths } from './engine/paths.js'
 import { detectDshVersion, repoHash, resolveProfileDir, statePaths } from './engine/paths.js'
 import type { InternalPreview, PreviewResult } from './engine/preview.js'
-import { PreviewCache, buildPreview, settingsFingerprint } from './engine/preview.js'
-import { applySelected, rollbackSnapshot } from './engine/restore.js'
-import type { ApplyResult, RpcHooks } from './engine/restore.js'
+import { PreviewCache, buildPreview, fileDiffOfPreview, settingsFingerprint } from './engine/preview.js'
+import { applySelected, previewRollback, rollbackSnapshot } from './engine/restore.js'
+import type { ApplyResult, RollbackPreview, RpcHooks } from './engine/restore.js'
 import { containsSecretValue } from './engine/secrets.js'
 import { SettingsStore, LocalStateStore, normalizeSettings, resolveToken } from './engine/settings.js'
 import { SnapshotStore } from './engine/snapshot.js'
@@ -63,6 +65,20 @@ export interface RpcService {
   paths: StatePaths
   handleRpc(body: unknown): Promise<RpcResponse>
   dispose(): Promise<void>
+}
+
+/**
+ * `previewDiff` 的返回体（docs/PLUGIN-DIFF.md §2）。
+ *
+ * `local: true`  = 本机：本地工作副本（上次推送的快照）vs 当前 profile 采集结果，真文件级差异；
+ * `local: false` = 远端设备：复用 `buildPreview` 的 entry 级差异，路径为
+ *                  `devices/<deviceId>/cordis.patch.yml#<entryId>` 的伪文件形式。
+ */
+export interface PreviewDiffData {
+  sourceDevice: string
+  local: boolean
+  summary: DiffSummary
+  hunks: UnifiedHunk[]
 }
 
 export interface ConnectionLike {
@@ -416,6 +432,108 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
   }
 
   /* ------------------------------------------------------------------ */
+  /* 差异预览 / 回滚预览（两个都是**只读** action：不建快照、不写 profile、       */
+  /* 不写 state.json、不写 pendingFile。失败一律 SyncError + 中文原因）           */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 本机差异：本地工作副本 `work/<repoHash>/devices/<deviceId>/`（上次 push 的内容）
+   * vs 当前 profile 的采集结果。工作副本不存在时 fail-closed，绝不"假装没有差异"。
+   */
+  async function previewDiffLocal(settings: SyncSettings): Promise<PreviewDiffData> {
+    if (!existsSync(profileDir)) {
+      throw new SyncError('E_NOT_FOUND', `当前 profile 目录不存在，无法对比差异：${profileDir}`, { profileDir })
+    }
+    const deviceDir = path.join(workDirOf(settings), 'devices', settings.deviceId)
+    if (!existsSync(deviceDir)) {
+      throw new SyncError(
+        'E_NOT_FOUND',
+        `本地工作副本里还没有本机快照目录 devices/${settings.deviceId}，请先推送一次后再查看差异`,
+        { deviceId: settings.deviceId, deviceDir },
+      )
+    }
+
+    // collectLocal 只读 profile（不写任何文件）。
+    const collected = collectLocal({
+      profileDir,
+      homeDir: options.homeDir,
+      deviceId: settings.deviceId,
+      scopes: settings.scope,
+      dshVersion,
+      now: now(),
+    })
+
+    const before: Record<string, string> = {}
+    const after: Record<string, string> = {}
+    for (const name of SYNC_FILE_NAMES) {
+      const file = path.join(deviceDir, name)
+      before[name] = existsSync(file) ? await readFile(file, 'utf8') : ''
+      after[name] = collected.files[name]
+    }
+
+    const summary = diffFiles(before, after)
+    const hunks: UnifiedHunk[] = []
+    for (const stat of summary.files) {
+      if (stat.kind === 'same' || stat.truncated === true) continue
+      const result = diffText(before[stat.path] ?? '', after[stat.path] ?? '', { path: stat.path })
+      for (const hunk of result.hunks) hunks.push(hunk)
+    }
+    return { sourceDevice: settings.deviceId, local: true, summary, hunks }
+  }
+
+  /**
+   * 远端设备差异：复用 `buildPreview` 的远端读取与校验路径（含 manifest sha256 校验），
+   * 把 entry 级差异转成文件级 `DiffSummary`。**不写预览缓存、不写 state.json、不建快照。**
+   */
+  async function previewDiffRemote(settings: SyncSettings, sourceDevice: string): Promise<PreviewDiffData> {
+    return await withRepo(settings, async (repo) => {
+      const collected = collectLocal({
+        profileDir,
+        homeDir: options.homeDir,
+        deviceId: settings.deviceId,
+        scopes: settings.scope,
+        dshVersion,
+        now: now(),
+      })
+      const built = await buildPreview({
+        git: repo,
+        profileDir,
+        deviceId: settings.deviceId,
+        scopes: settings.scope,
+        fingerprint: settingsFingerprint(settings),
+        now: now(),
+        localFiles: collected.files,
+        localPlugins: pluginsOf(collected.files['plugins.json']),
+      })
+      const available = built.internal.sources.map((item) => item.deviceId)
+      if (!available.includes(sourceDevice)) {
+        throw new SyncError('E_NOT_FOUND', `远端没有设备 ${sourceDevice} 的快照`, { sourceDevice, available })
+      }
+      const filtered: InternalPreview = {
+        ...built.internal,
+        sources: built.internal.sources.filter((item) => item.deviceId === sourceDevice),
+      }
+      const diff = fileDiffOfPreview(filtered)
+      return { sourceDevice, local: false, summary: diff.summary, hunks: diff.hunks }
+    })
+  }
+
+  /** `previewDiff`：`sourceDevice` 缺省（或等于本机 deviceId）→ 本机；否则按远端设备比对。 */
+  async function previewDiff(payload: Record<string, unknown>): Promise<PreviewDiffData> {
+    const settings = requireConfigured()
+    const sourceDevice = asString(payload.sourceDevice).trim()
+    if (sourceDevice === '' || sourceDevice === settings.deviceId) return await previewDiffLocal(settings)
+    return await previewDiffRemote(settings, sourceDevice)
+  }
+
+  /** `rollbackPreview`：只读；`rollback` 的 confirm 门禁不在这里，也不放宽。 */
+  async function rollbackPreview(payload: Record<string, unknown>): Promise<RollbackPreview> {
+    const snapshotId = asString(payload.snapshotId)
+    if (snapshotId === '') throw new SyncError('E_VALIDATION', 'snapshotId 不能为空')
+    return await previewRollback(restoreContext(), { snapshotId })
+  }
+
+  /* ------------------------------------------------------------------ */
   /* 远程访问（remote.* action）                                          */
   /* ------------------------------------------------------------------ */
 
@@ -509,6 +627,11 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
           return ok(await enqueue(async () => ({ snapshots: snapshots.list() })))
         case 'rollback':
           return ok(await enqueue(() => rollback(payload)))
+        // ---- 差异预览 / 回滚预览：只读，与写操作同一条串行队列（不会读到写一半的内容） ----
+        case 'previewDiff':
+          return ok(await enqueue(() => previewDiff(payload)))
+        case 'rollbackPreview':
+          return ok(await enqueue(() => rollbackPreview(payload)))
         // ---- 远程访问：与同步动作同一条串行队列（start/stop 不许并发） ----
         case 'remoteGetState':
           return ok(await enqueue(remoteGetState))

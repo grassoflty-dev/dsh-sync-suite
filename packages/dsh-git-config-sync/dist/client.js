@@ -288,6 +288,45 @@ window.__ModuleLoader__.load({
       "remote.notice.started": "已启动。",
       "remote.notice.stopped": "已停止。",
       "remote.notice.rotated": "已生成新令牌：旧链接与旧二维码立即失效。",
+      "actions.diff": "查看差异",
+      "actions.rollbackLatest": "回滚到上次快照",
+      "busy.diffing": "对比中…",
+      "busy.rollbackPreview": "计算回滚影响…",
+      "diff.title": "差异预览",
+      "diff.hint": "只读对比：不创建快照，也不写任何文件。",
+      "diff.emptyHint": "点「查看差异」对比本地工作副本与当前 profile。",
+      "diff.summary": "{changed} 个文件变更（+{plus} / -{minus} 行）",
+      "diff.summary.same": "另有 {n} 个文件无变化",
+      "diff.empty": "没有差异",
+      "diff.group.added": "新增",
+      "diff.group.modified": "修改",
+      "diff.group.deleted": "删除",
+      "diff.lineStat": "+{added} / -{removed} 行",
+      "diff.expand": "展开 hunk",
+      "diff.collapse": "收起 hunk",
+      "diff.truncated": "仅显示前 {n} 行",
+      "diff.truncatedFile": "二进制或过大：只给统计",
+      "diff.source.local": "本机：工作副本 → 当前 profile",
+      "diff.source.remote": "远端设备：{device}",
+      "diff.deletedNote": "「删除」表示当前有、快照里没有；回滚不会删除这些文件。",
+      "diff.failed": "差异预览失败",
+      "rollback.title": "回滚到上次快照",
+      "rollback.hint": "两步确认：先看这次回滚会改什么，再手动确认。",
+      "rollback.step1": "第 1 步 / 2：最近一份快照",
+      "rollback.step2": "第 2 步 / 2：回滚预览",
+      "rollback.check": "查看这次回滚会改什么",
+      "rollback.confirm": "确认回滚（不可撤销）",
+      "rollback.cancel": "取消",
+      "rollback.back": "返回上一步",
+      "rollback.empty": "没有可回滚的快照。",
+      "rollback.previewFailed": "回滚预览失败，未写入任何文件。",
+      "rollback.willRestore": "将写入",
+      "rollback.none": "不会改写任何文件",
+      "rollback.summary": "{changed} 个文件会变化（+{plus} / -{minus} 行）",
+      "rollback.same": "回滚后与当前一致",
+      "rollback.snapshot": "快照 {id}",
+      "rollback.reason": "原因：{reason}",
+      "rollback.createdAt": "创建于 {time}",
       "remote.notice.probed": "自检完成。"
     }
 
@@ -542,6 +581,45 @@ window.__ModuleLoader__.load({
       "remote.notice.started": "Started.",
       "remote.notice.stopped": "Stopped.",
       "remote.notice.rotated": "New token generated: old links and QR codes are invalid now.",
+      "actions.diff": "View diff",
+      "actions.rollbackLatest": "Roll back to latest snapshot",
+      "busy.diffing": "Comparing…",
+      "busy.rollbackPreview": "Computing rollback impact…",
+      "diff.title": "Diff preview",
+      "diff.hint": "Read-only: no snapshot is created and no file is written.",
+      "diff.emptyHint": "Click \"View diff\" to compare the working copy with the current profile.",
+      "diff.summary": "{changed} changed files (+{plus} / -{minus} lines)",
+      "diff.summary.same": "{n} more files unchanged",
+      "diff.empty": "No differences",
+      "diff.group.added": "Added",
+      "diff.group.modified": "Modified",
+      "diff.group.deleted": "Deleted",
+      "diff.lineStat": "+{added} / -{removed} lines",
+      "diff.expand": "Show hunks",
+      "diff.collapse": "Hide hunks",
+      "diff.truncated": "Showing the first {n} lines only",
+      "diff.truncatedFile": "Binary or oversized: stats only",
+      "diff.source.local": "This device: working copy → current profile",
+      "diff.source.remote": "Remote device: {device}",
+      "diff.deletedNote": "\"Deleted\" means present now but absent from the snapshot; rollback does not remove these files.",
+      "diff.failed": "Diff preview failed",
+      "rollback.title": "Roll back to latest snapshot",
+      "rollback.hint": "Two-step confirmation: review the impact first, then confirm manually.",
+      "rollback.step1": "Step 1 of 2: latest snapshot",
+      "rollback.step2": "Step 2 of 2: rollback preview",
+      "rollback.check": "See what this rollback changes",
+      "rollback.confirm": "Confirm rollback (cannot be undone)",
+      "rollback.cancel": "Cancel",
+      "rollback.back": "Back",
+      "rollback.empty": "No snapshot available to roll back to.",
+      "rollback.previewFailed": "Rollback preview failed; nothing was written.",
+      "rollback.willRestore": "Will write",
+      "rollback.none": "No file will be rewritten",
+      "rollback.summary": "{changed} files will change (+{plus} / -{minus} lines)",
+      "rollback.same": "Identical to the current file",
+      "rollback.snapshot": "Snapshot {id}",
+      "rollback.reason": "Reason: {reason}",
+      "rollback.createdAt": "Created {time}",
       "remote.notice.probed": "Check finished."
     }
 
@@ -1138,6 +1216,152 @@ window.__ModuleLoader__.load({
       return total
     }
 
+    function findSnapshot(snapshots, id) {
+      const list = Array.isArray(snapshots) ? snapshots : []
+      const wanted = String(id || '')
+      for (let i = 0; i < list.length; i++) {
+        const meta = list[i] && typeof list[i] === 'object' ? list[i] : {}
+        if (asText(meta.id) === wanted && wanted !== '') return meta
+      }
+      return null
+    }
+
+    /** 差异 totals 归一（缺字段按 0，绝不显示 NaN）。 */
+    function diffTotals(summary) {
+      const s = summary && typeof summary === 'object' ? summary : {}
+      const t = s.totals && typeof s.totals === 'object' ? s.totals : {}
+      function count(v) {
+        return typeof v === 'number' && isFinite(v) && v > 0 ? Math.floor(v) : 0
+      }
+      const added = count(t.added)
+      const modified = count(t.modified)
+      const deleted = count(t.deleted)
+      return {
+        added: added,
+        modified: modified,
+        deleted: deleted,
+        same: count(t.same),
+        plus: count(t.addedLines),
+        minus: count(t.removedLines),
+        changed: added + modified + deleted
+      }
+    }
+
+    /** 一句结论（与 host `summarize()` 同一口径，文案走 locale）。 */
+    function summarizeFileDiff(translate, summary) {
+      const totals = diffTotals(summary)
+      if (totals.changed === 0) return translate('diff.empty')
+      let text = translate('diff.summary', { changed: totals.changed, plus: totals.plus, minus: totals.minus })
+      if (totals.same > 0) text += ' · ' + translate('diff.summary.same', { n: totals.same })
+      return text
+    }
+
+    /** 按 kind 分组；`same` 不展示（只在结论里报数量）。 */
+    function fileDiffGroups(files) {
+      const groups = { added: [], modified: [], deleted: [] }
+      const list = Array.isArray(files) ? files : []
+      for (let i = 0; i < list.length; i++) {
+        const file = list[i] && typeof list[i] === 'object' ? list[i] : {}
+        if (file.kind === 'added' || file.kind === 'modified' || file.kind === 'deleted') groups[file.kind].push(file)
+      }
+      return groups
+    }
+
+    function kindBadge(translate, kind) {
+      if (kind === 'added') return { text: translate('diff.group.added'), tone: 'ok' }
+      if (kind === 'deleted') return { text: translate('diff.group.deleted'), tone: 'warn' }
+      return { text: translate('diff.group.modified'), tone: 'info' }
+    }
+
+    /**
+     * 文件级差异列表：按「新增 / 修改 / 删除」分组，每行 path + 行数 + 字节变化，
+     * 有 hunk 时可展开（等宽、限高滚动，truncated 时明说只显示了前 N 行）。
+     */
+    function FileDiffList(props) {
+      const translate = props.t
+      const files = Array.isArray(props.files) ? props.files : []
+      const hunks = Array.isArray(props.hunks) ? props.hunks : []
+      const openMap = props.openMap && typeof props.openMap === 'object' ? props.openMap : {}
+      if (!files.length) return h('p', { style: S.hint }, asText(props.emptyLabel) || translate('diff.empty'))
+      const groups = fileDiffGroups(files)
+      const blocks = []
+      ;['added', 'modified', 'deleted'].forEach(function (kind) {
+        const list = groups[kind]
+        if (!list.length) return
+        const badge = kindBadge(translate, kind)
+        blocks.push(
+          h(
+            'div',
+            { key: 'diff-group-' + kind, style: S.block },
+            h(
+              'div',
+              { style: S.blockHead },
+              h(Badge, { text: badge.text + ' ' + list.length, tone: badge.tone }),
+              kind === 'deleted' ? h('span', { style: S.hint }, translate('diff.deletedNote')) : null
+            ),
+            h(
+              'div',
+              { style: S.list },
+              list.map(function (file, index) {
+                const path = asText(file.path)
+                const pathHunks = hunks.filter(function (hunk) {
+                  return asText(hunk && hunk.path) === path
+                })
+                const open = Boolean(openMap[path])
+                const rows = [
+                  h(
+                    'div',
+                    { key: 'row-' + index, style: S.listRow },
+                    h('span', { style: S.listText }, path || '—'),
+                    h(
+                      'span',
+                      { style: S.listMeta },
+                      translate('diff.lineStat', { added: num(file.addedLines), removed: num(file.removedLines) })
+                    ),
+                    h('span', { style: S.listMeta }, fmtBytes(file.beforeBytes) + ' → ' + fmtBytes(file.afterBytes)),
+                    file.truncated
+                      ? h(Badge, { text: translate('diff.truncatedFile'), tone: 'warn' })
+                      : null,
+                    pathHunks.length
+                      ? h(
+                          'button',
+                          {
+                            type: 'button',
+                            style: S.linkBtn,
+                            onClick: function () {
+                              if (typeof props.onToggle === 'function') props.onToggle(path)
+                            }
+                          },
+                          open ? translate('diff.collapse') : translate('diff.expand')
+                        )
+                      : null
+                  )
+                ]
+                if (open) {
+                  pathHunks.forEach(function (hunk, hunkIndex) {
+                    const lines = Array.isArray(hunk && hunk.lines) ? hunk.lines : []
+                    rows.push(
+                      h(
+                        'div',
+                        { key: 'hunk-' + hunkIndex, style: S.diffCol },
+                        h('div', { style: S.diffColHead }, asText(hunk && hunk.header) || '@@'),
+                        h('pre', { style: S.pre }, lines.join('\n')),
+                        hunk && hunk.truncated
+                          ? h('div', { style: S.hint }, translate('diff.truncated', { n: lines.length }))
+                          : null
+                      )
+                    )
+                  })
+                }
+                return h('div', { key: 'file-' + index, style: S.entry }, rows)
+              })
+            )
+          )
+        )
+      })
+      return h('div', { style: S.entries }, blocks)
+    }
+
     // ------------------------------------------------------------------
     // Presentational components (stateless, inline styles only)
     // ------------------------------------------------------------------
@@ -1548,6 +1772,14 @@ window.__ModuleLoader__.load({
       const [confirmApply, setConfirmApply] = React.useState(false)
       const [confirmSnap, setConfirmSnap] = React.useState('')
       const [applyResult, setApplyResult] = React.useState(null)
+      // 差异预览（只读）与回滚两步确认：错误各自独立，任一步失败都停在当前步骤。
+      const [diffResult, setDiffResult] = React.useState(null)
+      const [diffError, setDiffError] = React.useState(null)
+      const [openDiffs, setOpenDiffs] = React.useState({})
+      const [rollbackStep, setRollbackStep] = React.useState('')
+      const [rollbackTarget, setRollbackTarget] = React.useState('')
+      const [rollbackPlan, setRollbackPlan] = React.useState(null)
+      const [rollbackError, setRollbackError] = React.useState(null)
       const initialized = React.useRef(false)
 
       React.useEffect(function () {
@@ -1790,6 +2022,106 @@ window.__ModuleLoader__.load({
           }
           setApplyResult(null)
           setNotice(tr('notice.rolledBack', { id: id }))
+          clearPreview()
+          await refreshSnapshots()
+          await reloadState({ silent: true })
+        })
+      }
+
+      /* ---- 差异预览：只读，失败只影响本卡片 ---------------------------- */
+
+      function doDiff() {
+        runTask('diff', async function () {
+          setDiffError(null)
+          const result = await rpcCall('previewDiff', {})
+          if (!alive.current) return
+          if (!result.ok) {
+            setDiffResult(null)
+            setDiffError(localizeError(tr, result.error))
+            return
+          }
+          setDiffResult(result.data && typeof result.data === 'object' ? result.data : {})
+          setOpenDiffs({})
+        })
+      }
+
+      function toggleDiff(path) {
+        const key = String(path || '')
+        if (!key) return
+        setOpenDiffs(function (prev) {
+          const next = Object.assign({}, prev)
+          next[key] = !prev[key]
+          return next
+        })
+      }
+
+      /* ---- 回滚两步确认：第 1 步只读预览，第 2 步才写 -------------------- */
+
+      function startRollback() {
+        setRollbackError(null)
+        setRollbackPlan(null)
+        const latest = snapshots.length ? snapshots[0] : null
+        const id = latest ? asText(latest.id) : ''
+        if (!id) {
+          setRollbackStep('')
+          setRollbackTarget('')
+          setNotice(tr('rollback.empty'))
+          return
+        }
+        setRollbackTarget(id)
+        setRollbackStep('pick')
+      }
+
+      function cancelRollback() {
+        setRollbackStep('')
+        setRollbackTarget('')
+        setRollbackPlan(null)
+        setRollbackError(null)
+      }
+
+      function backRollback() {
+        if (busy) return
+        setRollbackStep('pick')
+        setRollbackPlan(null)
+        setRollbackError(null)
+      }
+
+      function doRollbackPreview() {
+        const id = rollbackTarget
+        if (!id) return
+        runTask('rollbackPreview', async function () {
+          setRollbackError(null)
+          const result = await rpcCall('rollbackPreview', { snapshotId: id })
+          if (!alive.current) return
+          if (!result.ok) {
+            // 停在「第 1 步」：不展示未经验证的预览，也不写任何文件。
+            setRollbackPlan(null)
+            setRollbackError(localizeError(tr, result.error))
+            return
+          }
+          setRollbackPlan(result.data && typeof result.data === 'object' ? result.data : {})
+          setRollbackStep('preview')
+        })
+      }
+
+      function doRollbackConfirm() {
+        const id = rollbackTarget
+        if (!id || !rollbackPlan) return
+        runTask('rollback', async function () {
+          setRollbackError(null)
+          const result = await rpcCall('rollback', { snapshotId: id, confirm: true })
+          if (!alive.current) return
+          if (!result.ok) {
+            // 停在「第 2 步」：服务端 fail-closed（confirm 门禁 / sha 校验），这里只报错不重试。
+            const localized = localizeError(tr, result.error)
+            localized.hint = tr('rollback.previewFailed')
+            setRollbackError(localized)
+            return
+          }
+          const doneId = id
+          cancelRollback()
+          setApplyResult(null)
+          setNotice(tr('notice.rolledBack', { id: doneId }))
           clearPreview()
           await refreshSnapshots()
           await reloadState({ silent: true })
@@ -2206,6 +2538,18 @@ window.__ModuleLoader__.load({
               onClick: doPreview
             }),
             h(Btn, {
+              label: busy === 'diff' ? tr('busy.diffing') : tr('actions.diff'),
+              disabled: anyBusy,
+              title: tr('diff.hint'),
+              onClick: doDiff
+            }),
+            h(Btn, {
+              label: tr('actions.rollbackLatest'),
+              disabled: anyBusy || !snapshots.length,
+              title: snapshots.length ? tr('rollback.hint') : tr('rollback.empty'),
+              onClick: startRollback
+            }),
+            h(Btn, {
               label: busy === 'apply' ? tr('busy.applying') : tr('actions.apply'),
               primary: true,
               disabled: anyBusy || !canApply,
@@ -2372,6 +2716,72 @@ window.__ModuleLoader__.load({
         )
       )
 
+      // 5.5) 差异预览（只读） -------------------------------------------
+      const diffBody = []
+      if (diffError) {
+        diffBody.push(
+          h(ErrorBox, {
+            key: 'diff-error',
+            error: diffError,
+            title: tr('diff.failed'),
+            dismissLabel: tr('error.dismiss'),
+            onDismiss: function () {
+              setDiffError(null)
+            }
+          })
+        )
+      }
+      if (!diffResult) {
+        diffBody.push(h('p', { key: 'diff-hint', style: S.hint }, tr('diff.emptyHint')))
+      } else {
+        const diffSummary = diffResult.summary && typeof diffResult.summary === 'object' ? diffResult.summary : null
+        const diffFiles = diffSummary && Array.isArray(diffSummary.files) ? diffSummary.files : []
+        const diffHunks = Array.isArray(diffResult.hunks) ? diffResult.hunks : []
+        diffBody.push(
+          h(
+            'div',
+            { key: 'diff-meta', style: S.chipRow },
+            h(Badge, {
+              text: summarizeFileDiff(tr, diffSummary),
+              tone: diffTotals(diffSummary).changed > 0 ? 'info' : 'mute'
+            }),
+            h(Badge, {
+              text:
+                diffResult.local === false
+                  ? tr('diff.source.remote', { device: asText(diffResult.sourceDevice) || '—' })
+                  : tr('diff.source.local'),
+              tone: 'mute'
+            })
+          )
+        )
+        diffBody.push(
+          h(FileDiffList, {
+            key: 'diff-files',
+            t: tr,
+            files: diffFiles,
+            hunks: diffHunks,
+            openMap: openDiffs,
+            onToggle: toggleDiff
+          })
+        )
+      }
+      children.push(
+        h(
+          Card,
+          {
+            key: 'diff',
+            title: tr('diff.title'),
+            right: h(Btn, {
+              label: busy === 'diff' ? tr('busy.diffing') : tr('actions.diff'),
+              disabled: anyBusy,
+              onClick: doDiff
+            })
+          },
+          h('p', { key: 'diff-readonly', style: S.hint }, tr('diff.hint')),
+          diffBody
+        )
+      )
+
       // 6) Snapshots ---------------------------------------------------
       const snapshotRows = snapshots.map(function (snapshot, si) {
         const sn = snapshot && typeof snapshot === 'object' ? snapshot : {}
@@ -2453,6 +2863,138 @@ window.__ModuleLoader__.load({
             : h('p', { style: S.hint }, tr('snapshots.empty'))
         )
       )
+
+      // 6.5) 回滚两步确认（第 1 步只读预览，第 2 步才写） ----------------
+      const rollbackBody = []
+      if (!rollbackStep) {
+        rollbackBody.push(h('p', { key: 'rb-hint', style: S.hint }, tr('rollback.hint')))
+        rollbackBody.push(
+          h(
+            'div',
+            { key: 'rb-start', style: S.row },
+            h(Btn, {
+              label: tr('actions.rollbackLatest'),
+              disabled: anyBusy || !snapshots.length,
+              title: snapshots.length ? tr('rollback.hint') : tr('rollback.empty'),
+              onClick: startRollback
+            })
+          )
+        )
+      } else {
+        const target = findSnapshot(snapshots, rollbackTarget)
+        const planSummary = rollbackPlan && rollbackPlan.summary && typeof rollbackPlan.summary === 'object' ? rollbackPlan.summary : null
+        const planTotals = diffTotals(planSummary)
+        const planFiles = Array.isArray(rollbackPlan && rollbackPlan.files) ? rollbackPlan.files : []
+        const willRestore = Array.isArray(rollbackPlan && rollbackPlan.willRestore) ? rollbackPlan.willRestore : []
+
+        rollbackBody.push(
+          h(
+            'div',
+            { key: 'rb-step', style: S.chipRow },
+            h(Badge, {
+              text: rollbackStep === 'preview' ? tr('rollback.step2') : tr('rollback.step1'),
+              tone: 'info'
+            }),
+            h(Badge, { text: tr('rollback.snapshot', { id: rollbackTarget }), tone: 'mute' }),
+            target ? h('span', { style: S.snapMeta }, fmtTime(target.time)) : null
+          )
+        )
+        rollbackBody.push(
+          h(
+            'p',
+            { key: 'rb-reason', style: S.hint },
+            tr('rollback.reason', {
+              reason: (target && asText(target.reason)) || asText(rollbackPlan && rollbackPlan.reason) || '—'
+            }) +
+              ' · ' +
+              tr('rollback.createdAt', {
+                time: fmtTime((target && target.time) || asText(rollbackPlan && rollbackPlan.createdAt))
+              })
+          )
+        )
+
+        if (rollbackError) {
+          rollbackBody.push(
+            h(ErrorBox, {
+              key: 'rb-error',
+              error: rollbackError,
+              title: tr('error.title'),
+              dismissLabel: tr('error.dismiss'),
+              onDismiss: function () {
+                setRollbackError(null)
+              }
+            })
+          )
+        }
+
+        if (rollbackStep === 'preview' && rollbackPlan) {
+          rollbackBody.push(
+            h(
+              'div',
+              { key: 'rb-summary', style: S.chipRow },
+              h(Badge, {
+                text:
+                  planTotals.changed > 0
+                    ? tr('rollback.summary', {
+                        changed: planTotals.changed,
+                        plus: planTotals.plus,
+                        minus: planTotals.minus
+                      })
+                    : tr('rollback.same'),
+                tone: planTotals.changed > 0 ? 'warn' : 'mute'
+              })
+            )
+          )
+          rollbackBody.push(
+            h(
+              'p',
+              { key: 'rb-will', style: S.hint },
+              tr('rollback.willRestore') + '：' + (willRestore.length ? willRestore.join('、') : tr('rollback.none'))
+            )
+          )
+          rollbackBody.push(
+            h(FileDiffList, {
+              key: 'rb-files',
+              t: tr,
+              files: planFiles,
+              hunks: [],
+              openMap: {},
+              emptyLabel: tr('rollback.same')
+            })
+          )
+          rollbackBody.push(
+            h(
+              'div',
+              { key: 'rb-actions', style: S.confirmBar },
+              h('div', { style: S.confirmText }, tr('rollback.hint')),
+              h(Btn, {
+                label: busy === 'rollback' ? tr('busy.rollingBack') : tr('rollback.confirm'),
+                primary: true,
+                danger: true,
+                disabled: anyBusy,
+                onClick: doRollbackConfirm
+              }),
+              h(Btn, { label: tr('rollback.back'), disabled: anyBusy, onClick: backRollback }),
+              h(Btn, { label: tr('rollback.cancel'), disabled: anyBusy, onClick: cancelRollback })
+            )
+          )
+        } else {
+          rollbackBody.push(
+            h(
+              'div',
+              { key: 'rb-actions', style: S.row },
+              h(Btn, {
+                label: busy === 'rollbackPreview' ? tr('busy.rollbackPreview') : tr('rollback.check'),
+                primary: true,
+                disabled: anyBusy,
+                onClick: doRollbackPreview
+              }),
+              h(Btn, { label: tr('rollback.cancel'), disabled: anyBusy, onClick: cancelRollback })
+            )
+          )
+        }
+      }
+      children.push(h(Card, { key: 'rollback', title: tr('rollback.title') }, rollbackBody))
 
       // 7) Last apply result -------------------------------------------
       if (applyResult && typeof applyResult === 'object') {

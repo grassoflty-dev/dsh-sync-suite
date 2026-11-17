@@ -9,6 +9,7 @@
  */
 import { randomBytes } from 'node:crypto';
 import { readProfilePatch, pluginsOf } from './collect.js';
+import { diffText, summarizeFiles } from './diff.js';
 import { SyncError } from './errors.js';
 import { localOnlyKeys, mergePatch } from './patch.js';
 import { mergePluginManifests } from './pluginMerge.js';
@@ -255,4 +256,51 @@ export class PreviewCache {
     clear() {
         this.current = null;
     }
+}
+/**
+ * 把 `buildPreview` 的 **entry 级**差异转成文件级 `DiffSummary`。
+ *
+ * 远端快照只有脱敏后的四个文件，apply 真正改写的是 patch 里的条目，所以路径用
+ * `devices/<deviceId>/cordis.patch.yml#<entryId>` 这种伪文件形式：一行对应一个条目，
+ * 用户仍然能按「新增 / 修改 / 删除」分组并把差异展开成 hunk 文本。
+ * providers / plugins / mcp 的 id 级差异仍由既有 `preview` 的 DiffList 展示，不在这里重复。
+ */
+export function fileDiffOfPreview(internal, options = {}) {
+    const blocks = [];
+    const allFiles = [];
+    const allHunks = [];
+    for (const source of Array.isArray(internal?.sources) ? internal.sources : []) {
+        const files = [];
+        const hunks = [];
+        for (const entry of Array.isArray(source.entries) ? source.entries : []) {
+            const path = `devices/${source.deviceId}/cordis.patch.yml#${entry.id}`;
+            // added → 远端新增；same → 一致；changed / manual → 会被改写（manual 需本地补值）。
+            const kind = entry.status === 'added' ? 'added' : entry.status === 'same' ? 'same' : 'modified';
+            const localText = typeof entry.localText === 'string' ? entry.localText : '';
+            const remoteText = typeof entry.remoteText === 'string' ? entry.remoteText : '';
+            const stat = {
+                path,
+                kind,
+                addedLines: 0,
+                removedLines: 0,
+                beforeBytes: byteLength(localText),
+                afterBytes: byteLength(remoteText),
+            };
+            if (kind !== 'same') {
+                const result = diffText(localText, remoteText, { ...options, path });
+                stat.addedLines = result.addedLines;
+                stat.removedLines = result.removedLines;
+                for (const hunk of result.hunks)
+                    hunks.push(hunk);
+            }
+            files.push(stat);
+        }
+        const block = { deviceId: source.deviceId, files, summary: summarizeFiles(files), hunks };
+        blocks.push(block);
+        for (const file of files)
+            allFiles.push(file);
+        for (const hunk of hunks)
+            allHunks.push(hunk);
+    }
+    return { files: allFiles, summary: summarizeFiles(allFiles), hunks: allHunks, sources: blocks };
 }

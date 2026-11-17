@@ -14,6 +14,8 @@
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { SYNC_FILE_NAMES } from './collect.js';
+import { diffFiles } from './diff.js';
 import { SyncError } from './errors.js';
 import { composePatch, findEntryByKey, parsePatch } from './patch.js';
 import { sha256Hex } from './paths.js';
@@ -226,4 +228,51 @@ export async function rollbackSnapshot(ctx, options) {
         });
     }
     return { restored: [patchFile], verified: true };
+}
+async function readTextForPreview(file) {
+    try {
+        return await readFile(file, 'utf8');
+    }
+    catch (error) {
+        throw new SyncError('E_IO', `读取 ${file} 失败：${error instanceof Error ? error.message : String(error)}`, { file });
+    }
+}
+/**
+ * 计算「回滚到某快照会改什么」，**不写任何文件、不创建快照**。
+ *
+ * fail-closed：快照缺失 / id 非法 / manifest 里的 sha256 与文件不一致，
+ * 都在这里抛错（E_NOT_FOUND / E_VALIDATION / E_SHA_MISMATCH），前端停在当前步骤。
+ */
+export async function previewRollback(ctx, options) {
+    const snapshotId = typeof options.snapshotId === 'string' ? options.snapshotId : '';
+    // snapshots.get 负责 id 形态校验（E_VALIDATION）与 manifest sha256 校验（E_SHA_MISMATCH）。
+    const snapshot = ctx.snapshots.get(snapshotId);
+    if (!(PROFILE_PATCH_NAME in snapshot.files)) {
+        throw new SyncError('E_NOT_FOUND', `快照 ${snapshotId} 里没有 ${PROFILE_PATCH_NAME}，回滚不会写入任何文件`, {
+            snapshotId,
+        });
+    }
+    const names = new Set(Object.keys(snapshot.files));
+    for (const name of SYNC_FILE_NAMES) {
+        if (existsSync(path.join(ctx.profileDir, name)))
+            names.add(name);
+    }
+    const before = {};
+    const after = {};
+    for (const name of Array.from(names).sort()) {
+        const currentFile = path.join(ctx.profileDir, name);
+        if (existsSync(currentFile))
+            before[name] = await readTextForPreview(currentFile);
+        if (Object.prototype.hasOwnProperty.call(snapshot.files, name))
+            after[name] = snapshot.files[name] ?? '';
+    }
+    const summary = diffFiles(before, after);
+    return {
+        snapshotId: snapshot.id,
+        createdAt: snapshot.time,
+        reason: snapshot.reason,
+        files: summary.files,
+        summary,
+        willRestore: [profilePatchPath(ctx.profileDir)],
+    };
 }
