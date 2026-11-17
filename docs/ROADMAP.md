@@ -138,9 +138,8 @@
 | 独立只读评审（安全边界 / 失败语义 / token 出口） | pm/review-remote | ✅ 完成：**有条件通过**，P0=0 / P1=2 / P2=2，见 `docs/REVIEW-remote-security.md` | - | 无 |
 | 评审修复 M1（ipv6 方式起不来）/ M2（上游 cookie 过期不 fail-closed）/ M3（manualUrl token 进 DOM）/ M4（`?k=` 与 `?token=` 不一致） | pm | ✅ 全部已修 + 补测试（见下「评审修复」） | - | 无 |
 | 真机验收（平板已切回家中 WiFi，`192.168.1.10` / USB `6MFBB25C27205131`） | pm/qa-remote-device | ✅ 完成（**3 通过 / 1 不通过 / 1 未执行**） | - | 见下「真机验收结论」 |
-| 真机：竖↔横旋转往返 | —— | **待用户动手** | - | 设备无 `wm`/rotate，`uitest` 无 rotate，`snapshot_display` 无旋转参数 → 只能人工把平板转一次再补拍 |
-| 真机缺陷：内嵌 Web 的 WebSocket 握不上（`ERR_WS_UPGRADE -173`） | —— | **待定位（P1）** | - | 见下「WS 缺陷定位」；**先要 DSH 重启让本插件进链路**才能分清是 ArkWeb 还是代理 |
-| 真实 GUI 渲染验证（设置页「配置同步」+「远程访问」两个 section） | —— | **待办（等 DSH 重启）** | - | 用户决定本轮不重启；重启后需人工看一眼设置页渲染，别丢 |
+| 真机：装最新 HAP（含访问令牌字段）+ 竖↔横旋转往返 | —— | **阻塞** | - | 平板当前 `hdc list targets` = `[Empty]`（USB 断开 / 无线调试未开）；需用户接回后我立刻装机 + 截两张图 |
+| 重启后复测（插件是否进链路 / 设置页两 section 真实渲染 / 内嵌 Web WS 是否仍 -173） | —— | **待用户重启 DSH** | - | 一键脚本已就绪：`node packages/dsh-git-config-sync/tools/post-restart-check.mjs --token <token> --lan 192.168.1.6`；清单见 `docs/RESTART-CHECKLIST.md` |
 
 ### 端到端证据（`192.168.1.6:3099` → 真实 DSH `127.0.0.1:3080`）
 
@@ -238,10 +237,19 @@ probe: unknown 本机检查通过，但公网可达性必须从外网确认
 
 **发布状态（重要）**
 
-- **未发 Release**（未获 lead 批准）。
-- **未打 `dist-*` 交付包、未生成发布用 SHA256 清单**；本轮只有 `dist/remote/*.js` 的源码构建产物随仓库提交。
+- **未发 Release**（未获 lead 批准；本轮按决定**只打 `dist-*`**，不 `git tag`、不 GitHub Release、不改版本号对外声明）。
+- **交付包**：`dist-20261118-0744/`（含 `SHA256SUMS.txt` + `MANIFEST.md`），commit `2b29abb`，工作树 clean：
+
+  | 文件 | 字节 | SHA256 |
+  | --- | --- | --- |
+  | `arkui-schedule-harmony-debug-signed.hap` | 2,897,035 | `84903ff223f71d3495473824bc8d7369e4af8b0b1ab5af06f8fea5b4f1311721` |
+  | `dsh-git-config-sync-1.0.0.tgz` | 192,132 | `4457796b1dfb7cbfd89e5f6b61d9dd73c0d4a760fadde6ce3cc87c022c22a031` |
+  | `REMOTE-ACCESS-OPTIONS.md` | 22,112 | `4452b9b90098d682170893ed2e7cd3a2038d11ebb2bad508e29c83b51ee02e26` |
+  | `REVIEW-remote-security.md` | 28,337 | `6379bc12be9ad43ee1cb63b286e9c12bf1bd9a5ac4231406a7a1527110176be3` |
+
+- `dist-*/` 已在 `.gitignore`（二进制不进仓库）；重新生成：`node tools/pack-dist.mjs --tests "<全仓数字>" --validate "8/8"`。
 - 插件在 `~/.dsh/profiles/desktop` 是 **junction 链接**（`link:`），重启 DSH 即加载新 `dist/`；
-  **本轮按用户决定不重启**，因此「设置页两个 section 的真实 GUI 渲染」仍未验证（记为上方待办）。
+  **本轮按用户决定不重启**，因此「设置页两个 section 的真实 GUI 渲染」仍未验证（见上表待办）。
 
 ### 真机验收结论（2026-11-17，`6MFBB25C27205131`）
 
