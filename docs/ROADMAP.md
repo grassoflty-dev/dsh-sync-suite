@@ -166,6 +166,11 @@ PASS  bad-token-not-echoed
 复现：`DSH_UPSTREAM_TOKEN=<launch token> node packages/dsh-git-config-sync/tools/e2e-remote.mjs`
 （脚本在包内 `tools/`，读 env 里的 token，不落盘）。
 
+**收尾全量验证（2026-11-17 22:1x）**：`node --test "packages/*/test/*.test.mjs"
+"apps/arkui-schedule/tools/test/*.test.mjs"` → **1459 例 / 1458 pass / 0 fail / 1 skip**
+（skip 是 listener 的 fetch 用例：本机 `HTTP_PROXY=127.0.0.1:7897` 且 `NO_PROXY` 不含 LAN，
+被代理接管；无代理环境会真跑）；`validate-app` **8/8**；插件 `tsc -p` **exit 0**。
+
 ### IPv6 真绑定端到端（`[2409:8a20:4cad:ba20:d2c0:3d53:7540:763c]:3098`）
 
 `node packages/dsh-git-config-sync/tools/e2e-ipv6.mjs`（env: `DSH_UPSTREAM_TOKEN` + `V6`）：
