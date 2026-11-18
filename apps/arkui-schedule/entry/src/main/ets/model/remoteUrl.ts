@@ -537,6 +537,57 @@ export function mergeRemoteToken(url: string, token: string): string {
   return `${head}?${kept.join('&')}${fragment}`;
 }
 
+/**
+ * 去掉地址里 `token` / `k` 的**整组**参数，返回仍然可打开的纯地址。
+ *
+ * 为什么需要它：`docs/CONFIG-UX.md` §B.4 要求落盘的「最近一次成功」记录**不含 secret**；
+ * 重连时缺的令牌由调用方用已保存的 `remoteToken` 走 `mergeRemoteToken()` 现拼，
+ * 令牌在偏好文件里因此只存一份（`remoteToken`），记录本身可以随便看、随便贴。
+ *
+ * 与 `sanitizeUrlForDisplay()` 的区别：后者把值换成 `***`，只用于展示，拿去重连必然 401；
+ * 这里是删掉整对键值。口径与 `queryHasToken` 同源（键名大小写不敏感）；
+ * `?k` 这种没有值的裸键不算令牌参数，原样保留，免得把 URL 形态改掉。
+ * 删空 query 时连 `?` 一起去掉；**没有令牌参数时原样返回**（逐字等价，连空参数对
+ * `?a=1&&b=2` 都不动——只有真的删掉令牌时才会顺手收掉那些空对，见下）。
+ */
+export function stripRemoteToken(url: string): string {
+  const text: string = typeof url === 'string' ? url : '';
+  if (text.length === 0) {
+    return '';
+  }
+  const hash: number = text.indexOf('#');
+  const beforeHash: string = hash >= 0 ? text.slice(0, hash) : text;
+  const fragment: string = hash >= 0 ? text.slice(hash) : '';
+  const question: number = beforeHash.indexOf('?');
+  if (question < 0) {
+    return text;
+  }
+  const head: string = beforeHash.slice(0, question);
+  const kept: string[] = [];
+  let stripped: boolean = false;
+  for (const pair of beforeHash.slice(question + 1).split('&')) {
+    if (pair.length === 0) {
+      continue;
+    }
+    const equal: number = pair.indexOf('=');
+    const key: string = (equal >= 0 ? pair.slice(0, equal) : pair).toLowerCase();
+    if (equal >= 0 && TOKEN_KEYS.indexOf(key) >= 0) {
+      stripped = true;
+      continue;
+    }
+    kept.push(pair);
+  }
+  // 没有令牌参数 → 逐字返回原串（「记录不含 secret」不需要它顺手做规范化，
+  // 保持等价才能让「无令牌时结果与入参相同」这条注释说得通）
+  if (!stripped) {
+    return text;
+  }
+  if (kept.length === 0) {
+    return `${head}${fragment}`;
+  }
+  return `${head}?${kept.join('&')}${fragment}`;
+}
+
 // ============================================================================
 // 二、一键重连：只记「最近一次成功的地址 + 时间」
 //

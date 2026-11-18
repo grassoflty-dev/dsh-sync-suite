@@ -164,6 +164,15 @@ export interface ScheduleSettings {
    * （设置页只用 `maskRemoteToken` 显示"已保存"）。
    */
   remoteToken: string;
+  /**
+   * 「最近一次成功打开的远程地址」记录（单行 JSON `{"url":"…","at":<毫秒>}`；空串 = 无记录）。
+   *
+   * 用途只有一个：设置页的「一键重连 <host:port>」按钮（`docs/CONFIG-UX.md` §B.4）。
+   * 纪律：**不含 secret**——写入前调用方必须走 `stripRemoteToken()` 把 `token` / `k` 整组删掉，
+   * 重连时再用已保存的 `remoteToken` 现拼（`mergeRemoteToken`）。解析失败一律当「无记录」，
+   * 不让一行坏数据影响设置页（`decodeLastOk` 的容忍度见 `model/remoteUrl.ts`）。
+   */
+  remoteLastOk: string;
   /** 上次同步成功的时刻（ISO 8601，空串表示从未同步）。仅用于设置页展示。 */
   lastSyncAt: string;
   /** 上次同步失败的**分级后中文文案**（空串表示上次没有失败）。仅用于设置页展示。 */
@@ -220,6 +229,7 @@ export interface SettingsPatch {
   remoteIpv6Address?: string;
   remoteManualUrl?: string;
   remoteToken?: string;
+  remoteLastOk?: string;
 }
 
 /** 备用源配置（`deepseek` 服务层直接消费；`configured=false` 表示不启用）。 */
@@ -269,6 +279,7 @@ const KEY_REMOTE_CLOUDFLARE_HOST: string = 'remoteCloudflareHost';
 const KEY_REMOTE_IPV6_ADDRESS: string = 'remoteIpv6Address';
 const KEY_REMOTE_MANUAL_URL: string = 'remoteManualUrl';
 const KEY_REMOTE_TOKEN: string = 'remoteToken';
+const KEY_REMOTE_LAST_OK: string = 'remoteLastOk';
 const KEY_LAST_SYNC_AT: string = 'lastSyncAt';
 const KEY_LAST_SYNC_ERROR: string = 'lastSyncError';
 const KEY_LAST_SYNC_ACTION: string = 'lastSyncAction';
@@ -418,6 +429,8 @@ export class SettingsStore {
     const remoteManualUrl = readString(await prefs.get(KEY_REMOTE_MANUAL_URL, ''), '');
     // 访问令牌（可选）：旧数据没有这个键 → 空串（= 不带令牌，与升级前行为一致）
     const remoteToken = readString(await prefs.get(KEY_REMOTE_TOKEN, ''), '');
+    // 「最近一次成功」记录：旧数据没有这个键 → 空串（= 没有可重连的记录）
+    const remoteLastOk = readString(await prefs.get(KEY_REMOTE_LAST_OK, ''), '');
     const lastSyncAt = readString(await prefs.get(KEY_LAST_SYNC_AT, ''), '');
     const lastSyncError = readString(await prefs.get(KEY_LAST_SYNC_ERROR, ''), '');
     const lastSyncAction = readString(await prefs.get(KEY_LAST_SYNC_ACTION, ''), '');
@@ -463,6 +476,7 @@ export class SettingsStore {
       remoteIpv6Address: remoteIpv6Address.trim(),
       remoteManualUrl: remoteManualUrl.trim(),
       remoteToken: remoteToken.trim(),
+      remoteLastOk: remoteLastOk.trim(),
       lastSyncAt: lastSyncAt,
       lastSyncError: lastSyncError,
       lastSyncAction: normalizeSyncAction(lastSyncAction)
@@ -652,6 +666,8 @@ export class SettingsStore {
       // 访问令牌（可选）：只去首尾空白（粘贴常带换行）；空串 = 明确"清除令牌"，
       // 所以设置页**不能**拿空输入框直接覆盖——它必须走「没改就沿用」的通道。
       remoteToken: patch.remoteToken === undefined ? current.remoteToken : patch.remoteToken.trim(),
+      // 「最近一次成功」记录：整串替换（内容由调用方用 encodeLastOk 生成）；只去首尾空白
+      remoteLastOk: patch.remoteLastOk === undefined ? current.remoteLastOk : patch.remoteLastOk.trim(),
       lastSyncAt: current.lastSyncAt,
       lastSyncError: current.lastSyncError,
       lastSyncAction: current.lastSyncAction
@@ -692,6 +708,7 @@ export class SettingsStore {
     await prefs.put(KEY_REMOTE_IPV6_ADDRESS, next.remoteIpv6Address);
     await prefs.put(KEY_REMOTE_MANUAL_URL, next.remoteManualUrl);
     await prefs.put(KEY_REMOTE_TOKEN, next.remoteToken);
+    await prefs.put(KEY_REMOTE_LAST_OK, next.remoteLastOk);
     await prefs.put(KEY_GIT_USERNAME, next.gitUsername);
     await prefs.put(KEY_LAST_SYNC_AT, next.lastSyncAt);
     await prefs.put(KEY_LAST_SYNC_ERROR, next.lastSyncError);
@@ -750,6 +767,7 @@ export class SettingsStore {
       remoteIpv6Address: current.remoteIpv6Address,
       remoteManualUrl: current.remoteManualUrl,
       remoteToken: current.remoteToken,
+      remoteLastOk: current.remoteLastOk,
       lastSyncAt: patch.lastSyncAt === undefined ? current.lastSyncAt : patch.lastSyncAt,
       lastSyncError: patch.lastSyncError === undefined ? current.lastSyncError : patch.lastSyncError,
       lastSyncAction:

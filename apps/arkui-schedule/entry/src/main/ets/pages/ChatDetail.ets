@@ -6,6 +6,8 @@
  * 平板在这里续写会制造两条分叉的事件流（§1.1 的坏结局）。所以本页：
  * - 顶部固定一条说明「这是从 Git 同步来的只读会话，不能在这里继续对话」；
  * - **底部没有输入框**，也没有发送按钮（不给假入口）；
+ * - 底部唯一的出口是「在电脑上继续」：**跳转**到远程控制页（写入仍发生在电脑端），不是接管、
+ *   不是输入框、也不是发送按钮；`docs/CHAT-APP.md` §8.5「不做接管入口」的纪律不变；
  * - 工具调用只显示一行灰字等宽摘要（`🔧 <name>`），不渲染参数/结果（参数含绝对路径与命令输出）。
  *
  * 排版选择：**统一左对齐 + 角色小字**，而不是「user 右 / assistant 左」的双侧气泡。
@@ -24,11 +26,14 @@ import { loadingText } from '../common/copy';
 import { APP_VERSION } from '../common/version';
 import { formatChatTime } from '../model/chatList';
 import type { ChatMessage } from '../model/chatList';
+import { normalizeRemoteUrl, routeToRemote } from '../model/remoteUrl';
+import type { RemoteUrlCheck } from '../model/remoteUrl';
 import { formatDiagnostics } from '../model/stateView';
 import type { DiagnosticsInput } from '../model/stateView';
 import { chatStore } from '../services/chatStore';
 import type { ChatDetailResult } from '../services/chatStore';
 import { describeError } from '../services/scheduleStore';
+import { settingsStore } from '../services/settingsStore';
 import { ActionButton } from '../components/ActionButton';
 import { PageLayout } from '../components/PageLayout';
 import { EmptyState } from '../components/state/EmptyState';
@@ -69,6 +74,8 @@ struct ChatDetail {
   @State errorText: string = '';
   /** 首次读取中。 */
   @State loading: boolean = true;
+  /** 远程控制可用的地址；空串 = 不可用，按钮禁用并给原因。 */
+  @State remoteUrl: string = '';
 
   private disposed: boolean = false;
 
@@ -76,6 +83,8 @@ struct ChatDetail {
     this.chatId = this.readParamId();
     chatStore.prepare(getContext(this) as common.UIAbilityContext);
     this.load();
+    // 跳转出口的地址与正文读取互不依赖：并行取，失败也只是按钮禁用，不影响会话内容。
+    this.loadRemoteTarget();
   }
 
   aboutToDisappear(): void {
@@ -131,6 +140,35 @@ struct ChatDetail {
       this.errorText = `读取会话失败：${describeError(error)}`;
     }
     this.loading = false;
+  }
+
+  /** 读「电脑上的 DSH 地址」：只用于跳转出口；不可用就留空串（按钮禁用并给原因）。 */
+  private async loadRemoteTarget(): Promise<void> {
+    try {
+      // 带 context：本页可能先于设置页被打开（历史栈返回 / 深链），load 会顺带幂等初始化
+      const settings = await settingsStore.load(getContext(this) as common.UIAbilityContext);
+      if (this.disposed) {
+        return;
+      }
+      const check: RemoteUrlCheck = normalizeRemoteUrl(settings.remoteUrl);
+      this.remoteUrl = check.ok ? check.url : '';
+    } catch {
+      if (!this.disposed) {
+        this.remoteUrl = '';
+      }
+    }
+  }
+
+  /** 「在电脑上继续」：跳到远程控制页，把地址作为路由参数带过去（写入仍发生在电脑端）。 */
+  private continueOnPc(): void {
+    if (this.remoteUrl.length === 0) {
+      return;
+    }
+    try {
+      router.pushUrl({ url: routeToRemote(), params: { url: this.remoteUrl } });
+    } catch (error) {
+      promptAction.showToast({ message: `打开远程控制失败：${describeError(error)}` });
+    }
   }
 
   /**
@@ -344,6 +382,39 @@ struct ChatDetail {
     .alignItems(HorizontalAlign.Start)
   }
 
+  /**
+   * 底部跳转出口「在电脑上继续」：**只跳转，不接管**（写入仍在电脑端）。
+   *
+   * 地址不可用时给出 `disabledReason`（由 `ActionButton` 在点击时 toast），而不是给一个点了
+   * 没反应的假按钮；说明行用辅助字号 + 灰字，和顶部只读提示一样是「说明」而非操作。
+   */
+  @Builder
+  ContinueOnPc() {
+    Column({ space: SPACING.xs }) {
+      ActionButton({
+        label: '在电脑上继续',
+        enabled: this.remoteUrl.length > 0,
+        disabledReason: '先在设置里填写电脑上的 DSH 地址',
+        busy: false,
+        variant: 'secondary',
+        block: true,
+        onTap: (): void => {
+          this.continueOnPc();
+        },
+        onBlockedTap: null
+      })
+      Text('在电脑上打开 DSH 接管这条会话；本页只读，写入仍是电脑端的事')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+    }
+    .width('100%')
+    .padding({ top: SPACING.sm })
+    .alignItems(HorizontalAlign.Start)
+  }
+
   build() {
     // 根节点必须是**容器组件**（同 Chats.ets：10905210 实测），与 Detail/Edit/Index/Settings 同形：
     // Stack 兜底 + PageLayout 作为其唯一子节点。
@@ -367,6 +438,8 @@ struct ChatDetail {
           } else {
             this.MessageList()
           }
+          // 跳转出口在四选一内容区之外、列表之下：列表 layoutWeight(1) 吃剩余空间，出口固定可见。
+          this.ContinueOnPc()
         }
         .width('100%')
         .height('100%')

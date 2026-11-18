@@ -34,8 +34,8 @@ import { webview } from '@kit.ArkWeb';
 import { common, Want } from '@kit.AbilityKit';
 import { loadingText } from '../common/copy';
 import { APP_VERSION } from '../common/version';
-import { normalizeRemoteUrl } from '../model/remoteUrl';
-import type { RemoteUrlCheck } from '../model/remoteUrl';
+import { encodeLastOk, normalizeRemoteUrl, stripRemoteToken } from '../model/remoteUrl';
+import type { LastOkEntry, RemoteUrlCheck } from '../model/remoteUrl';
 import { formatDiagnostics } from '../model/stateView';
 import type { DiagnosticsInput } from '../model/stateView';
 import { ActionButton } from '../components/ActionButton';
@@ -165,6 +165,30 @@ struct RemoteControl {
   }
 
   // ------------------------------------------------------------------ 动作
+
+  /**
+   * 记录「最近一次成功」：`onPageEnd` = 主文档加载完成，是 App 侧最接近「这台电脑的 DSH 页面
+   * 确实打开了」的信号（`docs/CONFIG-UX.md` §B.4 的「一键重连」数据源）。
+   *
+   * 三条纪律：
+   * - **失败不覆盖**：`loadError` 非空时直接返回——旧记录是用户找回「上次能连的地址」的唯一线索；
+   * - **不含 secret**：落盘前 `stripRemoteToken()` 删掉 `token` / `k`，令牌在偏好文件里只存
+   *   `remoteToken` 一份，重连时用 `mergeRemoteToken()` 现拼；
+   * - **写失败不影响页面**：纯展示状态，下一次加载成功还会再写一次。
+   */
+  private recordLastOk(): void {
+    if (this.url.length === 0 || this.loadError.length > 0) {
+      return;
+    }
+    const stored: string = stripRemoteToken(this.url);
+    if (stored.length === 0) {
+      return;
+    }
+    const entry: LastOkEntry = { url: stored, at: Date.now() };
+    settingsStore.save({ remoteLastOk: encodeLastOk(entry) }).catch((): void => {
+      // 纯展示状态：写失败不改 UI、不打断 Web
+    });
+  }
 
   /** 刷新：先清错误态，再让 Web 重新加载（错误卡片上的「重试」与标题栏「刷新」共用）。 */
   private refresh(): void {
@@ -401,6 +425,10 @@ struct RemoteControl {
         .height('100%')
         .javaScriptAccess(true)
         .domStorageAccess(true)
+        .onPageEnd(() => {
+          // 主文档加载完成 → 记下「最近一次成功」（失败路径由 onErrorReceive 标 loadError，不写）
+          this.recordLastOk();
+        })
         .onErrorReceive((event: OnErrorReceiveEvent) => {
           // 只看主文档：子资源（favicon 之类）失败不该把整页判成打不开
           if (!event.request.isMainFrame()) {

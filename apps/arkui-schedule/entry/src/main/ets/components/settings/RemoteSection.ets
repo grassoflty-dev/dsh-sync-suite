@@ -13,6 +13,8 @@
  * - 「DSH 地址」那一行既是最终链接的预览（自动拼），也是 `manual` 方式的手输框；
  * - 空地址时「打开远程控制」不可用（`ActionButton` 的 `enabled` + `disabledReason`：点不动就
  *   toast 出原因），按钮**下方**同样保留「先填写电脑上的 DSH 地址」；
+ * - 「一键重连」按钮放在「打开远程控制」**之上**、仅当 `reconnectText` 文案非空时才出现；
+ *   文案由页面从最近成功记录派生，只到 host:port，**绝不含令牌**；
  * - 「清除令牌」是 `ActionButton` 的 ghost 档（不是裸 Text 当按钮）。
  */
 import { ActionButton } from '../ActionButton';
@@ -54,6 +56,8 @@ export struct RemoteSection {
   /** 最终要打开的地址（也可能是用户手输的那一行）。 */
   @Prop remoteUrl: string = '';
   @Prop remoteUrlError: string = '';
+  /** 一键重连按钮文案：非空才出按钮；文案由页面派生（只到 host:port），不含令牌。 */
+  @Prop reconnectText: string = '';
 
   // ---------------------------------------------------------------- 页面只读派生（函数 props）
   /** 当时「访问方式」的元数据（页面读 `REMOTE_MODES`，未知/空回落 `lan`）。 */
@@ -92,6 +96,8 @@ export struct RemoteSection {
   onClearToken: () => void = () => {};
   /** 「打开远程控制」：拼地址 → 归一 → 落盘 → 跳内嵌页。 */
   onOpenRemote: () => void = () => {};
+  /** 「一键重连」：照最近一次成功的地址原路重开（不重新推导方式字段）。 */
+  onReconnect: () => void = () => {};
 
   // ---------------------------------------------------------------- 共用字段构件（转发 SettingsBits）
   @Builder
@@ -346,6 +352,22 @@ export struct RemoteSection {
           .fontColor($r('app.color.warning'))
           .width('100%')
           .textAlign(TextAlign.Start)
+      }
+
+      // 一键重连：只有文案非空（有可用的最近成功记录）时才出现，且放在主按钮之上
+      if (this.reconnectText.length > 0) {
+        ActionButton({
+          label: this.reconnectText,
+          enabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: 'secondary',
+          block: true,
+          onTap: (): void => {
+            this.onReconnect();
+          },
+          onBlockedTap: null
+        })
       }
 
       ActionButton({

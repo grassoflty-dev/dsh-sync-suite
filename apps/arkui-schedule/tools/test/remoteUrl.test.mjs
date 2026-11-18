@@ -21,7 +21,8 @@ const {
   decodeLastOk,
   canReconnect,
   reconnectLabel,
-  sanitizeUrlForDisplay
+  sanitizeUrlForDisplay,
+  stripRemoteToken
 } = await import('../.build/model/remoteUrl.js');
 
 /** 断言「拒绝」：ok=false、url 为空串、reason 逐字匹配。 */
@@ -560,5 +561,69 @@ describe('sanitizeUrlForDisplay：展示/日志用地址打码', () => {
     const shown = sanitizeUrlForDisplay(`http://192.168.1.6:3080/?token=${secret}&x=1`);
     assert.equal(shown.includes(secret), false);
     assert.equal(shown.includes('***'), true);
+  });
+});
+
+describe('stripRemoteToken：落盘前删掉 token / k 整组参数（记录不含 secret）', () => {
+  test('只有令牌参数时删掉整组，并连 `?` 一起去掉（空 query 不留尾巴）', () => {
+    // `docs/CONFIG-UX.md` §B.4：落盘的「最近一次成功」记录不能带 secret；删空后必须是纯地址，不能留下 `…?`
+    assert.equal(stripRemoteToken('http://192.168.1.6:3080/?token=abc'), 'http://192.168.1.6:3080/');
+    assert.equal(stripRemoteToken('http://192.168.1.6:3080/?token='), 'http://192.168.1.6:3080/');
+  });
+
+  test('`k` 与 `token` 等价；两者混排时整组都删', () => {
+    // 服务端令牌门同时接受 `token` / `k`（评审 M4），清理动作必须同口径，否则 `?k=` 的 secret 会漏进记录
+    assert.equal(stripRemoteToken('http://h:3080/?k=abc'), 'http://h:3080/');
+    assert.equal(stripRemoteToken('http://h:3080/?token=a&k=b'), 'http://h:3080/');
+    assert.equal(stripRemoteToken('http://h:3080/?k=a&token=b'), 'http://h:3080/');
+  });
+
+  test('没有令牌参数时原样返回（结果与入参等价）', () => {
+    // 普通 query 一个字都不动：这是「清理」而不是「重写 URL」，否则用户填的分页/筛选参数会丢
+    assert.equal(stripRemoteToken('http://h:3080/ui?x=1'), 'http://h:3080/ui?x=1');
+    assert.equal(stripRemoteToken('http://h:3080/ui'), 'http://h:3080/ui');
+  });
+
+  test('无令牌时逐字等价：连 `?a=1&&b=2` 这种空参数对也不动（只有真删令牌才顺手收空对）', () => {
+    assert.equal(stripRemoteToken('http://h:3080/?a=1&&b=2'), 'http://h:3080/?a=1&&b=2');
+    assert.equal(stripRemoteToken('http://h:3080/?a=1&&token=x'), 'http://h:3080/?a=1');
+  });
+
+  test('保留其它参数与顺序，只摘掉令牌那一组', () => {
+    // 重连时只缺令牌，其余 query 参数必须原样带回，顺序也不能被打乱
+    assert.equal(stripRemoteToken('http://h:3080/?x=1&token=a&y=2'), 'http://h:3080/?x=1&y=2');
+    assert.equal(stripRemoteToken('http://h:3080/?x=1&k=a&y=2&token=b'), 'http://h:3080/?x=1&y=2');
+  });
+
+  test('fragment 原样保留；无 query 的 fragment 地址不受影响', () => {
+    // `#` 之后是路由 fragment（如 `#/chat`）不是 query，删令牌不能把它一起吃掉
+    assert.equal(stripRemoteToken('http://h:3080/?token=a#/chat'), 'http://h:3080/#/chat');
+    assert.equal(stripRemoteToken('http://h/#/chat'), 'http://h/#/chat');
+  });
+
+  test('键名大小写不敏感：TOKEN / K 都删（与 hasToken / sanitizeUrlForDisplay 同口径）', () => {
+    // 键名比较统一 lowerCase，避免「地址说有令牌却没删干净」这种自相矛盾
+    assert.equal(stripRemoteToken('http://h:3080/?TOKEN=a&K=b'), 'http://h:3080/');
+    assert.equal(stripRemoteToken('http://h:3080/?Token=a'), 'http://h:3080/');
+  });
+
+  test('裸键 `?k`（没有 `=`）不算令牌参数，原样保留', () => {
+    // 没有值的裸键不是 secret；删了只会平白改动 URL 形态，遵循「宁可少删」的口径
+    assert.equal(stripRemoteToken('http://h:3080/?k'), 'http://h:3080/?k');
+    assert.equal(stripRemoteToken('http://h:3080/?x=1&k'), 'http://h:3080/?x=1&k');
+  });
+
+  test('空串 / 非字符串入参（null / undefined）→ 空串（沿用模块内 typeof 兜底）', () => {
+    // 偏好文件读出来可能是 null/undefined：纯函数必须 fail-closed 返回空串、不抛异常
+    assert.equal(stripRemoteToken(''), '');
+    assert.equal(stripRemoteToken(null), '');
+    assert.equal(stripRemoteToken(undefined), '');
+  });
+
+  test('与 mergeRemoteToken 组合：落盘不带令牌、重连时现拼（闭环）', () => {
+    // 记录里剥掉令牌、重连时用已保存的 remoteToken 拼回去——secret 在偏好文件里只存一份
+    const merged = mergeRemoteToken('http://h:3080/', 'sec');
+    assert.equal(merged, 'http://h:3080/?token=sec');
+    assert.equal(stripRemoteToken(merged), 'http://h:3080/');
   });
 });

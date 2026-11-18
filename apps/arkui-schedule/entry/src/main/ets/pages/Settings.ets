@@ -84,7 +84,10 @@ import type { GitSyncConfig, GitSyncResult } from '../services/GitSyncService';
 import { describeRepoProbe, repoProbeUrl, validateRepoUrl } from '../model/repoUrl';
 import type { RepoUrlCheck } from '../model/repoUrl';
 import { normalizeRemoteUrl, routeToRemote } from '../model/remoteUrl';
+// 一键重连（§B.4）：只把记录还原成可打开的地址并派生按钮文案，令牌不进记录
+import { decodeLastOk, mergeRemoteToken, reconnectLabel } from '../model/remoteUrl';
 import type { RemoteUrlCheck } from '../model/remoteUrl';
+import type { LastOkEntry } from '../model/remoteUrl';
 import {
   REMOTE_AVAILABILITY_NEEDS_SETUP,
   REMOTE_AVAILABILITY_UNSUPPORTED,
@@ -403,6 +406,11 @@ struct Settings {
    * 输入框留空 = 不改（沿用已保存的令牌），见 `effectiveRemoteToken()`。
    */
   @State remoteToken: string = '';
+  /**
+   * 最近一次成功连接的单行 JSON 记录 `{"url","at"}`；空串=无记录。
+   * 仅供「一键重连」按钮派生文案与还原地址用，记录里绝不含令牌（令牌仍只存 `remoteToken`）。
+   */
+  @State remoteLastOk: string = '';
 
   /** 从列表页跳转过来时要自动执行的同步动作（pull / push / status）。 */
   private autoAction: string = '';
@@ -448,6 +456,26 @@ struct Settings {
     // 页面销毁后不要再改状态（异步回调里用 disposed 拦截），避免销毁后 setState 崩溃
     this.disposed = true;
     this.webReady = false;
+  }
+
+  /**
+   * 每次回到本页都补读一次「最近一次成功」记录（从远程控制页返回时可能刚写了新记录）。
+   */
+  onPageShow(): void {
+    this.refreshRemoteLastOk();
+  }
+
+  /** 只刷新重连记录：绝不用 applySettings 整表 reload，否则会覆盖用户正在编辑的表单。 */
+  private async refreshRemoteLastOk(): Promise<void> {
+    try {
+      const settings = await settingsStore.load();
+      if (this.disposed) {
+        return;
+      }
+      this.remoteLastOk = settings.remoteLastOk;
+    } catch {
+      // 纯展示状态：读失败就当没有新记录，不打扰用户
+    }
   }
 
   private readAutoAction(): void {
@@ -554,6 +582,7 @@ struct Settings {
     // **不回填输入框**——输入框只存"用户这次想改成的值"，留空即"不改"。
     this.savedRemoteToken = settings.remoteToken.trim();
     this.remoteToken = '';
+    this.remoteLastOk = settings.remoteLastOk;
     // 升级迁移（**只在首次铺表单时做一次**）：老数据只有 `remoteUrl`、没有任何方式字段。
     // 若按默认的 `lan` 走，「局域网地址」是空的 → 原来能打开的地址会突然点不动。
     // 因此把它当成「手动填的完整地址」打开；用户点一次「打开远程控制」后方式就落盘成 manual。
@@ -1936,22 +1965,65 @@ struct Settings {
   }
 
   /**
+   * 一键重连按钮文案（§B.4）：没有记录 / 记录里地址已不合法时为空串，按钮不出现。
+   *
+   * 三条纪律：① 只在「最近成功时间」非空时出按钮；② 文案由 `reconnectLabel` 派生，
+   * 只到 host:port，**绝不含令牌**；③ 点下去照上次那条连接重开，不重新推导访问方式顺序。
+   */
+  private reconnectText(): string {
+    return reconnectLabel(decodeLastOk(this.remoteLastOk), Date.now());
+  }
+
+  /**
+   * 一键重连：把记录里的地址（无令牌）合上当前令牌，交给 `openRemote` 原路重开。
+   *
+   * 成功更新时间戳、失败保留旧时间戳都由远程控制页负责（§B.4）；本页只读记录、不改变方式字段。
+   * 记录损坏时给一句可操作红字，绝不拿半截地址去打开一个注定不可达的内嵌 Web。
+   */
+  private async reconnectLastOk(): Promise<void> {
+    const entry: LastOkEntry | null = decodeLastOk(this.remoteLastOk);
+    if (entry === null) {
+      this.remoteUrlError = '重连失败：最近一次成功的记录已损坏，请重新填写地址';
+      return;
+    }
+    // mergeRemoteToken 在记录里的地址已不合法时返回空串。空串**不能**交给 openRemote：
+    // 它会退化成「按当前方式字段重新拼」，把「重连失败」变成「按别的方式打开」，
+    // 红字还会变成「请先填写电脑上的 DSH 地址」——与真实原因（记录失效）不符。
+    const merged: string = mergeRemoteToken(entry.url, this.effectiveRemoteToken());
+    if (merged.length === 0) {
+      this.remoteUrlError = '重连失败：最近一次成功的地址已失效，请重新填写地址';
+      return;
+    }
+    this.remoteUrlError = '';
+    await this.openRemote(merged);
+  }
+
+  /**
    * 「打开远程控制」：按访问方式拼地址 → 归一 → 落盘 → 再跳内嵌页。
    *
    * 顺序是刻意的：先保存再跳转，远程控制页拿到的一定是已经落盘的新地址；
    * 拼不出地址（缺字段 / `uu` 不可用）或地址非法时只标红、**不**跳转
    * （不要打开一个注定不可达的内嵌 Web）。
+   *
+   * `overrideUrl` 非空 = 一键重连：直接用记录里的地址，**不按当前方式字段重新拼**；
+   * 归一、保存、跳转的链路与普通打开完全一致（§B.4）。
    */
-  private async openRemote(): Promise<void> {
-    const config: RemoteAccessConfig = this.remoteAccessConfig();
-    const built: RemoteAccessUrlResult = buildRemoteAccessUrl(config);
-    if (!built.ok) {
-      // 方式侧的中文原因（缺字段 / 隧道域名带路径 / UU 入口为空 等）
-      const why: string = built.reason.trim();
-      this.remoteUrlError = why.length > 0 ? `地址不可用：${why}` : '地址不可用：请先填写电脑上的 DSH 地址';
-      return;
+  private async openRemote(overrideUrl: string = ''): Promise<void> {
+    const override: string = overrideUrl.trim();
+    if (override.length === 0) {
+      const config: RemoteAccessConfig = this.remoteAccessConfig();
+      const built: RemoteAccessUrlResult = buildRemoteAccessUrl(config);
+      if (!built.ok) {
+        // 方式侧的中文原因（缺字段 / 隧道域名带路径 / UU 入口为空 等）
+        const why: string = built.reason.trim();
+        this.remoteUrlError = why.length > 0 ? `地址不可用：${why}` : '地址不可用：请先填写电脑上的 DSH 地址';
+        return;
+      }
+      this.remoteUrl = built.url;
+    } else {
+      // 一键重连：照记录里的地址重开，不用当前方式字段重新拼（§B.4）
+      this.remoteUrl = override;
     }
-    this.remoteUrl = built.url;
     const check: RemoteUrlCheck = normalizeRemoteUrl(this.remoteUrl);
     if (!check.ok) {
       // 红字直接用 model/remoteUrl 给的中文原因（缺协议/有空格/不完整），空则退回通用提示
@@ -1961,30 +2033,33 @@ struct Settings {
     }
     this.remoteUrlError = '';
     this.remoteUrl = check.url;
-    if (this.remoteMode === REMOTE_MODE_MANUAL) {
-      // 手动方式的「完整地址」以归一后的地址为准，避免存一份 `192.168.1.6:3080` 半成品
-      this.remoteManualUrl = check.url;
-    }
     try {
       // 只写远程控制这一项（SettingsPatch 未出现的字段保持原值）
       await settingsStore.save({ remoteUrl: check.url });
-      // 访问方式与各字段再存一次：第一条已经把「能打开的地址」落盘，即使第二条写入失败，
-      // 用户下次进设置页仍有可用地址（不会两样都丢）。
-      // 令牌走「输入框优先、留空沿用已保存」的语义：这里传的是真正拼进地址的那个值，
-      // 所以「打开远程控制」也顺手把刚填的令牌保存下来（不会出现地址带新令牌、字段还是旧的）。
-      const nextRemoteToken: string = this.effectiveRemoteToken();
-      await settingsStore.save({
-        remoteMode: this.remoteMode,
-        remoteLanAddress: this.remoteLanAddress,
-        remotePort: config.port,
-        remoteTailscaleHost: this.remoteTailscaleHost,
-        remoteCloudflareHost: this.remoteCloudflareHost,
-        remoteIpv6Address: this.remoteIpv6Address,
-        remoteManualUrl: this.remoteManualUrl,
-        remoteToken: nextRemoteToken
-      });
-      this.savedRemoteToken = nextRemoteToken;
-      this.remoteToken = '';
+      if (override.length === 0) {
+        // 重连不重新推导方式字段：下面这段只在普通打开时执行
+        if (this.remoteMode === REMOTE_MODE_MANUAL) {
+          // 手动方式的「完整地址」以归一后的地址为准，避免存一份 `192.168.1.6:3080` 半成品
+          this.remoteManualUrl = check.url;
+        }
+        // 访问方式与各字段再存一次：第一条已经把「能打开的地址」落盘，即使第二条写入失败，
+        // 用户下次进设置页仍有可用地址（不会两样都丢）。
+        // 令牌走「输入框优先、留空沿用已保存」的语义：这里传的是真正拼进地址的那个值，
+        // 所以「打开远程控制」也顺手把刚填的令牌保存下来（不会出现地址带新令牌、字段还是旧的）。
+        const nextRemoteToken: string = this.effectiveRemoteToken();
+        await settingsStore.save({
+          remoteMode: this.remoteMode,
+          remoteLanAddress: this.remoteLanAddress,
+          remotePort: this.remotePortValue(),
+          remoteTailscaleHost: this.remoteTailscaleHost,
+          remoteCloudflareHost: this.remoteCloudflareHost,
+          remoteIpv6Address: this.remoteIpv6Address,
+          remoteManualUrl: this.remoteManualUrl,
+          remoteToken: nextRemoteToken
+        });
+        this.savedRemoteToken = nextRemoteToken;
+        this.remoteToken = '';
+      }
     } catch (error) {
       if (this.disposed) {
         return;
@@ -2303,6 +2378,7 @@ struct Settings {
       remoteToken: this.remoteToken,
       remoteUrl: this.remoteUrl,
       remoteUrlError: this.remoteUrlError,
+      reconnectText: this.reconnectText(),
       remoteSpec: (): RemoteModeSpec => this.remoteSpec(),
       remoteModeIndex: (): number => this.remoteModeIndex(),
       remoteModeOptionLabel: (index: number): string => this.remoteModeOptionLabel(index),
@@ -2360,6 +2436,9 @@ struct Settings {
       },
       onOpenRemote: (): void => {
         this.openRemote();
+      },
+      onReconnect: (): void => {
+        this.reconnectLastOk();
       }
     })
   }

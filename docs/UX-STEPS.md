@@ -10,7 +10,7 @@
 > | 覆盖层状态 | `node apps/arkui-schedule/tools/overlay.mjs status` → `applied=false`（读的是「共享源码 + 平台目录」原始形态） |
 > | 真机 | **不可用**：本机 `hdc` 不在 PATH（`hdc list targets` 报 `CommandNotFoundException`），本表所有数字**均非真机实测** |
 > | 口径版本 | `v1`（本文件 §1；后续所有人照这个数，改口径必须升版本并在本文件留痕） |
-| 行号基准 | 所有 `文件:行号` 以 **HEAD `379fcc5`** 为准（`git show 379fcc5:<file>` 可复核）。本文件写完时工作区已有**并行分支的未提交改动**，见 §5.1 末条。 |
+| 行号基准 | §2 的「改前」行号以 **HEAD `379fcc5`** 为准（`git show 379fcc5:<file>` 可复核）；§4.1 的「改后」以 **`main@6ecec62` + 其上的 B 批未提交工作树** 为准。本文件写完时工作区已有**并行分支的未提交改动**，见 §5.1 末条。 |
 
 ---
 
@@ -302,6 +302,31 @@
 
 ---
 
+### 4.1 本轮实际落地（B 批 D1-b + D2 P1；HEAD `6ecec62` 之上的未提交工作树）
+
+> 口径仍按 §1（v1），每个数字都能按 §2 的记法逐项对上。**全部是源码复算，不是真机实测**
+> （见 §5.2）。本轮只交付了「一键重连」与「在电脑上继续」两个入口，D4 / D6 等未做，
+> 所以合计只降 1 步——这是真实结果，不按「建议目标」凑数。
+
+| # | 路径 | 改前 | 改后（本轮） | 差 | 逐项算式（tap / scroll / wait） |
+| --- | --- | --- | --- | --- | --- |
+| 4 | 连远程 DSH（二次及以后） | **8**（tap 3 + scroll 2 + wait 3） | **7**（tap 2 + scroll 2 + wait 3） | **−1** | tap：`⚙ 设置` 1 + `重新连接 <host:port>` 1 = 2（原来要「点地址框」+「点打开远程控制」两个 tap，重连用**一个** tap 走同一条保存/跳转链路）；scroll 仍 2（重连按钮在远程组内、主按钮**之上**，不改变滚动量）；wait 仍 3（读设置 / 落盘+路由 / Web 首屏）。首次无记录时仍是 8。 |
+| 5 | 打开 chat 并想继续（终点＝详情页） | **10**（tap 3 + scroll 4 + wait 3） | **10**（tap 3 + scroll 4 + wait 3） | **0** | 出口按钮固定在列表**之外**、底部常驻 → 到达详情页时已在视野内，**不新增 scroll**；终点也从「死路」变成「有出路」。 |
+| 5′ | 同上，终点改为「在电脑上打开 DSH、可继续」 | **17**（tap 6 + scroll 6 + wait 5） | **12**（tap 4 + scroll 4 + wait 4） | **−5** | 改后：详情页 tap `在电脑上继续` 1 次（0 scroll）→ wait Web 首屏 1 次（地址走路由参数，**没有**落盘等待）。改前同终点 = 原 10 步 + 返回列表 1 tap + 返回设置 1 tap + 向上滚回远程组 2 scroll + 打开远程控制 1 tap + 落盘/路由 1 wait + Web 首屏 1 wait。 |
+
+**合计**：改前 **43 步**（§2.0 口径）→ 本轮 **42 步**（路径 4 −1；路径 5 终点口径不变）。
+
+- **路径 4 为什么只省 1 步、而不是本表 §4 先前估的 −3**：那 −3 把 D6（设置页锚点）省的
+  2 个 scroll 也算进去了，并且把「粘贴 / 重敲地址」当成了可省动作——按 §1.2 第 1 条，
+  **输入文字本身不计数**，能把地址预填好这件事只值 1 个 tap。D6 未做，所以 scroll 仍是 2。
+- **路径 5′ 的 5 步不含**「在 DSH 网页里重新找到这条会话」的点击数：那段发生在 `RemoteControl`
+  的内嵌 `Web` 里，依赖 DSH 网页 UI，本表没有覆盖（`unverified`）。
+- **原 P1 目标 26 未达成**：它依赖 D6 锚点（路径 3/4/5 各 −2 scroll）、D4 快捷 chip、
+  路径 1/2 的落盘改造，本轮均未做。已落地部分只拿到 43→42 这 1 步，差距 16 步全部属于未做项，
+  不是本轮的回归。
+
+---
+
 ## 5. 本表的可信度边界
 
 ### 5.1 可复算（读源码数的，任何人可用 grep/node 复核）
@@ -313,10 +338,11 @@
 - **D3 的「已满足」**：`Handwriting.ets:2030-2038` 的分支代码 + `handwritingToolbar.test.mjs:412-439`
   的断言，两者互相印证，可直接读。
 - **D1 的 `?k=` 不一致**：`remoteUrl.ts:170` 与 `packages/dsh-dots/src/remote/routes.ts:177` 对读即可确认。
-- **D1 的「无一键重连」**：`settingsStore.ets:137-166` 字段清单 + `:263-271` 键常量清单，两份都没有
-  `lastOk*`；全仓库 `lastOk|最近成功` 只在 `docs/CONFIG-UX.md`（设计稿）里出现，未落地。
-- **D2 的「完全没有入口」**：`ChatDetail.ets` 全文无 `TextInput` / `TextArea` / `Button('发送')`，
-  只有 `:317-349` 的 `build()`。
+- **D1 的「无一键重连」**（**改前基准**；本轮已落地，见 §4.1）：`settingsStore.ets:137-166` 字段清单
+  + `:263-271` 键常量清单，两份都没有 `lastOk*`；写本节时全仓库 `lastOk|最近成功` 只在
+  `docs/CONFIG-UX.md`（设计稿）里出现，未落地。
+- **D2 的「完全没有入口」**（**改前基准**；本轮已加跳转出口，见 §4.1）：`ChatDetail.ets` 全文无
+  `TextInput` / `TextArea` / `Button('发送')`，只有 `:317-349` 的 `build()`。
 - **D7 的「死代码」**：`node` 全量扫过 `.ets/.ts/.mjs/.md/.json`，`CalendarPicker` 除自身定义、
   `model/calendar.ts` 注释、`docs/FEATURE-BACKLOG.md:20` 与构建缓存外无引用。
 - **D3 的折行算术**：`904vp > 673.7vp` 由 `toolbarMetrics.ts:114` + `Handwriting.ets:407-413` 的公式
@@ -334,6 +360,14 @@
   （`RemoteControl.ets` 文件头注释提到可能报错）——都按 §1.3 不计入，但真机上可能额外打断流程。
 - **设备可用性**：本机 **`hdc` 不在 PATH**（`hdc list targets` → `CommandNotFoundException`），
   **没有任何真机验证**。因此本文件不出现「已验证」字样；凡涉及真机的结论一律 `unverified` / `est`。
+- **§4.1 新增的两个入口（本轮）同样 `unverified`**：
+  - 「重新连接 <host:port>」按钮是否真的落在远程组的**可视区**、与「打开远程控制」之间的间距是否被
+    挤成两屏（`RemoteSection.ets` 里它插在主按钮之上，只有源码顺序证据，**没有**真机排版证据）；
+  - `ChatDetail` 底部的「在电脑上继续」是否被系统手势条 / 软键盘遮挡（该页列表 `layoutWeight(1)`，
+    按钮在其外，理论上常驻底部，**真机未验**）；
+  - `Web.onPageEnd` 是否等价于「页面真的可用」（它只说明**主文档**加载完成；DSH 前端 JS 初始化失败、
+    或 WebSocket 被判 `ERR_WS_UPGRADE(-173)` 时，`onPageEnd` 仍可能已触发）→ 所以「记录最近成功」
+    不等于「已验证这条连接可用」，这一条只是**最接近**成功的 App 侧信号，`unverified`。
 - **行号会漂（重要）**：写本表期间，工作区就在被别的分支并行改动——
   `entry/src/main/ets/model/remoteUrl.ts` 从 273 行涨到 **697 行**（新增 `parseRemoteInput` /
   `mergeRemoteToken` / `extractTokenFromQuery` / `TOKEN_KEYS=['token','k']` / `canReconnect` /
