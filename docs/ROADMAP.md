@@ -131,6 +131,9 @@
 | chat P1 上传 + App 只读查看 | —— | 排队 | 依赖 `docs/RESEARCH-session-import.md`（已出：slug 可复现、Node 自带 zstd、外部写入**有条件**被识别） |
 | 真机待验：笔迹过滤 / 工具条一屏 / 撤销重做可点 / 装最新 HAP / 横竖屏 | —— | **阻塞** | 平板 `hdc list targets` = `[Empty]`，需用户接回 USB 或开无线调试 |
 | 重复 DSH 后复测（插件进链路 / 设置页两 section / 内嵌 Web WS） | —— | **待用户重启 DSH** | `tools/post-restart-check.mjs` + `docs/RESTART-CHECKLIST.md` |
+| chat P1 上传 + App 只读查看（实现） | pm/exec-chat-upload | 排队 | 设计已定：`docs/CHAT-SYNC.md` §2/§3/§7；格式事实见 `docs/RESEARCH-session-import.md` §2/§6.2 |
+| chat P2 导入回 DSH（`session.v4.jsonl.zstd`） | pm/exec-chat-import | 排队 | 依赖 `docs/RESEARCH-session-import.md` §1.1/§6.1/§6.3（slug 复刻、header `version=4`、`cwd` 必须指向本机存在目录） |
+| chat P3 纯对话 preset（工具隔离） | pm/exec-chat-preset | 调研中 | 依赖 `docs/RESEARCH-chat-preset.md`（待产出） |
 
 ### 第 5 轮关键事实订正
 
@@ -148,6 +151,22 @@
 
 | 任务 | 负责人 | 状态 | ETA | 阻塞 |
 | --- | --- | --- | --- | --- |
+### 第 5 轮待办（等用户 / 等决策）
+
+- **UU 远程两个实测点（等用户用 UU 客户端验，别自己去测）**：
+  1. 映射后它给的到底是 `域名`、`host:port`，还是仅 `127.0.0.1:端口`？（决定 `normalizeUuEntry` 的默认协议怎么定）
+  2. 用 `curl -i <入口>` 能否拿到 200；以及 `Upgrade: websocket` 是否被放行（决定内嵌 Web 能否用 `/api/remote.mux`）。
+  验收后只改 `packages/dsh-git-config-sync/src/remote/urls.ts` 的 `normalizeUuEntry` 一处 + 一条文案。
+- **手写板 5 项真机验证（平板一接回就做，第一件事装最新 HAP）**：penOnly 挡手掌（含笔迹面板切开关即时生效）、
+  笔迹面板二级菜单、工具条两行折行（且折叠后画布高度够写）、撤销/重做可点、横竖屏往返。
+- **日程"并写制"两个候选方案（等用户点头，先不实现）**：
+  - (a) **保存前冲突提示**：编辑保存时若远端存在同 id 且 `ts` 更新的版本 → 弹「这条在 `<设备>` 上被改过，保存会覆盖」+
+    双侧字段对比（标题/时间/正文/完成态），可选择「仍保存 / 放弃 / 先看远端」。**不改** 现有折叠语义。
+  - (b) **换机接管向导**：新设备首次同步时可选「继承旧设备目录」——把 `devices/<旧id>/` 复制/重命名为 `devices/<新id>/`
+    （只追加、不删旧目录），并同步更新 `.device-fingerprint` 与本地 `deviceId`，向导里逐条列出将要搬的日期文件。
+- **chat P2（导入回 DSH）先不写码**：等 `docs/CHAT-SYNC.md` 定稿 + 一次端到端实验（拿真会话导回、确认侧边栏出现且能继续）。
+- **chat P3（纯对话 preset）**：等 `docs/RESEARCH-chat-preset.md` 结论 + 独立只读评审（安全边界）。
+
 ## 进行中（第 4 轮，2026-11-18）——已收口
 
 | 任务 | 负责人 | 状态 | ETA | 阻塞 |

@@ -369,3 +369,12 @@ Index 侧 :146-153 的断言（`settingsStore.load(` 必须早于 `await summari
   历史按钮是 `Row + onClick` 且**不含 `.enabled(`**、`applyUndo/applyRedo` 真被调用、`onStatsChange → touchUi` 接线、
   面板「更多 / 仅手写笔输入 / 说明文案 / 切换即落盘并传画布」。
 
+
+### 9.6 两行时的画布高度（2026-11-18 复核，防后人改回滚动）
+
+- **竖屏实测换算**：本机 2560×1600、density ≈ 2.375 → `pageW ≈ 673.7vp`、`pageH ≈ 1077.9vp`；两行工具条
+  = `2 × barThickness(64) + 1(DIVIDER) = 129vp`，画布仍有 **≈ 949vp（≈88%）**，远超"能舒服写一行字"的下限。
+- **横屏不折行**：`rail` 是竖向条（`barThickness` 56–84 用作**宽度**），不占高度。
+- **判据是算出来的，不是拍阈值**：`topBarTwoRows()` 只在两种情况下为真 —— ① `pageW < 640vp`（极窄屏，
+  9 项物理放不下，直接两行）；② `topBarRequiredWidth() > pageW`（用真实控件尺寸求和）。二者都**不滚动**。
+- **不许为了"一行"把分页单元格压到 < 44vp**：触控定版优先于"一行好看"。
