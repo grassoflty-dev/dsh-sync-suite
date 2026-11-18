@@ -12,10 +12,14 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, test } from 'node:test';
+import { readRemoteSection, readSettingsSources } from './settingsSources.mjs';
 
 const ETS = new URL('../../entry/src/main/ets/', import.meta.url);
 const STORE = readFileSync(new URL('services/settingsStore.ets', ETS), 'utf8');
-const PAGE = readFileSync(new URL('pages/Settings.ets', ETS), 'utf8');
+// 因 A2 拆分移动：远程控制组的界面搬到了 components/settings/RemoteSection.ets，
+// 「页面级」断言（applySettings / saveSettings / openRemote / 访问令牌只写通道）仍在
+// pages/Settings.ets 里。`PAGE` 用作「设置页整体」的锚点（页面 + 五个 section 合并），断言不变。
+const PAGE = readSettingsSources();
 
 /**
  * 截取某个方法体（从 `签名` 到下一个顶层 `async `/`private `/`/**` 段落）。
@@ -55,7 +59,7 @@ function builderBody(source, name) {
 const LOAD_BODY = methodBody(STORE, 'async load(');
 const SAVE_BODY = methodBody(STORE, 'async save(');
 const SYNC_STATE_BODY = methodBody(STORE, 'async saveSyncState(');
-const REMOTE_GROUP = builderBody(PAGE, 'RemoteGroup');
+const REMOTE_GROUP = builderBody(readRemoteSection(), 'build');
 // openRemote 后面紧跟「通用 Builder」分节：按这个分节标记切，避免把整页后续代码都算进方法体
 const OPEN_REMOTE = PAGE.slice(
   PAGE.indexOf('private async openRemote('),

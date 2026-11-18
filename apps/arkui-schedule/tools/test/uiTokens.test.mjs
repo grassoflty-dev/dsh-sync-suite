@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { readSettingsSources } from './settingsSources.mjs'
 import {
   BREAKPOINTS,
   DIVIDER,
@@ -24,7 +25,9 @@ import {
 
 const INDEX = readFileSync(new URL('../../entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8')
 const PAGE_LAYOUT = readFileSync(new URL('../../entry/src/main/ets/components/PageLayout.ets', import.meta.url), 'utf8')
-const SETTINGS = readFileSync(new URL('../../entry/src/main/ets/pages/Settings.ets', import.meta.url), 'utf8')
+// 因 A2 拆分移动：设置页界面拆到 `pages/Settings.ets` + `components/settings/*.ets`，
+// 「设置页」的静态断言锚点改成两者合并（页面 + 五个 section + bits）；断言本身不变。
+const SETTINGS = readSettingsSources()
 const DETAIL_PAGE = readFileSync(new URL('../../entry/src/main/ets/pages/Detail.ets', import.meta.url), 'utf8')
 const EDIT_PAGE = readFileSync(new URL('../../entry/src/main/ets/pages/Edit.ets', import.meta.url), 'utf8')
 const DETAIL_VIEW = readFileSync(new URL('../../entry/src/main/ets/components/RecordDetailView.ets', import.meta.url), 'utf8')

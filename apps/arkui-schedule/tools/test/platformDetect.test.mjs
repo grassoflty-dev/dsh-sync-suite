@@ -18,6 +18,10 @@ import test from 'node:test';
 
 import { parseJson5 } from '../json5.mjs';
 import { detectPlatformFrom } from '../.build/common/platform.js';
+import { requireOverlayRestored } from './guard.mjs';
+
+// 构建期 overlay 生效时，本文件的源码扫描结论无意义 → 硬失败（不跳过、不自动 restore）。
+requireOverlayRestored("platformDetect.test.mjs");
 
 const ROOT = new URL('../../', import.meta.url);
 

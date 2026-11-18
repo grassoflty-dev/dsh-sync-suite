@@ -10,11 +10,15 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { readSettingsSources } from './settingsSources.mjs';
 
 const APP = fileURLToPath(new URL('../../entry/src/main/ets/', import.meta.url));
 const REPO_SRC = fileURLToPath(new URL('../../../../packages/dsh-git-config-sync/src/', import.meta.url));
 
-const SETTINGS_PAGE = readFileSync(join(APP, 'pages/Settings.ets'), 'utf8');
+// 因 A2 拆分移动：设置页界面现在在 `pages/Settings.ets` + `components/settings/*.ets`。
+// 凭据卫生的审计对象是「设置页整体」，所以锚点改成合并源码（页面 + 五个 section + bits）；
+// 断言本身不变（token/AI key 仍然只能出现在 Password 输入框里、不许进 Text）。
+const SETTINGS_PAGE = readSettingsSources();
 const GIT_SERVICE = readFileSync(join(APP, 'services/GitSyncService.ets'), 'utf8');
 const SETTINGS_STORE = readFileSync(join(APP, 'services/settingsStore.ets'), 'utf8');
 const SCHEDULE_STORE = readFileSync(join(APP, 'services/scheduleStore.ets'), 'utf8');

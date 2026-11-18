@@ -12,6 +12,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
+import { readSettingsSources } from './settingsSources.mjs';
 
 const {
   GIT_PLATFORM_PRESETS,
@@ -274,7 +275,9 @@ describe('平台与 HTTPS 用户名兜底（P0 不回归）', () => {
 });
 
 describe('设置页接线（源码级）：四个平台 chip、推断提示、SSH 说明', () => {
-  const PAGE = readFileSync(new URL('../../entry/src/main/ets/pages/Settings.ets', import.meta.url), 'utf8');
+  // 因 A2 拆分移动：平台推断提示 / 地址占位符搬到了 components/settings/SyncSection.ets，
+  // 平台 chip 与 `?` 弹层仍在页面里。锚点改成「页面 + 五个 section」的合并源码；断言不变。
+  const PAGE = readSettingsSources();
 
   test('四个平台 chip 都在，且平台值走 normalizeGitPlatform（不是旧的二值归一）', () => {
     for (const chip of ['PLATFORM_GITHUB', 'GITEE_PLATFORM', 'PLATFORM_GITLAB', 'PLATFORM_CUSTOM']) {

@@ -56,6 +56,15 @@
  * `resolveModel` / `aiBaseURLFor` 归一，因此本页**只传原始值**，不重复归一化。
  *
  * token / AI key 只存本机 preferences，不进同步载荷与日志；本页不打印它们。
+ *
+ * **A2 拆分（纯重构，行为不变）**：五个功能组的界面从本页搬到了
+ * `components/settings/{SyncSection,RemoteSection,AiSection,DataSection,AboutSection}.ets`：
+ * - 本页仍然是**唯一的状态持有者**（全部 `@State` 与业务方法：保存 / 同步 / 导出 / 远程控制 /
+ *   主题切换 / 弹层），并负责装配（`SyncGroup()` 等 5 个 builder，紧凑屏与宽屏共用）；
+ * - 子组件只收**单向 props + 回调**（`@Prop` 值 + `onXxx`），不持有共享状态 —— 因此刷新语义
+ *   与拆分前一致：父页面值变了才重绘，回调闭包始终读页面最新状态；
+ * - 共用字段构件（`FieldLabel` / `ErrorText` / `HintLine` / `FieldNote`）在
+ *   `components/settings/SettingsBits.ets`，页面只用得着两个（弹层里也画标题与说明行）。
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { webview } from '@kit.ArkWeb';
@@ -79,12 +88,9 @@ import type { RemoteUrlCheck } from '../model/remoteUrl';
 import {
   REMOTE_AVAILABILITY_NEEDS_SETUP,
   REMOTE_AVAILABILITY_UNSUPPORTED,
-  REMOTE_MODE_CLOUDFLARE,
-  REMOTE_MODE_IPV6,
   REMOTE_MODE_LAN,
   REMOTE_MODE_MANUAL,
   REMOTE_MODE_ORDER,
-  REMOTE_MODE_TAILSCALE,
   REMOTE_MODES,
   buildRemoteAccessUrl,
   defaultRemoteAccessConfig,
@@ -121,7 +127,6 @@ import type { SettingsFieldIssue } from '../model/settingsForm';
 import {
   canRetrySync,
   classifySyncError,
-  describeLastSyncOutcome,
   describePushReadiness,
   normalizeBranchName,
   normalizeSyncAction,
@@ -158,10 +163,8 @@ import {
   normalizeGitPlatform,
   platformLabel,
   repoUrlExamplesFor,
-  repoUrlPlaceholderFor,
   resolveGitUsername,
   resolvePlatformSelection,
-  tokenPlaceholderFor,
   GITEE_OWNER_INFER_FAILED,
   httpsUsernameFor,
   needsManualGiteeUsername
@@ -171,8 +174,13 @@ import { describeClaimOutcome } from '../model/deviceRegistry';
 import { gitExtrasStore } from '../services/syncController';
 import type { GitSyncExtras } from '../services/syncController';
 import { PageLayout } from '../components/PageLayout';
-import { AiFallbackPanel } from '../components/AiFallbackPanel';
-import { ExportImportPanel } from '../components/ExportImportPanel';
+// A2 拆分：五个 section 组件（页面只做装配；共享字段构件在 SettingsBits）
+import { SyncSection } from '../components/settings/SyncSection';
+import { AiSection } from '../components/settings/AiSection';
+import { RemoteSection } from '../components/settings/RemoteSection';
+import { DataSection } from '../components/settings/DataSection';
+import { AboutSection } from '../components/settings/AboutSection';
+import { FieldLabel as FieldLabelBit, HintLine as HintLineBit } from '../components/settings/SettingsBits';
 import {
   DEFAULT_MAX_ATTEMPTS,
   MAX_FALLBACK_SOURCES,
@@ -207,25 +215,13 @@ import type {
 } from '../services/exportService';
 import { DIVIDER, FONT, HOME_INCLUDE_OTHER_KEY, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
 import { applyThemeMode, isSystemDark } from '../common/themeApply';
-import { THEME_MODE_ORDER, normalizeThemeMode, resolveTheme, themeModeHint, themeModeLabel } from '../model/theme';
+import { normalizeThemeMode, resolveTheme, themeModeHint, themeModeLabel } from '../model/theme';
 
 /** 仓库探测超时（毫秒）：探测只看域名通不通，不需要长超时。 */
 const PROBE_TIMEOUT_MS: number = 10000;
 
 /** 底部弹层的单行高度。 */
 const SHEET_ROW: number = 48;
-
-/**
- * 深色模式三态片的最小宽度（vp）。
- *
- * 「跟随系统」四个字在 ×1.5 大字号下约 4 × 14 × 1.5 × 0.6 ≈ 50vp，加左右 padding 8×2 = 66；
- * 这里取 56 作**下限**、靠 `padding` 自然撑开（不给固定宽，避免大字号被裁——见
- * `docs/UI-DESIGN.md` §8 布局规则 ①）。
- */
-const THEME_CHIP_MIN_WIDTH: number = 56;
-
-/** 展示用版本号：与 `AppScope/app.json5` 的 versionName 保持一致（改版本时两处同步）。 */
-const APP_VERSION: string = '1.0.0';
 
 /**
  * 本页会话内最多保留几条 fallback 诊断。
@@ -1593,6 +1589,17 @@ struct Settings {
     return view;
   }
 
+  /**
+   * 「能不能推」的一行说明（`describePushReadiness` 的纯逻辑结果）。
+   *
+   * A2 拆分后由页面派生、以 `@Prop` 传给 `SyncSection`：拆分前这段计算写在同步组的
+   * builder 里，读的是同一个 `statusView()`；放到页面方法里，重绘时机与文案都不变
+   * （`statusLine` 一变，同步组就拿到新的 `statusReadiness`）。
+   */
+  private statusReadiness(): string {
+    return describePushReadiness(this.statusView());
+  }
+
   /** 把「上次同步」三项状态回写本机 preferences（失败不影响已完成的同步动作）。 */
   private async persistSyncState(): Promise<void> {
     if (!this.ready) {
@@ -1992,25 +1999,16 @@ struct Settings {
 
   // ------------------------------------------------------------------ 通用 Builder
 
+  /** 字段标题：转发 `SettingsBits` 的共享实现（弹层里也要用它）。 */
   @Builder
   FieldLabel(text: string) {
-    Text(text)
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .fontColor($r('app.color.text_secondary'))
-      .width('100%')
-      .textAlign(TextAlign.Start)
+    FieldLabelBit(text)
   }
 
-  /** 字段内联错误：danger 令牌（深色模式同样可见），与灰色说明文字区分开。 */
+  /** 一行说明（单行省略）：转发 `SettingsBits` 的共享实现（弹层里也要用它）。 */
   @Builder
-  ErrorText(text: string) {
-    Text(text)
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .fontColor($r('app.color.danger'))
-      .width('100%')
-      .textAlign(TextAlign.Start)
+  HintLine(text: string) {
+    HintLineBit(text)
   }
 
   /** 保存失败时的顶部红色汇总（「还有 N 项需要处理：…」+ 第一条原因）。 */
@@ -2040,930 +2038,6 @@ struct Settings {
     }
   }
 
-  /** 一行说明（超长省略，完整内容进 `?`）。 */
-  @Builder
-  HintLine(text: string) {
-    Text(text)
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .fontColor($r('app.color.text_secondary'))
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.Ellipsis })
-      .width('100%')
-      .textAlign(TextAlign.Start)
-  }
-
-  /**
-   * 字段语义说明（标题下一行小字，**可换行、不省略**）。
-   *
-   * 与 `HintLine` 的分工：`HintLine` 是「状态/提示」一行就够；
-   * 字段「到底影响什么」必须能完整读下去（设备标识这一条换行是必要的），
-   * 样式仍按 `docs/UI-DESIGN.md`：`FONT.caption` + `LINE_HEIGHT.caption` + `text_secondary`。
-   */
-  @Builder
-  FieldNote(text: string) {
-    Text(text)
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .fontColor($r('app.color.text_secondary'))
-      .width('100%')
-      .textAlign(TextAlign.Start)
-  }
-
-  /** 组标题 + 右侧「更多」入口。 */
-  @Builder
-  SyncHeader() {
-    Row({ space: SPACING.sm }) {
-      Text('同步（Git）')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.text_primary'))
-        .layoutWeight(1)
-        .textAlign(TextAlign.Start)
-      Text('更多')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.brand'))
-        .height(TOUCH_MIN)
-        .padding({ left: SPACING.md, right: SPACING.md })
-        .textAlign(TextAlign.Center)
-        .onClick(() => {
-          this.panel = PANEL_SYNC_MORE;
-        })
-    }
-    .width('100%')
-    .alignItems(VerticalAlign.Center)
-  }
-
-  /**
-   * 同步组「高级」折叠区：Git 用户名 / 设备标识 / 作者名。
-   *
-   * 这三项都有安全的默认值（用户名按仓库地址推断、编号自动分配、作者名默认「我」），
-   * 所以**默认收起**：用户要做的只有「填仓库地址 + token」。只有下面三种情况会自动展开
-   * （`openSyncAdvanced`）：① 设备标识重复 ② 编号分配失败 / 仓库不可读 ③ Gitee 用户名推不出来。
-   */
-  @Builder
-  SyncAdvancedFields() {
-    Column({ space: SPACING.md }) {
-      // HTTPS 认证必须带用户名：GitHub 可留空（默认 x-access-token），Gitee 自动取仓库 owner
-      if (this.authMode === AUTH_HTTPS) {
-        this.FieldLabel('用户名（HTTPS 认证）')
-        // 语义说明（用户最常见的困惑：GitHub 要不要填？Gitee 填什么？）
-        this.FieldNote('HTTPS 认证用；GitHub 可留空（自动 x-access-token），Gitee 自动取仓库 owner')
-        TextInput({ text: this.gitUsername, placeholder: this.gitUsernamePlaceholder() })
-          .width('100%')
-          .height(TOUCH_MIN + SPACING.xs)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.page_background'))
-          .borderRadius(RADIUS.none)
-          .padding({ left: 0, right: 0 })
-          .onChange((value: string) => {
-            this.gitUsername = value;
-            this.gitUsernameError = '';
-          })
-        Divider()
-          .strokeWidth(DIVIDER)
-          .color($r('app.color.divider'))
-        if (this.gitUsernameError.length > 0) {
-          this.ErrorText(this.gitUsernameError)
-        } else {
-          this.HintLine(this.gitUsernameHint())
-        }
-      }
-
-      // 设备标识：编号由仓库自动分配（`devices/registry.jsonl`），这里只是「手工指定」的逃生门
-      this.FieldLabel('设备标识')
-      this.FieldNote('自动分配；仅当你要手工指定时才改')
-      TextInput({ text: this.deviceId, placeholder: '自动分配（例如 device-2）' })
-        .width('100%')
-        .height(TOUCH_MIN + SPACING.xs)
-        .fontSize(FONT.body)
-        .backgroundColor($r('app.color.page_background'))
-        .borderRadius(RADIUS.none)
-        .padding({ left: 0, right: 0 })
-        .onChange((value: string) => {
-          this.deviceId = value;
-          this.deviceIdError = '';
-          // 用户手改了就等于「手工指定」，不再是自动分配（下次同步会重新算号）
-          this.deviceIdAuto = false;
-        })
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-      if (this.deviceIdError.length > 0) {
-        this.ErrorText(this.deviceIdError)
-      } else if (this.deviceIdNotice.length > 0) {
-        this.HintLine(this.deviceIdNotice)
-      }
-
-      // 作者名：只影响记录里的「谁记的」，与同步/认证无关
-      this.FieldLabel('作者名')
-      this.FieldNote('默认「我」，只影响记录里的"谁记的"')
-      TextInput({ text: this.author, placeholder: '我' })
-        .width('100%')
-        .height(TOUCH_MIN + SPACING.xs)
-        .fontSize(FONT.body)
-        .backgroundColor($r('app.color.page_background'))
-        .borderRadius(RADIUS.none)
-        .padding({ left: 0, right: 0 })
-        .onChange((value: string) => {
-          this.author = value;
-          this.authorError = '';
-        })
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-      if (this.authorError.length > 0) {
-        this.ErrorText(this.authorError)
-      }
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
-  }
-
-  /** 同步组：仓库地址 / token / 分支（主表单三个控件）+「高级」折叠区 / 立即同步 + 1 行状态。 */
-  @Builder
-  SyncGroup() {
-    Column({ space: SPACING.md }) {
-      this.SyncHeader()
-
-      Row({ space: SPACING.sm }) {
-        Text('仓库地址')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-        Blank()
-        Text('?')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.brand'))
-          .width(TOUCH_MIN)
-          .height(TOUCH_MIN)
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
-            this.panel = PANEL_REPO;
-          })
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-
-      TextInput({ text: this.repoUrl, placeholder: repoUrlPlaceholderFor(this.gitPlatform, this.authMode) })
-        .width('100%')
-        .height(TOUCH_MIN + SPACING.xs)
-        .fontSize(FONT.body)
-        .backgroundColor($r('app.color.page_background'))
-        .borderRadius(RADIUS.none)
-        .padding({ left: 0, right: 0 })
-        .onChange((value: string) => {
-          this.repoUrl = value;
-          this.repoUrlError = '';
-          // A1：地址一变就更新「将按地址推断为哪个平台」的提示（保存时才真正采用）
-          this.syncPlatformNotice();
-        })
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-      if (this.repoUrlError.length > 0) {
-        this.ErrorText(this.repoUrlError)
-      } else if (this.platformNotice.length > 0) {
-        // 平台推断/锁定的提示（「已按地址推断平台为 X」/「已保留你的手动选择」）
-        this.HintLine(this.platformNotice)
-      }
-
-      this.FieldLabel(this.authMode === AUTH_SSH ? '访问 token（SSH 方式可留空）' : '访问 token（仅存本机）')
-      TextInput({
-        text: this.token,
-        placeholder: this.authMode === AUTH_SSH ? '当前版本仅支持 HTTPS，可留空' : tokenPlaceholderFor(this.gitPlatform)
-      })
-        .type(InputType.Password)
-        .width('100%')
-        .height(TOUCH_MIN + SPACING.xs)
-        .fontSize(FONT.body)
-        .backgroundColor($r('app.color.page_background'))
-        .borderRadius(RADIUS.none)
-        .padding({ left: 0, right: 0 })
-        .onChange((value: string) => {
-          this.token = value;
-          this.tokenError = '';
-        })
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-      if (this.tokenError.length > 0) {
-        this.ErrorText(this.tokenError)
-      }
-
-      // A2：分支可配（默认 main）。首次推送时远端没有该分支会自动创建（桥里 force:false）。
-      Row({ space: SPACING.sm }) {
-        Text('分支')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .width(72)
-          .textAlign(TextAlign.Start)
-        TextInput({ text: this.branch, placeholder: DEFAULT_BRANCH })
-          .height(TOUCH_MIN + SPACING.xs)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.page_background'))
-          .borderRadius(RADIUS.none)
-          .padding({ left: 0, right: 0 })
-          .layoutWeight(1)
-          .onChange((value: string) => {
-            this.branch = value;
-            this.branchError = '';
-          })
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-      if (this.branchError.length > 0) {
-        this.ErrorText(this.branchError)
-      } else {
-        this.HintLine('默认 main；首次推送时远端没有该分支会自动创建（永不强制覆盖远端）')
-      }
-
-      // ---- 主表单到此结束：只剩「仓库地址 / 访问 token / 分支」三个控件 ----
-      // 设备编号是仓库自动分配的：成功登记后这里只显示一行只读文字（用户不需要、也不应该手填）。
-      if (this.deviceIdNotice.length > 0) {
-        this.HintLine(this.deviceIdNotice)
-      }
-
-      // 「高级 ▸」折叠区：Git 用户名 / 设备标识 / 作者名（默认收起，见 SyncAdvancedFields）
-      Row({ space: SPACING.xs }) {
-        Text(this.syncAdvancedOpen ? '高级 ▾' : '高级 ▸')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.brand'))
-        Blank()
-      }
-      .width('100%')
-      .height(TOUCH_MIN)
-      .alignItems(VerticalAlign.Center)
-      .onClick(() => {
-        this.toggleSyncAdvanced();
-      })
-      // 自动展开时的那一行原因（只有 ① 设备标识重复 ② 分配失败/仓库不可读 ③ Gitee 用户名推不出来）
-      if (this.syncAdvancedReason.length > 0) {
-        this.HintLine(this.syncAdvancedReason)
-      }
-      if (this.syncAdvancedOpen) {
-        this.SyncAdvancedFields()
-      }
-
-      // 设备标识重复：**常驻**警告（不是 toast）。两台设备同一个 id 时，附件 zip 互相覆盖、
-      // 历史混在一起，而且旧校验根本挡不住——所以这里必须一直红着，直到用户改成唯一值。
-      if (this.identityWarning.length > 0) {
-        Column({ space: SPACING.xs }) {
-          Text('⚠️ 设备标识重复：数据会互相覆盖')
-            .fontSize(FONT.caption)
-            .lineHeight(LINE_HEIGHT.caption)
-            .fontWeight(FontWeight.Medium)
-            .fontColor($r('app.color.warning'))
-            .width('100%')
-            .textAlign(TextAlign.Start)
-          Text(this.identityWarning)
-            .fontSize(FONT.caption)
-            .lineHeight(LINE_HEIGHT.caption)
-            .fontColor($r('app.color.warning'))
-            .width('100%')
-            .textAlign(TextAlign.Start)
-        }
-        .width('100%')
-        .padding({ top: SPACING.sm, bottom: SPACING.sm, left: SPACING.md, right: SPACING.md })
-        .backgroundColor($r('app.color.brand_soft'))
-        .alignItems(HorizontalAlign.Start)
-      }
-
-      // 附件被暂停推送（其它文件照常推）：一行 warning 说明，提醒先处理再重试
-      if (this.attachmentWarning.length > 0) {
-        Text(this.attachmentWarning)
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.warning'))
-          .width('100%')
-          .textAlign(TextAlign.Start)
-      }
-
-      Row({ space: SPACING.md }) {
-        Button(this.syncBusy ? '同步中…' : '立即同步')
-          .height(TOUCH_MIN + SPACING.sm)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.brand_soft'))
-          .fontColor($r('app.color.brand'))
-          .borderRadius(RADIUS.sm)
-          // 闪退回归：桥未就绪时禁用（原因显示在右侧状态行），避免未就绪就发起同步
-          .enabled(!this.syncBusy && this.webReady && this.authBlocker().length === 0)
-          .onClick(() => {
-            this.runAction('pull');
-          })
-        // 手动推送（A2 第 3 条）：未就绪 / SSH / 无地址 / 分支非法时禁用并给出原因
-        Button('推送')
-          .height(TOUCH_MIN + SPACING.sm)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.brand_soft'))
-          .fontColor($r('app.color.brand'))
-          .borderRadius(RADIUS.sm)
-          .enabled(!this.syncBusy && this.webReady && this.pushBlockedReason().length === 0)
-          .onClick(() => {
-            this.runAction('push');
-          })
-        Text(this.syncMessage)
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor(this.syncMessage.startsWith('❌') ? $r('app.color.danger') : $r('app.color.text_secondary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-          .textAlign(TextAlign.Start)
-          .onClick(() => {
-            this.panel = PANEL_SYNC_MORE;
-          })
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-
-      // 推送被禁用的具体原因（未就绪/SSH/无地址/分支非法），避免「按钮灰着不知道为什么」
-      if (this.pushBlockedReason().length > 0) {
-        this.HintLine(`推送不可用：${this.pushBlockedReason()}`)
-      }
-
-      // A2：同步状态（分支 / 领先 / 落后 / 冲突 / 本地改动）——桥就绪后自动刷新一次
-      if (this.statusLine.length > 0) {
-        Text(this.statusLine)
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-          .textAlign(TextAlign.Start)
-      }
-      if (this.statusLine.length > 0 && describePushReadiness(this.statusView()).length > 0) {
-        this.HintLine(describePushReadiness(this.statusView()))
-      }
-
-      // 从首页搬来的过滤开关：首页列表是否同时展示其他设备的只读记录
-      Row({ space: SPACING.sm }) {
-        Text('首页含其他设备（只读）')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .layoutWeight(1)
-          .textAlign(TextAlign.Start)
-        Toggle({ type: ToggleType.Switch, isOn: this.includeOtherDevices })
-          .selectedColor($r('app.color.brand'))
-          .onChange((isOn: boolean) => {
-            this.includeOtherDevices = isOn;
-            AppStorage.setOrCreate<boolean>(HOME_INCLUDE_OTHER_KEY, isOn);
-          })
-      }
-      .width('100%')
-      .height(TOUCH_MIN + SPACING.sm)
-      .alignItems(VerticalAlign.Center)
-
-      if (this.lastSyncError.length > 0) {
-        Text(`上次错误：${this.lastSyncError}`)
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.danger'))
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-          .textAlign(TextAlign.Start)
-      }
-
-      if (this.saveHint.length > 0) {
-        // 校验失败时这条也必须是红的：它在「保存」按钮正上方，用户一定看得到
-        Text(this.saveHint)
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor(this.issuesSummary.length > 0 ? $r('app.color.danger') : $r('app.color.text_secondary'))
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-          .textAlign(TextAlign.Start)
-      }
-
-      // 隐藏的 Git 运行环境：1x1、全透明，只用于执行 isomorphic-git（必须挂载）
-      Stack() {
-        Web({ src: $rawfile('git/index.html'), controller: this.gitController })
-          .width(1)
-          .height(1)
-          .opacity(0)
-          .onPageEnd(() => {
-            this.onWebReady();
-          })
-          .onErrorReceive(() => {
-            if (!this.disposed) {
-              this.syncMessage = '❌ 同步内核加载失败：rawfile/git/index.html 无法加载';
-            }
-          })
-      }
-      .width(1)
-      .height(1)
-      .opacity(0)
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
-  }
-
-  /** AI 组：服务 / 模型 / API Key / 测试 + 折叠的高级（仅 baseURL）。 */
-  @Builder
-  AiGroup() {
-    Column({ space: SPACING.md }) {
-      Text('AI 汇总')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-
-      Row({ space: SPACING.sm }) {
-        Text('服务')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .width(72)
-          .textAlign(TextAlign.Start)
-        Text(this.provider().label)
-          .fontSize(FONT.body)
-          .lineHeight(LINE_HEIGHT.body)
-          .fontColor($r('app.color.text_primary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-          .textAlign(TextAlign.End)
-        Text('▾')
-          .fontSize(FONT.caption)
-          .fontColor($r('app.color.text_secondary'))
-      }
-      .width('100%')
-      .height(TOUCH_MIN)
-      .alignItems(VerticalAlign.Center)
-      .onClick(() => {
-        this.panel = PANEL_PROVIDER;
-      })
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-
-      Row({ space: SPACING.sm }) {
-        Text('模型')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .width(72)
-          .textAlign(TextAlign.Start)
-        Text(this.modelLabel())
-          .fontSize(FONT.body)
-          .lineHeight(LINE_HEIGHT.body)
-          .fontColor($r('app.color.text_primary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-          .textAlign(TextAlign.End)
-        Text('▾')
-          .fontSize(FONT.caption)
-          .fontColor($r('app.color.text_secondary'))
-      }
-      .width('100%')
-      .height(TOUCH_MIN)
-      .alignItems(VerticalAlign.Center)
-      .onClick(() => {
-        this.panel = PANEL_MODEL;
-      })
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-
-      this.FieldLabel('API Key（仅存本机）')
-      TextInput({ text: this.aiKey, placeholder: 'sk-…' })
-        .type(InputType.Password)
-        .width('100%')
-        .height(TOUCH_MIN + SPACING.xs)
-        .fontSize(FONT.body)
-        .backgroundColor($r('app.color.page_background'))
-        .borderRadius(RADIUS.none)
-        .padding({ left: 0, right: 0 })
-        .onChange((value: string) => {
-          this.aiKey = value;
-        })
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-      this.HintLine(this.provider().keyHint)
-
-      Row({ space: SPACING.md }) {
-        Button(this.aiTestBusy ? '测试中…' : '测试')
-          .height(TOUCH_MIN + SPACING.sm)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.brand_soft'))
-          .fontColor($r('app.color.brand'))
-          .borderRadius(RADIUS.sm)
-          .enabled(!this.aiTestBusy)
-          .onClick(() => {
-            this.testAi();
-          })
-        Text(this.aiTestText.length > 0 ? this.aiTestText : '未测试')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor(this.aiTestText.startsWith('失败') ? $r('app.color.danger') : $r('app.color.text_secondary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-          .textAlign(TextAlign.Start)
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-
-      // 失败才出现的「下一步做什么」；成功时不占行
-      if (this.aiTestHint.length > 0) {
-        Text(this.aiTestHint)
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-          .textAlign(TextAlign.Start)
-      }
-
-      // 多源 fallback（`docs/AI-FALLBACK.md` §8 的挂载片段）：放在「高级」折叠区**之前**，
-      // 因为「主源失败后要不要发给别家」是隐私决策，不能藏在折叠里。组件自带开关 / 列表 /
-      // 次数 / 诊断，本页只接回调（改状态）与三个持久化键（保存时写回）。
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-
-      AiFallbackPanel({
-        fallbackEnabled: this.aiFallbackEnabled,
-        sources: this.aiFallbackSources,
-        maxAttempts: this.aiFallbackMaxAttempts,
-        diagnostics: this.aiFallbackDiagnostics,
-        primaryLabel: this.primarySourceLabel(),
-        onToggle: (isOn: boolean): void => {
-          this.aiFallbackEnabled = isOn;
-        },
-        onAdd: (): void => {
-          this.addFallbackSource();
-        },
-        onRemove: (index: number): void => {
-          this.removeFallbackSource(index);
-        },
-        onMove: (index: number, offset: number): void => {
-          this.moveFallbackSource(index, offset);
-        },
-        onChange: (index: number, patch: FallbackSourcePatch): void => {
-          this.patchFallbackSource(index, patch);
-        },
-        onMaxAttempts: (value: number): void => {
-          this.aiFallbackMaxAttempts = normalizeMaxAttempts(value);
-        }
-      })
-
-      Row({ space: SPACING.sm }) {
-        Text(this.advancedOpen ? '高级 ▾' : '高级 ▸')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .height(TOUCH_MIN)
-          .textAlign(TextAlign.Start)
-          .onClick(() => {
-            this.advancedOpen = !this.advancedOpen;
-          })
-      }
-      .width('100%')
-
-      if (this.advancedOpen) {
-        // 模型名允许手输（三个预设源也允许，防模型下线）；留空回落到该源默认
-        this.FieldLabel(this.isCustomProvider() ? '模型名（必填）' : '模型名（可手输，留空用默认）')
-        TextInput({ text: this.aiModel, placeholder: defaultModelOf(this.aiProviderId) })
-          .width('100%')
-          .height(TOUCH_MIN + SPACING.xs)
-          .fontSize(FONT.caption)
-          .backgroundColor($r('app.color.page_background'))
-          .borderRadius(RADIUS.none)
-          .padding({ left: 0, right: 0 })
-          .onChange((value: string) => {
-            this.aiModel = value;
-            this.aiModelError = '';
-          })
-        Divider()
-          .strokeWidth(DIVIDER)
-          .color($r('app.color.divider'))
-        if (this.aiModelError.length > 0) {
-          this.ErrorText(this.aiModelError)
-        }
-
-        if (this.isCustomProvider()) {
-          this.FieldLabel('接口地址 baseURL')
-          TextInput({ text: this.aiBaseURL, placeholder: 'https://api.example.com/v1' })
-            .width('100%')
-            .height(TOUCH_MIN + SPACING.xs)
-            .fontSize(FONT.caption)
-            .backgroundColor($r('app.color.page_background'))
-            .borderRadius(RADIUS.none)
-            .padding({ left: 0, right: 0 })
-            .onChange((value: string) => {
-              this.aiBaseURL = value;
-              this.aiBaseUrlError = '';
-            })
-          Divider()
-            .strokeWidth(DIVIDER)
-            .color($r('app.color.divider'))
-          if (this.aiBaseUrlError.length > 0) {
-            this.ErrorText(this.aiBaseUrlError)
-          }
-        } else {
-          this.HintLine('预设源使用内置接口地址；要自定义地址请把「服务」切到「自定义」。')
-        }
-      }
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
-  }
-
-  /**
-   * 远程控制组：访问方式（六选一）+ 该方式的字段 + 最终「DSH 地址」+ 打开按钮。
-   *
-   * 方式元数据（文案 / 字段 / 可用性 / 前置条件）全部来自 `model/remoteAccess.ts`，
-   * 与插件侧 `src/remote/accessMode.ts` 是同一份语义——页面只负责画，不另写一套解释。
-   * 「DSH 地址」那一行既是最终链接的预览（lan/ipv6/tailscale/cloudflare 自动拼），
-   * 也是 `manual` 方式的手输框；存的仍是 `remoteUrl`（历史键，保留）。
-   */
-  @Builder
-  RemoteGroup() {
-    Column({ space: SPACING.md }) {
-      Text('远程控制')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-
-      // 访问方式：6 项（顺序 = REMOTE_MODE_ORDER，uu 排末尾并标「不可用」）
-      this.FieldLabel('访问方式')
-      Select([
-        { value: this.remoteModeOptionLabel(0) },
-        { value: this.remoteModeOptionLabel(1) },
-        { value: this.remoteModeOptionLabel(2) },
-        { value: this.remoteModeOptionLabel(3) },
-        { value: this.remoteModeOptionLabel(4) },
-        { value: this.remoteModeOptionLabel(5) }
-      ])
-        .selected(this.remoteModeIndex())
-        .value(this.remoteSpec().label)
-        .font({ size: FONT.body })
-        .optionFont({ size: FONT.body })
-        .selectedOptionFont({ size: FONT.body })
-        .width('100%')
-        .height(TOUCH_MIN + SPACING.xs)
-        .onSelect((index: number) => {
-          this.pickRemoteMode(index);
-        })
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-
-      // 一句话说明 + 可用性（unsupported 显示原因、needs-setup 显示第一条前置条件）
-      Text(this.remoteSpec().description)
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.text_secondary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-      if (this.remoteAvailabilityHint().length > 0) {
-        Text(this.remoteAvailabilityHint())
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .width('100%')
-          .textAlign(TextAlign.Start)
-      }
-
-      // ---- 各方式的字段（标签/占位符/提示都取自 REMOTE_MODES.fields）----
-      if (this.remoteMode === REMOTE_MODE_LAN) {
-        this.FieldLabel(this.remoteFieldLabel('lanAddress'))
-        TextInput({ text: this.remoteLanAddress, placeholder: this.remoteFieldPlaceholder('lanAddress') })
-          .width('100%')
-          .height(TOUCH_MIN + SPACING.xs)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.page_background'))
-          .borderRadius(RADIUS.none)
-          .padding({ left: 0, right: 0 })
-          .onChange((value: string) => {
-            this.remoteLanAddress = value;
-            this.remoteUrlError = '';
-            this.refreshRemotePreview();
-          })
-        Divider()
-          .strokeWidth(DIVIDER)
-          .color($r('app.color.divider'))
-        this.HintLine(this.remoteFieldHint('lanAddress'))
-      }
-
-      if (this.remoteMode === REMOTE_MODE_IPV6) {
-        this.FieldLabel(this.remoteFieldLabel('ipv6Address'))
-        TextInput({ text: this.remoteIpv6Address, placeholder: this.remoteFieldPlaceholder('ipv6Address') })
-          .width('100%')
-          .height(TOUCH_MIN + SPACING.xs)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.page_background'))
-          .borderRadius(RADIUS.none)
-          .padding({ left: 0, right: 0 })
-          .onChange((value: string) => {
-            this.remoteIpv6Address = value;
-            this.remoteUrlError = '';
-            this.refreshRemotePreview();
-          })
-        Divider()
-          .strokeWidth(DIVIDER)
-          .color($r('app.color.divider'))
-        this.HintLine(this.remoteFieldHint('ipv6Address'))
-      }
-
-      if (this.remoteMode === REMOTE_MODE_TAILSCALE) {
-        this.FieldLabel(this.remoteFieldLabel('tailscaleHost'))
-        TextInput({ text: this.remoteTailscaleHost, placeholder: this.remoteFieldPlaceholder('tailscaleHost') })
-          .width('100%')
-          .height(TOUCH_MIN + SPACING.xs)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.page_background'))
-          .borderRadius(RADIUS.none)
-          .padding({ left: 0, right: 0 })
-          .onChange((value: string) => {
-            this.remoteTailscaleHost = value;
-            this.remoteUrlError = '';
-            this.refreshRemotePreview();
-          })
-        Divider()
-          .strokeWidth(DIVIDER)
-          .color($r('app.color.divider'))
-        this.HintLine(this.remoteFieldHint('tailscaleHost'))
-      }
-
-      if (this.remoteMode === REMOTE_MODE_CLOUDFLARE) {
-        this.FieldLabel(this.remoteFieldLabel('cloudflareHost'))
-        TextInput({ text: this.remoteCloudflareHost, placeholder: this.remoteFieldPlaceholder('cloudflareHost') })
-          .width('100%')
-          .height(TOUCH_MIN + SPACING.xs)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.page_background'))
-          .borderRadius(RADIUS.none)
-          .padding({ left: 0, right: 0 })
-          .onChange((value: string) => {
-            this.remoteCloudflareHost = value;
-            this.remoteUrlError = '';
-            this.refreshRemotePreview();
-          })
-        Divider()
-          .strokeWidth(DIVIDER)
-          .color($r('app.color.divider'))
-        this.HintLine(this.remoteFieldHint('cloudflareHost'))
-      }
-
-      // 端口：只有要起监听的方式才填（cloudflare 对外恒 443，manual 由地址自带端口）
-      if (
-        this.remoteMode === REMOTE_MODE_LAN ||
-        this.remoteMode === REMOTE_MODE_IPV6 ||
-        this.remoteMode === REMOTE_MODE_TAILSCALE
-      ) {
-        this.FieldLabel(this.remoteFieldLabel('port'))
-        TextInput({ text: this.remotePortText, placeholder: this.remoteFieldPlaceholder('port') })
-          // 纯数字键盘；ArkTS 里输入类型写在属性上（`.type(InputType.Number)`），
-          // 等价于给输入框声明 inputType=Number。
-          .type(InputType.Number)
-          .width('100%')
-          .height(TOUCH_MIN + SPACING.xs)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.page_background'))
-          .borderRadius(RADIUS.none)
-          .padding({ left: 0, right: 0 })
-          .onChange((value: string) => {
-            this.remotePortText = value;
-            this.remoteUrlError = '';
-            this.refreshRemotePreview();
-          })
-        Divider()
-          .strokeWidth(DIVIDER)
-          .color($r('app.color.divider'))
-        this.HintLine(this.remoteFieldHint('port'))
-      }
-
-      // 「访问令牌（可选）」：只出现在 lan / ipv6 / tailscale 的字段表里（端口之后）。
-      // 密码框里**只**是"用户这次想改成的值"（`remoteToken`）；已保存的令牌不回填，
-      // 只用打码小字说明"已保存"，这样旁边有人看屏幕也看不到明文。
-      if (this.remoteUsesToken()) {
-        this.FieldLabel(this.remoteFieldLabel('token'))
-        TextInput({ text: this.remoteToken, placeholder: this.remoteFieldPlaceholder('token') })
-          .type(InputType.Password)
-          .width('100%')
-          .height(TOUCH_MIN + SPACING.xs)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.page_background'))
-          .borderRadius(RADIUS.none)
-          .padding({ left: 0, right: 0 })
-          .onChange((value: string) => {
-            this.remoteToken = value;
-            this.remoteUrlError = '';
-            this.refreshRemotePreview();
-          })
-        Divider()
-          .strokeWidth(DIVIDER)
-          .color($r('app.color.divider'))
-        this.HintLine(this.remoteFieldHint('token'))
-        if (this.remoteTokenStatus().length > 0) {
-          Text(this.remoteTokenStatus())
-            .fontSize(FONT.caption)
-            .lineHeight(LINE_HEIGHT.caption)
-            .fontColor($r('app.color.text_secondary'))
-            .width('100%')
-            .textAlign(TextAlign.Start)
-        }
-        if (this.hasSavedRemoteToken()) {
-          Text('清除令牌')
-            .fontSize(FONT.caption)
-            .lineHeight(LINE_HEIGHT.caption)
-            .fontColor($r('app.color.brand'))
-            .height(TOUCH_MIN)
-            .padding({ left: SPACING.md, right: SPACING.md })
-            .textAlign(TextAlign.Center)
-            .onClick(() => {
-              this.clearRemoteToken();
-            })
-        }
-      }
-
-      if (this.remoteMode === REMOTE_MODE_MANUAL) {
-        // 手动方式的「完整地址」就是下面「DSH 地址」那一行（同一个值，不画两个输入框）
-        this.FieldLabel(this.remoteFieldLabel('manualUrl'))
-      } else {
-        this.FieldLabel('DSH 地址')
-      }
-      TextInput({ text: this.remoteUrl, placeholder: 'http://192.168.1.6:3080/?token=…' })
-        .width('100%')
-        .height(TOUCH_MIN + SPACING.xs)
-        .fontSize(FONT.body)
-        .backgroundColor($r('app.color.page_background'))
-        .borderRadius(RADIUS.none)
-        .padding({ left: 0, right: 0 })
-        .onChange((value: string) => {
-          this.remoteUrl = value;
-          // 手动方式下这一行就是「完整地址」字段：两份状态同步，拼地址与落盘才不会打架
-          if (this.remoteMode === REMOTE_MODE_MANUAL) {
-            this.remoteManualUrl = value;
-          }
-          this.remoteUrlError = '';
-        })
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-      if (this.remoteUrlError.length > 0) {
-        this.ErrorText(this.remoteUrlError)
-      } else {
-        this.HintLine('平板需与电脑在同一局域网；地址含 token，只存本机')
-      }
-
-      // 缺 token：橙色次要提示（不是错误，DSH 仍可能直接可用）
-      if (this.remoteTokenHint().length > 0) {
-        Text(this.remoteTokenHint())
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.warning'))
-          .width('100%')
-          .textAlign(TextAlign.Start)
-      }
-
-      Button('打开远程控制')
-        .width('100%')
-        .height(48)
-        .fontSize(FONT.body)
-        .backgroundColor($r('app.color.brand'))
-        .fontColor($r('app.color.text_inverse'))
-        .borderRadius(RADIUS.sm)
-        // 空地址禁用（提示写在按钮下方，用户知道先做什么）
-        .enabled(this.remoteUrl.trim().length > 0)
-        .onClick(() => {
-          this.openRemote();
-        })
-      if (this.remoteUrl.trim().length === 0) {
-        Text('先填写电脑上的 DSH 地址')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .width('100%')
-          .textAlign(TextAlign.Start)
-      }
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
-  }
-
   /**
    * 深色模式那行说明：跟随系统时补一句「系统当前为深/浅」，让用户知道实际生效的是哪一档。
    *
@@ -2977,74 +2051,6 @@ struct Settings {
     const context = getContext(this) as common.UIAbilityContext;
     const effective: string = resolveTheme('system', isSystemDark(context));
     return `${hint}（系统当前：${effective === 'dark' ? '深色' : '浅色'}）`;
-  }
-
-  /**
-   * 深色模式行：标签 + 三态片 + 一行说明（唯一入口，紧凑/宽屏两套骨架共用）。
-   *
-   * 布局规则（大字号验收的「表单行」代表）：标签 `layoutWeight(1)` 可压 + `maxLines(1)` +
-   * 省略号；三态片是**固定项**（`flexShrink(0)`），只守下限宽不写死宽。
-   */
-  @Builder
-  ThemeRow() {
-    Column({ space: SPACING.sm }) {
-      Row({ space: SPACING.sm }) {
-        Text('深色模式')
-          .fontSize(FONT.body)
-          .lineHeight(LINE_HEIGHT.body)
-          .fontColor($r('app.color.text_primary'))
-          .layoutWeight(1)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .textAlign(TextAlign.Start)
-
-        Row({ space: SPACING.xs }) {
-          ForEach(
-            THEME_MODE_ORDER,
-            (mode: string) => {
-              Text(themeModeLabel(mode))
-                .fontSize(FONT.caption)
-                .lineHeight(LINE_HEIGHT.caption)
-                .fontColor(
-                  this.themeMode === mode ? $r('app.color.brand') : $r('app.color.text_secondary')
-                )
-                .constraintSize({ minWidth: THEME_CHIP_MIN_WIDTH })
-                .height(TOUCH_MIN)
-                .padding({ left: SPACING.sm, right: SPACING.sm })
-                .textAlign(TextAlign.Center)
-                .borderRadius(RADIUS.sm)
-                .backgroundColor(
-                  this.themeMode === mode ? $r('app.color.selection_fill') : $r('app.color.control_fill')
-                )
-                .border({
-                  width: this.themeMode === mode ? DIVIDER : 0,
-                  color: $r('app.color.selection_stroke')
-                })
-                .maxLines(1)
-                .onClick(() => {
-                  this.saveThemeMode(mode);
-                })
-            },
-            (mode: string) => `theme-${mode}`
-          )
-        }
-        .flexShrink(0)
-        .alignItems(VerticalAlign.Center)
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-
-      Text(this.themeModeHintText())
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.text_secondary'))
-        .width('100%')
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .textAlign(TextAlign.Start)
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
   }
 
   /**
@@ -3087,111 +2093,6 @@ struct Settings {
     });
   }
 
-  /** 关于组：版本+上次同步 / 平台信息 / 隐私? / 权限?。 */
-  @Builder
-  AboutGroup() {
-    Column({ space: SPACING.md }) {
-      Text('关于')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-
-      Row({ space: SPACING.sm }) {
-        Text('版本 v' + APP_VERSION)
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-        Blank()
-        // A2：最近一次同步时间 + 动作 + 成败（失败原因是分级后的中文）
-        Text(describeLastSyncOutcome(this.lastSyncAt, this.lastSyncError, this.lastSyncAction, nowIso()))
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-      }
-      .width('100%')
-
-      this.HintLine(this.platformLine())
-      if (this.storageHint.length > 0) {
-        this.HintLine(this.storageHint)
-      }
-
-      Row({ space: SPACING.sm }) {
-        Text('隐私与凭据')
-          .fontSize(FONT.body)
-          .lineHeight(LINE_HEIGHT.body)
-          .fontColor($r('app.color.text_primary'))
-          .layoutWeight(1)
-          .textAlign(TextAlign.Start)
-        Text('?')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.brand'))
-          .width(TOUCH_MIN)
-          .height(TOUCH_MIN)
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
-            this.panel = PANEL_PRIVACY;
-          })
-      }
-      .width('100%')
-      .height(TOUCH_MIN)
-      .alignItems(VerticalAlign.Center)
-
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-
-      this.ThemeRow()
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
-  }
-
-  /**
-   * 数据组：导出 / 导入（排在「关于」之前）。
-   *
-   * 组内**只有** `ExportImportPanel` 一个组件：区间 / 格式 / 两个开关 / 导出按钮 / 选文件 /
-   * dry-run 统计 / 确认 / 取消都在组件内部，这里再包一层控件就会变成两套语义。
-   */
-  @Builder
-  DataGroup() {
-    Column({ space: SPACING.md }) {
-      Text('数据')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-
-      ExportImportPanel({
-        state: this.exportImport,
-        onExport: (request: ExportRequest): void => {
-          this.handleExport(request);
-        },
-        onPickFile: (): void => {
-          this.handlePickImportFile();
-        },
-        onConfirmImport: (): void => {
-          this.handleConfirmImport();
-        },
-        onCancel: (): void => {
-          this.handleCancelImport();
-        },
-        onCopyPath: (): void => {
-          this.handleCopyPath();
-        }
-      })
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
-  }
-
   /** 页面唯一主操作：保存设置（三组共用一份表单）。 */
   @Builder
   SaveButton() {
@@ -3206,6 +2107,293 @@ struct Settings {
       .onClick(() => {
         this.saveSettings();
       })
+  }
+
+  // ------------------------------------------------------------------ 装配（A2 拆分）
+
+  /**
+   * 五个 section 组件（`components/settings/*.ets`）的装配点。
+   *
+   * 分工：**页面持有全部 `@State` 与业务方法**（保存 / 同步 / 导出 / 远程控制 / 主题切换），
+   * 组件只收单向 props + 回调（`@Prop` 值 + `onXxx`）。因此：
+   * - 刷新语义不变（父页面值变了才重绘组件）；
+   * - 回调闭包始终读页面最新状态（`pushBlockedReason()` 之类的只读派生以函数 props 传入）；
+   * - 输入框仍是「受控」的：组件把输入回传给页面，页面写 `@State`，值再经 `@Prop` 铺回去。
+   *
+   * 紧凑屏与宽屏两套骨架都调用下面这五个 builder（组顺序与拆分前逐字一致）。
+   */
+  @Builder
+  SyncGroup() {
+    SyncSection({
+      gitPlatform: this.gitPlatform,
+      authMode: this.authMode,
+      repoUrl: this.repoUrl,
+      repoUrlError: this.repoUrlError,
+      platformNotice: this.platformNotice,
+      token: this.token,
+      tokenError: this.tokenError,
+      branch: this.branch,
+      branchError: this.branchError,
+      syncAdvancedOpen: this.syncAdvancedOpen,
+      syncAdvancedReason: this.syncAdvancedReason,
+      gitUsername: this.gitUsername,
+      gitUsernameError: this.gitUsernameError,
+      deviceId: this.deviceId,
+      deviceIdError: this.deviceIdError,
+      deviceIdNotice: this.deviceIdNotice,
+      author: this.author,
+      authorError: this.authorError,
+      identityWarning: this.identityWarning,
+      attachmentWarning: this.attachmentWarning,
+      syncMessage: this.syncMessage,
+      syncBusy: this.syncBusy,
+      webReady: this.webReady,
+      statusLine: this.statusLine,
+      statusReadiness: this.statusReadiness(),
+      lastSyncError: this.lastSyncError,
+      saveHint: this.saveHint,
+      issuesSummary: this.issuesSummary,
+      includeOtherDevices: this.includeOtherDevices,
+      pushBlockedReason: (): string => this.pushBlockedReason(),
+      authBlocker: (): string => this.authBlocker(),
+      gitUsernamePlaceholder: (): string => this.gitUsernamePlaceholder(),
+      gitUsernameHint: (): string => this.gitUsernameHint(),
+      onChangeRepoUrl: (value: string): void => {
+        this.repoUrl = value;
+        this.repoUrlError = '';
+        // A1：地址一变就更新「将按地址推断为哪个平台」的提示（保存时才真正采用）
+        this.syncPlatformNotice();
+      },
+      onChangeToken: (value: string): void => {
+        this.token = value;
+        this.tokenError = '';
+      },
+      onChangeBranch: (value: string): void => {
+        this.branch = value;
+        this.branchError = '';
+      },
+      onChangeGitUsername: (value: string): void => {
+        this.gitUsername = value;
+        this.gitUsernameError = '';
+      },
+      onChangeDeviceId: (value: string): void => {
+        this.deviceId = value;
+        this.deviceIdError = '';
+        // 用户手改了就等于「手工指定」，不再是自动分配（下次同步会重新算号）
+        this.deviceIdAuto = false;
+      },
+      onChangeAuthor: (value: string): void => {
+        this.author = value;
+        this.authorError = '';
+      },
+      toggleSyncAdvanced: (): void => {
+        this.toggleSyncAdvanced();
+      },
+      onToggleIncludeOtherDevices: (isOn: boolean): void => {
+        this.includeOtherDevices = isOn;
+        AppStorage.setOrCreate<boolean>(HOME_INCLUDE_OTHER_KEY, isOn);
+      },
+      runAction: (action: string): void => {
+        this.runAction(action);
+      },
+      onOpenSyncMore: (): void => {
+        this.panel = PANEL_SYNC_MORE;
+      },
+      onOpenRepoHelp: (): void => {
+        this.panel = PANEL_REPO;
+      },
+      // 隐藏 Web 的控制器与页面 GitSyncService 是同一个实例（`@Prop` 会深拷贝，故用普通成员）
+      gitController: this.gitController,
+      onWebReady: (): void => {
+        this.onWebReady();
+      },
+      onWebError: (): void => {
+        if (!this.disposed) {
+          this.syncMessage = '❌ 同步内核加载失败：rawfile/git/index.html 无法加载';
+        }
+      }
+    })
+  }
+
+  @Builder
+  AiGroup() {
+    AiSection({
+      aiKey: this.aiKey,
+      aiModel: this.aiModel,
+      aiProviderId: this.aiProviderId,
+      aiBaseURL: this.aiBaseURL,
+      aiModelError: this.aiModelError,
+      aiBaseUrlError: this.aiBaseUrlError,
+      advancedOpen: this.advancedOpen,
+      aiTestText: this.aiTestText,
+      aiTestHint: this.aiTestHint,
+      aiTestBusy: this.aiTestBusy,
+      providerLabel: this.provider().label,
+      providerKeyHint: this.provider().keyHint,
+      modelLabel: this.modelLabel(),
+      customProvider: this.isCustomProvider(),
+      primarySourceLabel: this.primarySourceLabel(),
+      fallbackEnabled: this.aiFallbackEnabled,
+      sources: this.aiFallbackSources,
+      maxAttempts: this.aiFallbackMaxAttempts,
+      diagnostics: this.aiFallbackDiagnostics,
+      onOpenProviderPanel: (): void => {
+        this.panel = PANEL_PROVIDER;
+      },
+      onOpenModelPanel: (): void => {
+        this.panel = PANEL_MODEL;
+      },
+      onChangeAiKey: (value: string): void => {
+        this.aiKey = value;
+      },
+      onTestAi: (): void => {
+        this.testAi();
+      },
+      onToggleAdvanced: (): void => {
+        this.advancedOpen = !this.advancedOpen;
+      },
+      onChangeAiModel: (value: string): void => {
+        this.aiModel = value;
+        this.aiModelError = '';
+      },
+      onChangeAiBaseURL: (value: string): void => {
+        this.aiBaseURL = value;
+        this.aiBaseUrlError = '';
+      },
+      onToggleFallback: (isOn: boolean): void => {
+        this.aiFallbackEnabled = isOn;
+      },
+      onAddFallback: (): void => {
+        this.addFallbackSource();
+      },
+      onRemoveFallback: (index: number): void => {
+        this.removeFallbackSource(index);
+      },
+      onMoveFallback: (index: number, offset: number): void => {
+        this.moveFallbackSource(index, offset);
+      },
+      onChangeFallback: (index: number, patch: FallbackSourcePatch): void => {
+        this.patchFallbackSource(index, patch);
+      },
+      onMaxAttempts: (value: number): void => {
+        this.aiFallbackMaxAttempts = value;
+      }
+    })
+  }
+
+  @Builder
+  RemoteGroup() {
+    RemoteSection({
+      remoteMode: this.remoteMode,
+      remoteLanAddress: this.remoteLanAddress,
+      remotePortText: this.remotePortText,
+      remoteTailscaleHost: this.remoteTailscaleHost,
+      remoteCloudflareHost: this.remoteCloudflareHost,
+      remoteIpv6Address: this.remoteIpv6Address,
+      remoteManualUrl: this.remoteManualUrl,
+      remoteToken: this.remoteToken,
+      remoteUrl: this.remoteUrl,
+      remoteUrlError: this.remoteUrlError,
+      remoteSpec: (): RemoteModeSpec => this.remoteSpec(),
+      remoteModeIndex: (): number => this.remoteModeIndex(),
+      remoteModeOptionLabel: (index: number): string => this.remoteModeOptionLabel(index),
+      remoteFieldLabel: (key: string): string => this.remoteFieldLabel(key),
+      remoteFieldPlaceholder: (key: string): string => this.remoteFieldPlaceholder(key),
+      remoteFieldHint: (key: string): string => this.remoteFieldHint(key),
+      remoteAvailabilityHint: (): string => this.remoteAvailabilityHint(),
+      remoteUsesToken: (): boolean => this.remoteUsesToken(),
+      remoteTokenStatus: (): string => this.remoteTokenStatus(),
+      hasSavedRemoteToken: (): boolean => this.hasSavedRemoteToken(),
+      remoteTokenHint: (): string => this.remoteTokenHint(),
+      onSelectMode: (index: number): void => {
+        this.pickRemoteMode(index);
+      },
+      onChangeLanAddress: (value: string): void => {
+        this.remoteLanAddress = value;
+        this.remoteUrlError = '';
+        this.refreshRemotePreview();
+      },
+      onChangeIpv6Address: (value: string): void => {
+        this.remoteIpv6Address = value;
+        this.remoteUrlError = '';
+        this.refreshRemotePreview();
+      },
+      onChangeTailscaleHost: (value: string): void => {
+        this.remoteTailscaleHost = value;
+        this.remoteUrlError = '';
+        this.refreshRemotePreview();
+      },
+      onChangeCloudflareHost: (value: string): void => {
+        this.remoteCloudflareHost = value;
+        this.remoteUrlError = '';
+        this.refreshRemotePreview();
+      },
+      onChangePort: (value: string): void => {
+        this.remotePortText = value;
+        this.remoteUrlError = '';
+        this.refreshRemotePreview();
+      },
+      onChangeRemoteToken: (value: string): void => {
+        this.remoteToken = value;
+        this.remoteUrlError = '';
+        this.refreshRemotePreview();
+      },
+      onChangeRemoteUrl: (value: string): void => {
+        this.remoteUrl = value;
+        // 手动方式下这一行就是「完整地址」字段：两份状态同步，拼地址与落盘才不会打架
+        if (this.remoteMode === REMOTE_MODE_MANUAL) {
+          this.remoteManualUrl = value;
+        }
+        this.remoteUrlError = '';
+      },
+      onClearToken: (): void => {
+        this.clearRemoteToken();
+      },
+      onOpenRemote: (): void => {
+        this.openRemote();
+      }
+    })
+  }
+
+  @Builder
+  DataGroup() {
+    DataSection({
+      exportImport: this.exportImport,
+      onExport: (request: ExportRequest): void => {
+        this.handleExport(request);
+      },
+      onPickFile: (): void => {
+        this.handlePickImportFile();
+      },
+      onConfirmImport: (): void => {
+        this.handleConfirmImport();
+      },
+      onCancel: (): void => {
+        this.handleCancelImport();
+      },
+      onCopyPath: (): void => {
+        this.handleCopyPath();
+      }
+    })
+  }
+
+  @Builder
+  AboutGroup() {
+    AboutSection({
+      lastSyncAt: this.lastSyncAt,
+      lastSyncError: this.lastSyncError,
+      lastSyncAction: this.lastSyncAction,
+      platformLine: this.platformLine(),
+      storageHint: this.storageHint,
+      themeMode: this.themeMode,
+      themeModeHintText: (): string => this.themeModeHintText(),
+      onPickTheme: (mode: string): void => {
+        this.saveThemeMode(mode);
+      },
+      onOpenPrivacy: (): void => {
+        this.panel = PANEL_PRIVACY;
+      }
+    })
   }
 
   /** 紧凑屏：五组自上而下。 */

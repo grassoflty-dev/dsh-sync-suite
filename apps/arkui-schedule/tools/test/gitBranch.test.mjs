@@ -19,6 +19,7 @@ import { dirname, join, resolve } from 'node:path';
 import { after, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
+import { readSettingsSources } from './settingsSources.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = resolve(HERE, '..', '..');
@@ -448,7 +449,9 @@ describe('源码级：push 永不 force，首次推送会建本地/远端分支'
 });
 
 describe('设置页接线（源码级）：分支输入、推送按钮、同步状态行', () => {
-  const PAGE = readFileSync(new URL('../../entry/src/main/ets/pages/Settings.ets', import.meta.url), 'utf8');
+  // 因 A2 拆分移动：分支输入框 / 推送按钮 / 状态行搬到了 components/settings/SyncSection.ets，
+  // 锚点改成「页面 + 五个 section」的合并源码（页面仍持有分支状态与 runAction）；断言不变。
+  const PAGE = readSettingsSources();
 
   test('分支可配：默认 main、输入框、校验红字、保存进扩展设置', () => {
     const has = (pattern) => assert.ok(pattern.test(PAGE), `页面缺少：${pattern}`);

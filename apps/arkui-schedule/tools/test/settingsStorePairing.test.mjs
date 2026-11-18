@@ -8,12 +8,15 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
+import { readSettingsSources } from './settingsSources.mjs';
 
 const ETS = new URL('../../entry/src/main/ets/', import.meta.url);
 const SETTINGS_STORE = readFileSync(new URL('services/settingsStore.ets', ETS), 'utf8');
 const DEEPSEEK = readFileSync(new URL('services/deepseek.ets', ETS), 'utf8');
 const INDEX = readFileSync(new URL('pages/Index.ets', ETS), 'utf8');
-const SETTINGS_PAGE = readFileSync(new URL('pages/Settings.ets', ETS), 'utf8');
+// 因 A2 拆分移动：上次同步行 / 重试入口现在分别渲染在 AboutSection 与页面的「更多」弹层里。
+// 断言关心的是「设置页整体有没有读写/渲染这些键」，锚点改成页面 + 五个 section 的合并源码。
+const SETTINGS_PAGE = readSettingsSources();
 
 /** 取出所有 `const KEY_X: string = 'x';` 声明：常量名 → 存储键名。 */
 function keyConstants(source) {
@@ -196,7 +199,17 @@ describe('数据边界：deviceUuid / deviceIdAuto 的读写与回写', () => {
     assert.match(GIT_SERVICE, /deviceId: outcome\.deviceId/);
     assert.match(GIT_SERVICE, /deviceIdAuto: outcome\.auto/);
     assert.match(GIT_SERVICE, /deviceUuid: outcome\.uuid/);
-    // 身份与既有「设备指纹」半成品合并：有指纹就沿用它当 uuid
-    assert.match(GIT_SERVICE, /fingerprint\.length > 0 \? fingerprint : generateFingerprint\(\)/);
+    // 身份只留一个：`.device-fingerprint` 的内容 = registry 的 uuid = settings 的两个键（同一个值）
+    assert.match(
+      GIT_SERVICE,
+      /deviceUuid: outcome\.uuid,\s*deviceFingerprint: outcome\.uuid/,
+      '登记成功后 settings 的两个键必须是同一个 uuid'
+    );
+    assert.match(GIT_SERVICE, /adoptRepoFingerprintUnder\(outcome\.deviceId, outcome\.uuid\)/, '指纹文件写同一个 uuid');
+    assert.equal(
+      /generateFingerprint\(\)/.test(GIT_SERVICE),
+      false,
+      '服务里不许再独立生成一个身份串（uuid 只由 resolveIdentity 生成）'
+    );
   });
 });

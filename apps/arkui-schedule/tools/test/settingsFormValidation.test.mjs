@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import { describe, test } from 'node:test';
+import { readSettingsSources } from './settingsSources.mjs';
 
 // settingsForm.ts 运行时 import ./aiProvider（isValidBaseURL），编译产物里是无后缀 ESM 说明符
 registerHooks({
@@ -158,10 +159,15 @@ describe('设置页保存校验：与页面源码的接线（防止退回「只�
 
   test('逐字段错误用 danger 令牌渲染（不再用灰色 FieldLabel）', () => {
     // ErrorText builder 必须是 danger 色
-    const builder = SETTINGS_PAGE.slice(
-      SETTINGS_PAGE.indexOf('ErrorText(text: string)'),
-      SETTINGS_PAGE.indexOf('IssuesBanner()')
+    // 因 A2 拆分移动：ErrorText / IssuesBanner 不再同处一页 —— ErrorText 抽到
+    // components/settings/SettingsBits.ets（五个 section 共用），IssuesBanner 仍在页面顶部。
+    // 切片锚点跟着 ErrorText 走（bits 文件里它后面是 HintLine），断言（必须是 danger 色）不变。
+    const bits = readSettingsFile('components/settings/SettingsBits.ets');
+    const builder = bits.slice(
+      bits.indexOf('ErrorText(text: string)'),
+      bits.indexOf('HintLine(text: string)')
     );
+    assert.ok(builder.length > 0, 'SettingsBits 里必须能找到 ErrorText 的实现');
     assert.match(builder, /app\.color\.danger/, 'ErrorText 必须用 danger');
     for (const field of ['repoUrlError', 'tokenError', 'deviceIdError', 'authorError']) {
       assert.match(SETTINGS_PAGE, new RegExp(`this\\.ErrorText\\(this\\.${field}\\)`), `${field} 必须用红色 ErrorText 渲染`);
@@ -201,7 +207,16 @@ describe('设置页保存校验：与页面源码的接线（防止退回「只�
 });
 
 function readSettingsPage() {
-  return readFileSyncSafe('../../entry/src/main/ets/pages/Settings.ets');
+  // 因 A2 拆分移动：设置页界面拆到 `pages/Settings.ets` + `components/settings/*.ets`。
+  // 本文件里「存在性」断言（某段文案 / 某个 ErrorText 调用必须在）仍然成立，因为语义没变，
+  // 只是文件位置变了 —— 锚点从「单文件」改成「页面 + 五个 section + bits」的合并源码。
+  // 需要按 builder 切片、比较相对顺序的断言，另用 readSettingsFile() 指向**搬过去之后**的文件。
+  return readSettingsSources();
+}
+
+/** 读设置页拆分后的某个文件（相对 `entry/src/main/ets`）。 */
+function readSettingsFile(relative) {
+  return readFileSyncSafe(`../../entry/src/main/ets/${relative}`);
 }
 
 function readFileSyncSafe(relative) {
@@ -322,8 +337,13 @@ describe('幽灵报错守卫：每个 issue 都必须有可见落点', () => {
   test('横幅在可滚动区域内部顶部（scrollEdge(Edge.Top) 才有效）', () => {
     const page = readSettingsPage();
     // 两套骨架（紧凑/宽屏）都要：Scroll(pageScroller) → IssuesBanner → SyncGroup
+    // 因 A2 拆分移动：SaveButton 现在排在两个 Body **之前**（装配段落顺序变了），
+    // 宽屏切片的右边界改用「弹层」分节标记；断言（Scroll → 横幅 → 同步组）不变。
     const compact = page.slice(page.indexOf('CompactBody() {'), page.indexOf('WideBody() {'));
-    const wide = page.slice(page.indexOf('WideBody() {'), page.indexOf('SaveButton()', page.indexOf('WideBody() {')));
+    const wide = page.slice(
+      page.indexOf('WideBody() {'),
+      page.indexOf('// ------------------------------------------------------------------ 弹层')
+    );
     for (const body of [compact, wide]) {
       assert.match(body, /Scroll\(this\.pageScroller\)/, '滚动容器必须绑定 pageScroller');
       const scrollAt = body.indexOf('Scroll(this.pageScroller)');
@@ -377,7 +397,12 @@ describe('同步组字段说明：写明「它到底影响什么」', () => {
   });
 
   test('说明用小字（FONT.caption + text_secondary），且允许多行读完（不是单行省略）', () => {
-    const builder = page.slice(page.indexOf('FieldNote(text: string)'), page.indexOf('SyncHeader()'));
+    // 因 A2 拆分移动：FieldNote 抽到 components/settings/SettingsBits.ets（SyncHeader 留在
+    // components/settings/SyncSection.ets），切片锚点改成 bits 文件里 FieldNote 的实现段；
+    // 断言（caption 字号 + text_secondary + 不许 maxLines(1)）不变。
+    const bits = readSettingsFile('components/settings/SettingsBits.ets');
+    const builder = bits.slice(bits.indexOf('FieldNote(text: string)'));
+    assert.ok(builder.length > 0, 'SettingsBits 里必须能找到 FieldNote 的实现');
     assert.match(builder, /FONT\.caption/, '说明字号必须是 caption');
     assert.match(builder, /text_secondary/, '说明颜色必须是 text_secondary');
     assert.equal(/maxLines\(1\)/.test(builder), false, '字段语义说明不能被单行省略号截断');
@@ -407,10 +432,17 @@ describe('同步组字段说明：写明「它到底影响什么」', () => {
 
 describe('数据边界：主表单只有三个控件，三个原字段藏在「高级」里', () => {
   const page = readSettingsPage();
+  // 因 A2 拆分移动：`SyncAdvancedFields` / 同步组主表单搬进了
+  // components/settings/SyncSection.ets（组件的根 builder 就是 `build()`）。
+  // 切片的锚点改成该文件（同一个文件里「高级」仍排在主表单之前），断言内容不变。
+  const syncSection = readSettingsFile('components/settings/SyncSection.ets');
   /** 「高级」折叠区 builder 正文。 */
-  const advanced = page.slice(page.indexOf('SyncAdvancedFields() {'), page.indexOf('SyncGroup() {'));
-  /** 主表单（SyncGroup 里、折叠区调用之前的部分）。 */
-  const mainForm = page.slice(page.indexOf('SyncGroup() {'), page.indexOf('AiGroup() {'));
+  const advanced = syncSection.slice(
+    syncSection.indexOf('SyncAdvancedFields() {'),
+    syncSection.indexOf('build() {')
+  );
+  /** 主表单（同步组根 builder 里、折叠区调用之前的部分）。 */
+  const mainForm = syncSection.slice(syncSection.indexOf('build() {'));
 
   test('「高级」默认收起（状态初值 false + 只有展开时才渲染折叠区）', () => {
     assert.match(page, /@State syncAdvancedOpen: boolean = false/, '「高级」必须默认收起');
@@ -442,7 +474,15 @@ describe('数据边界：主表单只有三个控件，三个原字段藏在「�
     assert.match(advanced, /TextInput\(\{ text: this\.deviceId/, '设备标识输入框在「高级」里');
     assert.match(advanced, /TextInput\(\{ text: this\.author/, '作者名输入框在「高级」里');
     // 手工改设备标识 = 放弃「自动分配」（否则下次同步会把它当成沿用老标识）
-    assert.match(advanced, /this\.deviceIdAuto = false;/, '手改设备标识要标记为「非自动」');
+    // 因 A2 拆分移动：输入框的 onChange 回调由页面承接（子组件只上报 onChangeDeviceId），
+    // 「手改设备标识 = 放弃自动分配」这句因此在页面的回调里，不在组件的 builder 里。
+    // 等价语义（不是放宽成「全文出现一次」）：仍然钉住「设备标识输入框的 onChange → deviceIdAuto = false」，
+    // 只是把切片从 `advanced` 换成页面里 `onChangeDeviceId` 回调那一段。
+    const deviceIdCallbackAt = page.indexOf('onChangeDeviceId: (value: string)');
+    assert.ok(deviceIdCallbackAt > 0, '页面必须承接 onChangeDeviceId 回调（子组件只上报）');
+    const deviceIdCallback = page.slice(deviceIdCallbackAt, page.indexOf('\n      },', deviceIdCallbackAt));
+    assert.match(deviceIdCallback, /this\.deviceId = value;/, '回调里要先写回用户输入');
+    assert.match(deviceIdCallback, /this\.deviceIdAuto = false;/, '手改设备标识要标记为「非自动」');
   });
 
   test('设备编号是只读一行（自动分配），不是输入框', () => {

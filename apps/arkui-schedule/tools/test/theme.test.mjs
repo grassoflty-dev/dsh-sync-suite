@@ -5,21 +5,48 @@
 //   node --test apps/arkui-schedule/tools/test/theme.test.mjs
 //
 // 四类断言：
-// 1. **静态扫描**：`entry/src/**/*.ets` 里不许再出现字面色值 / `rgb(` / `Color.Red|White…`，
-//    `fontSize(` 不许吃裸数字（这两条是「色值收编」与「字号令牌化」的硬门闸，改回字面量立刻红）；
+// 1. **目录级预算 + 语义约束**（`tools/test/helpers/colorGate.mjs`）：字面色值按**目录**给额度，
+//    并按**上下文形态**放行（`isDarkTheme() ? 深色令牌 : '浅色'` 的假分支、常量对象字面量、
+//    `backgroundColor(...)` 的参数位……），另加 `fontSize(` 不许吃裸数字（字号令牌化）；
 // 2. **资源一致性**：`base` 与 `dark` 的 `color.json` 键集必须完全一致，且 `COLOR_TOKENS`
 //    里的每个语义名两边都有；
 // 3. **纯函数边界**：三态归一、主题解析、字号夹取、令牌回落；
 // 4. **对比度与布局**：错误红字 ≥4.5:1、网格线/选中框 ≥3:1、二维码白底恒定、
 //    「×1.5 不截断」在两条代表性页面上用 `assertNoOverflow` 断言。
 //
+// 为什么不再是「文件:行号锚点」白名单：A1（手写页去重）与 A2（设置页拆 section）两次重构里，
+// 颜色一个都没变，但豁免表里的 `{ file, anchor }` 全部对不上，门闸整片打红。位置是重构的产物，
+// 不该当契约——现在只看「目录内总计数」与「上下文形态」，文件怎么拆/怎么挪都不红。
+//
 // 关于注释：静态扫描前会**剥掉注释**——注释里写「旧值 #F1F3F5」属于文档，不参与渲染；
 // 剥注释也让「把字面色写进注释绕过检查」失去意义。
+//
+// 关于工作区状态：覆盖层（`tools/overlay.mjs apply`）会把 harmony 树复制进 main 树，
+// 那时 main 里会凭空多出 5 处 hex、透明色被数两遍——门闸先断言「覆盖层已还原」，
+// 免得把「工作区没 restore」误读成「代码写死了色值」（2026-11-18 的 4 条红就是这么来的）。
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, test } from 'node:test';
+import { before, describe, test } from 'node:test';
+import { readAboutSection, readSettingsSources } from './settingsSources.mjs';
+import {
+  COLOR_BUDGET,
+  PINNED_HEX_VALUES,
+  bucketFiles,
+  budgetViolations,
+  collectColorHits,
+  countsOf,
+  detectColorLiterals,
+  formatHit,
+  shapeViolations
+} from './helpers/colorGate.mjs';
+import {
+  OVERLAY_RESIDUE_MESSAGE,
+  listFiles,
+  platformOverlayApplied,
+  stripComments
+} from './helpers/etsSource.mjs';
 
 import {
   CANVAS_PAINTS,
@@ -47,30 +74,15 @@ import {
 } from '../.build/model/theme.js';
 import { DEFAULT_PEN_COLOR, PEN_COLORS } from '../.build/model/strokeHistory.js';
 import { FONT, FONT_SCALE, LINE_HEIGHT, SPACING, TOUCH_MIN } from '../.build/common/uiTokens.js';
+import { requireOverlayRestored } from './guard.mjs';
+
+// 构建期 overlay 生效时，本文件的源码扫描结论无意义 → 硬失败（不跳过、不自动 restore）。
+requireOverlayRestored("theme.test.mjs");
 
 const APP_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const ETS_ROOT = join(APP_ROOT, 'entry', 'src');
 const BASE_COLORS = join(APP_ROOT, 'entry', 'src', 'main', 'resources', 'base', 'element', 'color.json');
 const DARK_COLORS = join(APP_ROOT, 'entry', 'src', 'main', 'resources', 'dark', 'element', 'color.json');
-
-/** 递归收集某目录下全部 `.ets`（路径统一成正斜杠，报错信息跨平台一致）。 */
-function listEts(dir) {
-  const out = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      out.push(...listEts(full));
-    } else if (entry.name.endsWith('.ets')) {
-      out.push(full.replace(/\\/g, '/'));
-    }
-  }
-  return out;
-}
-
-/** 剥注释（块注释 + 整行行注释）；保留换行数，因此行号与源文件一致。 */
-function stripComments(source) {
-  return source.replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' ')).replace(/\/\/[^\n]*/g, '');
-}
 
 /** 把匹配结果整理成「文件:行号: 片段」，失败信息直接可定位。 */
 function hitsOf(files, pattern) {
@@ -88,211 +100,77 @@ function hitsOf(files, pattern) {
   return hits;
 }
 
-const MAIN_ETS = listEts(join(ETS_ROOT, 'main', 'ets'));
-const HARMONY_ETS = listEts(join(ETS_ROOT, 'harmony', 'ets'));
+const MAIN_ETS = listFiles(join(ETS_ROOT, 'main', 'ets'), ['.ets']);
+const HARMONY_ETS = listFiles(join(ETS_ROOT, 'harmony', 'ets'), ['.ets', '.ts']);
 const ALL_ETS = [...MAIN_ETS, ...HARMONY_ETS];
 
-﻿/**
- * 被 `tools/test/handwritingToolbar.test.mjs` **钉住**的字面色（该测试不在本轮可改范围）。
- *
- * :418 要求 insertDeleteCell / pageLabelCell / prevNextCell / railToolButton 里必须出现
- * `'#F…'` 字面量；:653 要求 `const RAIL_BG: string = '#F7F9FB';` 原样存在。
- * 处理办法：浅色档保留字面量、深色档走 `theme.ts` 的 `DARK_FALLBACK`，
- * 于是这里只允许这 5 处，且每一处都必须出现在 `isDarkTheme()` 三元里（RAIL_BG 声明除外）。
- */
-const PINNED_HEX = new Map([
-  ['#F7F9FB', 1],
-  // A1 去重后 DARK_FALLBACK.railFill 已不在该处（横屏 rail 底色改读 RAIL_BG），
-  // `#F1F3F5` 只剩 cellBackground 里橡皮/手动框那一处。
-  ['#F1F3F5', 1],
-  ['#F7F8FA', 3]
-]);
+// ---------------------------------------------------------------- 1. 目录预算 + 语义约束
+//
+// 旧形态是 `WHITELIST = [{ file, anchor, kind }]`：豁免精确到「这个文件的这一行里出现这段文本」。
+// 它挡住了「随手塞色值」，但也把**位置**当成了契约——A1 / A2 两次拆分里颜色一个都没变，
+// 只因为代码搬了家（行号变了、文件变了），四条断言同时红，排查成本远大于它挡住的收益。
+//
+// 新形态分两层，都不看位置：
+//   1. 目录级预算：`COLOR_BUDGET` 里每个目录允许几处，只看**总计数**；
+//   2. 语义形态：允许留存的每一处，必须长在明确允许的上下文里（三元假分支 / 常量字面量 /
+//      调用参数位），落在形态之外的新字面色直接失败。
+// 计数常量是实测值（见 `colorGate.mjs` 每行的「实测」注释）。
 
-// ---------------------------------------------------------------- 1. 静态扫描
-
-/**
- * 色值静态门闸**能抓住的形态**（每一种都有下面的负向自测，改正则时先看那些用例）。
- *
- * 覆盖（评审 M5 的五条绕过路径全部收口）：
- * - `hex`：`#FFF` / `#RGBA` / `#RRGGBB` / `#AARRGGBB`（大小写不敏感，3/4/6/8 位）；
- * - `func`：`rgb(` / `rgba(` / `hsl(` / `hsla(`（含空格语法 `rgb (…)`）；
- * - `named`：**任意** `Color.<Name>`（不再靠一份常见色名单，`Color.Cyan` / `Color.LightGray` 也会被抓）；
- * - `ctor`：`Color(0x…)` 与 `Color(数字)` 数值构造器；
- * - `concat`：`'#' + '…'`、`'…' + 'F1F3F5'`、`` `#${x}` `` 三种字符串拼接。
- *
- * 扫描范围 = `entry/src/main|harmony/ets` 两棵树里的全部 `.ets` + main 的 `model` / `common` 下的全部 `.ts`
- * （模型层同样是共享代码，把字面色藏进 `.ts` 一样是绕过）。
- */
-const COLOR_PATTERNS = [
-  { kind: 'hex', label: 'hex 字面色（3/4/6/8 位）', pattern: /#[0-9A-Fa-f]{3,8}\b/g },
-  { kind: 'func', label: 'rgb()/rgba()/hsl()/hsla()', pattern: /\b(?:rgba?|hsla?)\s*\(/g },
-  { kind: 'named', label: 'Color.<Name> 命名色', pattern: /\bColor\.[A-Za-z][A-Za-z0-9]*/g },
-  { kind: 'ctor', label: 'Color(0x…) / Color(数字)', pattern: /\bColor\s*\(\s*(?:0[xX][0-9A-Fa-f]+|\d+)/g },
-  { kind: 'concat', label: "'#' + '…' 拼接", pattern: /['"]#['"]?\s*\+/g },
-  { kind: 'concat', label: "'…' + 'F1F3F5' 拼接", pattern: /\+\s*['"][0-9A-Fa-f]{3,8}['"]/g },
-  // 模板拼接：`` `#${x}` ``（`#` 前面必须是行首或非 `#`/单词字符，否则 Markdown 的 `## ${date}` 会误报）
-  { kind: 'concat', label: '`#${x}` 模板拼接', pattern: /(^|[^#\w])#\s*\$\{/g }
-];
-
-/**
- * 白名单：**逐条**列出、每条带理由，条目数与覆盖的字面量条数都在测试里钉死。
- *
- * 为什么不是「按文件白名单」：按文件放行等于把整棵 `Handwriting.ets` 交出去，
- * 新加一行字面色不会有任何人发现。这里精确到「这个文件里这一行（锚点）的这一类字面量」，
- * 多一处、少一处、换个位置都会红。
- *
- * 两条原则（写新豁免前先读）：
- * 1. 能用资源令牌 `$r('app.color.*')` / `theme.ts` 的 `CANVAS_PAINTS` / `DARK_FALLBACK` 的，
- *    一律走令牌，**不许**加白名单；
- * 2. 只有「被别的测试逐字钉住」或「语义上就是恒定色（纸面/墨色/透明）」才允许豁免。
- */
-const COLOR_WHITELIST = [
-  // Handwriting.ets:120 —— `const RAIL_BG: string = '#F7F9FB';` 被 handwritingToolbar.test.mjs:653 逐字钉住。
-  { file: 'harmony/ets/pages/Handwriting.ets', kind: 'hex', anchor: "const RAIL_BG: string = '#F7F9FB'" },
-  // Handwriting.ets:1699 —— 橡皮/手动框的浅色底 `'#F1F3F5'` 被 handwritingToolbar.test.mjs:493 钉住，
-  // 深色档走 DARK_FALLBACK.railFill。A1 去重后 DARK_FALLBACK.railFill 已不在该处（横屏 rail 底色改读
-  // RAIL_BG），豁免锚点同步删到实际剩余的 1 处。
-  { file: 'harmony/ets/pages/Handwriting.ets', kind: 'hex', anchor: "DARK_FALLBACK.railFill : '#F1F3F5'", count: 1 },
-  // Handwriting.ets:1641 / :1662 / :1706 —— 工具片底：浅色档 `'#F7F8FA'` 被 :418 钉住，深色档走 DARK_FALLBACK.chipFill。
-  { file: 'harmony/ets/pages/Handwriting.ets', kind: 'hex', anchor: "DARK_FALLBACK.chipFill : '#F7F8FA'", count: 3 },
-  // Index.ets:1675 —— `.backgroundColor(Color.Transparent)`：透明不是颜色，两套主题同义（ARGB 全 0）。
-  { file: 'main/ets/pages/Index.ets', kind: 'named', anchor: 'Color.Transparent' },
-  // Handwriting.ets:1829 —— 「完成」按钮在品牌蓝实底上的反白字（buttonCell 里唯一一处）。
-  // A1 把两处「完成」按钮（竖屏 finishButton / 横屏 railFinishButton）合并成一处 buttonCell，
-  // Color.White 由 2 变 1。
-  { file: 'harmony/ets/pages/Handwriting.ets', kind: 'named', anchor: '.fontColor(Color.White)', count: 1 },
-  // Handwriting.ets:2289 / :2406 / :2464 —— 选中态非选中分支的透明（让底色透出来），语义恒定。
-  { file: 'harmony/ets/pages/Handwriting.ets', kind: 'named', anchor: 'Color.Transparent', count: 3 },
-  // theme.ts：`CANVAS_PAINTS` 是画布绘制色的**唯一**来源（纸面/遮白/网格/对象描边…），属性就是「恒定色」。
-  { file: 'main/ets/model/theme.ts', kind: 'hex', anchor: "paper: '#FFFFFF'" },
-  { file: 'main/ets/model/theme.ts', kind: 'hex', anchor: "mask: '#FFFFFF'" },
-  { file: 'main/ets/model/theme.ts', kind: 'hex', anchor: "grid: '#4A5563'" },
-  { file: 'main/ets/model/theme.ts', kind: 'hex', anchor: "objectStroke: '#4A5563'" },
-  { file: 'main/ets/model/theme.ts', kind: 'hex', anchor: "objectTint: '#2F6BFF'" },
-  { file: 'main/ets/model/theme.ts', kind: 'hex', anchor: "selectionStroke: '#2F6BFF'" },
-  { file: 'main/ets/model/theme.ts', kind: 'hex', anchor: "objectDanger: '#D93025'" },
-  // theme.ts：`CANVAS_PAINTS.objectOutlineFaded` —— 半透明的对象描边淡色，同样是画布绘制色（不跟主题）。
-  { file: 'main/ets/model/theme.ts', kind: 'func', anchor: 'objectOutlineFaded' },
-  // brush.ts：荧光笔（`HIGHLIGHTER_RGBA`）与按不透明度拼 rgba 的两个绘制函数——笔迹/荧光是**画布绘制色**，
-  // 与主题开关无关（深色下也画在同一张白纸/同一层墨上），改成资源令牌反而会让笔迹变色。
-  { file: 'main/ets/model/brush.ts', kind: 'func', anchor: 'HIGHLIGHTER_RGBA' },
-  { file: 'main/ets/model/brush.ts', kind: 'func', anchor: 'rgba(0,0,0,${opacity})' },
-  { file: 'main/ets/model/brush.ts', kind: 'func', anchor: 'rgba(${red},${green},${blue},${opacity})' },
-  // theme.ts：`DARK_FALLBACK` 是「被别的测试钉住的 .ets 字面量」在深色档的等价色，必须与 dark/color.json 同值（有断言）。
-  { file: 'main/ets/model/theme.ts', kind: 'hex', anchor: "chipFill: '#1B1E21'" },
-  { file: 'main/ets/model/theme.ts', kind: 'hex', anchor: "railFill: '#23262A'" },
-  // strokeHistory.ts：笔迹色是**持久化数据**（写进 JSONL 的墨色），不跟主题走；改它等于改历史笔迹的颜色。
-  { file: 'main/ets/model/strokeHistory.ts', kind: 'hex', anchor: 'PEN_COLORS: string[] = [', count: 5 },
-  { file: 'main/ets/model/strokeHistory.ts', kind: 'hex', anchor: 'DEFAULT_PEN_COLOR' },
-  // draft.ts：草稿为空时的兜底墨色，与 DEFAULT_PEN_COLOR 同义（不落盘、不跟主题）。
-  { file: 'main/ets/model/draft.ts', kind: 'hex', anchor: 'FALLBACK_COLOR' }
-];
-
-/** 白名单**条目数**（改白名单必须同步改这里：这是「豁免只增不减」的显式刹车）。 */
-const WHITELIST_ENTRY_COUNT = 22;
-/** 白名单覆盖的**字面量条数**（`count` 之和；与条目数分开钉，防止偷偷调大 count）。 */
-const WHITELIST_LITERAL_COUNT = 30;
-
-/** 递归收集某目录下指定后缀的文件（路径统一正斜杠）。 */
-function listFilesByExt(dir, suffix) {
-  const out = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      out.push(...listFilesByExt(full, suffix));
-    } else if (entry.name.endsWith(suffix)) {
-      out.push(full.replace(/\\/g, '/'));
-    }
-  }
-  return out;
-}
-
-/** 色值扫描的文件集合：两棵 `.ets` 树 + 共享模型层的 `.ts`。 */
-const COLOR_SCAN_FILES = [
-  ...MAIN_ETS,
-  ...HARMONY_ETS,
-  ...listFilesByExt(join(ETS_ROOT, 'main', 'ets', 'model'), '.ts'),
-  ...listFilesByExt(join(ETS_ROOT, 'main', 'ets', 'common'), '.ts')
-];
-
-/**
- * 扫一段源码文本，返回逐条命中（`kind` + 命中的字面量 + 所在行文本）。
- * 导出给负向自测用：`assert.ok(detectColorLiterals(sample).length > 0)`。
- */
-function detectColorLiterals(code) {
-  const hits = [];
-  const lines = code.split('\n');
-  for (let index = 0; index < lines.length; index++) {
-    const text = lines[index];
-    for (const rule of COLOR_PATTERNS) {
-      const found = text.match(rule.pattern);
-      if (found === null) {
-        continue;
-      }
-      for (const literal of found) {
-        hits.push({ line: index + 1, kind: rule.kind, literal, text });
-      }
-    }
-  }
-  return hits;
-}
-
-/** 扫描文件集合，返回带相对路径的命中列表。 */
-function collectColorHits(files) {
-  const hits = [];
-  for (const file of files) {
-    const rel = file.slice(ETS_ROOT.length + 1);
-    for (const hit of detectColorLiterals(stripComments(readFileSync(file, 'utf8')))) {
-      hits.push({ file: rel, line: hit.line, kind: hit.kind, literal: hit.literal, text: hit.text });
-    }
-  }
-  return hits;
-}
-
-/** 命中是否属于白名单里的某一条（文件 + 类别 + 行内锚点）。 */
-function whitelistMatches(entry, hit) {
-  return hit.file === entry.file && hit.kind === entry.kind && hit.text.includes(entry.anchor);
-}
-
-describe('色值收编：字面色只允许出现在白名单里（硬门闸）', () => {
-  test('未豁免的色值字面量 = 0（hex 3/4/6/8、rgb/hsl、Color.<Name>、Color(0x…)、拼接）', () => {
-    assert.equal(COLOR_WHITELIST.length, WHITELIST_ENTRY_COUNT, `白名单条目数变了（应为 ${WHITELIST_ENTRY_COUNT}）；新增豁免请写明理由并同步改断言`);
-    const literalCount = COLOR_WHITELIST.reduce((sum, entry) => sum + (entry.count ?? 1), 0);
-    assert.equal(literalCount, WHITELIST_LITERAL_COUNT, `白名单覆盖的字面量条数变了（应为 ${WHITELIST_LITERAL_COUNT}）`);
-
-    const remaining = collectColorHits(COLOR_SCAN_FILES);
-    assert.ok(remaining.length > 0, '扫描一个都没扫到，说明文件集合或正则坏了');
-
-    for (const entry of COLOR_WHITELIST) {
-      let need = entry.count ?? 1;
-      for (let index = 0; index < remaining.length && need > 0; ) {
-        if (whitelistMatches(entry, remaining[index])) {
-          remaining.splice(index, 1);
-          need -= 1;
-        } else {
-          index += 1;
-        }
-      }
-      assert.equal(
-        need,
-        0,
-        `白名单里的豁免已经对不上了（${entry.file} · ${entry.kind} · ${entry.anchor}）：还差 ${need} 处，` +
-          '源码改了就把这条豁免删掉或更新锚点'
-      );
-    }
-
-    const leftovers = remaining.map((hit) => `${hit.file}:${hit.line}: [${hit.kind}] ${hit.literal} → ${hit.text.trim()}`);
-    assert.deepEqual(
-      leftovers,
-      [],
-      `色值必须走 $r('app.color.*') / theme.ts 的 CANVAS_PAINTS / DARK_FALLBACK：\n${leftovers.join('\n')}`
-    );
+describe('色值收编：目录级预算 + 语义形态（硬门闸）', () => {
+  // 覆盖层残留时 main 树是 harmony 的副本，下面每条预算都会假红——先把这条红讲清楚，
+  // 而不是让人以为「代码里又写死了色值」。
+  before(() => {
+    assert.equal(platformOverlayApplied(), false, OVERLAY_RESIDUE_MESSAGE);
   });
 
-  test('main 树：hex / rgb / hsl / Color(0x…) / 拼接 一处都不许有（命名色只剩白名单的 Transparent）', () => {
-    const hits = collectColorHits(MAIN_ETS).filter((hit) => hit.kind !== 'named');
-    const shown = hits.map((hit) => `${hit.file}:${hit.line}: [${hit.kind}] ${hit.literal} → ${hit.text.trim()}`);
-    assert.deepEqual(shown, [], `main 树的字面色必须换成 $r('app.color.*') / CANVAS_PAINTS：\n${shown.join('\n')}`);
+  test('预算表自身可用：每个目录都能扫到文件、互不重叠、限额是非负整数', () => {
+    assert.ok(COLOR_BUDGET.length >= 4, '预算表至少覆盖 main UI / main model / main common / harmony 四棵树');
+    const owned = new Map();
+    for (const bucket of COLOR_BUDGET) {
+      const files = bucketFiles(bucket);
+      assert.ok(files.length > 0, `${bucket.label} 一个文件都没扫到（目录写错了？预算会变成空过）`);
+      for (const [kind, limit] of Object.entries(bucket.limits)) {
+        assert.equal(Number.isInteger(limit) && limit >= 0, true, `${bucket.label} 的 ${kind} 限额必须是非负整数`);
+      }
+      for (const file of files) {
+        assert.equal(owned.has(file), false, `${file} 同时落在 ${owned.get(file)} 与 ${bucket.label} 两个桶里（会重复计数）`);
+        owned.set(file, bucket.label);
+      }
+    }
+  });
+
+  test('目录预算：没有预算外的色值字面量（hex 3/4/6/8、rgb/hsl、Color.<Name>、Color(0x…)、拼接）', (t) => {
+    const hits = collectColorHits();
+    assert.ok(hits.length > 0, '扫描一个都没扫到，说明目录集合或正则坏了');
+    const measured = COLOR_BUDGET.map((bucket) => `${bucket.label} → ${JSON.stringify(countsOf(hits, bucket.key))}`);
+    t.diagnostic(`实测计数\n${measured.join('\n')}`);
+    const over = budgetViolations(hits);
+    assert.deepEqual(over, [], `色值超预算（预算 = 实测值，只留「变少」的方向）：\n${over.join('\n')}`);
+  });
+
+  test('语义形态：预算内的每一处都长在允许的上下文里（不是「有额度就能随便塞」）', (t) => {
+    const shape = shapeViolations(collectColorHits());
+    const shown = shape.map((item) => `${formatHit(item.hit)}\n     ← ${item.reason}`);
+    t.diagnostic(shown.length === 0 ? '全部命中都在允许的形态里' : `形态违约 ${shown.length} 处`);
+    assert.deepEqual(shown, [], `以下字面色不在允许的上下文形态里：\n${shown.join('\n')}`);
+  });
+
+  test('main 树：hex / rgb / hsl / Color(0x…) / 拼接 一处都不许有（命名色只剩预算内的 Transparent）', () => {
+    const hits = collectColorHits().filter((hit) => hit.bucket === 'main-ui');
+    const literals = hits
+      .filter((hit) => hit.kind !== 'named')
+      .map((hit) => `${hit.file}:${hit.line}: [${hit.kind}] ${hit.literal} → ${hit.text.trim()}`);
+    assert.deepEqual(
+      literals,
+      [],
+      `main 共享 UI 层的字面色必须换成 $r('app.color.*') / CANVAS_PAINTS：\n${literals.join('\n')}`
+    );
+    const named = hits.filter((hit) => hit.kind === 'named');
+    assert.deepEqual(
+      named.map((hit) => hit.literal),
+      ['Color.Transparent'],
+      `main 树只允许「透明」这一种命名色（${named.map((hit) => `${hit.file}:${hit.line}`).join(', ')}）`
+    );
   });
 
   test('负向自测：这 16 种写法必须被同一套正则抓住（改正则先跑它）', () => {
@@ -313,7 +191,7 @@ describe('色值收编：字面色只允许出现在白名单里（硬门闸）'
       ["const c: string = '#' + 'F1F3F5';", "'#' + '…' 拼接"],
       ["const c: string = 'F1F' + '3F5';", "'…' + 'F1F3F5' 拼接"],
       ['const c: string = `#${token}`;', '模板拼接'],
-      ['const c: ResourceColor = Color.Transparent;', '命名色（透明也要走白名单）']
+      ['const c: ResourceColor = Color.Transparent;', '命名色（透明也要走预算）']
     ];
     for (const [sample, label] of samples) {
       assert.ok(
@@ -321,48 +199,73 @@ describe('色值收编：字面色只允许出现在白名单里（硬门闸）'
         `${label} 必须被色值扫描抓住，实际漏了：${sample}`
       );
     }
-    // 反向：正常写法不能被误伤（否则门闸会逼人加无意义白名单）
+    // 反向：正常写法不能被误伤（否则门闸会逼人加无意义预算）
     const clean = [
       ".backgroundColor($r('app.color.canvas'))",
-      'const c: ResourceColor = colorToken(\'text_primary\');',
-      "const paint: string = CANVAS_PAINTS.paper;",
+      "const c: ResourceColor = colorToken('text_primary');",
+      'const paint: string = CANVAS_PAINTS.paper;'
     ];
     for (const sample of clean) {
       assert.deepEqual(detectColorLiterals(sample), [], `正常写法被误判：${sample}`);
     }
   });
 
-  test('harmony 树只剩被 handwritingToolbar.test.mjs 钉住的 5 处 hex，且都在 isDarkTheme() 三元里', () => {
-    const hits = collectColorHits(HARMONY_ETS).filter((hit) => hit.kind === 'hex');
-    assert.equal(hits.length, 5, `harmony 树 hex 数量变了（应为 5 处钉住值）：\n${hits.map((hit) => `${hit.file}:${hit.line} ${hit.literal}`).join('\n')}`);
-    const counts = new Map();
-    for (const hit of hits) {
-      counts.set(hit.literal, (counts.get(hit.literal) ?? 0) + 1);
+  test('negative 自测（语义层）：形态之外的写法必须被拒，形态之内的必须放行', () => {
+    const shapeOf = (bucket, code) =>
+      detectColorLiterals(code).map((hit) => ({ ...hit, bucket, file: 'sample.ets', code }));
+    const rejected = [
+      ['harmony', "    .backgroundColor('#FFFFFF')", '裸 hex（不在三元/常量声明里）'],
+      ['harmony', "    const other: string = '#123456';", '钉住值集合之外的新 hex'],
+      ['harmony', '    .fontColor(Color.Black)', '完成按钮之外的命名色'],
+      ['main-ui', '    const c: ResourceColor = Color.Transparent;', 'main 树透明色不在调用参数位'],
+      ['main-model', '    const paint: string = someFn() + \'#FFF\';', 'model 层裸 hex 不在常量形态里'],
+      ['main-common', "    const c: string = '#FFF';", 'common 层一个色值都不许有']
+    ];
+    for (const [bucket, code, label] of rejected) {
+      const hits = shapeOf(bucket, code);
+      assert.ok(
+        shapeViolations(hits).length > 0,
+        `${label} 必须被语义层拒绝：${code.trim()}`
+      );
     }
-    assert.deepEqual(counts, PINNED_HEX, `钉住值的集合变了：${JSON.stringify([...counts])}`);
-
-    // 结构断言：非 RAIL_BG 声明的每一处，都必须是 `isDarkTheme() ? <深色令牌> : '<浅色字面量>'` 的**假分支**。
-    const ternary = /isDarkTheme\(\)\s*\?[^:?]*:\s*'#[0-9A-Fa-f]{3,8}'/;
-    for (const hit of hits) {
-      const isDeclaration = /const\s+RAIL_BG/.test(hit.text);
-      if (isDeclaration) {
-        continue;
-      }
-      assert.match(
-        hit.text,
-        ternary,
-        `${hit.file}:${hit.line} 的字面色不在「isDarkTheme() 三元的浅色档」里：${hit.text.trim()}`
+    const accepted = [
+      ['harmony', "    .backgroundColor(this.isDarkTheme() ? DARK_FALLBACK.chipFill : '#F7F8FA')", '三元假分支'],
+      ['harmony', "  const RAIL_BG: string = '#F7F9FB';", '常量声明'],
+      ['harmony', '    .fontColor(Color.White)', '完成按钮反白字'],
+      ['harmony', "    .backgroundColor(this.on ? $r('app.color.selection_fill') : Color.Transparent)", '三元里的透明'],
+      ['main-ui', '    .backgroundColor(Color.Transparent)', '调用参数位的透明'],
+      ['main-model', "  paper: '#FFFFFF',", '常量对象字面量']
+    ];
+    for (const [bucket, code, label] of accepted) {
+      const hits = shapeOf(bucket, code);
+      assert.deepEqual(
+        shapeViolations(hits).map((item) => item.reason),
+        [],
+        `${label} 必须被语义层放行：${code.trim()}`
       );
     }
   });
 
-  test('命名色只剩白名单：完成按钮的 Color.White ×1 + 透明 ×4', () => {
-    const named = collectColorHits(COLOR_SCAN_FILES).filter((hit) => hit.kind === 'named');
+  test('harmony 树 hex ≤5，且值只能是被钉住的浅色档、位置只能是三元假分支/常量声明', () => {
+    const hits = collectColorHits().filter((hit) => hit.bucket === 'harmony' && hit.kind === 'hex');
+    assert.ok(hits.length <= 5, `harmony 树 hex 数量超预算（≤5，实测 ${hits.length}）：\n${hits.map((hit) => `${hit.file}:${hit.line} ${hit.literal}`).join('\n')}`);
+    for (const hit of hits) {
+      assert.ok(
+        PINNED_HEX_VALUES.has(hit.literal.toUpperCase()),
+        `${hit.file}:${hit.line} 的 ${hit.literal} 不在被 handwritingToolbar.test.mjs 钉住的值集合里`
+      );
+    }
+    const values = [...new Set(hits.map((hit) => hit.literal))].sort();
+    assert.deepEqual(values, ['#F1F3F5', '#F7F8FA', '#F7F9FB'], `钉住值的集合变了：${values.join(', ')}`);
+    assert.deepEqual(shapeViolations(hits).map((item) => formatHit(item.hit)), [], 'harmony 树的 hex 必须都在三元假分支或常量声明里');
+  });
+
+  test('命名色只剩预算内：完成按钮的 Color.White ×1 + 透明 ×4', () => {
+    const named = collectColorHits().filter((hit) => hit.kind === 'named');
     const white = named.filter((hit) => hit.literal === 'Color.White');
     const transparent = named.filter((hit) => hit.literal === 'Color.Transparent');
-    // A1 把两处「完成」按钮合并成一处 buttonCell，Color.White 由 2 变 1。
     assert.equal(white.length, 1, `Color.White 只允许 1 处（完成按钮反白字）：\n${white.map((hit) => `${hit.file}:${hit.line}`).join('\n')}`);
-    assert.equal(transparent.length, 4, `Color.Transparent 只允许 4 处（语义恒定）：\n${transparent.map((hit) => `${hit.file}:${hit.line}`).join('\n')}`);
+    assert.equal(transparent.length, 4, `Color.Transparent 只允许 4 处（main 1 + harmony 3，语义恒定：让底色透出来）：\n${transparent.map((hit) => `${hit.file}:${hit.line}`).join('\n')}`);
     assert.equal(named.length, white.length + transparent.length, '除 White / Transparent 之外不允许任何命名色');
   });
 
@@ -760,8 +663,11 @@ describe('大字号：×1.0 与 ×1.5 下两条代表性页面行都不溢出', 
     assert.match(row, /\.maxLines\(2\)/, 'Index 列表行标题必须 maxLines(2)');
     assert.match(row, /TextOverflow\.Ellipsis/, 'Index 列表行标题必须省略号收尾');
 
-    const settings = readFileSync(join(ETS_ROOT, 'main', 'ets', 'pages', 'Settings.ets'), 'utf8');
-    const themeRow = settings.slice(settings.indexOf('ThemeRow() {'), settings.indexOf('AboutGroup() {'));
+    // 因 A2 拆分移动：`ThemeRow()` 随「关于」组搬到 components/settings/AboutSection.ets，
+    // 锚点从「Settings.ets 里 ThemeRow 到 AboutGroup 之间」改成「AboutSection.ets 里的 ThemeRow」；
+    // 断言（maxLines(1) + 省略号 + 只守 minWidth）不变。
+    const settings = readAboutSection();
+    const themeRow = settings.slice(settings.indexOf('ThemeRow() {'), settings.indexOf('build() {'));
     assert.ok(themeRow.length > 0, 'Settings 必须渲染 ThemeRow（深色模式行）');
     assert.match(themeRow, /\.maxLines\(1\)/, '表单行标签必须 maxLines(1)');
     assert.match(themeRow, /TextOverflow\.Ellipsis/, '表单行标签必须省略号收尾');
@@ -780,7 +686,10 @@ describe('大字号：×1.0 与 ×1.5 下两条代表性页面行都不溢出', 
 describe('接线：三态设置真的落到存储与 ColorMode', () => {
   const ENTRY = readFileSync(join(ETS_ROOT, 'main', 'ets', 'entryability', 'EntryAbility.ets'), 'utf8');
   const STORE = readFileSync(join(ETS_ROOT, 'main', 'ets', 'services', 'settingsStore.ets'), 'utf8');
-  const SETTINGS = readFileSync(join(ETS_ROOT, 'main', 'ets', 'pages', 'Settings.ets'), 'utf8');
+  // 因 A2 拆分移动：`themeMode` 仍是页面的 @State（切换逻辑在页面 saveThemeMode），
+  // 而三态片（THEME_MODE_ORDER 的顺序）渲染在 components/settings/AboutSection.ets；
+  // 锚点改成页面 + 五个 section 的合并源码，断言（setColorMode/落盘/回退/顺序来自 theme.ts）不变。
+  const SETTINGS = readSettingsSources();
   const APPLY = readFileSync(join(ETS_ROOT, 'main', 'ets', 'common', 'themeApply.ets'), 'utf8');
 
   test('EntryAbility 启动时按持久化值设置 ColorMode', () => {
