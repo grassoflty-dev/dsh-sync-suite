@@ -16,7 +16,6 @@
  *   4. token 明文只能出现在 `withToken()` 的返回值里（那是"显示链接"的专用出口）；
  *      错误消息、日志、`RemoteStatus` 只许用打码后的形态。
  */
-import { REMOTE_MODES } from './accessMode.js'
 import type { RemoteAccessMode, RemoteSettings } from './types.js'
 
 /** 统一返回形状：`reason` 为空串表示成功。 */
@@ -258,6 +257,43 @@ function normalizeManualUrl(raw: string): UrlResult {
   return urlOk(parsed.toString())
 }
 
+/**
+ * UU 远程「对外入口」归一。
+ *
+ * 用户从 UU 远程的「图形化端口映射」里复制出来的东西，形态**还没实测过**，可能长这样：
+ * `abc.uuyc.com:12345`（host:port）、`abc.uuyc.com`（纯域名）、或已经是 `https://…`。
+ * 规则（**临时默认，实测后只改这一处**）：
+ *   - 已带协议 → 原样保留（只校验是 http/https）；
+ *   - 不带协议且文本里**含 `/`**（看起来是域名/带路径）→ 补 `https://`；
+ *   - 否则（看起来是 `host:port`）→ 补 `http://`。
+ *
+ * 为什么先这么定：域名入口通常由 UU 终结 TLS，补 http 会打不开；而 `host:port` 形态几乎
+ * 只可能是明文端口映射。两个方向都可能判错，所以这里只做"最可能打开"的猜测，并把
+ * 「待实测」写进 uu 的 `steps` 最后一步，等真机结果回来再改这个函数。
+ *
+ * 不在这里追加 token：token 由 `appendAccessToken` / `showLink` 统一负责。
+ */
+function normalizeUuEntry(raw: string): UrlResult {
+  const text = raw.trim()
+  if (text === '') return urlFail('还没填 UU 远程生成的对外入口')
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(text)
+    ? text
+    : text.includes('/')
+      ? `https://${text}`
+      : `http://${text}`
+  let parsed: URL
+  try {
+    parsed = new URL(withScheme)
+  } catch {
+    return urlFail('对外入口不可用：地址解析失败，请检查是否拼错（例如少了主机名或多了空格）')
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return urlFail('对外入口不可用：只支持 http:// 或 https:// 开头的地址')
+  }
+  if (parsed.hostname === '') return urlFail('对外入口不可用：地址里缺少主机名')
+  return urlOk(parsed.toString())
+}
+
 /** 端口取值：设置里 `>0` 用它，否则跟随 DSH 自己的监听端口。 */
 function effectivePort(settings: RemoteSettings, ctx: { dshPort: number }): number {
   return settings.port > 0 ? settings.port : ctx.dshPort
@@ -313,7 +349,9 @@ export function urlForMode(
     case 'manual':
       return normalizeManualUrl(settings.manualUrl)
     case 'uu':
-      return urlFail(REMOTE_MODES.uu.unavailableReason)
+      // UU 的对外入口与 manual 共用 `manualUrl` 槽位（刻意复用，见 accessMode.ts 的注释），
+      // 但归一规则不同：UU 允许缺协议（入口形态待实测）。
+      return normalizeUuEntry(settings.manualUrl)
     default:
       // 旧配置/手改文件里可能出现未知 mode：fail-closed，不猜。
       return urlFail('不认识的访问方式，请重新选择')

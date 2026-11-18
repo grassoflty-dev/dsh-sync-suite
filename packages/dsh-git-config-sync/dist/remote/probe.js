@@ -48,7 +48,9 @@ export const PROBE_CHECK_IDS = Object.freeze([
     'ws-upgrade',
     'manual-url-parse',
     'manual-url-scheme',
-    'uu-unsupported',
+    'uu-entry',
+    'uu-reachable',
+    'uu-ws-upgrade',
     'mode-unknown',
 ]);
 /** 认识的方式集合（运行时兜底：形状不对的 mode 一律 fail-closed）。 */
@@ -60,7 +62,7 @@ const MODE_READY = {
     ipv6: '公网 IPv6 本机条件已就绪，但必须从外网实测一次才能确认',
     cloudflare: 'Cloudflare 隧道域名已配置，但仍需实测 WebSocket 能否返回 101',
     manual: '手动地址格式正确：用平板打开确认即可',
-    uu: '不可用：UU 是画面串流，不能当隧道',
+    uu: 'UU 远程（图形化端口映射）：入口与 WS 透传待实测',
 };
 /** 这些 `unknown` 只意味着"必须从外网/真机确认"，不影响"本机检查通过"的措辞。 */
 const EXTERNAL_UNKNOWN_IDS = ['external-reachability', 'ws-upgrade'];
@@ -998,10 +1000,21 @@ export async function runProbe(mode, settings, deps = {}) {
             case 'manual':
                 runManualChecks(settings, add);
                 break;
-            case 'uu':
-                // 明确不可行，但仍然是"一条 fail"，不是静默隐藏；hint 指回能用的方式。
-                add(chk('uu-unsupported', 'fail', 'UU 远程是画面串流，不能当隧道', '改用局域网 / Tailscale / Cloudflare 隧道 / IPv6 直连；UU 只能看到屏幕画面，DSH 的 Web 访问和 token 都走不通。'));
+            case 'uu': {
+                // 第 5 轮订正：UU 远程**确实**有「图形化端口映射」（免费版含），不再判「不可用」。
+                // 本机能判的只有两件事：入口填没填、形态像不像；入口能否从外网打开、WS 能否透传
+                // 都只能实测，所以那两条一律 unknown（不假阳性）。
+                const entry = (settings.manualUrl ?? '').trim();
+                if (entry === '') {
+                    add(chk('uu-entry', 'fail', '还没填 UU 远程生成的对外入口', 'UU远程 → 图形化端口映射 → 内部端口填 DSH 端口 → 复制生成的对外入口，粘到「对外入口地址」。'));
+                }
+                else {
+                    add(chk('uu-entry', 'ok', `已填对外入口：${entry.length} 个字符`, ''));
+                    add(chk('uu-reachable', 'unknown', '本机无法自证这个入口在外网可打开', '用平板（关掉 Wi-Fi、走流量）打开该入口确认；打不开就回 UU 客户端看映射是否在线。'));
+                    add(chk('uu-ws-upgrade', 'unknown', '端口映射是否放行 WebSocket upgrade 只能实测', '在内嵌页看是否出现「连接异常，刷新重试」，或抓 hilog 的 ERR_WS_UPGRADE。'));
+                }
                 break;
+            }
         }
     }
     // 统一打码后才返回：任何分支拼进去的 URL 都不会把 token 带出去。

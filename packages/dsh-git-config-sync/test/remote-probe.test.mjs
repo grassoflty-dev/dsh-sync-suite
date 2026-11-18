@@ -116,7 +116,9 @@ test('PROBE_CHECK_IDS 覆盖每种方式的关键 check id', () => {
     'ws-upgrade',
     'manual-url-parse',
     'manual-url-scheme',
-    'uu-unsupported',
+    'uu-entry',
+    'uu-reachable',
+    'uu-ws-upgrade',
   ]) {
     assert.ok(PROBE_CHECK_IDS.includes(id), `PROBE_CHECK_IDS 缺 ${id}`)
   }
@@ -676,16 +678,21 @@ test('manual：URL 带 token 时结果里绝不含 token 明文', async () => {
   assert.match(checkOf(result, 'manual-url-parse').message, /dsh\.example\.com/)
 })
 
-test('uu：单条 fail，hint 指向别的访问方式', async () => {
+test('uu：没填对外入口 → fail；填了 → entry ok + 可达性/WS 恒 unknown', async () => {
   const { deps } = makeDeps()
-  const result = await runProbe('uu', settings({ mode: 'uu' }), deps)
-  const uu = checkOf(result, 'uu-unsupported')
-  assert.equal(uu.level, 'fail')
-  assert.match(uu.message, /画面串流/)
-  assert.match(uu.hint, /Cloudflare|局域网/)
-  assert.equal(result.level, 'fail')
-  assert.match(result.verdict, /还不能用/)
-  assert.equal(idsOf(result).filter((id) => id === 'uu-unsupported').length, 1)
+  const empty = await runProbe('uu', settings({ mode: 'uu', manualUrl: '' }), deps)
+  const entry = checkOf(empty, 'uu-entry')
+  assert.equal(entry.level, 'fail')
+  assert.match(entry.hint, /图形化端口映射/)
+  assert.equal(empty.level, 'fail')
+  assert.match(empty.verdict, /还不能用/)
+
+  const filled = await runProbe('uu', settings({ mode: 'uu', manualUrl: 'https://abc.uuyc.com:12345/' }), deps)
+  assert.equal(checkOf(filled, 'uu-entry').level, 'ok')
+  assert.equal(checkOf(filled, 'uu-reachable').level, 'unknown')
+  assert.equal(checkOf(filled, 'uu-ws-upgrade').level, 'unknown')
+  assert.equal(filled.level, 'unknown', 'unknown 不得被降级成 ok')
+  assert.equal(idsOf(filled).includes('uu-unsupported'), false, '旧「不可用」断言必须消失')
 })
 
 test('聚合顺序：fail 压过 unknown；unknown 压过 warn', async () => {

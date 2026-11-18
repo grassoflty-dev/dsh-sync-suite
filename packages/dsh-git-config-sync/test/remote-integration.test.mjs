@@ -43,8 +43,14 @@ test('联调：remoteGetState 走真实装配，返回 6 种方式 + 令牌已�
     ['lan', 'tailscale', 'ipv6', 'cloudflare', 'manual', 'uu'],
   )
   const uu = res.data.modes.find((item) => item.mode === 'uu')
-  assert.equal(uu.availability, 'unsupported')
-  assert.ok(uu.unavailableReason.length > 0, 'uu 必须给出不可用原因')
+  assert.equal(uu.availability, 'needs-setup', 'uu 已订正为「可用（需准备）」')
+  assert.equal(uu.unavailableReason, '', 'uu 不再是 unsupported，unavailableReason 必须为空串')
+  assert.deepEqual(
+    uu.fields.map((field) => field.key),
+    ['manualUrl', 'token'],
+    'uu 复用 manualUrl 槽位 + 可选令牌',
+  )
+  assert.ok(uu.requires.length > 0 && uu.steps.length > 0, 'uu 必须给出前置条件与操作步骤')
   assert.equal(res.data.status.token.exists, true, '首次装配应自动生成令牌')
   assert.equal(res.data.settings.enabled, false, '默认关闭')
 
@@ -121,13 +127,38 @@ test('联调：remoteProbe 走真实 probe，返回带 id/level 的结论且 ver
   assert.ok(probe.verdict.length > 0)
 })
 
-test('联调：uu 方式请求链接时 fail-closed（给原因而不是假地址）', async (t) => {
-  const { service } = await makeRpc(t)
+test('联调：uu 有对外入口时 showLink 成功并带令牌；没入口时给中文原因', async (t) => {
+  const { service, mod } = await makeRpc(t)
+
+  // 1) 没填入口 → fail-closed，但原因是"还没填入口"，不是"这种方式不可用"
   await service.handleRpc({ action: 'remoteSaveSettings', settings: { enabled: false, mode: 'uu' } })
+  const missing = await service.handleRpc({ action: 'remoteShowLink' })
+  assert.equal(missing.ok, false, '没有入口时不该产出可打开地址')
+  assert.equal(missing.error.code, 'E_INTERNAL')
+  assert.match(missing.error.message, /还没填 UU 远程生成的对外入口/)
+
+  // 2) 填了入口（就按 UU 界面里复制出来的 host:port 形态，不带协议）→ 直接能出链接
+  const saved = await service.handleRpc({
+    action: 'remoteSaveSettings',
+    settings: { enabled: false, mode: 'uu', manualUrl: 'abc.uuyc.com:12345' },
+  })
+  assert.equal(saved.ok, true, JSON.stringify(saved))
+  assert.equal(saved.data.settings.mode, 'uu')
+  assert.equal(saved.data.settings.manualUrl, 'abc.uuyc.com:12345', 'uu 的入口允许缺协议，原样保存')
+
   const link = await service.handleRpc({ action: 'remoteShowLink' })
-  assert.equal(link.ok, false, 'uu 不该产出可打开地址')
-  assert.equal(link.error.code, 'E_INTERNAL')
-  assert.match(link.error.message, /画面串流|不能当隧道|不产生端口/)
+  assert.equal(link.ok, true, JSON.stringify(link))
+  assert.match(link.data.url, /^http:\/\/abc\.uuyc\.com:12345\/\?token=/)
+  assert.ok(link.data.qr.size >= 21, '二维码仍然照常生成')
+
+  const tokenRecord = JSON.parse(await readFile(mod.paths.tokenFile, 'utf8'))
+  assert.ok(link.data.url.includes(tokenRecord.token), 'uu 链接同样带令牌（showLink 是唯一明文出口）')
+
+  // 3) 令牌不进其它出口
+  for (const action of ['remoteGetState']) {
+    const res = await service.handleRpc({ action })
+    assert.equal(JSON.stringify(res).includes(tokenRecord.token), false, `${action} 响应里出现了 token 明文`)
+  }
 })
 
 test('联调：「访问令牌（可选）」落盘 → getState 只有 tokenSet/tokenMasked，showLink 用粘贴的令牌', async (t) => {

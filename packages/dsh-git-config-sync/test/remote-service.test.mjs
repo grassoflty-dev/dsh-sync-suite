@@ -103,16 +103,29 @@ test('start：没装配 listener → E_NO_LISTENER，且不抛异常', async (t)
   await service.dispose()
 })
 
-test('start：unsupported 方式（uu）→ E_MODE_UNSUPPORTED，并把原因放进消息', async (t) => {
+test('start：uu（可用但不需要本机监听）→ E_NO_BIND_ADDRESS，不再按 unsupported 拒绝', async (t) => {
+  // 2026-11-18 订正：uu 从 unsupported 变成 needs-setup。它是"用户自己在 UU 里配端口映射"，插件
+  // 不起旁挂监听，所以 start() 走的是"这种方式不需要本机监听"这条 fail-closed 分支
+  // （与 manual 一致），而不是 E_MODE_UNSUPPORTED。
   const home = await makeHome(t)
+  const fake = await startFakeDsh(t)
   const { gate } = fakeGate()
-  const { start } = fakeListener()
-  const service = createRemoteService({ homeDir: home, createGate: () => gate, startListener: start, webServer: { port: 3080 } })
+  const { start, calls } = fakeListener()
+  const service = createRemoteService({
+    homeDir: home,
+    createGate: () => gate,
+    startListener: start,
+    webServer: { port: fake.port },
+    // 上游身份要先拿到才会走到绑定地址那一步（与 happy path 同一套假 DSH）
+    connection: { authenticatedUrl: (base) => `${base}?token=launch` },
+  })
   await service.saveSettings({ mode: 'uu' })
   const status = await service.start()
   assert.equal(status.running, false)
-  assert.equal(status.lastError.code, 'E_MODE_UNSUPPORTED')
-  assert.match(status.lastError.message, /画面串流|不能当隧道|不产生端口/)
+  assert.equal(status.lastError.code, 'E_NO_BIND_ADDRESS')
+  assert.match(status.lastError.message, /不需要本机监听/)
+  assert.doesNotMatch(status.lastError.message, /画面串流|不产生端口/)
+  assert.equal(calls.length, 0, 'uu 不该起任何监听')
   await service.dispose()
 })
 

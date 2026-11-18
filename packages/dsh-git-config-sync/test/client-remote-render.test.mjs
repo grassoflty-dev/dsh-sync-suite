@@ -5,8 +5,8 @@
  *   1. 注册了**两个独立** section：配置同步（id git-config-sync / order 70）与
  *      远程访问（id git-config-sync-remote / order 71），locale 都复用同一个 NS；
  *   2. `remote.*` 文案在 locale/zh.json 与 locale/en.json 都存在且两侧键集一致；
- *   3. 用「含 uu（unsupported）+ 四种 level 的 checks + qr 矩阵」的假 state 渲染
- *      RemotePanel 不抛异常，且 DOM 里出现「远程访问」「不可用」等文案；
+ *   3. 用「含 uu（needs-setup：图形化端口映射）+ 四种 level 的 checks + qr 矩阵」的假 state
+ *      渲染 RemotePanel 不抛异常，且 DOM 里出现「远程访问」「需先准备」「图形化端口映射」等文案；
  *   4. 渲染结果里**不包含**任何 token 明文（含属性 / title / aria）。
  */
 import test from 'node:test'
@@ -47,6 +47,9 @@ const REMOTE_KEYS = [
   'remote.fields.ipv6Address.placeholder',
   'remote.fields.manualUrl',
   'remote.fields.manualUrl.placeholder',
+  // uu 与 manual 共用 manualUrl 槽位，但 方式专属 文案必须单独存在（client.js 先查这两个）
+  'remote.fields.uu.manualUrl',
+  'remote.fields.uu.manualUrl.placeholder',
   'remote.field.token',
   'remote.field.token.hint',
   'remote.token.saved',
@@ -399,12 +402,27 @@ function fakeState(mode = 'lan', settingsOverrides = {}) {
       {
         mode: 'uu',
         label: '网易 UU',
-        description: '游戏加速器的远程能力。',
-        availability: 'unsupported',
-        unavailableReason: 'UU 的远程端口不对第三方开放，本插件无法接入',
-        requires: [],
-        fields: [],
-        steps: [],
+        description: '图形化端口映射，免费版包含。',
+        availability: 'needs-setup',
+        unavailableReason: '',
+        requires: ['电脑装 UU 远程并登录（免费版含端口映射）', '在 UU 远程 →「图形化端口映射」里把内部端口设为 DSH 端口'],
+        fields: [
+          {
+            key: 'manualUrl',
+            label: '对外入口地址',
+            placeholder: '从 UU 远程复制，如 abc.uuyc.com:12345 或 https://…',
+            hint: 'UU远程 → 图形化端口映射 → 内部端口填 DSH 端口 → 复制生成的对外入口',
+            required: true
+          },
+          {
+            key: 'token',
+            label: '访问令牌（可选）',
+            placeholder: '粘贴电脑上 DSH 地址里的 token',
+            hint: '留空则不带令牌；填了会追加 ?token=…',
+            required: false
+          }
+        ],
+        steps: ['电脑上启动 DSH', '打开 UU 远程 → 图形化端口映射', '复制生成的对外入口', '粘到「对外入口地址」'],
         hostsListener: false
       }
     ]
@@ -498,7 +516,7 @@ test('remote.* 键在 zh/en 都存在且两侧键集一致', () => {
 /* 3) 渲染                                                                     */
 /* -------------------------------------------------------------------------- */
 
-test('RemotePanel：假 state 渲染不抛异常，且出现「远程访问」「不可用」等文案', async () => {
+test('RemotePanel：假 state 渲染不抛异常，且出现「远程访问」「需先准备」等文案', async () => {
   const { mod } = await loadClient()
   const sections = renderSections(mod)
   const remote = sections.find((s) => s.options.id === 'git-config-sync-remote')
@@ -511,10 +529,9 @@ test('RemotePanel：假 state 渲染不抛异常，且出现「远程访问」�
   const text = textOf(tree)
   for (const expected of [
     '远程访问', // remote.title / nav
-    '不可用', // uu 的 availability 徽章
-    '需先准备', // tailscale 的 availability 徽章
+    '需先准备', // uu / ipv6 / tailscale 的 availability 徽章
     '网易 UU', // 方式名
-    'UU 的远程端口不对第三方开放', // unavailableReason（中性色文案）
+    '图形化端口映射', // uu 的 requires（可用但有前置）
     '安装 Tailscale 客户端', // requires 列表
     '怎么做', // steps 折叠
     '运行中',
@@ -537,23 +554,43 @@ test('RemotePanel：假 state 渲染不抛异常，且出现「远程访问」�
     assert.ok(text.includes(expected), `渲染结果里缺少文案「${expected}」`)
   }
   assert.ok(text.includes('http://192.168.1.6:3080/'), '链接区应显示不含令牌的地址')
+  // 旧的（错误）结论文案不得再出现在 UI 里
+  assert.equal(text.includes('不对第三方开放'), false, 'uu 不再有"不可用"的理由文案')
+  assert.equal(text.includes('画面串流'), false, 'uu 不再是"画面串流不是隧道"的说法')
 })
 
-test('RemotePanel：uu（unsupported）在下拉里被禁用，lan 不被禁用', async () => {
+test('RemotePanel：uu（needs-setup）可被选中，显示 requires 与操作提示', async () => {
   const { mod } = await loadClient()
   const sections = renderSections(mod)
   const remote = sections.find((s) => s.options.id === 'git-config-sync-remote')
-  const tree = renderRemote(remote.component, { seedState: fakeState() })
+  const tree = renderRemote(remote.component, { seedState: fakeState('uu') })
 
   const nodes = nodesOf(tree)
   const options = nodes.filter((node) => node.type === 'option')
   const uu = options.find((node) => node.props.value === 'uu')
   const lan = options.find((node) => node.props.value === 'lan')
-  assert.ok(uu, '方式下拉里必须仍列出 uu（让用户看到原因，而不是消失）')
-  assert.equal(uu.props.disabled, true, 'unsupported 的项必须禁用')
+  assert.ok(uu, '方式下拉里必须列出 uu')
+  assert.notEqual(uu.props.disabled, true, 'needs-setup 的 uu 必须可选（不再是 disabled）')
   assert.ok(lan)
   assert.notEqual(lan.props.disabled, true, '可用方式不得被禁用')
   assert.equal(nodes.filter((node) => node.type === 'select').length, 1, '方式下拉一个')
+
+  const text = textOf(tree)
+  // 选中 uu 后的说明区：徽章 + 前置条件 + 操作步骤 + 字段
+  assert.ok(text.includes('需先准备'), 'uu 的徽章必须是「需先准备」')
+  assert.ok(text.includes('图形化端口映射'), '必须显示 uu 的 requires')
+  assert.ok(text.includes('怎么做'), 'uu 必须有可展开的操作步骤')
+  assert.ok(text.includes('电脑上启动 DSH'), 'uu 的步骤文案必须渲染出来')
+  assert.ok(text.includes('对外入口地址'), 'uu 的 manualUrl 字段 label 必须渲染出来')
+
+  // 字段来自 spec.fields：对外入口（text）+ 访问令牌（password），端口输入仍在
+  const inputs = nodes.filter((node) => node.type === 'input')
+  assert.ok(
+    inputs.some((node) => node.props.type === 'text' && node.props.placeholder.includes('abc.uuyc.com:12345')),
+    '对外入口字段必须用 uu 自己的 placeholder'
+  )
+  assert.equal(inputs.filter((node) => node.props.type === 'password').length, 1, 'uu 有一个可选的访问令牌输入')
+  assert.equal(inputs.filter((node) => node.props.type === 'number').length, 1, '端口仍是唯一的数字输入')
 })
 
 test('RemotePanel：端口是数字输入，字段来自 spec.fields', async () => {
@@ -706,7 +743,7 @@ test('RemotePanel：已保存令牌显示中性徽章（打码）+「清除令�
   assert.equal(serialize(tree).includes(TOKEN_PLAIN), false)
 })
 
-test('RemotePanel：令牌字段只出现在 lan/ipv6/tailscale（manual 没有），字段数量随方式变化', async () => {
+test('RemotePanel：令牌字段出现在 lan/ipv6/tailscale/uu（manual 没有），字段数量随方式变化', async () => {
   const { mod } = await loadClient()
   const sections = renderSections(mod)
   const remote = sections.find((s) => s.options.id === 'git-config-sync-remote')
@@ -737,6 +774,10 @@ test('RemotePanel：令牌字段只出现在 lan/ipv6/tailscale（manual 没有�
 
   const manual = inputCount(renderRemote(remote.component, { seedState: fakeState('manual') }))
   assert.deepEqual(manual, { total: 2, numbers: 1, texts: 1, passwords: 0, checkboxes: 1 }, 'manual：只有完整地址（自带令牌），没有令牌字段')
+
+  // uu：对外入口（text）+ 可选令牌（password）；端口输入仍在（虽然 uu 不起监听）
+  const uu = inputCount(renderRemote(remote.component, { seedState: fakeState('uu') }))
+  assert.deepEqual(uu, { total: 3, numbers: 1, texts: 1, passwords: 1, checkboxes: 1 }, 'uu：对外入口 + 可选令牌 + 端口输入')
 
   const manualText = textOf(renderRemote(remote.component, { seedState: fakeState('manual') }))
   assert.equal(manualText.includes('访问令牌（可选）'), false, 'manual 不该出现令牌字段')

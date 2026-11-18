@@ -178,6 +178,8 @@
   "remote.fields.ipv6Address.placeholder": "e.g. 2408:8207:... (no brackets)",
   "remote.fields.manualUrl": "Full URL",
   "remote.fields.manualUrl.placeholder": "e.g. https://example.com/dsh",
+  "remote.fields.uu.manualUrl": "Public entry URL",
+  "remote.fields.uu.manualUrl.placeholder": "Paste from UU Remote, e.g. abc.uuyc.com:12345 or https://…",
   "remote.field.token": "Access token (optional)",
   "remote.field.token.hint": "Leave empty to send no token; when filled, ?token=… is appended to the link.",
   "remote.token.saved": "Access token saved ({masked})",

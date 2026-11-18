@@ -222,3 +222,26 @@
 | `test/remote-service.test.mjs` | 78-197（+ 全文 grep 用例名） | service/index 覆盖 |
 | `test/remote-listener.test.mjs` | 全文 grep（upgrade/set-cookie/location/0.0.0.0）+ 353-383、454-500、503-660 区域 | listener 安全面 |
 | `test/remote-model.test.mjs`、`test/remote-qr.test.mjs`、`test/remote-probe.test.mjs`、`test/remote-rpc.test.mjs`、`test/client-remote-render.test.mjs` | 用例名清单 + 关键断言点（`remote-auth.test.mjs:386`、`remote-model.test.mjs:264,384`、`remote-probe.test.mjs:634`、`remote-rpc.test.mjs:227-397`、`client-remote-render.test.mjs:542`） | 覆盖缺口判定依据 |
+
+## 勘误（2026-11-18）：UU 远程可做端口映射
+
+> 本节只做补充说明，**不修改本评审的任何既有结论与条目**（上面的段落、编号、行号引用原样保留）。
+
+- **事实订正**：本评审写作时（2026-11-17）沿用了当时 `docs/RESEARCH-B-uu-remote.md` 的结论
+  「网易 UU 远程 = 画面串流，没有端口映射 → `unsupported`」。官方 blog
+  <https://uuyc.163.com/blog/20261117dewhjg.html>（2026-11-10）明确提供**图形化端口映射**且免费版
+  包含，因此 `uu` 已改为 `needs-setup`（用户自己在 UU 界面里配映射、把生成的对外入口粘进插件）。
+- **对本评审各项结论的影响：无。** 令牌门（`?token=` / `x-dsh-remote-token` / 会话 cookie 三入口、
+  命中 `?token=` 本层换 cookie + 303、绝不把带 token 的请求转发上游）、上游 `dsh-auth-*` cookie
+  的注入与 `Set-Cookie` 剥离、同 IP 失败限速、secret 不进日志/错误/`remoteGetState`、以及对本域
+  「有条件通过 / 4 条必须改」的判定，全部**与访问方式枚举无关**——`uu` 只是多了一种"用户提供地址"
+  的来源，它**不起旁挂监听**（`hostsListener: false`、`bindKind: 'none'`），走的仍是已有的
+  `urlForMode` + `appendAccessToken` + `showLink` 这一条出口；令牌与上游 cookie 的安全边界没有变化。
+- **本轮随之改动的代码面**（供复评时对照，均为本域内的机械改动，未触碰监听/鉴权/qr/routes/service）：
+  - `src/remote/accessMode.ts`：`uu` 的 `availability` / `fields` / `steps`；`manualUrl` 的落盘校验
+    对 `uu` 放宽到允许缺协议（`manual` 仍严格）；
+  - `src/remote/urls.ts`：新增 `normalizeUuEntry`（入口形态临时默认），`urlForMode('uu')` 改用它；
+  - `src/client.js`：字段文案支持 `remote.fields.<mode>.<key>` 这一层（`manual` 与 `uu` 共用
+    `manualUrl` 槽位但叫法不同），同步改 `locale/zh.json`、`locale/en.json`（三处键集一致）。
+- **仍未同步的地方**：`src/remote/probe.ts` 的 `uu-unsupported` 检查与 `MODE_READY.uu` 文案本轮
+  未改（该文件不在本轮改动范围），下一轮修。

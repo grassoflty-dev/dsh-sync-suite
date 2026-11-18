@@ -7,12 +7,20 @@
  * 改这里必须同时看那张表，别在页面里另写一份同义文案。
  *
  * 三条不变式：
- * 1. **`unsupported` 不做假开关**：`uu` 在 UI 里可以选中（让人看见原因），但
- *    `buildRemoteAccessUrl` 恒 `ok:false` + 给中文原因，绝不产出一个「看起来能用」的地址。
+ * 1. **能做才给入口，做不到不做假开关**：`needs-setup` 方式（`tailscale` / `ipv6` /
+ *    `cloudflare` / `uu`）在用户按 `requires` 填齐字段前，`buildRemoteAccessUrl` 只给中文的
+ *    失败原因，绝不产出一个「看起来能用」的地址；`unsupported` 方式（目前没有）恒 `ok:false`
+ *    + 原样展示 `unavailableReason`。
  * 2. **失败一律 fail-closed**：`RemoteAccessUrlResult.ok=false` 时 `url` 恒为空串，
  *    调用方拿到空串就不会去打开一个注定打不开的内嵌 Web。
  * 3. **归一不抛异常**：`normalizeRemoteAccessConfig` 吃坏 JSON / 未知 mode / 负端口时回落默认值
  *    （App 的设置读盘路径，抛异常会把设置页整页搞崩）；插件侧落盘校验更严格是刻意的差异。
+ *
+ * `uu` 的**结论订正**（2026-11）：网易 UU 远程官方 blog
+ * （`https://uuyc.163.com/blog/20261117dewhjg.html`，2026-11-10）明确它面向开发者提供
+ * **图形化端口映射**、**免费版包含**：用户在界面上把「内部服务端口」与「对外入口」对上，
+ * 再把生成的入口发给对方即可。上一版「UU 是画面串流、不产生端口/虚拟网卡、App 打不开网址」
+ * 的结论**是错的**，已改为 `needs-setup`（要用户先在 UU 远程里建映射），`unavailableReason` 清空。
  *
  * 与插件侧的**刻意差异**（都在 §3 的「补充约定」里有据）：
  * - 插件侧 `port: 0` = 由服务层解析 `ctx.webServer.port` 后传具体值；App 侧**拿不到** DSH 的端口，
@@ -35,7 +43,10 @@ export const REMOTE_MODE_IPV6: string = 'ipv6';
 export const REMOTE_MODE_CLOUDFLARE: string = 'cloudflare';
 /** 手动填完整地址：App 只做归一与保存，不代管监听。 */
 export const REMOTE_MODE_MANUAL: string = 'manual';
-/** 网易 UU 远程：**不可用**（画面串流，不产生端口/虚拟网卡）。 */
+/**
+ * 网易 UU 远程：**可用（需准备）** —— 官方「图形化端口映射」（免费版含）把本机 DSH 端口
+ * 映射成对外入口，用户在 App 里粘那个入口即可。
+ */
 export const REMOTE_MODE_UU: string = 'uu';
 
 /** 可用：本仓库可直接落地。 */
@@ -123,11 +134,12 @@ function portField(): RemoteModeField {
 }
 
 /**
- * 「访问令牌（可选）」字段：只出现在 `lan` / `ipv6` / `tailscale` 的字段表里（端口之后）。
+ * 「访问令牌（可选）」字段：出现在 `lan` / `ipv6` / `tailscale` / `uu` 的字段表里（地址之后）。
  *
  * 与插件侧 `RemoteSettings.token` 同一套语义：空串 = 不追加任何参数；非空 = 地址后追加
- * `?token=<值>`。`cloudflare` / `manual` / `uu` **没有**这个字段（隧道域名/完整地址自带
- * 参数，uu 根本不可用），所以不给它们画一个"填了也没用"的输入框。
+ * `?token=<值>`。`cloudflare` / `manual` **没有**这个字段（隧道域名/完整地址自带参数，
+ * 用户手填的完整地址里通常已经带好了 token），所以不给它们画一个"填了也没用"的输入框。
+ * `uu` 复用同一个 `token` 字段：映射出来的对外入口可能仍要过 DSH 的令牌校验。
  */
 function tokenField(): RemoteModeField {
   const field: RemoteModeField = {
@@ -273,14 +285,31 @@ export const REMOTE_MODES: Record<string, RemoteModeSpec> = {
   'uu': {
     mode: REMOTE_MODE_UU,
     label: '网易 UU 远程',
-    description: '网易 UU 远程是画面串流（远程桌面），没法让 App 直接打开一个网址。',
-    availability: REMOTE_AVAILABILITY_UNSUPPORTED,
-    // 判定浓缩：调研 B 的核心结论，UI 必须原样展示，不许改写或软化。
-    unavailableReason:
-      '网易 UU 远程是画面串流（远程桌面），不产生端口或虚拟网卡，没法让 App 打开一个网址。',
-    requires: ['无；该方式在原理上不可行'],
-    fields: [],
-    steps: []
+    description: '用 UU 远程的图形化端口映射把本机 DSH 端口映射成对外入口，平板打开那个入口。',
+    availability: REMOTE_AVAILABILITY_NEEDS_SETUP,
+    // 可用（需准备）：官方 blog 明确「图形化端口映射」免费版包含，故不再有不可用原因。
+    unavailableReason: '',
+    requires: [
+      '电脑装 UU 远程并登录（免费版含端口映射）',
+      '在 UU 远程 →「图形化端口映射」里把内部端口设为 DSH 端口'
+    ],
+    // 复用既有字段：对外入口地址（`manualUrl`）+ 可选令牌（`token`），不新增存储字段。
+    fields: [
+      {
+        key: 'manualUrl',
+        label: '对外入口地址',
+        placeholder: '从 UU 远程复制，如 abc.uuyc.com:12345 或 https://…',
+        hint: 'UU远程 → 图形化端口映射 → 内部端口填 DSH 端口 → 复制生成的对外入口'
+      },
+      tokenField()
+    ],
+    steps: [
+      '在电脑上启动 DSH，记下「设置 → 远程访问」里显示的端口（如 3080）。',
+      '打开 UU 远程 →「图形化端口映射」，新增一条映射，内部端口填上面那个 DSH 端口。',
+      '映射生效后，复制 UU 远程生成的对外入口地址。',
+      '把入口粘到「对外入口地址」；带不带 https:// 都可以，入口形态以实测为准。',
+      '平板打开这个入口；打不开时回 UU 远程确认映射还在生效。'
+    ]
   }
 };
 
@@ -323,8 +352,9 @@ export function normalizeRemoteMode(raw: string): string {
 /**
  * 该方式能不能真的打开一个地址。
  *
- * `unsupported`（目前只有 `uu`）一律 `false`；未知方式也 `false`（fail-closed，不猜）。
- * 注意 `needs-setup` 是 `true`：用户按 `requires` 做完准备就能用，不该被本函数挡死。
+ * `unsupported`（目前**没有**方式是这个值）一律 `false`；未知方式也 `false`（fail-closed，不猜）。
+ * 注意 `needs-setup` 是 `true`：用户按 `requires` 做完准备就能用（`uu` 也在这一类），
+ * 不该被本函数挡死。
  */
 export function remoteModeUsable(mode: string): boolean {
   const spec: RemoteModeSpec | null = findRemoteMode(mode);
@@ -354,7 +384,7 @@ export interface RemoteAccessConfig {
    * 「访问令牌（可选）」（与插件侧 `RemoteSettings.token` 同名同义）。
    *
    * 空串 = 不往地址里追加任何令牌参数；非空 = 拼成 `?token=<值>`（已有 query 时用 `&`）。
-   * 只对 `lan` / `ipv6` / `tailscale` 生效（`cloudflare` / `manual` / `uu` 没有这个字段）。
+   * 对 `lan` / `ipv6` / `tailscale` / `uu` 生效（`cloudflare` / `manual` 没有这个字段）。
    * 它是 secret：**永不**出现在失败原因 / 日志里（`validateRemoteToken` 的原因只描述规则）。
    */
   token: string;
@@ -486,7 +516,7 @@ function fieldValue(config: RemoteAccessConfig, key: string): string {
  *
  * 端口在 `lan` / `ipv6` / `tailscale` 下算**必填**：App 拿不到电脑上的 DSH 端口，
  * 省略端口只会打开 80，等于给一个注定打不开的地址（这比"报缺字段"更让人困惑）。
- * `cloudflare` / `manual` 不看端口（隧道恒 443，手动方式自带端口）。
+ * `cloudflare` / `manual` / `uu` 不看端口（隧道恒 443、手动方式与 UU 对外入口自带端口）。
  * 未知方式按 `normalizeRemoteMode` 归一成 `lan`，不会出现「不认识的 mode 缺 0 个字段」的假象。
  */
 export function missingFields(mode: string, config: RemoteAccessConfig): string[] {
@@ -675,6 +705,30 @@ function stripBrackets(text: string): string {
 }
 
 /**
+ * 给 UU 远程生成的「对外入口」补默认协议（**入口形态待实测**，理由见 `buildRemoteAccessUrl` 的 uu 分支）。
+ *
+ * 判定顺序：
+ * 1. 空串 → 空串（调用方自己给「还没填」的原因）；
+ * 2. 已写 `scheme://` → **原样**返回，交给 `normalizeRemoteUrl` 判是不是 http(s)（`ftp://` 会被它拒）；
+ * 3. 没写协议但含 `/`（`abc.uuyc.com/dsh` 这类带路径的入口）→ 补 `https://`（像域名入口，默认走 TLS）；
+ * 4. 其余（`abc.uuyc.com:12345` 这类 host:port）→ 补 `http://`（映射出来的端口通常直接是明文 HTTP）。
+ *
+ * 这是**临时默认**：实测出 UU 入口的真实形态后，只改这里与 uu 分支，别在页面里另写一份同义规则。
+ */
+function uuEntranceWithScheme(text: string): string {
+  if (text.length === 0) {
+    return '';
+  }
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(text)) {
+    return text;
+  }
+  if (text.indexOf('/') >= 0) {
+    return `https://${text}`;
+  }
+  return `http://${text}`;
+}
+
+/**
  * 按当前配置拼出一条可打开的地址。
  *
  * 各方式的期望产物（与 `docs/REMOTE-ACCESS-OPTIONS.md` §2 逐条对应）：
@@ -683,11 +737,12 @@ function stripBrackets(text: string): string {
  * - `tailscale`  → `http://<tailscaleHost>:<port>/`；
  * - `cloudflare` → `https://<cloudflareHost>/`（隧道对外恒 443，端口不参与）；
  * - `manual`     → 复用 `normalizeRemoteUrl`（补 `http://`、校验 scheme/host/端口、识别 token）；
- * - `uu`         → `ok:false` + `unavailableReason`（画面串流，不产生端口/虚拟网卡）。
+ * - `uu`         → 复用 `manualUrl`（UU 远程生成的对外入口），按 `uuEntranceWithScheme` 补默认协议
+ *                  后再过 `normalizeRemoteUrl`；空入口 → `ok:false` +「还没填 UU 远程生成的对外入口」。
  *
- * 令牌（`config.token`，可选）**只**对 `lan` / `ipv6` / `tailscale` 生效：非空时在拼好的地址后
+ * 令牌（`config.token`，可选）对 `lan` / `ipv6` / `tailscale` / `uu` 生效：非空时在拼好的地址后
  * 追加 `?token=<encodeURIComponent(值)>`（已有 query 用 `&`，且落在 `#` 之前）；空串不加任何参数。
- * `cloudflare` / `manual` / `uu` 没有这个字段（前两者地址自带参数），`token` 一律不参与——
+ * `cloudflare` / `manual` 没有这个字段（地址自带参数），`token` 一律不参与——
  * 这样「切到 manual 后残留的 token」不会污染用户手填的完整地址。
  *
  * 未知 mode 已由 `normalizeRemoteMode` 回落 `lan`，因此不会走到「不认识的方式」分支。
@@ -697,8 +752,19 @@ export function buildRemoteAccessUrl(config: RemoteAccessConfig): RemoteAccessUr
   const port: number = normalizeRemotePort(config.port);
 
   if (mode === REMOTE_MODE_UU) {
-    const uu: RemoteModeSpec | undefined = REMOTE_MODES[REMOTE_MODE_UU];
-    return urlFailed(uu === undefined ? '该访问方式不可用' : uu.unavailableReason);
+    // UU 远程：用户在「图形化端口映射」里把内部 DSH 端口映射成对外入口，再把入口粘进来。
+    // **入口形态待实测**：官方只说「复制生成的对外入口」，没写死一定带协议，所以这里按形状补
+    // 默认协议（含 `/` → https，纯 host:port → http，已带协议则原样交给 normalizeRemoteUrl）。
+    // 实测后只改 `uuEntranceWithScheme` 这一处（入口形态的规则只存在于那里）。
+    const entrance: string = readText(config.manualUrl);
+    if (entrance.length === 0) {
+      return urlFailed('还没填 UU 远程生成的对外入口');
+    }
+    const check: RemoteUrlCheck = normalizeRemoteUrl(uuEntranceWithScheme(entrance));
+    if (!check.ok) {
+      return urlFailed(`对外入口不可用：${check.reason}`);
+    }
+    return withRemoteToken(check.url, config);
   }
 
   if (mode === REMOTE_MODE_MANUAL) {

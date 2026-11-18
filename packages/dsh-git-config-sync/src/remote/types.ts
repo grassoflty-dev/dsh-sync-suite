@@ -14,8 +14,9 @@
 
 /**
  * 访问方式。`manual` = 用户自填完整地址（不代管监听）；
- * `uu` = 网易 UU 远程（**判定不可用**，仅作为"明确不可行"的选项出现在 UI 与文档里，
- * 不许给它做开关）。
+ * `uu` = 网易 UU 远程（**可用，需准备**：它自带「图形化端口映射」，免费版包含；
+ * 用户把映射生成的对外入口粘进来即可。第 5 轮订正了上一版「UU 不可用」的错误结论，
+ * 依据见 `docs/REMOTE-ACCESS-OPTIONS.md` §2.6 与 §7 的官方 blog 链接）。
  */
 export type RemoteAccessMode = 'lan' | 'tailscale' | 'ipv6' | 'cloudflare' | 'manual' | 'uu'
 

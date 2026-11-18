@@ -61,12 +61,14 @@ function modesFixture() {
     {
       mode: 'uu',
       label: '网易 UU',
-      description: '',
-      availability: 'unsupported',
-      unavailableReason: 'UU 的远程端口不对第三方开放',
-      requires: [],
-      fields: [],
-      steps: [],
+      description: '图形化端口映射',
+      availability: 'needs-setup',
+      unavailableReason: '',
+      requires: ['电脑装 UU 远程并登录'],
+      fields: [
+        { key: 'manualUrl', label: '对外入口地址', placeholder: 'abc.uuyc.com:12345', hint: '', required: true },
+      ],
+      steps: ['配好端口映射', '复制对外入口'],
       hostsListener: false,
     },
   ]
@@ -270,7 +272,8 @@ test('remoteGetState：返回 settings/status/modes（RemoteStateData，settings
   assert.equal('token' in result.data.settings, false, '视图里没有 token 明文键')
   assert.equal(result.data.modes.length, 3)
   assert.equal(result.data.modes[2].mode, 'uu')
-  assert.equal(result.data.modes[2].availability, 'unsupported')
+  assert.equal(result.data.modes[2].availability, 'needs-setup', 'uu 是「可用（需准备）」，不是 unsupported')
+  assert.equal(result.data.modes[2].unavailableReason, '')
   assert.equal(result.data.status.running, false)
   assert.deepEqual(
     remote.calls.map((c) => c.method),

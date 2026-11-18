@@ -3,7 +3,7 @@
  *
  * 覆盖：
  *   1. 六种方式元数据：availability / bindKind / 必填字段 / 步骤数 / 字段占位符；
- *      关键判定文案（uu 的"画面串流不产生端口"、tailscale 的"卓易通不能让本机 App 走它"）；
+ *      关键判定文案（uu 的"图形化端口映射 / 免费版包含"、tailscale 的"卓易通不能让本机 App 走它"）；
  *   2. `normalizeRemoteSettings`：缺省沿用、显式清空、逐字段非法（含 details 打码）；
  *   3. `urlForMode` 六种方式（IPv6 方括号、cloudflare 无端口、lan 无地址报错）；
  *   4. `withToken` 幂等、`maskToken` / `redactToken`（含 %2B 编码形态）；
@@ -46,7 +46,8 @@ const EXPECTED_MODES = {
   ipv6: ['needs-setup', 'ipv6', ['ipv6Address', 'port']],
   cloudflare: ['needs-setup', 'loopback', ['cloudflareHost', 'port']],
   manual: ['ready', 'none', ['manualUrl']],
-  uu: ['unsupported', 'none', []],
+  // 2026-11-18 订正：UU 官方 blog 明确提供图形化端口映射（免费版含）→ needs-setup。
+  uu: ['needs-setup', 'none', ['manualUrl']],
 }
 
 const CTX = { lanAddress: '192.168.1.6', dshPort: 40596 }
@@ -99,7 +100,9 @@ test('六种方式的可用性/绑定点/必填字段与调研结论一致', () 
     assert.equal(isModeUsable(mode), availability !== 'unsupported', `${mode}: 可用性判定`)
     assert.ok(spec.label.length > 0, `${mode}: label 不能为空`)
     assert.ok(spec.description.length > 0, `${mode}: description 不能为空`)
-    assert.ok(spec.description.length <= 40, `${mode}: description 超过 40 字`)
+    // description 是方式卡片上的一行说明：原上限 40 字，uu 订正成"可用（需准备）"后
+    // 需要把机制（图形化端口映射）+ 用法说全，放宽到 60 字；其余方式仍远低于 40。
+    assert.ok(spec.description.length <= 60, `${mode}: description 超过 60 字`)
     for (const field of spec.fields) {
       assert.ok(field.label.length > 0, `${mode}.${field.key}: label 不能为空`)
       assert.ok(field.placeholder.length > 0, `${mode}.${field.key}: placeholder 不能为空`)
@@ -107,22 +110,35 @@ test('六种方式的可用性/绑定点/必填字段与调研结论一致', () 
     }
   }
 
-  assert.equal(isModeUsable('uu'), false)
+  assert.equal(isModeUsable('uu'), true, 'uu 已订正为"可用（需准备）"，不再 unsupported')
   assert.equal(isModeUsable('lan'), true)
   assert.equal(isModeUsable('manual'), true)
 })
 
-test('uu 判定为不可用，原因是"画面串流不产生端口"', () => {
+test('uu 判定为可用（需准备）：图形化端口映射，免费版包含', () => {
   const uu = REMOTE_MODES.uu
-  assert.equal(uu.availability, 'unsupported')
-  assert.deepEqual(uu.fields, [])
-  assert.deepEqual(uu.steps, [])
-  assert.equal(uu.hostsListener, false)
-  assert.ok(uu.unavailableReason.includes('画面串流'))
-  assert.ok(uu.unavailableReason.includes('远程桌面'))
-  assert.ok(uu.unavailableReason.includes('不产生端口或虚拟网卡'))
-  assert.ok(uu.unavailableReason.includes('没法让 App 打开一个网址'))
-  assert.ok(uu.unavailableReason.includes('端口映射'))
+  assert.equal(uu.availability, 'needs-setup')
+  assert.equal(uu.unavailableReason, '', 'uu 不再是 unsupported，unavailableReason 必须为空串')
+  assert.equal(isModeUsable('uu'), true)
+  assert.deepEqual(
+    uu.fields.map((field) => field.key),
+    ['manualUrl', 'token'],
+    'uu 复用 manualUrl 槽位 + 可选的 token',
+  )
+  assert.equal(uu.fields[0].required, true)
+  assert.equal(uu.fields[0].label, '对外入口地址')
+  assert.equal(uu.fields[1].required, false)
+  assert.ok(uu.steps.length >= 3 && uu.steps.length <= 6, 'uu 的步骤数必须是 3–6 步')
+  assert.equal(uu.hostsListener, false, 'UU 自己负责转发，插件不起监听')
+  assert.equal(uu.bindKind, 'none')
+  const requiresText = uu.requires.join('｜')
+  assert.ok(requiresText.includes('UU 远程'), 'requires 必须点明要装 UU 远程')
+  assert.ok(requiresText.includes('端口映射'), 'requires 必须点明图形化端口映射')
+  assert.ok(requiresText.includes('免费'), 'requires 必须说明免费版就含端口映射')
+  const stepsText = uu.steps.join('｜')
+  assert.ok(stepsText.includes('图形化端口映射'), 'steps 必须给出配映射的入口')
+  assert.ok(stepsText.includes('对外入口'), 'steps 必须让用户复制生成的对外入口')
+  assert.ok(stepsText.includes('待实测'), '入口形态仍是待实测点，不能写成已确定')
 })
 
 test('tailscale 需要平板装鸿蒙原生客户端，并点明卓易通路线不可用', () => {
@@ -142,7 +158,7 @@ test('tailscale 需要平板装鸿蒙原生客户端，并点明卓易通路线�
 test('步骤数与"是否起监听"符合契约', () => {
   assert.ok(REMOTE_MODES.lan.steps.length >= 2 && REMOTE_MODES.lan.steps.length <= 3)
   assert.equal(REMOTE_MODES.manual.steps.length, 2)
-  assert.equal(REMOTE_MODES.uu.steps.length, 0)
+  assert.equal(REMOTE_MODES.uu.steps.length, 5, 'uu：启动 DSH → 配映射 → 复制入口 → 粘贴 → 平板打开')
   assert.ok(REMOTE_MODES.ipv6.steps.length >= 3 && REMOTE_MODES.ipv6.steps.length <= 6)
   assert.ok(REMOTE_MODES.cloudflare.steps.length >= 3 && REMOTE_MODES.cloudflare.steps.length <= 6)
   assert.equal(REMOTE_MODES.lan.hostsListener, true)
@@ -263,6 +279,27 @@ test('设置归一：地址字段逐项校验，details 带 field/value', () => 
   expectValidation(() => normalizeRemoteSettings({ lanAddress: 123 }, base), '字符串')
 })
 
+test('设置归一：uu 的对外入口允许缺协议（UU 界面复制出来的就是 host:port），manual 仍严格', () => {
+  const uuBase = baseSettings({ mode: 'uu' })
+  assert.equal(
+    normalizeRemoteSettings({ manualUrl: 'abc.uuyc.com:12345' }, uuBase).manualUrl,
+    'abc.uuyc.com:12345',
+    'uu 方式下原样保存，不替用户猜协议',
+  )
+  assert.equal(
+    normalizeRemoteSettings({ manualUrl: 'https://abc.uuyc.com/x' }, uuBase).manualUrl,
+    'https://abc.uuyc.com/x',
+  )
+  // 仍拦乱写：解析不出主机名 / 非 http(s) 的一律拒
+  expectValidation(() => normalizeRemoteSettings({ manualUrl: 'http://' }, uuBase), '完整地址')
+  expectValidation(() => normalizeRemoteSettings({ manualUrl: 'javascript:alert(1)' }, uuBase), '完整地址')
+  // 同一个输入换个方式（manual）必须被拒：落盘严格是 manual 的既有纪律
+  expectValidation(
+    () => normalizeRemoteSettings({ manualUrl: 'abc.uuyc.com:12345' }, baseSettings({ mode: 'manual' })),
+    '完整地址',
+  )
+})
+
 test('设置归一：manualUrl 里的 token 在 details 里已打码', () => {
   const base = baseSettings()
   const token = 'tok-abcdefghijklmnop-1234567890'
@@ -277,8 +314,10 @@ test('设置归一：manualUrl 里的 token 在 details 里已打码', () => {
   assert.ok(JSON.stringify(error.details).includes('***'))
 })
 
-test('「访问令牌（可选）」只出现在 lan / ipv6 / tailscale，且排在端口之后', () => {
-  const withTokenField = ['lan', 'ipv6', 'tailscale']
+test('「访问令牌（可选）」出现在 lan / ipv6 / tailscale / uu，且排在端口之后', () => {
+  // uu 也带令牌字段：UU 生成的对外入口不保证带令牌，需要插件在链接后追加 ?token=…
+  // （cloudflare / manual 没有它：令牌由域名或完整地址自带）
+  const withTokenField = ['lan', 'ipv6', 'tailscale', 'uu']
   for (const mode of REMOTE_MODE_ORDER) {
     const keys = REMOTE_MODES[mode].fields.map((field) => field.key)
     const tokenFields = REMOTE_MODES[mode].fields.filter((field) => field.key === 'token')
@@ -288,13 +327,18 @@ test('「访问令牌（可选）」只出现在 lan / ipv6 / tailscale，且排
     }
     assert.equal(tokenFields.length, 1, `${mode}: 必须恰好一个 token 字段`)
     assert.equal(keys[keys.length - 1], 'token', `${mode}: token 字段必须排在端口之后（UI 顺序）`)
-    assert.deepEqual(tokenFields[0], {
+    // label / placeholder / required 必须全方式一致；hint 允许措辞略不同（uu 复用的是自己那份
+    // 文案，语义相同：留空不追加、填了追加 ?token=…），所以只做包含式断言。
+    const tokenShape = { ...tokenFields[0] }
+    delete tokenShape.hint
+    assert.deepEqual(tokenShape, {
       key: 'token',
       label: '访问令牌（可选）',
       placeholder: '粘贴电脑上 DSH 地址里的 token',
-      hint: '留空则不带令牌；填了会在链接里追加 ?token=…',
       required: false,
     })
+    assert.ok(tokenFields[0].hint.includes('留空则不带令牌'), `${mode}: token hint 必须说明留空的行为`)
+    assert.ok(tokenFields[0].hint.includes('?token='), `${mode}: token hint 必须说明会追加 ?token=`)
     assert.equal(
       REMOTE_MODES[mode].fields.filter((field) => field.required).map((field) => field.key).includes('token'),
       false,
@@ -372,7 +416,7 @@ test('missingRequiredFields 只报真正空的字符串字段（端口与令牌�
   assert.deepEqual(missingRequiredFields('ipv6', defaultRemoteSettings()), ['ipv6Address'])
   assert.deepEqual(missingRequiredFields('cloudflare', defaultRemoteSettings()), ['cloudflareHost'])
   assert.deepEqual(missingRequiredFields('manual', defaultRemoteSettings()), ['manualUrl'])
-  assert.deepEqual(missingRequiredFields('uu', defaultRemoteSettings()), [])
+  assert.deepEqual(missingRequiredFields('uu', defaultRemoteSettings()), ['manualUrl'], 'uu 缺的是对外入口')
   assert.deepEqual(missingRequiredFields('lan', baseSettings({ lanAddress: '192.168.1.6' })), [])
   assert.deepEqual(missingRequiredFields('lan', baseSettings({ lanAddress: '   ' })), ['lanAddress'])
 })
@@ -518,7 +562,7 @@ test('urlForMode: tailscale 走 http，cloudflare 走 https 且不带端口', ()
   assert.equal(badCloudflare.url, '')
 })
 
-test('urlForMode: manual 透传（缺协议补 http://），uu 恒不可用', () => {
+test('urlForMode: manual 透传（缺协议补 http://）', () => {
   const full = urlForMode('manual', baseSettings({ manualUrl: 'https://example.com/dsh/?x=1' }), CTX)
   assert.equal(full.ok, true)
   assert.equal(full.url, 'https://example.com/dsh/?x=1')
@@ -536,11 +580,50 @@ test('urlForMode: manual 透传（缺协议补 http://），uu 恒不可用', ()
   assert.equal(badScheme.ok, false)
   assert.equal(badScheme.url, '')
   assert.ok(badScheme.reason.includes('http'))
+})
 
-  const uu = urlForMode('uu', baseSettings(), CTX)
-  assert.equal(uu.ok, false)
-  assert.equal(uu.url, '')
-  assert.equal(uu.reason, REMOTE_MODES.uu.unavailableReason)
+test('urlForMode: uu 用 UU 生成的对外入口（缺协议按"含 / 补 https、否则 host:port 补 http"归一）', () => {
+  const empty = urlForMode('uu', baseSettings(), CTX)
+  assert.equal(empty.ok, false)
+  assert.equal(empty.url, '')
+  assert.equal(empty.reason, '还没填 UU 远程生成的对外入口')
+
+  // host:port 形态（UU 端口映射最常见的复制结果）→ 补 http://
+  const hostPort = urlForMode('uu', baseSettings({ manualUrl: 'abc.uuyc.com:12345' }), CTX)
+  assert.equal(hostPort.ok, true)
+  assert.equal(hostPort.url, 'http://abc.uuyc.com:12345/')
+
+  // 含 `/` → 视为域名入口，补 https://
+  const domain = urlForMode('uu', baseSettings({ manualUrl: 'abc.uuyc.com/dsh' }), CTX)
+  assert.equal(domain.ok, true)
+  assert.equal(domain.url, 'https://abc.uuyc.com/dsh')
+
+  // 已带协议 → 原样保留（不改 scheme、不丢路径）
+  const withScheme = urlForMode('uu', baseSettings({ manualUrl: 'https://abc.uuyc.com/remote?x=1' }), CTX)
+  assert.equal(withScheme.ok, true)
+  assert.equal(withScheme.url, 'https://abc.uuyc.com/remote?x=1')
+
+  // 非 http(s) 一律拒：不能凭"用户粘了地址"就放过 javascript:/ftp:
+  const badScheme = urlForMode('uu', baseSettings({ manualUrl: 'ftp://abc.uuyc.com/' }), CTX)
+  assert.equal(badScheme.ok, false)
+  assert.equal(badScheme.url, '')
+  assert.ok(badScheme.reason.includes('http'))
+  assert.ok(badScheme.reason.startsWith('对外入口不可用'), '失败原因要与 App 侧同一套措辞')
+
+  // 解析不出主机名（例如端口越界）也是 fail-closed，且带同一前缀
+  const badPort = urlForMode('uu', baseSettings({ manualUrl: 'abc.uuyc.com:999999' }), CTX)
+  assert.equal(badPort.ok, false)
+  assert.equal(badPort.url, '')
+  assert.ok(badPort.reason.startsWith('对外入口不可用'))
+
+  // token 不在这里拼：`urlForMode` 恒返回不带 token 的地址，追加由 appendAccessToken 负责
+  const noToken = urlForMode('uu', baseSettings({ manualUrl: 'abc.uuyc.com:12345', token: 'rt_plain_0123456789' }), CTX)
+  assert.equal(noToken.ok, true)
+  assert.equal(noToken.url.includes('token='), false, 'urlForMode 不得自行追加 token')
+  assert.equal(
+    appendAccessToken(noToken.url, 'rt_plain_0123456789'),
+    'http://abc.uuyc.com:12345/?token=rt_plain_0123456789',
+  )
 })
 
 test('withToken 幂等、只留一个 token、保留其它参数与 fragment', () => {

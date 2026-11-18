@@ -15,8 +15,12 @@
  *      连长度以外的任何形态都不放进 details/message（它是 secret，见 `types.ts` 纪律 3）。
  *   4. 本文件只 import `engine/errors.ts`（`types.ts` 纪律 1 允许的纯工具），不碰同步实现。
  *
- * 可用性来自本轮调研，**结论不许在此推翻**：
- *   - uu：网易 UU 远程是画面串流，不产生端口/虚拟网卡 → unsupported；
+ * 可用性来自调研，**结论不许在此推翻**（2026-11-18 订正过一次，见 `docs/REMOTE-ACCESS-OPTIONS.md`
+ * 的「勘误」小节）：
+ *   - uu：官方 blog（`uuyc.163.com/blog/20261117dewhjg.html`）明确写了面向开发者的**图形化端口映射**，
+ *     而且**免费版包含**；所以它是 `needs-setup`（用户自己在 UU 界面里配好映射、把生成的对外入口
+ *     粘进来），不再是 `unsupported`。旧结论「画面串流 → 不产生端口 → 不可用」是错的：
+ *     当时只核对了官网特色功能与帮助中心目录，那两处**没有**这篇 blog，才漏掉了端口映射；
  *   - tailscale：平板必须装**鸿蒙原生**客户端（HarmoTail 等，需侧载 HAP），
  *     卓易通里的安卓 Tailscale 只作用于容器内的 App → needs-setup；
  *   - ipv6 / cloudflare：技术上可行，但要用户先做环境准备 → needs-setup；
@@ -56,9 +60,10 @@ function portField() {
     };
 }
 /**
- * 「访问令牌（可选）」字段：只出现在 `lan` / `ipv6` / `tailscale` 三种"插件自己拼地址"的方式。
+ * 「访问令牌（可选）」字段：`lan` / `ipv6` / `tailscale` 三种"插件自己拼地址"的方式用它，
+ * `uu` 也显式给了一个（见下面 uu 的 `fields`）。
  *
- * 为什么 `cloudflare` / `manual` / `uu` 没有它：隧道域名与手动完整地址由用户给定，
+ * 为什么 `cloudflare` / `manual` 没有它：隧道域名与手动完整地址由用户给定，
  * 令牌要么由 DSH 的登录页要、要么已经写在完整地址里，再拼一个 `?token=` 只会打不开。
  *
  * `required: false` 是硬约束：留空 = 不追加任何参数（与升级前行为完全一致）。
@@ -221,13 +226,42 @@ export const REMOTE_MODES = {
     uu: {
         mode: 'uu',
         label: '网易 UU 远程',
-        description: '网易 UU 远程是画面串流，没法让 App 直接打开一个网址。',
-        availability: 'unsupported',
-        // 判定浓缩：调研 B 的核心结论，UI 必须原样展示，不许改写或软化。
-        unavailableReason: '网易 UU 远程是画面串流（远程桌面），不产生端口或虚拟网卡，没法让 App 打开一个网址；官方功能与帮助中心都没有端口映射。',
-        requires: ['无；该方式在原理上不可行'],
-        fields: [],
-        steps: [],
+        description: '用 UU 远程的图形化端口映射把本机 DSH 端口映射成对外入口，平板打开那个入口。',
+        availability: 'needs-setup',
+        // 不再是 unsupported：UU 官方 blog 明确提供图形化端口映射（免费版含），必须为空串。
+        unavailableReason: '',
+        requires: [
+            '电脑装 UU 远程并登录（免费版含端口映射）',
+            '在 UU 远程 →「图形化端口映射」里把内部端口设为 DSH 端口',
+        ],
+        fields: [
+            // **刻意复用 `manualUrl`**：uu 与 manual 都是"用户粘一个地址"，只是 label/placeholder/hint
+            // 不同。`types.ts` 是契约，不为 uu 新开存储字段（否则 RemoteSettings 要多一个键、旧配置
+            // 迁移、RPC 视图全都要跟着动）。代价是两种方式共用一个槽位：切方式时旧的地址仍在，
+            // 这是可接受的——渲染期 `urlForMode` 会按当前方式重新判一遍（见 `urls.ts`）。
+            {
+                key: 'manualUrl',
+                label: '对外入口地址',
+                placeholder: '从 UU 远程复制，如 abc.uuyc.com:12345 或 https://…',
+                hint: 'UU远程 → 图形化端口映射 → 内部端口填 DSH 端口 → 复制生成的对外入口',
+                required: true,
+            },
+            {
+                key: 'token',
+                label: '访问令牌（可选）',
+                placeholder: '粘贴电脑上 DSH 地址里的 token',
+                hint: '留空则不带令牌；填了会追加 ?token=…',
+                required: false,
+            },
+        ],
+        steps: [
+            '电脑上启动 DSH，记下它的端口（如 3080）',
+            '打开 UU 远程 → 图形化端口映射，内部端口填这个端口',
+            '复制它生成的对外入口',
+            '把入口粘到上面的「对外入口地址」',
+            '用平板打开（入口形态待实测：域名给 https、host:port 给 http）',
+        ],
+        // UU 自己负责把外部请求转到本机端口，插件**不**起旁挂监听。
         hostsListener: false,
         bindKind: 'none',
     },
@@ -282,15 +316,33 @@ function maskTokenInUrl(text) {
     return text.replace(/([?&;]token=)[^&#\s]*/gi, '$1***');
 }
 /**
- * 手动地址的**持久化**校验：必须是带协议的 http/https 完整地址。
+ * `manualUrl` 槽位的**持久化**校验。
  *
- * 与 `urls.urlForMode('manual', …)` 的容错（缺协议自动补 http://）刻意不同：
- * 落盘时严格，免得把 `example.com` 这种半成品存进去；渲染时容错，是为了兼容用户
- * 在别处粘贴的短地址。两处的判定理由都写在这里，避免以后被当成 bug 改掉。
+ * - `manual`：必须是带协议的 http/https 完整地址。与 `urls.urlForMode('manual', …)` 的容错
+ *   （缺协议自动补 http://）刻意不同：落盘时严格，免得把 `example.com` 这种半成品存进去；
+ *   渲染时容错，是为了兼容用户在别处粘贴的短地址。
+ * - `uu`：**允许缺协议**，因为 UU 界面里复制出来的对外入口本身就是 `abc.uuyc.com:12345`
+ *   这种形态（见 `fields.manualUrl.placeholder`）。这里只证明"它能被解析成一个有主机名的
+ *   http(s) 地址"，具体补 https 还是 http 由 `urls.ts` 的 `urlForMode('uu')` 决定——
+ *   落盘不该替用户猜协议，也不该把用户原样粘来的东西判成非法。
+ *
+ * 两处的判定理由都写在这里，避免以后被当成 bug 改掉。
  */
-function checkManualUrl(value) {
-    if (!/^https?:\/\//i.test(value))
-        return '必须以 http:// 或 https:// 开头';
+function checkManualUrl(value, mode) {
+    if (!/^https?:\/\//i.test(value)) {
+        if (mode !== 'uu')
+            return '必须以 http:// 或 https:// 开头';
+        // 缺协议：只在这一种方式下放行，仍要求能解析出主机名（拦掉 `abc` 之外的乱写）。
+        try {
+            const probe = new URL(`http://${value}`);
+            if (probe.hostname === '')
+                return '地址里缺少主机名';
+        }
+        catch {
+            return '地址解析失败，请检查是否拼错';
+        }
+        return '';
+    }
     let parsed;
     try {
         parsed = new URL(value);
@@ -304,8 +356,8 @@ function checkManualUrl(value) {
         return '地址里缺少主机名';
     return '';
 }
-/** 校验并归一一个字符串字段；`reason` 为空串表示通过。 */
-function checkField(field, value) {
+/** 校验并归一一个字符串字段；`reason` 为空串表示通过。`mode` 只影响 `manualUrl` 的严格度。 */
+function checkField(field, value, mode) {
     if (value === '')
         return { value: '', reason: '' };
     switch (field) {
@@ -323,7 +375,7 @@ function checkField(field, value) {
             return { value: host.ok ? host.value : value, reason: host.ok ? '' : host.reason };
         }
         case 'manualUrl':
-            return { value, reason: checkManualUrl(value) };
+            return { value, reason: checkManualUrl(value, mode) };
         default:
             // enabled/mode/port 不在这里处理（各有专门规则）。
             return { value, reason: '' };
@@ -343,8 +395,9 @@ const STRING_FIELDS = [
  * - 显式 `''` → 清空该字段（用户主动清掉主机名是合法操作）；
  * - 其余非法 → `SyncError('E_VALIDATION')`，message 直接可展示。
  *
- * `mode` 允许存成 `uu`：UI 需要能"选中看一下为什么不行"，但监听/建链那侧会按
- * `availability` fail-closed（见 `isModeUsable` 与 `urlForMode`）。
+ * `mode` 允许存成 `uu`（`needs-setup`，需要用户先准备）：UU 这一侧**不需要**本机监听，
+ * 所以真正起监听时 `service.start()` 会按"这种方式不需要本机监听"拒绝（`E_NO_BIND_ADDRESS`），
+ * 而"生成一条可打开地址"走的是 `urlForMode('uu')`（用户粘的对外入口）。
  */
 export function normalizeRemoteSettings(input, previous) {
     const record = asRecord(input);
@@ -393,7 +446,7 @@ export function normalizeRemoteSettings(input, previous) {
             });
         }
         const trimmed = raw.trim();
-        const checked = checkField(field, trimmed);
+        const checked = checkField(field, trimmed, next.mode);
         if (checked.reason !== '') {
             throw new SyncError('E_VALIDATION', `${FIELD_LABELS[field]}不可用：${checked.reason}`, {
                 field,

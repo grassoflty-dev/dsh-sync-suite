@@ -234,6 +234,8 @@ window.__ModuleLoader__.load({
       "remote.fields.ipv6Address.placeholder": "例如 2408:8207:...（不带方括号）",
       "remote.fields.manualUrl": "完整地址",
       "remote.fields.manualUrl.placeholder": "例如 https://example.com/dsh",
+      "remote.fields.uu.manualUrl": "对外入口地址",
+      "remote.fields.uu.manualUrl.placeholder": "从 UU 远程复制，如 abc.uuyc.com:12345 或 https://…",
       "remote.field.token": "访问令牌（可选）",
       "remote.field.token.hint": "留空则不带令牌；填了会在链接里追加 ?token=…",
       "remote.token.saved": "已保存访问令牌（{masked}）",
@@ -527,6 +529,8 @@ window.__ModuleLoader__.load({
       "remote.fields.ipv6Address.placeholder": "e.g. 2408:8207:... (no brackets)",
       "remote.fields.manualUrl": "Full URL",
       "remote.fields.manualUrl.placeholder": "e.g. https://example.com/dsh",
+      "remote.fields.uu.manualUrl": "Public entry URL",
+      "remote.fields.uu.manualUrl.placeholder": "Paste from UU Remote, e.g. abc.uuyc.com:12345 or https://…",
       "remote.field.token": "Access token (optional)",
       "remote.field.token.hint": "Leave empty to send no token; when filled, ?token=… is appended to the link.",
       "remote.token.saved": "Access token saved ({masked})",
@@ -3206,16 +3210,30 @@ window.__ModuleLoader__.load({
       token: { label: 'remote.field.token', hint: 'remote.field.token.hint' }
     }
 
-    /** 字段文案：优先 host 文案，其次本地化 key，最后回落到 spec 自带 label/placeholder/hint。 */
-    function remoteFieldText(translate, field, kind) {
+    /**
+     * 字段文案：优先 host 文案，其次**方式专属**本地化 key（`remote.fields.<mode>.<key>`），
+     * 再次通用本地化 key（`remote.fields.<key>`），最后回落到 spec 自带 label/placeholder/hint。
+     *
+     * 为什么要有"方式专属"这一层：`manual` 与 `uu` 刻意共用 `manualUrl` 这个存储槽位
+     * （契约 `types.ts` 不新增字段），但两者对用户的叫法完全不同——manual 是「完整地址」，
+     * uu 是 UU 界面里复制出来的「对外入口地址」。没有这一层的话，uu 会显示 manual 的文案。
+     * 没配专属 key 的方式（lan/ipv6/tailscale/cloudflare）行为与从前完全一致。
+     */
+    function remoteFieldText(translate, field, kind, mode) {
       const key = String(field && field.key ? field.key : '')
+      const suffix = kind === 'placeholder' ? '.placeholder' : ''
       const overrides = REMOTE_FIELD_TEXT_KEYS[key] || {}
       const overrideKey = kind === 'placeholder' ? '' : asText(overrides[kind === 'hint' ? 'hint' : 'label'])
       if (overrideKey !== '') {
         const out = translate(overrideKey)
         if (typeof out === 'string' && out !== '' && out !== overrideKey) return out
       }
-      const localKey = 'remote.fields.' + key + (kind === 'placeholder' ? '.placeholder' : '')
+      const modeKey = asText(mode) === '' ? '' : 'remote.fields.' + asText(mode) + '.' + key + suffix
+      if (modeKey !== '') {
+        const scoped = translate(modeKey)
+        if (typeof scoped === 'string' && scoped !== '' && scoped !== modeKey) return scoped
+      }
+      const localKey = 'remote.fields.' + key + suffix
       const out = translate(localKey)
       if (typeof out === 'string' && out !== '' && out !== localKey) return out
       if (kind === 'placeholder') return asText(field && field.placeholder)
@@ -3705,12 +3723,16 @@ window.__ModuleLoader__.load({
                 // value 只来自表单 state（初始恒为空串），DOM 里因此**永远**不出现令牌明文。
                 return h(
                   Field,
-                  { key: 'rf-' + fi, label: remoteFieldText(tr, f, 'label'), hint: remoteFieldText(tr, f, 'hint') },
+                  {
+                    key: 'rf-' + fi,
+                    label: remoteFieldText(tr, f, 'label', selected.mode),
+                    hint: remoteFieldText(tr, f, 'hint', selected.mode)
+                  },
                   h(Input, {
                     type: 'password',
                     autoComplete: 'new-password',
                     value: asText(form.token),
-                    placeholder: remoteFieldText(tr, f, 'placeholder'),
+                    placeholder: remoteFieldText(tr, f, 'placeholder', selected.mode),
                     disabled: anyBusy,
                     onChange: function (value) {
                       setTokenDirty(true)
@@ -3729,10 +3751,14 @@ window.__ModuleLoader__.load({
               }
               return h(
                 Field,
-                { key: 'rf-' + fi, label: remoteFieldText(tr, f, 'label'), hint: asText(f.hint) },
+                {
+                  key: 'rf-' + fi,
+                  label: remoteFieldText(tr, f, 'label', selected.mode),
+                  hint: asText(f.hint)
+                },
                 h(Input, {
                   value: form[key] === undefined || form[key] === null ? '' : String(form[key]),
-                  placeholder: remoteFieldText(tr, f, 'placeholder'),
+                  placeholder: remoteFieldText(tr, f, 'placeholder', selected.mode),
                   disabled: anyBusy,
                   onChange: function (value) {
                     setFormField(key, value)
