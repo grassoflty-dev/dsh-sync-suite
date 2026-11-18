@@ -129,8 +129,9 @@
 | chat 单写者 + 租约设计（`docs/CHAT-SYNC.md`） | pm/exec-chat-design | 进行中 | 设计文档 + DATA-CONTRACT §10 |
 | chat P3 preset/工具隔离调研 | pm/research-chat-preset | 进行中 | `docs/RESEARCH-chat-preset.md` |
 | chat P1 上传 + App 只读查看 | —— | 排队 | 依赖 `docs/RESEARCH-session-import.md`（已出：slug 可复现、Node 自带 zstd、外部写入**有条件**被识别） |
-| 真机待验：笔迹过滤 / 工具条一屏 / 撤销重做可点 / 装最新 HAP / 横竖屏 | —— | **阻塞** | 平板 `hdc list targets` = `[Empty]`，需用户接回 USB 或开无线调试 |
-| 重复 DSH 后复测（插件进链路 / 设置页两 section / 内嵌 Web WS） | —— | **待用户重启 DSH** | `tools/post-restart-check.mjs` + `docs/RESTART-CHECKLIST.md` |
+| 手写板 5 项 / 工具条两行真机复验 | —— | **挂起：用户要求先优化代码** | 设备离线，且用户明确"暂时不实测" |
+| 装最新 HAP / 横竖屏往返 / chat 内嵌 Web / UU 两实测点 | —— | **挂起：用户要求先优化代码** | 同上；UU 两实测点仍需用户用 UU 客户端验 |
+| 代码质量优化 A–E（拆分去重 / 常量文案 / 死码 / 性能度量 / APK 收尾） | pm + exec-* | 进行中（A1/C/D 并行，A2/E 排队） | 纯重构不许改行为；每批全量 + validate + tsc |
 | chat P1 上传 + App 只读查看（实现） | pm/exec-chat-upload | 排队 | 设计已定：`docs/CHAT-SYNC.md` §2/§3/§7；格式事实见 `docs/RESEARCH-session-import.md` §2/§6.2 |
 | chat P2 导入回 DSH（`session.v4.jsonl.zstd`） | pm/exec-chat-import | 排队 | 依赖 `docs/RESEARCH-session-import.md` §1.1/§6.1/§6.3（slug 复刻、header `version=4`、`cwd` 必须指向本机存在目录） |
 | chat P3 纯对话 preset（工具隔离） | pm/exec-chat-preset | 调研中 | 依赖 `docs/RESEARCH-chat-preset.md`（待产出） |
