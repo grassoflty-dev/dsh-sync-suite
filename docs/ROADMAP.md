@@ -458,7 +458,8 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 ## 交接：当前状态与下一步（2026-11-18 22:00 起笔，23:10 收口 B 批）
 
 > 用途：换会话/重启后**先读这一节**，不用问人。
-> **HEAD = `8f34418`**（B 批已提交；`git status --short` 为空）。B 批那个提交 = 11 个文件 /
+> **HEAD = main 顶端**（B 批代码提交 = `8f34418`，紧随其后的 docs 提交即本节所在提交）；
+> 工作树**干净**（`git status --short` 为空）。B 批那个提交 = 11 个文件 /
 > `+1122 −45`：6 个 `.ets`/`.ts` 源码 + `tools/test/remoteUrl.test.mjs` + `docs/UX-STEPS.md`
 > + `docs/ROADMAP.md` + 新增 `tools/test/bBatch.test.mjs`、`docs/REVIEW-b-batch.md`。
 > **提交由 Lead 统一做**，规划者/执行子代理都不 commit。
