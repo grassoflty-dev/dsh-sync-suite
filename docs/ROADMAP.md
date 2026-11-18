@@ -433,17 +433,19 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 >
 > 要求：**可复现**——别人照 ① 重跑必须能得到 ②；"贴一段没有命令的 `BUILD SUCCESSFUL`"不算证据。
 
-- **并行上限本项目约定为 5**（2026-11-18 用户确认）：同一时刻最多 5 个执行子代理在跑。
-  DSH 的 `subagent.maxActiveSubagents` 是 **profile 级**（默认 8），写进 profile 会连带影响其它项目，
-  所以**不改 profile，只靠本约定约束**；达到 5 个就排队，短任务优先、交付即回收。
-  其它工作区不受本项目影响（各自用 DSH 默认值）。
-- **模型分工**（2026-11-18 用户确认，写进每次派活的 prompt）：
-  - 主会话与**总设计师**：`dsh-opencode-go / deepseek-v4.1-flash / high`（总设计师**不传** provider/model，
-    直接继承主会话，这样最稳）；
-  - **执行子代理**：显式 `provider: dsh-opencode-go, model: hy4-flash-free`（省额度；Go 通道只公布
-    `deepseek-v4.1-flash` 与 `hy4-flash-free` 两个模型）；
-  - 前提：`allowedModels` 里已加入这两个 opencode-go 路由（profile 已配置，**新会话生效**；
-    会话启动时快照，旧会话改不了）。
+- **并行上限本项目约定为 5**（2026-11-18 用户确认）：同一时刻最多 5 个执行子代理在跑，
+  达到 5 个就排队，短任务优先、交付即回收。
+  这是**本工作区的软约束**，不改 DSH 配置（`subagent.maxActiveSubagents` 保持默认 8），
+  其它工作区不受影响。
+- **模型分工**（2026-11-18 用户确认，写进每次派活的 prompt）——同为**软约束，不改配置**：
+  - 主会话与**总设计师**：`dsh-opencode-go / deepseek-v4.1-flash / high`；
+    总设计师**不传** provider/model，直接继承主会话（最稳）；
+  - **执行子代理**：`dsh-opencode-go / hy4-flash-free`（省额度）——在 prompt 里写明，
+    由派活方按此约定执行；
+  - 约束的前提是模型路由被允许。**当前会话的允许清单是启动时快照**，所以显式指定
+    `dsh-opencode-go/hy4-flash-free` 可能被拒（`not allowed for this Session`）；
+    此时执行子代理**不传模型、继承主会话**即可（同为 v4.1-flash），
+    **不要为此去改 profile**——用户已明确：这些是软约定，不动 DSH 本体配置。
 - 层级仍是「主会话 → 规划子代理 → 执行子代理」，执行子代理不再向下派生。
 - 执行子代理不只写代码，也可承担调研、方案评估、代码评审、真机验收、文档补记。
 - **唯一不能省的是评审**：涉及数据格式、失败语义、安全边界、删除/覆盖类操作的关键改动，
