@@ -167,6 +167,17 @@
 - **chat P2（导入回 DSH）先不写码**：等 `docs/CHAT-SYNC.md` 定稿 + 一次端到端实验（拿真会话导回、确认侧边栏出现且能继续）。
 - **chat P3（纯对话 preset）**：等 `docs/RESEARCH-chat-preset.md` 结论 + 独立只读评审（安全边界）。
 
+### chat 安全口径（Lead 2026-11-18 拍板）
+
+- **不改 profile 默认 preset**（默认仍 `standard`，否则正常编码会话会失去文件工具）。隔离改在**出入口**：
+  1. 插件导出准入：会话首行 `agentPreset === 'chat'` 才导出，否则 `E_PRESET_NOT_CHAT`（`chats/` 里存在的东西恒等于纯对话会话）；
+  2. App 侧创建/续接云端会话时必须显式带 `agentPreset: 'chat'`，缺失即拒绝（不做"没带就用默认"）；
+  3. 不变量测试：`chats/*/session.jsonl` 首行出现任何非 `chat` → 测试失败。
+- **chat 模式全 deny**：`schedule_*` / `dsh_dots`（本机数据入口）与第三方全局工具（browser-cdp 系 / codex-subscription 系）**逐一显式列出**，
+  名单写错名字必须报错不许吞；测试用**白名单式**断言"可见工具集只含纯对话工具"。
+- 已知限制（写进 `docs/RESEARCH-chat-preset.md` 结论 + `docs/CHAT-SYNC.md` 安全边界）：**preset 摘不掉第三方 Host 插件注册的全局工具**，
+  只能靠 `ctx.tools.restrict({ deny })` 遮蔽，且 `deny` 只认已注册名字、写错即抛。
+
 ## 进行中（第 4 轮，2026-11-18）——已收口
 
 | 任务 | 负责人 | 状态 | ETA | 阻塞 |
