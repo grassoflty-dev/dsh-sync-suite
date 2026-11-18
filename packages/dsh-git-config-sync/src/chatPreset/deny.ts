@@ -40,9 +40,12 @@
  *
  * ## 路径别名
  *
- * - `<ASAR>` = `C:\Users\GWL\AppData\Local\Programs\DeepSeek Harness\resources\app.asar\dsh\node_modules\@deepseek-ai`
+ * - `<ASAR>` = `<DSH 安装目录>/resources/app.asar/dsh/node_modules/@deepseek-ai`
  *   （asar 内的文件只能用 Host 的 read 工具读，`rg`/`glob` 穿不透）
- * - `NM` = `C:\Users\GWL\.dsh\profiles\desktop\node_modules`（本机 profile 已装插件）
+ * - `NM` = `<用户主目录>/.dsh/profiles/<profile>/node_modules`（本机 profile 已装插件）
+ *
+ * 这里一律写占位符、不写本机绝对路径：这些注释经常被复制/贴进 issue 与评审记录，
+ * 绝对路径属于环境信息（用户名、安装位置），不该随源码外泄。
  *
  * 行号以本机当前安装版本为准；升级 DSH 或升级插件后需重新核对（见 `docs/CHAT-SYNC.md`
  * 「安全边界：chat preset 与工具隔离」的"复核方法"）。

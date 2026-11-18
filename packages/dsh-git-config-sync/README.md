@@ -14,14 +14,14 @@ DSH（DeepSeek Harness）配置同步插件：把本机 `profiles/web` 的配置
 推荐在 DSH Web GUI 的 **Plugins → Add plugin** 选择本地目录：
 
 ```
-C:\Users\GWL\Desktop\itwillclaude\dsh-sync-suite\packages\dsh-git-config-sync
+<repo>/packages/dsh-git-config-sync
 ```
 
 等价 CLI（若环境允许）：
 
 ```powershell
 # 在 dsh-sync-suite 仓库根执行
-dsh plugin --profile web add link:C:\Users\GWL\Desktop\itwillclaude\dsh-sync-suite\packages\dsh-git-config-sync
+dsh plugin --profile web add link:<repo>/packages/dsh-git-config-sync
 ```
 
 前置检查：链接安装不会执行构建，`dist/index.js` 与 `dist/client.js` 必须已在仓库里
