@@ -98,11 +98,13 @@ const ALL_ETS = [...MAIN_ETS, ...HARMONY_ETS];
  * :418 要求 insertDeleteCell / pageLabelCell / prevNextCell / railToolButton 里必须出现
  * `'#F…'` 字面量；:653 要求 `const RAIL_BG: string = '#F7F9FB';` 原样存在。
  * 处理办法：浅色档保留字面量、深色档走 `theme.ts` 的 `DARK_FALLBACK`，
- * 于是这里只允许这 6 处，且每一处都必须出现在 `isDarkTheme()` 三元里（RAIL_BG 声明除外）。
+ * 于是这里只允许这 5 处，且每一处都必须出现在 `isDarkTheme()` 三元里（RAIL_BG 声明除外）。
  */
 const PINNED_HEX = new Map([
   ['#F7F9FB', 1],
-  ['#F1F3F5', 2],
+  // A1 去重后 DARK_FALLBACK.railFill 已不在该处（横屏 rail 底色改读 RAIL_BG），
+  // `#F1F3F5` 只剩 cellBackground 里橡皮/手动框那一处。
+  ['#F1F3F5', 1],
   ['#F7F8FA', 3]
 ]);
 
@@ -147,14 +149,18 @@ const COLOR_PATTERNS = [
 const COLOR_WHITELIST = [
   // Handwriting.ets:120 —— `const RAIL_BG: string = '#F7F9FB';` 被 handwritingToolbar.test.mjs:653 逐字钉住。
   { file: 'harmony/ets/pages/Handwriting.ets', kind: 'hex', anchor: "const RAIL_BG: string = '#F7F9FB'" },
-  // Handwriting.ets:1477 / :1945 —— 工具栏底：浅色档 `'#F1F3F5'` 被 :418 钉住，深色档走 DARK_FALLBACK.railFill。
-  { file: 'harmony/ets/pages/Handwriting.ets', kind: 'hex', anchor: "DARK_FALLBACK.railFill : '#F1F3F5'", count: 2 },
+  // Handwriting.ets:1699 —— 橡皮/手动框的浅色底 `'#F1F3F5'` 被 handwritingToolbar.test.mjs:493 钉住，
+  // 深色档走 DARK_FALLBACK.railFill。A1 去重后 DARK_FALLBACK.railFill 已不在该处（横屏 rail 底色改读
+  // RAIL_BG），豁免锚点同步删到实际剩余的 1 处。
+  { file: 'harmony/ets/pages/Handwriting.ets', kind: 'hex', anchor: "DARK_FALLBACK.railFill : '#F1F3F5'", count: 1 },
   // Handwriting.ets:1641 / :1662 / :1706 —— 工具片底：浅色档 `'#F7F8FA'` 被 :418 钉住，深色档走 DARK_FALLBACK.chipFill。
   { file: 'harmony/ets/pages/Handwriting.ets', kind: 'hex', anchor: "DARK_FALLBACK.chipFill : '#F7F8FA'", count: 3 },
   // Index.ets:1675 —— `.backgroundColor(Color.Transparent)`：透明不是颜色，两套主题同义（ARGB 全 0）。
   { file: 'main/ets/pages/Index.ets', kind: 'named', anchor: 'Color.Transparent' },
-  // Handwriting.ets:1727 / :1989 —— 两个「完成」按钮在品牌蓝实底上的反白字，handwritingToolbar.test.mjs:240 逐字钉住。
-  { file: 'harmony/ets/pages/Handwriting.ets', kind: 'named', anchor: '.fontColor(Color.White)', count: 2 },
+  // Handwriting.ets:1829 —— 「完成」按钮在品牌蓝实底上的反白字（buttonCell 里唯一一处）。
+  // A1 把两处「完成」按钮（竖屏 finishButton / 横屏 railFinishButton）合并成一处 buttonCell，
+  // Color.White 由 2 变 1。
+  { file: 'harmony/ets/pages/Handwriting.ets', kind: 'named', anchor: '.fontColor(Color.White)', count: 1 },
   // Handwriting.ets:2289 / :2406 / :2464 —— 选中态非选中分支的透明（让底色透出来），语义恒定。
   { file: 'harmony/ets/pages/Handwriting.ets', kind: 'named', anchor: 'Color.Transparent', count: 3 },
   // theme.ts：`CANVAS_PAINTS` 是画布绘制色的**唯一**来源（纸面/遮白/网格/对象描边…），属性就是「恒定色」。
@@ -185,7 +191,7 @@ const COLOR_WHITELIST = [
 /** 白名单**条目数**（改白名单必须同步改这里：这是「豁免只增不减」的显式刹车）。 */
 const WHITELIST_ENTRY_COUNT = 22;
 /** 白名单覆盖的**字面量条数**（`count` 之和；与条目数分开钉，防止偷偷调大 count）。 */
-const WHITELIST_LITERAL_COUNT = 32;
+const WHITELIST_LITERAL_COUNT = 30;
 
 /** 递归收集某目录下指定后缀的文件（路径统一正斜杠）。 */
 function listFilesByExt(dir, suffix) {
@@ -326,9 +332,9 @@ describe('色值收编：字面色只允许出现在白名单里（硬门闸）'
     }
   });
 
-  test('harmony 树只剩被 handwritingToolbar.test.mjs 钉住的 6 处 hex，且都在 isDarkTheme() 三元里', () => {
+  test('harmony 树只剩被 handwritingToolbar.test.mjs 钉住的 5 处 hex，且都在 isDarkTheme() 三元里', () => {
     const hits = collectColorHits(HARMONY_ETS).filter((hit) => hit.kind === 'hex');
-    assert.equal(hits.length, 6, `harmony 树 hex 数量变了（应为 6 处钉住值）：\n${hits.map((hit) => `${hit.file}:${hit.line} ${hit.literal}`).join('\n')}`);
+    assert.equal(hits.length, 5, `harmony 树 hex 数量变了（应为 5 处钉住值）：\n${hits.map((hit) => `${hit.file}:${hit.line} ${hit.literal}`).join('\n')}`);
     const counts = new Map();
     for (const hit of hits) {
       counts.set(hit.literal, (counts.get(hit.literal) ?? 0) + 1);
@@ -350,11 +356,12 @@ describe('色值收编：字面色只允许出现在白名单里（硬门闸）'
     }
   });
 
-  test('命名色只剩白名单：完成按钮的 Color.White ×2 + 透明 ×4', () => {
+  test('命名色只剩白名单：完成按钮的 Color.White ×1 + 透明 ×4', () => {
     const named = collectColorHits(COLOR_SCAN_FILES).filter((hit) => hit.kind === 'named');
     const white = named.filter((hit) => hit.literal === 'Color.White');
     const transparent = named.filter((hit) => hit.literal === 'Color.Transparent');
-    assert.equal(white.length, 2, `Color.White 只允许 2 处（完成按钮反白字）：\n${white.map((hit) => `${hit.file}:${hit.line}`).join('\n')}`);
+    // A1 把两处「完成」按钮合并成一处 buttonCell，Color.White 由 2 变 1。
+    assert.equal(white.length, 1, `Color.White 只允许 1 处（完成按钮反白字）：\n${white.map((hit) => `${hit.file}:${hit.line}`).join('\n')}`);
     assert.equal(transparent.length, 4, `Color.Transparent 只允许 4 处（语义恒定）：\n${transparent.map((hit) => `${hit.file}:${hit.line}`).join('\n')}`);
     assert.equal(named.length, white.length + transparent.length, '除 White / Transparent 之外不允许任何命名色');
   });

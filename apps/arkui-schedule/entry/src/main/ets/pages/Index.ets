@@ -610,19 +610,6 @@ struct Index {
     });
   }
 
-  /**
-   * 首页快捷同步（带 `autoAction=pull` 跳设置页）。
-   *
-   * **当前没有入口**：同步相关动作已按用户要求全部收进「设置 → 同步(Git)」组，
-   * 这里保留实现与 `autoAction` 参数通道，将来若要恢复首页快捷同步直接接回来即可。
-   */
-  private openSync(): void {
-    const params: Record<string, string> = { 'autoAction': 'pull' };
-    router.pushUrl({ url: 'pages/Settings', params: params }).catch((error: Error) => {
-      promptAction.showToast({ message: `打开设置页失败：${describeError(error)}` });
-    });
-  }
-
   /** 勾选完成：追加一条同 id、新 ts 的记录（事件溯源，不改历史行）。 */
   private toggleDone(id: string, done: boolean): void {
     let target: ScheduleRecord | null = null;

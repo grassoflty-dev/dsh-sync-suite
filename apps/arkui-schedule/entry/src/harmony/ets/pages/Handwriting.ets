@@ -149,6 +149,29 @@ const GAP_MIN: number = 8;
  * 任何情况下都**不许再用横向 `Scroll`**（真机上工具按钮被滚走 = 用户找不到）。
  */
 const TOP_BAR_SINGLE_ROW_MIN: number = 640;
+
+/**
+ * 工具条单元格 id：`buttonCell(id, layout, width)` 的语义键。
+ *
+ * 2026-11-18 重构（A 线）：「退出/笔迹/橡皮/手动框/插入/↶/↷/完成」原先在 `topBar` 与
+ * `railBar` 里各写一套 builder（8 对近似重复，改一处必须同步另一处）；现在语义只有一份
+ * （`cellLabel` / `cellTextColor` / `cellBackground` / `onCellTap`），两个布局壳只决定
+ * 「怎么排」与「宽度从哪儿来」。
+ */
+const CELL_EXIT: string = 'exit';
+const CELL_INK: string = 'ink';
+const CELL_ERASER: string = 'eraser';
+const CELL_SELECT: string = 'select';
+const CELL_INSERT: string = 'insert';
+const CELL_UNDO: string = 'undo';
+const CELL_REDO: string = 'redo';
+const CELL_FINISH: string = 'finish';
+/**
+ * 布局壳标识（只有两个）：竖屏顶部条的单元格宽度**按内容自适应**，
+ * 横屏 rail 的单元格**铺满 rail 宽**（`railWidth()`）——几何差异只在这里分叉。
+ */
+const LAYOUT_PORTRAIT: string = 'portrait';
+const LAYOUT_RAIL: string = 'rail';
 /** 二级面板每行高度（vp）。 */
 const MENU_ROW_HEIGHT: number = 44;
 /** 二级面板每项最小宽度（vp）——用户定版 ≥140。 */
@@ -1587,152 +1610,247 @@ struct Handwriting {
     return index >= 0 && index < SIZE_DOTS.length ? SIZE_DOTS[index] : SIZE_DOTS[2];
   }
 
+  // ------------------------------------------------------------------ 工具条单元格（唯一实现，两套布局壳共用）
+
   /**
-   * 「笔迹设置」按钮（笔形 + 粗细合并后的入口）。
+   * 单元格主文案（`''` = 没有文字）。
    *
-   * 文案**固定为「笔迹」**（不再显示当前值 `钢笔 · 3.5 · 黑`——真机上会被裁成 `钢笔 · 3.5`）。
-   * 当前值在面板里看（三段各有选中态）；宽度按内容自适应，`flexShrink(0)` 不压缩。
+   * **唯一文案表**：竖屏顶部条与横屏 rail 都从这里取字，不再各自写一遍 `Text('橡皮')`。
    */
-  @Builder
-  brushMenuButton() {
-    Row({ space: 2 }) {
-      Text('笔迹')
-        .fontSize(this.toolbarFontSize())
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INK ? $r('app.color.text_inverse') : $r('app.color.text_primary'))
-      // 当前色块（边长取 `metrics.iconSize × 0.6`）：文案收缩时也还能看出颜色
-      Text('')
-        .width(this.iconSize() * 0.6)
-        .height(this.iconSize() * 0.6)
-        .borderRadius(3)
-        .backgroundColor(this.pagerState.penColor)
-        .border({ width: 1, color: this.panel === PANEL_INK ? $r('app.color.text_inverse') : $r('app.color.border') })
-        .margin({ left: 2 })
-      Text('▾')
-        .fontSize(this.toolbarFontSize())
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INK ? $r('app.color.text_inverse') : $r('app.color.text_secondary'))
+  private cellLabel(id: string): string {
+    switch (id) {
+      case CELL_EXIT:
+        return '‹';
+      case CELL_INK:
+        return '笔迹';
+      case CELL_ERASER:
+        return '橡皮';
+      case CELL_SELECT:
+        return '手动框';
+      case CELL_INSERT:
+        return '插入';
+      case CELL_UNDO:
+        return '↶';
+      case CELL_REDO:
+        return '↷';
+      default:
+        return '';
     }
-    .height(this.itemSize())
-    .constraintSize({ minWidth: this.itemSize() })
-    .padding({ left: SPACING.sm, right: SPACING.sm })
-    .borderRadius(RADIUS.sm)
-    .backgroundColor(this.panel === PANEL_INK ? $r('app.color.brand') : $r('app.color.control_fill'))
-    .flexShrink(0)
-    .onClick(() => {
-      this.togglePanel(PANEL_INK);
-    })
+  }
+
+  /** 单元格绑定的绘画工具（只有橡皮 / 手动框有，其余返回 `''`）。 */
+  private cellTool(id: string): string {
+    if (id === CELL_ERASER) {
+      return HW_TOOL_ERASER;
+    }
+    if (id === CELL_SELECT) {
+      return HW_TOOL_SELECT;
+    }
+    return '';
+  }
+
+  /** 选中态：橡皮 / 手动框看当前工具，笔迹 / 插入看对应面板是否展开（其余永远 false）。 */
+  private cellSelected(id: string): boolean {
+    if (id === CELL_ERASER || id === CELL_SELECT) {
+      return this.pagerState.tool === this.cellTool(id);
+    }
+    if (id === CELL_INK) {
+      return this.panel === PANEL_INK;
+    }
+    if (id === CELL_INSERT) {
+      return this.panel === PANEL_INSERT;
+    }
+    return false;
+  }
+
+  /** 历史单元格是否可用（撤销栈空 / 没有可重做时为 false：只影响字色，按钮仍然可点）。 */
+  private historyAvailable(id: string): boolean {
+    return id === CELL_UNDO ? this.pagerState.undoSteps > 0 : this.pagerState.redoAvailable;
+  }
+
+  /** 单元格文字颜色：选中态品牌色、面板展开反白、历史不可用走次要色（**不降透明度**）。 */
+  private cellTextColor(id: string): ResourceColor {
+    const selected: boolean = this.cellSelected(id);
+    if (id === CELL_UNDO || id === CELL_REDO) {
+      return this.historyAvailable(id) ? $r('app.color.text_primary') : $r('app.color.text_secondary');
+    }
+    if (id === CELL_INK || id === CELL_INSERT) {
+      return selected ? $r('app.color.text_inverse') : $r('app.color.text_primary');
+    }
+    if (id === CELL_ERASER || id === CELL_SELECT) {
+      return selected ? $r('app.color.brand') : $r('app.color.text_primary');
+    }
+    return $r('app.color.text_primary');
+  }
+
+  /** 单元格「▾」的颜色（面板展开时与文字一起反白）。 */
+  private cellArrowColor(id: string): ResourceColor {
+    return this.cellSelected(id) ? $r('app.color.text_inverse') : $r('app.color.text_secondary');
+  }
+
+  /** 单元格底色：面板展开 = 品牌蓝、工具选中 = 选中底、历史 = 输入框底、其余 = 控件底。 */
+  private cellBackground(id: string): ResourceColor {
+    if (id === CELL_INK || id === CELL_INSERT) {
+      return this.cellSelected(id) ? $r('app.color.brand') : $r('app.color.control_fill');
+    }
+    if (id === CELL_ERASER || id === CELL_SELECT) {
+      return this.cellSelected(id)
+        ? $r('app.color.selection_fill')
+        : (this.isDarkTheme() ? DARK_FALLBACK.railFill : '#F1F3F5');
+    }
+    if (id === CELL_UNDO || id === CELL_REDO) {
+      return $r('app.color.field_fill');
+    }
+    return $r('app.color.control_fill');
+  }
+
+  /** 选中描边宽度：只有橡皮 / 手动框选中时 1vp，其余 0（0 = 不描边，也就没有视觉差）。 */
+  private cellBorderWidth(id: string): number {
+    if (id === CELL_ERASER || id === CELL_SELECT) {
+      return this.cellSelected(id) ? 1 : 0;
+    }
+    return 0;
   }
 
   /**
-   * 橡皮 / 手动框：独立按钮，点一次进该模式、再点一次回画笔。
-   * 选中态品牌淡底 + 品牌色文字；**禁用态不降透明度**（定版：只改颜色）。
+   * 单元格点击分派（`@Builder` 里**不传闭包**：只传 id，行为在这里 `switch`）。
+   *
+   * 缺陷 4 的两个成因都在这里收口：
+   * - (a) 手势被 Scrollable 抢走：历史按钮是 `Row` + `.onClick`（有独立点击区的真按钮），
+   *   竖屏顶部条里没有任何 Scroll，横屏那条 Scroll 是竖向的，不会吃横向点击；
+   * - (b) 禁用态哑巴：**不用 `.enabled(false)`**（真机会「看着能点、点了没反应」），
+   *   历史按钮永远可点，只用字色体现「没东西可撤销」，点下去 toast 说明原因。
    */
+  private onCellTap(id: string): void {
+    switch (id) {
+      case CELL_EXIT:
+        this.exitWritingBoard();
+        break;
+      case CELL_INK:
+        this.togglePanel(PANEL_INK);
+        break;
+      case CELL_ERASER:
+        this.toggleTool(HW_TOOL_ERASER);
+        break;
+      case CELL_SELECT:
+        this.toggleTool(HW_TOOL_SELECT);
+        break;
+      case CELL_INSERT:
+        this.togglePanel(PANEL_INSERT);
+        break;
+      case CELL_UNDO:
+        this.onHistoryTap('undo', this.pagerState.undoSteps > 0);
+        break;
+      case CELL_REDO:
+        this.onHistoryTap('redo', this.pagerState.redoAvailable);
+        break;
+      case CELL_FINISH:
+        this.finish();
+        break;
+      default:
+        break;
+    }
+  }
+
+  /** 单元格主文案：字号 / 不截断 / 颜色全部由 id 派生（`maxLines(1)` + 禁止省略号）。 */
   @Builder
-  toolButton(label: string, tool: string) {
-    Text(label)
-      .height(this.itemSize())
-      .constraintSize({ minWidth: this.itemSize() })
-      .padding({ left: SPACING.sm, right: SPACING.sm })
+  cellText(id: string) {
+    Text(this.cellLabel(id))
       .fontSize(this.toolbarFontSize())
       .maxLines(1)
       .textOverflow({ overflow: TextOverflow.None })
       .textAlign(TextAlign.Center)
-      .borderRadius(RADIUS.sm)
-      .backgroundColor(this.pagerState.tool === tool ? $r('app.color.selection_fill') : (this.isDarkTheme() ? DARK_FALLBACK.railFill : '#F1F3F5'))
-      .fontColor(this.pagerState.tool === tool ? $r('app.color.brand') : $r('app.color.text_primary'))
-      .border({ width: this.pagerState.tool === tool ? 1 : 0, color: $r('app.color.brand') })
-      .flexShrink(0)
-      .onClick(() => {
-        this.toggleTool(tool);
-      })
+      .fontColor(this.cellTextColor(id))
   }
 
-  /** 「插入」按钮：固定文案 + ▾（二级菜单里选 图片 / 表格）。 */
+  /** 「▾」：面板类单元格（笔迹 / 插入）的展开指示。 */
   @Builder
-  insertMenuButton() {
-    Row({ space: 2 }) {
-      Text('插入')
-        .fontSize(this.toolbarFontSize())
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INSERT ? $r('app.color.text_inverse') : $r('app.color.text_primary'))
-      Text('▾')
-        .fontSize(this.toolbarFontSize())
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INSERT ? $r('app.color.text_inverse') : $r('app.color.text_secondary'))
-    }
-    .height(this.itemSize())
-    .constraintSize({ minWidth: this.itemSize() })
-    .padding({ left: SPACING.sm, right: SPACING.sm })
-    .borderRadius(RADIUS.sm)
-    .backgroundColor(this.panel === PANEL_INSERT ? $r('app.color.brand') : $r('app.color.control_fill'))
-    .flexShrink(0)
-    .onClick(() => {
-      this.togglePanel(PANEL_INSERT);
-    })
+  cellArrow(id: string) {
+    Text('▾')
+      .fontSize(this.toolbarFontSize())
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.None })
+      .fontColor(this.cellArrowColor(id))
   }
 
-  /** rail「插入」按钮：与其它 rail 控件同尺寸（100% 宽 × `metrics.itemSize` 高），文案固定 + ▾。 */
+  /** 单元格内容（文字 / 当前色块 / ▾）：竖屏与横屏共用同一份。 */
   @Builder
-  railInsertButton() {
-    Row({ space: 2 }) {
-      Text('插入')
-        .fontSize(this.toolbarFontSize())
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INSERT ? $r('app.color.text_inverse') : $r('app.color.text_primary'))
-      Text('▾')
-        .fontSize(this.toolbarFontSize())
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INSERT ? $r('app.color.text_inverse') : $r('app.color.text_secondary'))
+  cellContent(id: string) {
+    if (id === CELL_INK) {
+      Row({ space: 2 }) {
+        this.cellText(id)
+        // 当前色块（边长取 `metrics.iconSize × 0.6`）：文案收缩时也还能看出颜色
+        Text('')
+          .width(this.iconSize() * 0.6)
+          .height(this.iconSize() * 0.6)
+          .borderRadius(3)
+          .backgroundColor(this.pagerState.penColor)
+          .border({
+            width: 1,
+            color: this.cellSelected(id) ? $r('app.color.text_inverse') : $r('app.color.border')
+          })
+          .margin({ left: 2 })
+        this.cellArrow(id)
+      }
+    } else if (id === CELL_INSERT) {
+      Row({ space: 2 }) {
+        this.cellText(id)
+        this.cellArrow(id)
+      }
+    } else {
+      this.cellText(id)
     }
-    .justifyContent(FlexAlign.Center)
-    .width('100%')
-    .height(this.itemSize())
-    .borderRadius(RADIUS.sm)
-    .backgroundColor(this.panel === PANEL_INSERT ? $r('app.color.brand') : $r('app.color.control_fill'))
-    .onClick(() => {
-      this.togglePanel(PANEL_INSERT);
-    })
   }
 
   /**
-   * 撤销 / 重做（**真按钮**：`Row` + `.onClick`；`kind` 分发，避免把回调传进 @Builder）。
+   * 工具条单元格（**所有按钮的唯一实现**，竖屏顶部条 / 横屏 rail 共用）。
    *
-   * 缺陷 4 的两个成因都在这里收口：
-   * - (a) 手势被 Scrollable 抢走：历史按钮现在在 `topBar` 的**普通 Row** 里（横向 Scroll 已删），
-   *   竖向 rail 的那条 Scroll 不会吃横向点击；控件是有独立点击区的 `Row`，不是裸 `Text`；
-   * - (b) 禁用态哑巴：**不再用 `.enabled(false)`**（真机会出现「看着能点、点了没反应」），
-   *   按钮永远可点，只在字色上体现「没东西可撤销」，点下去 toast 说明原因；
-   *   可用性由父页面 build 里读 `pagerState.undoSteps / redoAvailable` 传入，
-   *   `onStatsChange → touchUi()` 保证撤销栈一变工具条就重建。
+   * 两个布局壳只差几何，语义一律走 id（`cellLabel` / `cellTextColor` / `cellBackground`）：
+   * - 竖屏（`LAYOUT_PORTRAIT`）：宽度**按内容自适应**——只给 `minWidth = itemSize` + 左右 8vp
+   *   padding + `flexShrink(0)`，**不给固定 width**（真机上固定宽会把「手动框」截断）；
+   * - 横屏（`LAYOUT_RAIL`）：铺满 rail（`minWidth = railWidth()`）、不加内边距。
+   * 参数只用简单类型（`@Builder` 不传闭包），点击行为由 `onCellTap(id)` 的 `switch` 分派；
+   * `width` 只给「完成」用（竖屏 `finishWidth()` / 横屏 `railWidth()`），其余单元格传 0。
    */
   @Builder
-  historyButton(kind: string, label: string, available: boolean) {
-    Row() {
-      Text(label)
+  buttonCell(id: string, layout: string, width: number) {
+    if (id === CELL_FINISH) {
+      // 「完成」是唯一主操作：实底品牌蓝 + 白字、不收缩。真机缺陷：rail 里 56vp 宽时
+      // Button 内部 padding 会把 2 个字挤成「...」——宽度守 64 下限，并显式给 4vp 左右 padding。
+      Button(this.busy ? '识别中' : '完成')
+        .width(width)
+        .height(this.itemSize())
+        .constraintSize({ minWidth: FINISH_MIN_WIDTH })
+        .padding({ left: SPACING.xs, right: SPACING.xs })
+        // 横屏用 RADIUS.sm（与 rail 其它控件一致）；竖屏保持 Button 默认的胶囊圆角（= 高度的一半）
+        .borderRadius(layout === LAYOUT_RAIL ? RADIUS.sm : this.itemSize() / 2)
         .fontSize(this.toolbarFontSize())
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .textAlign(TextAlign.Center)
-        // 禁用态只改字色（不降透明度：真机上透明会被误认为「按钮没了」）
-        .fontColor(available ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
+        .backgroundColor($r('app.color.brand'))
+        .fontColor(Color.White)
+        .enabled(!this.busy)
+        .flexShrink(0)
+        .onClick(() => {
+          this.onCellTap(id);
+        })
+    } else {
+      Row() {
+        this.cellContent(id)
+      }
+      .constraintSize({ minWidth: layout === LAYOUT_RAIL ? this.railWidth() : this.itemSize() })
+      .height(this.itemSize())
+      .padding({
+        left: layout === LAYOUT_RAIL ? 0 : SPACING.sm,
+        right: layout === LAYOUT_RAIL ? 0 : SPACING.sm
+      })
+      .justifyContent(FlexAlign.Center)
+      .borderRadius(RADIUS.sm)
+      .backgroundColor(this.cellBackground(id))
+      .border({ width: this.cellBorderWidth(id), color: $r('app.color.brand') })
+      .flexShrink(0)
+      .onClick(() => {
+        this.onCellTap(id);
+      })
     }
-    .height(this.itemSize())
-    .constraintSize({ minWidth: this.itemSize() })
-    .padding({ left: SPACING.sm, right: SPACING.sm })
-    .justifyContent(FlexAlign.Center)
-    .borderRadius(RADIUS.sm)
-    .backgroundColor($r('app.color.field_fill'))
-    .flexShrink(0)
-    .onClick(() => {
-      this.onHistoryTap(kind, available);
-    })
   }
 
   /**
@@ -1881,55 +1999,6 @@ struct Handwriting {
   }
 
   /**
-   * 「完成」：唯一主操作，实底品牌蓝 + 白字、不收缩。
-   *
-   * 真机缺陷：rail 里 56vp 宽时 Button 内部 padding 把 2 个字挤成「...」。
-   * 现在：宽度 = `finishWidth()`（≥64vp，且不小于控件边长），并显式给 4vp 左右 padding，
-   * 否则 Button 默认内边距会把 2 个字挤成「...」。
-   */
-  @Builder
-  finishButton() {
-    Button(this.busy ? '识别中' : '完成')
-      .height(this.itemSize())
-      .width(this.finishWidth())
-      .constraintSize({ minWidth: FINISH_MIN_WIDTH })
-      .padding({ left: SPACING.xs, right: SPACING.xs })
-      .fontSize(this.toolbarFontSize())
-      .backgroundColor($r('app.color.brand'))
-      .fontColor(Color.White)
-      .enabled(!this.busy)
-      .flexShrink(0)
-      .onClick(() => {
-        this.finish();
-      })
-  }
-
-  /**
-   * 「‹」退出：**暂存草稿后返回**（不二次确认）。
-   *
-   * 用户诉求：「退出后应该要暂存当前手写页的所有内容，可以后续进入再修改，
-   * 完成才是按照要求做 OCR」——所以退出只存草稿，不触发识别。
-   */
-  @Builder
-  exitButton() {
-    Text('‹')
-      .width(this.itemSize())
-      .height(this.itemSize())
-      .constraintSize({ minWidth: this.itemSize() })
-      .fontSize(this.toolbarFontSize())
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.None })
-      .textAlign(TextAlign.Center)
-      .borderRadius(RADIUS.sm)
-      .backgroundColor($r('app.color.control_fill'))
-      .fontColor($r('app.color.text_primary'))
-      .flexShrink(0)
-      .onClick(() => {
-        this.exitWritingBoard();
-      })
-  }
-
-  /**
    * 竖屏：顶部工具条（**9 项一屏排完，绝不横向滚动**）。
    *
    * ```
@@ -1949,6 +2018,9 @@ struct Handwriting {
    *   控件尺寸一律不压缩、不隐藏）；顶部条高度由 `topBarHeight()` 一起放大到 2 × 厚度。
    * - **注意**：这里只是同一个 builder 的两个 if 分支，画布（`HandwritingPager`）始终在
    *   `build()` 的同一位置，不会因宽度变化被重建（重建会丢掉已经画好的像素）。
+   *
+   * 单元格语义只有一份（`buttonCell` + `cellContent`）：本壳只负责「排成一行还是两行」，
+   * 不再重复定义按钮。
    */
   @Builder
   topBar() {
@@ -1956,13 +2028,13 @@ struct Handwriting {
       // ---- 极窄屏：两行折行（不用滚动，也不隐藏任何控件）
       Column() {
         Row({ space: this.controlGap() }) {
-          this.exitButton()
-          this.brushMenuButton()
-          this.toolButton('橡皮', HW_TOOL_ERASER)
-          this.toolButton('手动框', HW_TOOL_SELECT)
-          this.insertMenuButton()
-          this.historyButton('undo', '↶', this.pagerState.undoSteps > 0)
-          this.historyButton('redo', '↷', this.pagerState.redoAvailable)
+          this.buttonCell(CELL_EXIT, LAYOUT_PORTRAIT, 0)
+          this.buttonCell(CELL_INK, LAYOUT_PORTRAIT, 0)
+          this.buttonCell(CELL_ERASER, LAYOUT_PORTRAIT, 0)
+          this.buttonCell(CELL_SELECT, LAYOUT_PORTRAIT, 0)
+          this.buttonCell(CELL_INSERT, LAYOUT_PORTRAIT, 0)
+          this.buttonCell(CELL_UNDO, LAYOUT_PORTRAIT, 0)
+          this.buttonCell(CELL_REDO, LAYOUT_PORTRAIT, 0)
         }
         .width('100%')
         .height(this.barThickness())
@@ -1971,7 +2043,7 @@ struct Handwriting {
 
         Row({ space: this.controlGap() }) {
           this.pageStepper()
-          this.finishButton()
+          this.buttonCell(CELL_FINISH, LAYOUT_PORTRAIT, this.finishWidth())
         }
         .width('100%')
         .height(this.barThickness())
@@ -1986,15 +2058,15 @@ struct Handwriting {
     } else {
       // ---- 宽屏：9 项一屏一行
       Row({ space: this.controlGap() }) {
-        this.exitButton()
-        this.brushMenuButton()
-        this.toolButton('橡皮', HW_TOOL_ERASER)
-        this.toolButton('手动框', HW_TOOL_SELECT)
-        this.insertMenuButton()
-        this.historyButton('undo', '↶', this.pagerState.undoSteps > 0)
-        this.historyButton('redo', '↷', this.pagerState.redoAvailable)
+        this.buttonCell(CELL_EXIT, LAYOUT_PORTRAIT, 0)
+        this.buttonCell(CELL_INK, LAYOUT_PORTRAIT, 0)
+        this.buttonCell(CELL_ERASER, LAYOUT_PORTRAIT, 0)
+        this.buttonCell(CELL_SELECT, LAYOUT_PORTRAIT, 0)
+        this.buttonCell(CELL_INSERT, LAYOUT_PORTRAIT, 0)
+        this.buttonCell(CELL_UNDO, LAYOUT_PORTRAIT, 0)
+        this.buttonCell(CELL_REDO, LAYOUT_PORTRAIT, 0)
         this.pageStepper()
-        this.finishButton()
+        this.buttonCell(CELL_FINISH, LAYOUT_PORTRAIT, this.finishWidth())
       }
       .width('100%')
       .height(this.barThickness())
@@ -2022,6 +2094,8 @@ struct Handwriting {
    * 尺寸改成随屏自适应后（`itemSize` 最大 72vp），12 项竖向总高可能超过真机可用高度
    * （≈601vp），因此中段整体放进**竖向 Scroll**：所有控件都点得到、「完成」也不会被挤出屏幕。
    * 这不是「压缩控件」——每个控件仍是 `metrics.itemSize` 见方，只是允许滚动。
+   *
+   * 单元格语义与竖屏完全一致（同一个 `buttonCell`）：本壳只负责「竖着排、铺满 rail 宽」。
    */
   @Builder
   railBar() {
@@ -2029,14 +2103,14 @@ struct Handwriting {
       Column({ space: this.controlGap() }) {
         Scroll() {
           Column({ space: this.controlGap() }) {
-            // 横屏专用一套按钮：**统一 rail 宽（100%）+ 高 = `metrics.itemSize`**
-            this.railExitButton()
-            this.railBrushButton()
-            this.railToolButton('橡皮', HW_TOOL_ERASER)
-            this.railToolButton('手动框', HW_TOOL_SELECT)
-            this.railInsertButton()
-            this.railHistoryButton('undo', '↶', this.pagerState.undoSteps > 0)
-            this.railHistoryButton('redo', '↷', this.pagerState.redoAvailable)
+            // 与竖屏同一份单元格语义，这里只换成「铺满 rail 宽」的布局壳（LAYOUT_RAIL）
+            this.buttonCell(CELL_EXIT, LAYOUT_RAIL, 0)
+            this.buttonCell(CELL_INK, LAYOUT_RAIL, 0)
+            this.buttonCell(CELL_ERASER, LAYOUT_RAIL, 0)
+            this.buttonCell(CELL_SELECT, LAYOUT_RAIL, 0)
+            this.buttonCell(CELL_INSERT, LAYOUT_RAIL, 0)
+            this.buttonCell(CELL_UNDO, LAYOUT_RAIL, 0)
+            this.buttonCell(CELL_REDO, LAYOUT_RAIL, 0)
             // 分页三单元格：宽度 = rail 宽度（`railWidth()` 已兜住「每半 ≥44」的下限）
             this.insertDeleteCell(this.railWidth())
             this.pageLabelCell(this.railWidth())
@@ -2050,7 +2124,7 @@ struct Handwriting {
         .layoutWeight(1)
         .align(Alignment.Top)
 
-        this.railFinishButton()
+        this.buttonCell(CELL_FINISH, LAYOUT_RAIL, this.railWidth())
       }
       .width(this.railWidth())
       .height('100%')
@@ -2068,118 +2142,6 @@ struct Handwriting {
     .width(this.railWidth() + DIVIDER)
     .height('100%')
     .alignItems(VerticalAlign.Top)
-  }
-
-  // ------------------------------------------------------------------ 横屏 rail 专用按钮（统一 100% × itemSize）
-
-  /** rail 顶部「‹」退出：满 rail 宽 × `metrics.itemSize` 高（与竖屏同一个动作：存草稿 → 返回）。 */
-  @Builder
-  railExitButton() {
-    Text('‹')
-      .width('100%')
-      .height(this.itemSize())
-      .fontSize(this.toolbarFontSize())
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.None })
-      .textAlign(TextAlign.Center)
-      .borderRadius(RADIUS.sm)
-      .backgroundColor($r('app.color.control_fill'))
-      .fontColor($r('app.color.text_primary'))
-      .flexShrink(0)
-      .onClick(() => {
-        this.exitWritingBoard();
-      })
-  }
-
-  /** rail「笔迹」按钮：满 rail 宽 × `metrics.itemSize` 高，内容居中，文案固定 + 当前色块。 */
-  @Builder
-  railBrushButton() {
-    Row({ space: 2 }) {
-      Text('笔迹')
-        .fontSize(this.toolbarFontSize())
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INK ? $r('app.color.text_inverse') : $r('app.color.text_primary'))
-      Text('')
-        .width(this.iconSize() * 0.6)
-        .height(this.iconSize() * 0.6)
-        .borderRadius(3)
-        .backgroundColor(this.pagerState.penColor)
-        .border({ width: 1, color: this.panel === PANEL_INK ? $r('app.color.text_inverse') : $r('app.color.border') })
-        .margin({ left: 2 })
-      Text('▾')
-        .fontSize(this.toolbarFontSize())
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INK ? $r('app.color.text_inverse') : $r('app.color.text_secondary'))
-    }
-    .justifyContent(FlexAlign.Center)
-    .width('100%')
-    .height(this.itemSize())
-    .borderRadius(RADIUS.sm)
-    .backgroundColor(this.panel === PANEL_INK ? $r('app.color.brand') : $r('app.color.control_fill'))
-    .onClick(() => {
-      this.togglePanel(PANEL_INK);
-    })
-  }
-
-  /** rail 的橡皮 / 手动框：与竖屏语义一致（再点回画笔），尺寸统一。 */
-  @Builder
-  railToolButton(label: string, tool: string) {
-    Text(label)
-      .width('100%')
-      .height(this.itemSize())
-      .fontSize(this.toolbarFontSize())
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.None })
-      .textAlign(TextAlign.Center)
-      .borderRadius(RADIUS.sm)
-      .backgroundColor(this.pagerState.tool === tool ? $r('app.color.selection_fill') : (this.isDarkTheme() ? DARK_FALLBACK.railFill : '#F1F3F5'))
-      .fontColor(this.pagerState.tool === tool ? $r('app.color.brand') : $r('app.color.text_primary'))
-      .border({ width: this.pagerState.tool === tool ? 1 : 0, color: $r('app.color.brand') })
-      .onClick(() => {
-        this.toggleTool(tool);
-      })
-  }
-
-  /** rail 的撤销 / 重做（与竖屏同一套语义：`Row` + 永远可点 + 禁用只有字色，见 `historyButton`）。 */
-  @Builder
-  railHistoryButton(kind: string, label: string, available: boolean) {
-    Row() {
-      Text(label)
-        .fontSize(this.toolbarFontSize())
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.None })
-        .textAlign(TextAlign.Center)
-        .width('100%')
-        .fontColor(available ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
-    }
-    .width('100%')
-    .height(this.itemSize())
-    .justifyContent(FlexAlign.Center)
-    .borderRadius(RADIUS.sm)
-    .backgroundColor($r('app.color.field_fill'))
-    .onClick(() => {
-      this.onHistoryTap(kind, available);
-    })
-  }
-
-  /** rail 底部「完成」：满 rail 宽 × `metrics.itemSize` 实底品牌蓝 + 白字，固定底部、不参与滚动。 */
-  @Builder
-  railFinishButton() {
-    Button(this.busy ? '识别中' : '完成')
-      .width(this.railWidth())
-      .height(this.itemSize())
-      .borderRadius(RADIUS.sm)
-      .constraintSize({ minWidth: FINISH_MIN_WIDTH })
-      .fontSize(this.toolbarFontSize())
-      .backgroundColor($r('app.color.brand'))
-      .fontColor(Color.White)
-      .enabled(!this.busy)
-      .flexShrink(0)
-      .onClick(() => {
-        this.finish();
-      })
   }
 
   // ------------------------------------------------------------------ 二级面板（绝对定位浮层，不挤压画布）

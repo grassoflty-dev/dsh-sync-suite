@@ -196,7 +196,14 @@ describe('toolbarMetrics：按视口比例自适应', () => {
 });
 
 describe('Handwriting.ets 源码接线：工具条尺寸只从 metrics 取', () => {
-  /** 工具条/分页区相关的成员（写死 44/40 在这段里必须 0 命中）。 */
+  /**
+   * 工具条/分页区相关的成员（写死 44/40 在这段里必须 0 命中）。
+   *
+   * A1 去重后竖屏的 brushMenuButton / toolButton / insertMenuButton / historyButton /
+   * finishButton / exitButton 与横屏的 rail* 全部合并成一个 `buttonCell`（语义走 id、
+   * 几何走 layout 参数），控件内容拆到 `cellContent` / `cellText` / `cellArrow`。
+   * 名单按**合并后的实际成员**重钉：断言强度不变，只是锚点跟着重构走。
+   */
   const TOOLBAR_MEMBERS = [
     'topBar',
     'railBar',
@@ -204,18 +211,10 @@ describe('Handwriting.ets 源码接线：工具条尺寸只从 metrics 取', () 
     'insertDeleteCell',
     'pageLabelCell',
     'prevNextCell',
-    'brushMenuButton',
-    'toolButton',
-    'insertMenuButton',
-    'historyButton',
-    'finishButton',
-    'exitButton',
-    'railExitButton',
-    'railBrushButton',
-    'railToolButton',
-    'railHistoryButton',
-    'railInsertButton',
-    'railFinishButton',
+    'buttonCell',
+    'cellContent',
+    'cellText',
+    'cellArrow',
     'brushIcon',
     'sizeIcon',
     'colorIcon'
@@ -255,8 +254,12 @@ describe('Handwriting.ets 源码接线：工具条尺寸只从 metrics 取', () 
     for (const name of ['barThickness', 'itemSize', 'controlGap', 'iconSize', 'toolbarFontSize', 'railWidth']) {
       assert.ok(new RegExp(`\\n  private ${name}\\(`).test(code), `缺少尺寸派生方法 ${name}()`);
     }
-    for (const member of ['brushMenuButton', 'toolButton', 'historyButton', 'insertMenuButton', 'railBrushButton', 'railToolButton', 'railHistoryButton']) {
+    // A1 之后：按钮高度只在 `buttonCell` 里（竖屏/横屏共用同一份几何），字号只在
+    // `cellText` / `cellArrow` 里——都必须取 metrics 派生方法，别处不许再各写一套。
+    for (const member of ['buttonCell', 'insertDeleteCell', 'pageLabelCell', 'prevNextCell']) {
       assert.ok(/\.height\(this\.itemSize\(\)\)/.test(builderBody(member)), `${member} 的高度必须取 metrics.itemSize`);
+    }
+    for (const member of ['cellText', 'cellArrow']) {
       assert.ok(
         /\.fontSize\(this\.toolbarFontSize\(\)\)/.test(builderBody(member)),
         `${member} 的字号必须取 metrics.fontSize`

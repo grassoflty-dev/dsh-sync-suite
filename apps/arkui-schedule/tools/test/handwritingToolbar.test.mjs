@@ -79,38 +79,40 @@ describe('手写板工具条：宽度自适应与不截断', () => {
   });
 
   test('固定宽度清零：按钮容器不得给固定 width（图标内部允许），改用 minWidth(itemSize) + padding 自适应', () => {
-    // 图标本身可以有宽高（色块），这里把「图标宽」排除后再断言容器没有固定宽
-    const iconWidths = {
-      brushMenuButton: ['.width(this.iconSize() * 0.6)'],
-      toolButton: [],
-      historyButton: []
-    };
-    for (const builder of Object.keys(iconWidths)) {
-      const body = builderBody(builder);
-      let stripped = body;
-      for (const fragment of iconWidths[builder]) {
-        stripped = stripped.split(fragment).join('');
-      }
-      assert.equal(/\.width\(/.test(stripped), false, `${builder} 的按钮容器不得给固定 width（会被截断）`);
-      assert.ok(
-        /\.constraintSize\(\{ minWidth: this\.itemSize\(\) \}\)/.test(body),
-        `${builder} 缺少 minWidth(metrics.itemSize)`
-      );
-      assert.ok(/\.padding\(\{ left: SPACING\.sm, right: SPACING\.sm \}\)/.test(body), `${builder} 缺少左右 8vp padding`);
-      assert.ok(/\.flexShrink\(0\)/.test(body), `${builder} 缺少 flexShrink(0)`);
-    }
+    const body = builderBody('buttonCell');
+    // 「完成」是唯一带固定宽的单元格（宽度由调用方给：finishWidth() / railWidth()）
+    const finishBranch = body.slice(0, body.indexOf('} else {'));
+    assert.ok(/\.width\(width\)/.test(finishBranch), '「完成」的宽度必须由调用方传（finishWidth()/railWidth()）');
+    // 其余单元格：**内容自适应**——只给 minWidth + padding，不得给固定 width（给了就会被截断）
+    const fluidBranch = body.slice(body.indexOf('} else {'));
+    assert.equal(/\.width\(/.test(fluidBranch), false, '单元格容器不得给固定 width（会被截断）');
+    assert.ok(
+      /\.constraintSize\(\{ minWidth: layout === LAYOUT_RAIL \? this\.railWidth\(\) : this\.itemSize\(\) \}\)/.test(fluidBranch),
+      '缺少 minWidth：竖屏 itemSize / 横屏 railWidth'
+    );
+    assert.ok(
+      /\.padding\(\{\s*left: layout === LAYOUT_RAIL \? 0 : SPACING\.sm,\s*right: layout === LAYOUT_RAIL \? 0 : SPACING\.sm\s*\}\)/.test(
+        fluidBranch
+      ),
+      '竖屏必须保留左右 8vp padding（内容自适应），横屏不额外加内边距'
+    );
+    assert.ok(/\.flexShrink\(0\)/.test(fluidBranch), '缺少 flexShrink(0)');
+    // 图标（当前色块）内部仍允许显式宽高
+    assert.ok(
+      /\.width\(this\.iconSize\(\) \* 0\.6\)/.test(builderBody('cellContent')),
+      '「笔迹」单元格的当前色块必须跟随 metrics.iconSize'
+    );
   });
 
   test('「笔迹」按钮文案固定（不再拼接当前值，因此不会被裁）', () => {
-    const body = builderBody('brushMenuButton');
-    // 用户定版：按钮固定写「笔迹」+ ▾；当前值（钢笔 · 3.5 · 黑）只在面板里看
-    assert.ok(/Text\('笔迹'\)/.test(body), '竖屏「笔迹」按钮文案必须固定为「笔迹」');
-    assert.equal(/inkSummary\(\)/.test(body), false, '按钮不得再显示 inkSummary（会被裁）');
-    assert.equal(/·/.test(body), false, '按钮文案里不得出现「·」拼接');
-    assert.ok(/Text\('▾'\)/.test(body), '「笔迹」按钮必须有 ▾');
-    const rail = builderBody('railBrushButton');
-    assert.ok(/Text\('笔迹'\)/.test(rail), '横屏 rail 按钮文案也必须固定为「笔迹」');
-    assert.equal(/inkSummary\(\)/.test(rail), false, 'rail 也不得显示 inkSummary');
+    const label = builderBody('cellLabel');
+    assert.ok(/return '笔迹';/.test(label), '文案表里「笔迹」必须固定（不拼接当前值）');
+    assert.ok(/return '插入';/.test(label), '文案表里「插入」必须固定');
+    const content = builderBody('cellContent');
+    assert.ok(/this\.cellText\(id\)/.test(content), '笔迹单元格必须用统一文字');
+    assert.ok(/this\.cellArrow\(id\)/.test(content), '笔迹单元格必须有 ▾');
+    assert.equal(/inkSummary\(\)/.test(content), false, '按钮不得再显示 inkSummary（会被裁）');
+    assert.equal(/·/.test(content), false, '按钮文案里不得出现「·」拼接');
     // 状态摘要仍保留（hilog / 草稿提示用），但不再进按钮
     const summary = builderBody('inkSummary');
     assert.ok(/currentBrushLabel\(\)/.test(summary), 'inkSummary 仍应包含笔刷名');
@@ -119,21 +121,46 @@ describe('手写板工具条：宽度自适应与不截断', () => {
     for (const gone of ['sizeMenuButton', 'railSizeButton', 'colorMenuButton', 'railColorButton']) {
       assert.equal(new RegExp(gone).test(code), false, `不得再有 ${gone}（已并入笔迹）`);
     }
+    // 成对 builder 全部删除：同一套语义只剩 buttonCell 一份
+    for (const gone of [
+      'brushMenuButton',
+      'railBrushButton',
+      'toolButton',
+      'railToolButton',
+      'insertMenuButton',
+      'railInsertButton',
+      'exitButton',
+      'railExitButton',
+      'historyButton',
+      'railHistoryButton',
+      'finishButton',
+      'railFinishButton'
+    ]) {
+      assert.equal(new RegExp(gone).test(code), false, `不得再有 ${gone}（已并入 buttonCell）`);
+    }
+    // 文案字面量在源码里只出现一次 = 不再成对维护
+    for (const literal of ["'笔迹'", "'橡皮'", "'手动框'", "'↶'", "'↷'", "'完成'"]) {
+      const hits = code.split(literal).length - 1;
+      assert.equal(hits, 1, `${literal} 只能出现一次（实际 ${hits} 次：说明又被复制了一份）`);
+    }
+    // 「插入」= 单元格文案 + 插入面板菜单项；「‹」= 退出单元格 + 上一页
+    assert.equal(code.split("'插入'").length - 1, 2, '「插入」只允许「单元格文案 + 插入面板菜单项」各一处');
+    assert.equal(code.split("'‹'").length - 1, 2, '「‹」只允许「退出单元格 + 上一页」各一处');
     for (const bar of ['topBar', 'railBar']) {
       const barBody = builderBody(bar);
+      assert.ok(/this\.buttonCell\(CELL_INK, /.test(barBody), `${bar} 必须有「笔迹」单元格`);
       assert.equal(/sizeMenuButton|railSizeButton/.test(barBody), false, `${bar} 不得再渲染独立粗细按钮`);
       assert.equal(/colorMenuButton|railColorButton/.test(barBody), false, `${bar} 不得再渲染独立颜色按钮`);
-      assert.ok(/this\.(brushMenuButton|railBrushButton)\(\)/.test(barBody), `${bar} 必须有「笔迹设置」按钮`);
     }
   });
 
   test('「笔迹设置」按钮带当前色块（角度随 metrics.iconSize，颜色永远可见）', () => {
-    const body = builderBody('brushMenuButton');
+    const content = builderBody('cellContent');
     assert.ok(
-      /\.width\(this\.iconSize\(\) \* 0\.6\)/.test(body) && /\.height\(this\.iconSize\(\) \* 0\.6\)/.test(body),
-      '按钮必须有跟随 metrics.iconSize 的当前色块'
+      /\.width\(this\.iconSize\(\) \* 0\.6\)/.test(content) && /\.height\(this\.iconSize\(\) \* 0\.6\)/.test(content),
+      '笔迹单元格必须有跟随 metrics.iconSize 的当前色块'
     );
-    assert.ok(/backgroundColor\(this\.pagerState\.penColor\)/.test(body), '色块必须是当前颜色');
+    assert.ok(/backgroundColor\(this\.pagerState\.penColor\)/.test(content), '色块必须是当前颜色');
     const summary = builderBody('inkSummary');
     assert.ok(/currentColorLabel\(\)/.test(summary), '文案必须含当前色名（钢笔 · 3.5 · 黑）');
   });
@@ -209,11 +236,11 @@ describe('手写板工具条：宽度自适应与不截断', () => {
   test('禁止省略号：页面无 TextOverflow.Ellipsis，工具条/面板文字都有 maxLines(1)', () => {
     assert.equal(/TextOverflow\.Ellipsis/.test(code), false, '页面不得出现 TextOverflow.Ellipsis');
     const chrome = [
-      'brushMenuButton',
-      'toolButton',
-      'historyButton',
+      'cellText',
+      'cellArrow',
+      'cellContent',
       'pageStepper',
-      'finishButton',
+      'buttonCell',
       'topBar',
       'railBar',
       'overlayPanel'
@@ -236,21 +263,43 @@ describe('手写板工具条：宽度自适应与不截断', () => {
     const chrome = ['pageStepper', 'insertDeleteCell', 'prevNextCell'].map((name) => builderBody(name)).join('\n');
     assert.equal(/\.opacity\(0?\.\d+\)/.test(chrome), false, '不得用 opacity 表达禁用态');
     assert.ok(/\.enabled\(/.test(chrome), '分页区的禁用必须用 enabled（只对 `−`/`+`/`‹`/`›` 这类页面动作）');
-    // 历史按钮相反：**不许**用 enabled（缺陷 4b：enabled=false 会变成「看着能点、点了没反应」）
-    const history = builderBody('historyButton');
-    assert.equal(/\.enabled\(/.test(history), false, '历史按钮不得用 enabled 表达禁用（改用可点 + toast）');
-    assert.equal(/\.opacity\(/.test(history), false, '历史按钮禁用态不得用 opacity');
+    // 回调类单元格相反：**不许**用 enabled（缺陷 4b：enabled=false 会变成「看着能点、点了没反应」）
+    const cell = builderBody('buttonCell');
+    const fluid = cell.slice(cell.indexOf('} else {'));
+    assert.equal(/\.enabled\(/.test(fluid), false, '回调类单元格不得用 enabled 表达禁用');
+    assert.equal(/\.opacity\(/.test(cell), false, '单元格禁用态不得用 opacity（只改字色）');
   });
 
   test('完成按钮：实底品牌蓝 + 白字 + 不收缩 + 竖屏 ≥64', () => {
-    const body = builderBody('finishButton');
-    assert.ok(/\.backgroundColor\(\$r\('app\.color\.brand'\)\)/.test(body), '完成必须品牌蓝实底');
-    assert.ok(/\.fontColor\(Color\.White\)/.test(body), '完成必须白字');
-    assert.ok(/\.flexShrink\(0\)/.test(body), '完成不得被压缩');
-    assert.ok(/constraintSize\(\{ minWidth: FINISH_MIN_WIDTH \}\)/.test(body), '完成最小宽必须 ≥64');
-    assert.ok(/\.width\(this\.finishWidth\(\)\)/.test(body), '竖屏完成宽 = max(64, metrics.itemSize)');
-    assert.ok(/\.height\(this\.itemSize\(\)\)/.test(body), '完成高度 = metrics.itemSize');
-    assert.ok(/\.padding\(\{ left: SPACING\.xs, right: SPACING\.xs \}\)/.test(body), '完成必须收窄内部 padding，否则 2 字会被挤成 ...');
+    const body = builderBody('buttonCell');
+    const finish = body.slice(0, body.indexOf('} else {'));
+    assert.ok(/Button\(this\.busy \? '识别中' : '完成'\)/.test(finish), '完成必须是 Button（识别中文案变「识别中」）');
+    assert.ok(/\.backgroundColor\(\$r\('app\.color\.brand'\)\)/.test(finish), '完成必须品牌蓝实底');
+    assert.ok(/\.fontColor\(Color\.White\)/.test(finish), '完成必须白字');
+    assert.ok(/\.flexShrink\(0\)/.test(finish), '完成不得被压缩');
+    assert.ok(/constraintSize\(\{ minWidth: FINISH_MIN_WIDTH \}\)/.test(finish), '完成最小宽必须 ≥64');
+    assert.ok(/\.width\(width\)/.test(finish), '完成宽度必须由调用方给（竖屏 finishWidth() / 横屏 railWidth()）');
+    assert.ok(/\.height\(this\.itemSize\(\)\)/.test(finish), '完成高度 = metrics.itemSize');
+    assert.ok(/\.padding\(\{ left: SPACING\.xs, right: SPACING\.xs \}\)/.test(finish), '完成必须收窄内部 padding，否则 2 字会被挤成 ...');
+    assert.ok(/\.enabled\(!this\.busy\)/.test(finish), '识别中必须禁用');
+    // 点击必须落到 onCellTap 的 CELL_FINISH 分支（分派表漏一项 = 按钮变成死的）
+    assert.ok(
+      /case CELL_FINISH:\s*\n\s*this\.finish\(\);/.test(builderBody('onCellTap')),
+      '「完成」的点击必须在 onCellTap 里分派到 finish()'
+    );
+    assert.ok(
+      /layout === LAYOUT_RAIL \? RADIUS\.sm : this\.itemSize\(\) \/ 2/.test(finish),
+      '圆角必须按布局壳分档：横屏 RADIUS.sm（与 rail 其它控件一致）/ 竖屏 Button 默认胶囊（= 高度一半）'
+    );
+    // 宽度来源：两个壳各自给指标宽度
+    assert.ok(
+      /this\.buttonCell\(CELL_FINISH, LAYOUT_PORTRAIT, this\.finishWidth\(\)\)/.test(builderBody('topBar')),
+      '竖屏完成宽 = finishWidth()'
+    );
+    assert.ok(
+      /this\.buttonCell\(CELL_FINISH, LAYOUT_RAIL, this\.railWidth\(\)\)/.test(builderBody('railBar')),
+      '横屏完成宽 = railWidth()'
+    );
     // finishWidth 必须兜住 64 下限
     assert.ok(/Math\.max\(FINISH_MIN_WIDTH, this\.itemSize\(\)\)/.test(builderBody('finishWidth')), 'finishWidth() 必须 ≥64');
   });
@@ -258,15 +307,15 @@ describe('手写板工具条：宽度自适应与不截断', () => {
   test('工具条顺序 = 退出/笔迹/橡皮/手动框/插入/撤销/重做/步进器/完成（9 项，无 Scroll）', () => {
     const bar = builderBody('topBar');
     const order = [
-      'this.exitButton()',
-      'this.brushMenuButton()',
-      "this.toolButton('橡皮'",
-      "this.toolButton('手动框'",
-      'this.insertMenuButton()',
-      "this.historyButton('undo'",
-      "this.historyButton('redo'",
+      'this.buttonCell(CELL_EXIT, LAYOUT_PORTRAIT',
+      'this.buttonCell(CELL_INK, LAYOUT_PORTRAIT',
+      'this.buttonCell(CELL_ERASER, LAYOUT_PORTRAIT',
+      'this.buttonCell(CELL_SELECT, LAYOUT_PORTRAIT',
+      'this.buttonCell(CELL_INSERT, LAYOUT_PORTRAIT',
+      'this.buttonCell(CELL_UNDO, LAYOUT_PORTRAIT',
+      'this.buttonCell(CELL_REDO, LAYOUT_PORTRAIT',
       'this.pageStepper()',
-      'this.finishButton()'
+      'this.buttonCell(CELL_FINISH, LAYOUT_PORTRAIT'
     ];
     let cursor = -1;
     for (const token of order) {
@@ -275,14 +324,14 @@ describe('手写板工具条：宽度自适应与不截断', () => {
       assert.ok(at > cursor, `${token} 顺序不对`);
       cursor = at;
     }
-    // 9 项一屏排完：没有任何一项被 Scroll 包住（旧实现里「橡皮→↷ + 分页组」都在横向 Scroll 里）
+    // 9 项一屏排完：没有任何一项被 Scroll 包住
     assert.equal(/Scroll\(/.test(bar), false, '工具条内不得出现 Scroll（否则工具项会被滚出屏幕）');
-    // 计数：退出 1 / 笔迹 1 / 工具 2 / 插入 1 / 历史 2 / 分页组 1 / 完成 1（两个分支各一套，共 2 套）
-    const count = (token) => (bar.split(token).length - 1);
-    assert.equal(count('this.exitButton()'), 2, '退出按钮应在「一行 / 两行」两个分支里各出现一次');
-    assert.equal(count('this.finishButton()'), 2, '完成按钮应在两个分支里各出现一次');
-    assert.equal(count("this.historyButton('undo'"), 2, '撤销应在两个分支里各出现一次');
-    assert.equal(count("this.historyButton('redo'"), 2, '重做应在两个分支里各出现一次');
+    // 计数：9 项在「一行 / 两行」两个分支里各一套 ⇒ 每项 2 次
+    for (const token of order) {
+      assert.equal(bar.split(token).length - 1, 2, `${token} 应在两个分支里各出现一次`);
+    }
+    // 9 项之外不许再冒出别的控件
+    assert.equal((bar.match(/this\.buttonCell\(/g) ?? []).length, 16, '顶部条单元格调用数必须是 8 项 × 2 分支 = 16');
   });
 
   test('菜单开合有 hilog 自证标记 `[hw] menu=<name> open=<0|1>` / `[hw] ink …`', () => {
@@ -345,16 +394,16 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     const bar = builderBody('railBar');
     assert.equal(/this\.railStepper\(\)/.test(bar), false, 'railBar 不得再用旧的整组步进器');
     assert.equal(/this\.pageStepper\(\)/.test(bar), false, 'railBar 不得直接用竖屏三单元格行（要纵向堆叠）');
-    // 退出按钮在 rail 最上方
-    const exitAt = bar.indexOf('this.railExitButton()');
-    const brushAt = bar.indexOf('this.railBrushButton()');
-    assert.ok(exitAt >= 0 && exitAt < brushAt, '`‹` 退出按钮必须在 rail 最上方（笔形之前）');
+    // 退出单元格在 rail 最上方（与竖屏同一个 buttonCell，只是换成 RAIL 壳）
+    const exitAt = bar.indexOf('this.buttonCell(CELL_EXIT, LAYOUT_RAIL');
+    const brushAt = bar.indexOf('this.buttonCell(CELL_INK, LAYOUT_RAIL');
+    assert.ok(exitAt >= 0 && exitAt < brushAt, '`‹` 退出单元格必须在 rail 最上方（笔迹之前）');
     // 三个单元格纵向堆叠在工具之后、「完成」之前（宽度都取 railWidth()）
     const stepperAt = bar.indexOf('this.insertDeleteCell(this.railWidth())');
-    const finishAt = bar.indexOf('this.railFinishButton()');
+    const finishAt = bar.indexOf('this.buttonCell(CELL_FINISH, LAYOUT_RAIL');
     assert.ok(stepperAt > brushAt, '分页单元格必须在工具按钮之后');
     assert.ok(finishAt > stepperAt, '「完成」在最后（压底）');
-    // 「完成」不再靠 Blank() 压底，而是放在 Scroll 之外、用 layoutWeight 让滚动区吃掉余量
+    // 「完成」放在 Scroll 之外、用 layoutWeight 让滚动区吃掉余量
     assert.ok(/\.layoutWeight\(1\)/.test(bar), 'rail 滚动区必须 layoutWeight(1)，把「完成」压到底部');
     const scrollEnd = bar.indexOf('.align(Alignment.Top)');
     assert.ok(finishAt > scrollEnd, '「完成」必须在竖向 Scroll 之外（不随滚动跑掉）');
@@ -366,13 +415,12 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     assert.equal(/Scroll\(/.test(bar), false, '顶部条不得含 Scroll');
     assert.equal(/pagerPinned/.test(bar), false, 'pagerPinned 分支已作废（没有 Scroll 就没有「滚不滚得走」）');
     // 一行分支：顺序必须是 … 分页组 → 完成（分页组在完成左侧）
-    // `builderBody()` 取的是**去注释**源码，所以用 `} else {` 切两个分支
     const rowStart = bar.indexOf('} else {');
     assert.ok(rowStart > 0, '顶部条必须保留「两行 / 一行」两个分支');
     const row = bar.slice(rowStart);
     assert.ok(row.indexOf('this.pageStepper()') >= 0, '一行分支必须有分页组');
     assert.ok(
-      row.indexOf('this.pageStepper()') < row.indexOf('this.finishButton()'),
+      row.indexOf('this.pageStepper()') < row.indexOf('this.buttonCell(CELL_FINISH'),
       '分页组必须在「完成」左侧（一行分支）'
     );
     // 两行分支：分页组 + 完成在**第二行**同一个 Row 里
@@ -381,12 +429,12 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     const secondRowAt = twoRow.indexOf('this.pageStepper()');
     assert.ok(secondRowAt > 0, '两行分支第二行必须有分页组');
     assert.ok(
-      twoRow.indexOf('this.finishButton()') > secondRowAt,
+      twoRow.indexOf('this.buttonCell(CELL_FINISH') > secondRowAt,
       '两行分支里「完成」必须跟在分页组后面（同一个 Row）'
     );
     // 9 项在两个分支里都在（一行分支 7+1+1，两行分支 7 / 1+1）
-    for (const tool of ["this.toolButton('橡皮'", "this.toolButton('手动框'"]) {
-      assert.ok(bar.indexOf(tool) >= 0, `工具按钮丢了：${tool}`);
+    for (const tool of ['this.buttonCell(CELL_ERASER, LAYOUT_PORTRAIT', 'this.buttonCell(CELL_SELECT, LAYOUT_PORTRAIT']) {
+      assert.ok(bar.indexOf(tool) >= 0, `工具单元格丢了：${tool}`);
     }
   });
 
@@ -415,40 +463,37 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
   });
 
   test('rail 内控件尺寸统一：满 rail 宽 / 高 = metrics.itemSize / 同圆角 / 同底色', () => {
-    const railControls = ['railBrushButton', 'railToolButton', 'railHistoryButton'];
-    for (const name of railControls) {
-      const body = builderBody(name);
-      assert.ok(/\.width\('100%'\)/.test(body), `${name} 必须宽 100%（= rail 宽度）`);
-      assert.ok(/\.height\(this\.itemSize\(\)\)/.test(body), `${name} 必须统一 metrics.itemSize 高`);
-      assert.ok(/\.borderRadius\(RADIUS\.sm\)/.test(body), `${name} 必须统一圆角`);
+    // 横屏单元格 = buttonCell(..., LAYOUT_RAIL)：铺满 rail（minWidth = railWidth()），
+    // 高 / 圆角 / 居中与竖屏是**同一份代码**（这正是本轮重构要去掉的成对重复）。
+    const cell = builderBody('buttonCell');
+    const fluid = cell.slice(cell.indexOf('} else {'));
+    assert.ok(
+      /minWidth: layout === LAYOUT_RAIL \? this\.railWidth\(\)/.test(fluid),
+      'LAYOUT_RAIL 必须铺满 rail 宽（minWidth = railWidth()，等价于旧实现的 width 100%）'
+    );
+    assert.ok(/\.height\(this\.itemSize\(\)\)/.test(fluid), '单元格必须统一 metrics.itemSize 高');
+    assert.ok(/\.borderRadius\(RADIUS\.sm\)/.test(fluid), '单元格必须统一圆角');
+    assert.ok(/\.justifyContent\(FlexAlign\.Center\)/.test(fluid), '单元格内容必须水平居中');
+    assert.equal(/\.width\('100%'\)/.test(cell), false, '单元格不得再固定 100% 宽（宽度只有 railWidth / 内容自适应两种）');
+    // rail 里 7 个工具单元格全部走 RAIL 壳
+    const rail = builderBody('railBar');
+    for (const id of ['CELL_EXIT', 'CELL_INK', 'CELL_ERASER', 'CELL_SELECT', 'CELL_INSERT', 'CELL_UNDO', 'CELL_REDO']) {
+      assert.ok(rail.includes(`this.buttonCell(${id}, LAYOUT_RAIL`), `rail 必须用 LAYOUT_RAIL 渲染 ${id}`);
     }
-    // 三个分页单元格与完成：宽度由调用方传（横屏 railWidth()）/ 完成满 rail 宽，高都是 itemSize
-    for (const name of ['insertDeleteCell', 'pageLabelCell', 'prevNextCell']) {
-      const body = builderBody(name);
-      assert.ok(/\.width\(width\)/.test(body), `${name} 必须由调用方传宽度（竖屏 pagerCellWidth / 横屏 railWidth）`);
-      assert.ok(/\.height\(this\.itemSize\(\)\)/.test(body), `${name} 必须统一 metrics.itemSize 高`);
-      assert.ok(/\.borderRadius\(RADIUS\.sm\)/.test(body), `${name} 必须统一圆角`);
+    // 三个分页单元格：宽度由调用方传（竖屏 pagerCellWidth / 横屏 railWidth），高与圆角统一
+    for (const id of ['insertDeleteCell', 'pageLabelCell', 'prevNextCell']) {
+      const body = builderBody(id);
+      assert.ok(/\.width\(width\)/.test(body), `${id} 必须由调用方传宽度`);
+      assert.ok(/\.height\(this\.itemSize\(\)\)/.test(body), `${id} 必须统一 metrics.itemSize 高`);
+      assert.ok(/\.borderRadius\(RADIUS\.sm\)/.test(body), `${id} 必须统一圆角`);
+      assert.ok(/\.backgroundColor\([\s\S]{0,120}?'#F/.test(body), `${id} 必须有底色`);
     }
-    {
-      const body = builderBody('railFinishButton');
-      assert.ok(/\.width\(this\.railWidth\(\)\)/.test(body), 'railFinishButton 必须满 rail 宽');
-      assert.ok(/\.height\(this\.itemSize\(\)\)/.test(body), 'railFinishButton 必须 metrics.itemSize 高');
-      assert.ok(/\.borderRadius\(RADIUS\.sm\)/.test(body), 'railFinishButton 必须统一圆角');
-    }
-    // 橡皮/手动框 + 三个单元格：同底色 #F1F3F5 / #F7F8FA 系（railToolButton 是三元）
-    for (const name of ['insertDeleteCell', 'pageLabelCell', 'prevNextCell', 'railToolButton']) {
-      assert.ok(
-        /\.backgroundColor\([\s\S]{0,120}?'#F/.test(builderBody(name)),
-        `${name} 必须有底色`
-      );
-    }
-    // 内容水平居中
-    for (const name of ['railToolButton', 'railHistoryButton']) {
-      assert.ok(/\.textAlign\(TextAlign\.Center\)/.test(builderBody(name)), `${name} 内容必须水平居中`);
-    }
-    for (const name of ['railBrushButton']) {
-      assert.ok(/\.justifyContent\(FlexAlign\.Center\)/.test(builderBody(name)), `${name} 内容必须水平居中`);
-    }
+    // 橡皮 / 手动框的底色（浅色档 #F1F3F5 系 + 深色档主题令牌）在单元格底色表里
+    const background = builderBody('cellBackground');
+    assert.ok(/'#F1F3F5'/.test(background), '橡皮/手动框的浅色底色必须在 cellBackground 里');
+    assert.ok(/DARK_FALLBACK\.railFill/.test(background), '深色档必须走 theme 令牌');
+    // 内容水平居中：文字单元格有 textAlign，笔迹/插入的内层 Row 由外层 justifyContent 居中
+    assert.ok(/\.textAlign\(TextAlign\.Center\)/.test(builderBody('cellText')), '单元格文字必须水平居中');
   });
 
   test('分页区 = 三个单元格（[−|+] / [n/m] / [‹|›]），竖屏与 rail 共用同一套', () => {
@@ -519,25 +564,27 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
       assert.ok(rail.includes(token), `rail 缺少 ${token}`);
     }
     assert.ok(
-      rail.indexOf('this.prevNextCell(this.railWidth())') < rail.indexOf('this.railFinishButton()'),
+      rail.indexOf('this.prevNextCell(this.railWidth())') < rail.indexOf('this.buttonCell(CELL_FINISH, LAYOUT_RAIL'),
       '三个单元格必须在「完成」之前'
     );
   });
 
-  test('竖屏按钮仍是「内容自适应 + minWidth(itemSize)」（两套布局分开写，rail 的固定宽不要污染竖屏）', () => {
-    const controls = ['brushMenuButton', 'toolButton', 'historyButton'];
-    for (const name of controls) {
-      const body = builderBody(name);
-      assert.ok(/\.flexShrink\(0\)/.test(body), `${name} 缺少 flexShrink(0)`);
-      assert.ok(
-        /constraintSize\(\{ minWidth: this\.itemSize\(\) \}\)/.test(body),
-        `${name} 缺少 minWidth(metrics.itemSize)`
-      );
-      assert.equal(/\.width\('100%'\)/.test(body), false, `${name} 属于竖屏，不得固定 100% 宽`);
-    }
-    // rail 专用按钮反过来：必须 100%，且不参与竖屏
-    assert.ok(/\.width\('100%'\)/.test(builderBody('railBrushButton')), 'rail 按钮必须 100% 宽');
-    assert.equal(/railBrushButton/.test(builderBody('topBar')), false, '竖屏 topBar 不得使用 rail 按钮');
+  test('竖屏按钮仍是「内容自适应 + minWidth(itemSize)」（rail 的固定宽不要污染竖屏）', () => {
+    const cell = builderBody('buttonCell');
+    const fluid = cell.slice(cell.indexOf('} else {'));
+    assert.ok(/\.flexShrink\(0\)/.test(fluid), '单元格缺少 flexShrink(0)');
+    assert.ok(
+      /minWidth: layout === LAYOUT_RAIL \? this\.railWidth\(\) : this\.itemSize\(\)/.test(fluid),
+      '竖屏分支必须 minWidth(metrics.itemSize)'
+    );
+    assert.equal(/\.width\('100%'\)/.test(fluid), false, '竖屏分支不得固定 100% 宽');
+    // 两个壳各用各的布局标识：竖屏只用 PORTRAIT，横屏只用 RAIL
+    const portrait = builderBody('topBar');
+    assert.equal(/LAYOUT_RAIL/.test(portrait), false, '竖屏 topBar 不得使用 rail 布局壳');
+    assert.equal((portrait.match(/LAYOUT_PORTRAIT/g) ?? []).length, 16, '竖屏顶部条 = 8 项 × 2 分支');
+    const rail = builderBody('railBar');
+    assert.equal(/LAYOUT_PORTRAIT/.test(rail), false, '横屏 rail 不得使用竖屏布局壳');
+    assert.equal((rail.match(/LAYOUT_RAIL/g) ?? []).length, 8, '横屏 rail = 7 个工具单元格 + 完成');
   });
 
   test('关键文案是完整字符串（布局里必须能读到）', () => {
@@ -560,31 +607,30 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     assert.ok(/Scroll\(\)/.test(bar), 'rail 必须有竖向 Scroll（否则「完成」会被挤出屏幕）');
     assert.ok(/\.scrollable\(ScrollDirection\.Vertical\)/.test(bar), 'rail 的 Scroll 必须是竖向');
     assert.ok(!/Blank\(\)/.test(bar), '不再用 Blank() 压底（改由 layoutWeight(1) 的滚动区吃掉余量）');
-
-    const soloButtons = (bar.match(/this\.rail(Exit|Brush|Tool|History)Button\(/g) ?? []).length;
-    assert.equal(soloButtons, 6, 'rail 独立按钮应为 6 个（退出/笔迹设置/橡皮/手动框/撤销/重做）');
+    // 滚动区里 7 个工具单元格 + 3 个分页单元格，滚动区外 1 个「完成」
+    const toolCells = (bar.match(/this\.buttonCell\(CELL_(?:EXIT|INK|ERASER|SELECT|INSERT|UNDO|REDO), LAYOUT_RAIL/g) ?? []).length;
+    assert.equal(toolCells, 7, 'rail 工具单元格应为 7 个（退出/笔迹设置/橡皮/手动框/插入/撤销/重做）');
     // 真机横屏（1600×2560 @2.375 = 673.7vp 高）下的实际值：itemSize = 72、gap = 10.8
     const item = 72;
     const gap = Math.max(8, item * 0.15);
     const padding = 8; // SPACING.sm，rail 上下 padding
-    const items = soloButtons + 3 /* [−|+] [n/m] [‹|›] */ + 1 /* 完成 */;
+    const items = toolCells + 3 /* [−|+] [n/m] [‹|›] */ + 1 /* 完成 */;
     const content = item * items + gap * (items - 1) + padding * 2;
     assert.ok(content > 601, `rail 内容 ${content.toFixed(1)}vp 已超真机可用 601vp，必须靠 Scroll 才不裁切`);
     // 「完成」在 Scroll 之外（固定底部）
-    const finishAt = bar.indexOf('this.railFinishButton()');
+    const finishAt = bar.indexOf('this.buttonCell(CELL_FINISH, LAYOUT_RAIL');
     assert.ok(finishAt > bar.indexOf('.align(Alignment.Top)'), '「完成」必须在竖向 Scroll 之后（不随滚动跑掉）');
   });
 
   test('竖屏「完成」永远在同一屏内（一行在右端、两行在第二行末，不被滚走也不被裁掉）', () => {
     const bar = builderBody('topBar');
     assert.equal(/Scroll\(/.test(bar), false, '顶部条不得含 Scroll（「完成」靠布局而不是靠滚动保证可见）');
-    const finishAt = bar.indexOf('this.finishButton()');
-    assert.ok(finishAt > 0, '顶部条必须有「完成」');
-    // 两个分支都要有「完成」，且两行分支里它排在该行末尾
-    const branches = bar.split('this.finishButton()').length - 1;
-    assert.equal(branches, 2, '「完成」必须在一行 / 两行两个分支里各出现一次');
+    const token = 'this.buttonCell(CELL_FINISH, LAYOUT_PORTRAIT, this.finishWidth())';
+    assert.ok(bar.indexOf(token) > 0, '顶部条必须有「完成」');
+    // 两个分支都要有「完成」，且排在分页组之后
+    assert.equal(bar.split(token).length - 1, 2, '「完成」必须在一行 / 两行两个分支里各出现一次');
     assert.ok(
-      /this\.pageStepper\(\)\s*\n\s*this\.finishButton\(\)/.test(bar),
+      /this\.pageStepper\(\)\s*\n\s*this\.buttonCell\(CELL_FINISH/.test(bar),
       '两个分支里「完成」都必须紧跟分页组（布局固定，不依赖滚动）'
     );
   });
@@ -711,20 +757,41 @@ describe('手写板工具条与画布的分界线', () => {
 
 describe('手写板退出：按钮 / 系统返回 / 草稿落盘', () => {
   test('竖屏工具条最左侧有「‹」退出按钮（itemSize 见方，在 Scroll 之外）', () => {
-    const exit = builderBody('exitButton');
-    assert.ok(/Text\('‹'\)/.test(exit), '必须是「‹」');
-    assert.ok(/\.width\(this\.itemSize\(\)\)/.test(exit) && /\.height\(this\.itemSize\(\)\)/.test(exit), '必须 metrics.itemSize 见方');
-    assert.ok(/\.onClick\(\(\) => \{\s*this\.exitWritingBoard\(\);/.test(exit), '点击必须走 exitWritingBoard()');
-    assert.equal(/\.opacity\(/.test(exit), false, '退出按钮不得透明');
+    assert.ok(/case CELL_EXIT:\s*\n\s*return '‹';/.test(builderBody('cellLabel')), '退出单元格必须是「‹」');
+    const bar = builderBody('topBar');
+    assert.equal(
+      bar.indexOf('this.buttonCell(CELL_EXIT, LAYOUT_PORTRAIT'),
+      bar.search(/this\.buttonCell\(/),
+      '退出必须是顶部条的第一个单元格'
+    );
+    // 点击 = 存草稿 → 返回（不二次确认），走 switch 分派
+    const tap = builderBody('onCellTap');
+    assert.ok(/case CELL_EXIT:\s*\n\s*this\.exitWritingBoard\(\);/.test(tap), '点击必须走 exitWritingBoard()');
+    assert.equal(/confirmStage/.test(tap), false, '退出不得弹二次确认');
+    // 尺寸：内容自适应 + minWidth(itemSize)，不给固定宽；
+    // 数值自证：单字「‹」（≤ fontSize 上限 18vp）+ 左右 8vp = 34vp < itemSize 下限 40vp
+    // ⇒ 实际宽 = max(内容, minWidth) = itemSize，仍是「itemSize 见方」，与改成 minWidth 之前一致。
+    assert.ok(
+      /minWidth: layout === LAYOUT_RAIL \? this\.railWidth\(\) : this\.itemSize\(\)/.test(builderBody('buttonCell')),
+      '竖屏单元格 minWidth = metrics.itemSize'
+    );
+    const oneGlyphWidth = 18 + 2 * 8; // fontSize 上限 + 左右 SPACING.sm
+    assert.ok(oneGlyphWidth < 40, `单字单元格内容 ${oneGlyphWidth}vp < itemSize 下限 40vp ⇒ 实际宽 = minWidth = itemSize 见方`);
+    assert.equal(/\.opacity\(/.test(builderBody('buttonCell')), false, '退出单元格不得透明');
   });
 
   test('横屏 rail 顶部有「‹」退出按钮（满 rail 宽 × itemSize 高）', () => {
-    const exit = builderBody('railExitButton');
-    assert.ok(/Text\('‹'\)/.test(exit), '必须是「‹」');
-    assert.ok(/\.width\('100%'\)/.test(exit), '必须与 rail 其它控件等宽');
-    assert.ok(/\.height\(this\.itemSize\(\)\)/.test(exit), '高度 = metrics.itemSize');
-    assert.ok(/\.flexShrink\(0\)/.test(exit), '退出按钮不得被压缩');
-    assert.ok(/this\.railExitButton\(\)/.test(builderBody('railBar')), 'railBar 必须渲染退出按钮');
+    assert.ok(/case CELL_EXIT:\s*\n\s*return '‹';/.test(builderBody('cellLabel')), '退出单元格必须是「‹」');
+    const cell = builderBody('buttonCell');
+    assert.ok(/minWidth: layout === LAYOUT_RAIL \? this\.railWidth\(\)/.test(cell), '横屏必须铺满 rail 宽');
+    assert.ok(/\.height\(this\.itemSize\(\)\)/.test(cell), '高度 = metrics.itemSize');
+    assert.ok(/\.flexShrink\(0\)/.test(cell), '退出单元格不得被压缩');
+    const bar = builderBody('railBar');
+    assert.ok(/this\.buttonCell\(CELL_EXIT, LAYOUT_RAIL/.test(bar), 'railBar 必须渲染退出单元格');
+    assert.ok(
+      bar.indexOf('this.buttonCell(CELL_EXIT, LAYOUT_RAIL') < bar.indexOf('this.buttonCell(CELL_INK, LAYOUT_RAIL'),
+      '退出在 rail 最上方'
+    );
   });
 
   test('退出 = 存草稿 → router.back()，不二次确认', () => {
@@ -975,15 +1042,15 @@ describe('缺陷 3：竖屏工具条 9 项一屏排完 / 极窄屏两行折行�
   test('9 个控件都在 topBar 里（退出/笔迹/橡皮/手动框/插入/↶/↷/分页组/完成，关键标识逐个点名）', () => {
     const bar = builderBody('topBar');
     const items = [
-      ['退出', 'this.exitButton()'],
-      ['笔迹', 'this.brushMenuButton()'],
-      ['橡皮', "this.toolButton('橡皮'"],
-      ['手动框', "this.toolButton('手动框'"],
-      ['插入', 'this.insertMenuButton()'],
-      ['撤销', "this.historyButton('undo'"],
-      ['重做', "this.historyButton('redo'"],
+      ['退出', 'this.buttonCell(CELL_EXIT, LAYOUT_PORTRAIT'],
+      ['笔迹', 'this.buttonCell(CELL_INK, LAYOUT_PORTRAIT'],
+      ['橡皮', 'this.buttonCell(CELL_ERASER, LAYOUT_PORTRAIT'],
+      ['手动框', 'this.buttonCell(CELL_SELECT, LAYOUT_PORTRAIT'],
+      ['插入', 'this.buttonCell(CELL_INSERT, LAYOUT_PORTRAIT'],
+      ['撤销', 'this.buttonCell(CELL_UNDO, LAYOUT_PORTRAIT'],
+      ['重做', 'this.buttonCell(CELL_REDO, LAYOUT_PORTRAIT'],
       ['分页组', 'this.pageStepper()'],
-      ['完成', 'this.finishButton()']
+      ['完成', 'this.buttonCell(CELL_FINISH, LAYOUT_PORTRAIT']
     ];
     assert.equal(items.length, 9, '定版就是 9 项');
     for (const [label, token] of items) {
@@ -993,22 +1060,49 @@ describe('缺陷 3：竖屏工具条 9 项一屏排完 / 极窄屏两行折行�
       assert.equal(times, 2, `「${label}」必须在一行/两行两个分支里各出现一次，实际 ${times} 次`);
     }
     // 9 项之外不许再冒出别的控件（防止有人又塞进一个「更多」把工具条挤爆）
-    const calls = (bar.match(/this\.[a-zA-Z]+Button\(/g) ?? []).length;
-    assert.equal(calls, 16, `顶部条 builder 调用数必须是 8 个单控件 × 2 分支 = 16，实际 ${calls}`);
+    assert.equal((bar.match(/this\.buttonCell\(/g) ?? []).length, 16, '顶部条单元格调用数必须是 8 个 × 2 分支 = 16');
+    assert.equal((bar.match(/this\.pageStepper\(\)/g) ?? []).length, 2, '分页组也必须两个分支各一次');
+    // —— 本轮重构的核心不变量：每个单元格的语义只定义一次，不再「竖屏一套 / 横屏一套」——
+    const labelBody = builderBody('cellLabel');
+    const tapBody = builderBody('onCellTap');
+    for (const id of ['CELL_EXIT', 'CELL_INK', 'CELL_ERASER', 'CELL_SELECT', 'CELL_INSERT', 'CELL_UNDO', 'CELL_REDO']) {
+      assert.equal(labelBody.split(`case ${id}:`).length - 1, 1, `${id} 的文案只能定义一次`);
+      assert.equal(tapBody.split(`case ${id}:`).length - 1, 1, `${id} 的点击只能定义一次`);
+    }
+    assert.equal((code.match(/private cellLabel\(/g) ?? []).length, 1, 'cellLabel 只能有一份');
+    assert.equal((code.match(/private onCellTap\(/g) ?? []).length, 1, 'onCellTap 只能有一份');
+    assert.equal((code.match(/  buttonCell\(/g) ?? []).length, 1, 'buttonCell 只能有一份定义');
+    assert.equal((code.match(/  cellContent\(/g) ?? []).length, 1, 'cellContent 只能有一份定义');
+    // 8 对旧 builder 一个都不能复活
+    for (const gone of ['railExitButton', 'railBrushButton', 'railToolButton', 'railHistoryButton', 'railFinishButton']) {
+      assert.equal(new RegExp(gone).test(code), false, `不得再有 ${gone}`);
+    }
   });
 });
 
 describe('缺陷 4：撤销 / 重做点不动（真按钮 + 响应式可用性 + 禁用仍可点）', () => {
   test('历史按钮是 Row + onClick，**不是** Text(...) + .enabled(...)', () => {
-    for (const name of ['historyButton', 'railHistoryButton']) {
-      const body = builderBody(name);
-      assert.ok(/Row\(\) \{/.test(body), `${name} 必须是 Row 容器（真正的可点组件）`);
-      assert.ok(/\.onClick\(\(\) => \{/.test(body), `${name} 必须有 onClick`);
-      assert.equal(/\.enabled\(/.test(body), false, `${name} 不得再用 .enabled（会变成「看着能点、点了没反应」）`);
-      // 反例：不允许「Text(...) 一直挂到 .enabled(」
-      assert.equal(/Text\([^)]*\)[\s\S]*\.enabled\(/.test(body), false, `${name} 不得是 Text + enabled 的组合`);
-      assert.ok(/this\.onHistoryTap\(kind, available\)/.test(body), `${name} 的点击必须走 onHistoryTap(kind, available)`);
-    }
+    const cell = builderBody('buttonCell');
+    const fluid = cell.slice(cell.indexOf('} else {'));
+    assert.ok(/Row\(\) \{/.test(fluid), '回调类单元格必须是 Row 容器（真正的可点组件）');
+    assert.ok(/\.onClick\(\(\) => \{/.test(fluid), '单元格必须有 onClick');
+    assert.equal(/\.enabled\(/.test(fluid), false, '历史单元格不得再用 .enabled（会变成「看着能点、点了没反应」）');
+    // 反例：不允许「Text(...) 一直挂到 .enabled(」
+    assert.equal(/Text\([^)]*\)[\s\S]*\.enabled\(/.test(fluid), false, '不得是 Text + enabled 的组合');
+    // 点击 = onCellTap 的 switch 分支（不把闭包传进 @Builder）
+    const tap = builderBody('onCellTap');
+    assert.ok(
+      /this\.onHistoryTap\('undo', this\.pagerState\.undoSteps > 0\)/.test(tap),
+      '撤销必须走 onHistoryTap(kind, available)，且现读 undoSteps'
+    );
+    assert.ok(
+      /this\.onHistoryTap\('redo', this\.pagerState\.redoAvailable\)/.test(tap),
+      '重做必须走 onHistoryTap(kind, available)，且现读 redoAvailable'
+    );
+    assert.ok(/case CELL_UNDO:/.test(tap) && /case CELL_REDO:/.test(tap), '撤销/重做必须有分派分支');
+    // 禁用只改字色：可用性在 cellTextColor 里按 id 现读
+    assert.ok(/this\.historyAvailable\(id\)/.test(builderBody('cellTextColor')), '历史单元格字色必须读实时可用性');
+    assert.equal(/\.opacity\(/.test(cell), false, '不得用 opacity 表达禁用');
     // 历史按钮不能在 Scrollable 容器里：顶部条没有 Scroll；rail 的 Scroll 是竖向
     assert.equal(/Scroll\(/.test(builderBody('topBar')), false, '顶部条不得含 Scroll（否则点按会被滚动手势吃掉）');
     assert.ok(
@@ -1026,10 +1120,17 @@ describe('缺陷 4：撤销 / 重做点不动（真按钮 + 响应式可用性 +
     assert.ok(/没有可撤销的笔画/.test(tap), '没有可撤销笔画时必须 toast 说明');
     assert.ok(/没有可重做的笔画/.test(tap), '没有可重做笔画时必须 toast 说明');
     assert.ok(/promptAction\.showToast/.test(tap), '必须用 toast 给反馈');
-    // 工具条里读的是 pagerState 的当前值（响应式判断），不是构造时的一次性快照
-    const bar = builderBody('topBar');
-    assert.ok(/this\.pagerState\.undoSteps > 0/.test(bar), '撤销可用性必须在 build 里读 pagerState.undoSteps');
-    assert.ok(/this\.pagerState\.redoAvailable/.test(bar), '重做可用性必须在 build 里读 pagerState.redoAvailable');
+    // 可用性必须**渲染时现读** pagerState（不是构造时的一次性快照）：
+    // 字色走 historyAvailable()，点击分派也在点下的那一刻现读
+    const available = builderBody('historyAvailable');
+    assert.ok(/this\.pagerState\.undoSteps > 0/.test(available), 'historyAvailable 必须读 pagerState.undoSteps');
+    assert.ok(/this\.pagerState\.redoAvailable/.test(available), 'historyAvailable 必须读 pagerState.redoAvailable');
+    const dispatch = builderBody('onCellTap');
+    assert.ok(/this\.pagerState\.undoSteps > 0/.test(dispatch), '点击分派必须在点下时读 pagerState.undoSteps');
+    assert.ok(/this\.pagerState\.redoAvailable/.test(dispatch), '点击分派必须在点下时读 pagerState.redoAvailable');
+    // 布局壳不再自己快照可用性（唯一真相源在 pagerState / 单元格语义层）
+    assert.equal(/undoSteps/.test(builderBody('topBar')), false, '顶部条只调单元格，不自己快照可用性');
+    assert.equal(/redoAvailable/.test(builderBody('railBar')), false, 'rail 只调单元格，不自己快照可用性');
   });
 
   test('撤销栈变化会重建工具条：onStatsChange → onHistoryStats → touchUi（不靠 @Observed 碰运气）', () => {

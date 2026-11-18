@@ -17,8 +17,7 @@ import {
   buildArchivedAttachmentRefs,
   dayArchiveName,
   isLegacyAttachment,
-  jpegFileName,
-  parseZipEntryName
+  jpegFileName
 } from '../model/attachments';
 import { sha256Hex } from '../model/sha256';
 import type { Attachment } from '../model/types';
