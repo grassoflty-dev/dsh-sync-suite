@@ -14,8 +14,6 @@ import { fileURLToPath } from 'node:url';
 export const APP_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 /** `entry/src` 的绝对路径。 */
 export const ETS_ROOT = join(APP_ROOT, 'entry', 'src');
-/** `platform overlay`（鸿蒙覆盖层）的状态文件。 */
-export const OVERLAY_MANIFEST = join(APP_ROOT, '.platform-overlay', 'manifest.json');
 
 /** 读 `entry/src` 下的文件（传相对 `entry/src` 的路径，正反斜杠都行）。 */
 export function readEts(relative) {
@@ -112,21 +110,6 @@ export function windowLines(code, index, radius = 8) {
   return lines.slice(Math.max(0, line - radius), line + radius + 1).join('\n');
 }
 
-/**
- * 工作区是否残留了「鸿蒙覆盖层」（`tools/overlay.mjs apply` 之后没 restore）。
- *
- * 为什么测试要管这件事：覆盖层会把 `entry/src/harmony/**` 复制到 `entry/src/main/**`，
- * 于是 main 树里凭空多出手写页的 5 处 hex、两套 `Color.Transparent` 也会被数两遍，
- * 色值门闸会红成一片——**红的不是代码，是工作区状态**。
- * 2026-11-18 就发生过一次：build-harmony 中途退出，4 条色值断言全红，根因是没 restore。
- * 所以门闸先检查这个，把「4 条莫名其妙的红」收敛成「1 条可操作的提示」。
- */
-export function platformOverlayApplied() {
-  return existsSync(OVERLAY_MANIFEST);
-}
-
-/** 覆盖层残留时的统一提示（色值门闸 / 结构断言共用，报错就能照着做）。 */
-export const OVERLAY_RESIDUE_MESSAGE =
-  '工作区残留鸿蒙覆盖层（.platform-overlay/manifest.json 还在）：此时 entry/src/main 是 ' +
-  'entry/src/harmony 的副本，色值/结构断言读到的不是共享层源码。先 `node tools/overlay.mjs restore` ' +
-  '再跑测试（2026-11-18 的 4 条色值红就是这个原因，不是代码写死）。';
+// 覆盖层状态判定统一由 `tools/test/guard.mjs`（`requireOverlayRestored`）负责——
+// 构建期 `overlay apply` 会把 main 树换成 harmony 的副本，源码扫描类断言全部失真，
+// 所以测试入口直接硬失败。2026-11-18 那 4 条色值假红就是残留 overlay 造成的，不是代码写死。

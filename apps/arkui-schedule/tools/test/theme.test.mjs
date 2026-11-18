@@ -28,7 +28,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { before, describe, test } from 'node:test';
+import { describe, test } from 'node:test';
 import { readAboutSection, readSettingsSources } from './settingsSources.mjs';
 import {
   COLOR_BUDGET,
@@ -41,12 +41,7 @@ import {
   formatHit,
   shapeViolations
 } from './helpers/colorGate.mjs';
-import {
-  OVERLAY_RESIDUE_MESSAGE,
-  listFiles,
-  platformOverlayApplied,
-  stripComments
-} from './helpers/etsSource.mjs';
+import { listFiles, stripComments } from './helpers/etsSource.mjs';
 
 import {
   CANVAS_PAINTS,
@@ -117,11 +112,8 @@ const ALL_ETS = [...MAIN_ETS, ...HARMONY_ETS];
 // 计数常量是实测值（见 `colorGate.mjs` 每行的「实测」注释）。
 
 describe('色值收编：目录级预算 + 语义形态（硬门闸）', () => {
-  // 覆盖层残留时 main 树是 harmony 的副本，下面每条预算都会假红——先把这条红讲清楚，
-  // 而不是让人以为「代码里又写死了色值」。
-  before(() => {
-    assert.equal(platformOverlayApplied(), false, OVERLAY_RESIDUE_MESSAGE);
-  });
+  // 覆盖层残留的硬失败由文件头的 requireOverlayRestored()（tools/test/guard.mjs）负责：
+  // 那种情况下 main 树是 harmony 的副本，下面每条预算都会假红，不如在入口一次性拒绝运行。
 
   test('预算表自身可用：每个目录都能扫到文件、互不重叠、限额是非负整数', () => {
     assert.ok(COLOR_BUDGET.length >= 4, '预算表至少覆盖 main UI / main model / main common / harmony 四棵树');

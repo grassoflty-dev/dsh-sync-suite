@@ -10,12 +10,9 @@
 // 判据来自 `helpers/structureGuards.mjs`（`build()` / `@Builder` 区间 + 读写计数 + 双向装配）。
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { before, describe, test } from 'node:test';
+import { describe, test } from 'node:test';
 import { APP_ROOT } from './helpers/etsSource.mjs';
-import {
-  OVERLAY_RESIDUE_MESSAGE,
-  platformOverlayApplied
-} from './helpers/etsSource.mjs';
+import { requireOverlayRestored } from './guard.mjs';
 import {
   collectIssueFields,
   collectStateFields,
@@ -23,10 +20,15 @@ import {
   declaredMembers,
   fieldUsage,
   fieldsWithoutRenderSite,
+  hasRenderSite,
   passedKeys,
   propWiringViolations,
-  unreadStateFields
+  unreadStateFields,
+  wiringViolations
 } from './helpers/structureGuards.mjs';
+
+// 构建期 overlay 生效时，本文件的结构扫描结论无意义 → 硬失败（不跳过、不自动 restore）。
+requireOverlayRestored('structureGuards.test.mjs');
 
 const PAGE_SETTINGS = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'pages', 'Settings.ets');
 const SECTION_FILES = [
@@ -60,11 +62,6 @@ const STATE_READ_ALLOWLIST = [
 ];
 
 describe('结构断言：@State 至少被读一次 / issue 必须有渲染落点', () => {
-  // 覆盖层残留时 main 树是 harmony 的副本，结构断言读到的不是共享层源码，同样会假红。
-  before(() => {
-    assert.equal(platformOverlayApplied(), false, OVERLAY_RESIDUE_MESSAGE);
-  });
-
   test('死状态：pages/*.ets 与 components/**/*.ets 里每个 @State 至少被读一次', (t) => {
     const files = componentFiles();
     assert.ok(files.length >= 20, `扫描文件太少（${files.length}），说明目录写错了`);
@@ -140,6 +137,63 @@ describe('结构断言：@State 至少被读一次 / issue 必须有渲染落点
     const call = 'FooSection({\n      a: this.a,\n      b: this.b,\n      onChange: (v: string): void => {\n        this.a = v;\n      }\n    })';
     assert.deepEqual(passedKeys(call, 'FooSection'), ['a', 'b', 'onChange'], '装配 key 只取顶层缩进，不把回调体里的字段算进来');
     assert.equal(passedKeys(call, 'Missing'), null, '找不到调用点返回 null');
+  });
+
+  test('helper 自测：可见落点要「作为值」出现，只在条件里读不算（幽灵报错）', () => {
+    const ghost = [
+      'struct Demo {',
+      "  @State deviceIdError: string = '';",
+      '  build() {',
+      '    if (this.deviceIdError.length > 0) {',
+      "      Text('')",
+      '    }',
+      '  }',
+      '}'
+    ].join('\n');
+    assert.equal(hasRenderSite(ghost, 'deviceIdError'), false, '只在 if 条件里读 = 界面上没有红字，必须判为没有落点');
+
+    const rendered = ghost.replace("      Text('')", '      this.ErrorText(this.deviceIdError)');
+    assert.equal(hasRenderSite(rendered, 'deviceIdError'), true, '作为参数传给 ErrorText 才是真落点');
+
+    const templated = ghost.replace("      Text('')", '      Text(`${this.deviceIdError}`)');
+    assert.equal(hasRenderSite(templated, 'deviceIdError'), true, '模板插值也算渲染');
+
+    const outsideBuild = ghost.replace('  build() {', '  helper() {\n    this.ErrorText(this.deviceIdError);\n  }\n  build() {');
+    assert.equal(hasRenderSite(outsideBuild, 'deviceIdError'), false, '只在普通方法里传给 ErrorText，不在渲染树里');
+  });
+
+  test('helper 自测：装配少传 / 多传都要报（拆分处断线）', () => {
+    const section = [
+      'export struct FooSection {',
+      "  @Prop token: string = '';",
+      "  @Prop tokenError: string = '';",
+      '  onChangeToken: (v: string) => void;',
+      '  build() {',
+      '  }',
+      '}'
+    ].join('\n');
+    const pageMissing = 'FooSection({\n      token: this.token,\n      onChangeToken: (v: string): void => {}\n    })';
+    const missing = wiringViolations(pageMissing, 'FooSection', section).map((item) => item.reason);
+    assert.deepEqual(
+      missing,
+      ['页面没给 FooSection.tokenError 传值（组件只会用默认值，拆分后数据断了）'],
+      `少传必须报出来：\n${missing.join('\n')}`
+    );
+
+    const pageExtra = pageMissing.replace('      token: this.token,', '      token: this.token,\n      tokenErr: this.tokenError,');
+    const extra = wiringViolations(pageExtra, 'FooSection', section).map((item) => item.reason);
+    assert.deepEqual(
+      extra,
+      [
+        '页面没给 FooSection.tokenError 传值（组件只会用默认值，拆分后数据断了）',
+        '页面给 FooSection 传了未声明的 tokenErr（拼错名字会被静默忽略）'
+      ],
+      `拼错名字必须报出来：\n${extra.join('\n')}`
+    );
+
+    assert.deepEqual(wiringViolations('nothing here', 'FooSection', section), [
+      { reason: '页面里找不到 FooSection({ … }) 调用点（组件没被挂上）' }
+    ]);
   });
 
   test('白名单过期要报错（防止只增不减）', () => {

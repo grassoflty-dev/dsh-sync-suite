@@ -126,30 +126,44 @@ export function collectIssueFields(files) {
 }
 
 /**
- * 可见落点检查：返回「声明了、但没在渲染树里出现过」的校验类字段。
+ * 可见落点：字段是否作为**值**出现在渲染树里。
+ *
+ * 「出现在 build() 里」不够——`if (this.deviceIdError.length > 0) { Text('') }` 里字段被读了，
+ * 但红字一个字都没画出来。所以要求字段处在**值位置**（后面紧跟 `,` `)` `}`），
+ * 也就是被当成参数/插值传给了某个渲染节点，而不是只参与条件判断。
+ */
+export function hasRenderSite(source, field) {
+  const regions = renderRegions(source);
+  const valuePosition = new RegExp(`this\\.${field}\\s*[,)}]`);
+  const templateValue = new RegExp(`\\$\\{\\s*this\\.${field}\\s*\\}`);
+  return regions.some(([start, end]) => {
+    const body = source.slice(start, end);
+    return valuePosition.test(body) || templateValue.test(body);
+  });
+}
+
+/**
+ * 可见落点检查：返回「声明了、但没在渲染树里作为值出现过」的校验类字段。
  *
  * 渲染树 = 本文件的 `build()` + 全部 `@Builder`（见 `renderRegions`）。
- * 页面把字段作为 prop 传给 section 也算落点（那行就在 `XxxGroup()` 这个 @Builder 里），
- * 但接受方自己的 `@Prop` 同样要过一遍本检查——两层都过才算「真能看见」。
+ * 页面把字段作为 prop 传给 section 也算落点（那行就在 `XxxGroup()` 这个 @Builder 里，
+ * 且形如 `deviceIdError: this.deviceIdError,` → 值位置），但接受方自己的 `@Prop` 同样要过一遍
+ * 本检查——两层都过才算「真能看见」。
  */
 export function fieldsWithoutRenderSite(files) {
   const violations = [];
   const fields = collectIssueFields(files);
-  const regionsByFile = new Map();
+  const sourceByFile = new Map();
   for (const field of fields) {
-    if (!regionsByFile.has(field.absolute)) {
-      regionsByFile.set(field.absolute, renderRegions(sourceOf(field.absolute)));
+    if (!sourceByFile.has(field.absolute)) {
+      sourceByFile.set(field.absolute, sourceOf(field.absolute));
     }
-    const source = sourceOf(field.absolute);
-    const regions = regionsByFile.get(field.absolute);
-    const pattern = new RegExp(`this\\.${field.field}\\b`);
-    const hit = regions.find(([start, end]) => pattern.test(source.slice(start, end)));
-    if (hit === undefined) {
+    if (!hasRenderSite(sourceByFile.get(field.absolute), field.field)) {
       violations.push({
         file: field.file,
         field: field.field,
         line: field.line,
-        reason: `${field.decorator} ${field.field} 只在逻辑里出现，build()/@Builder 里没有引用——界面看不到（幽灵报错）`
+        reason: `${field.decorator} ${field.field} 只在条件/逻辑里出现，没有作为值进入 build()/@Builder——界面看不到（幽灵报错）`
       });
     }
   }
@@ -193,32 +207,41 @@ export function passedKeys(source, structName) {
 }
 
 /**
- * 装配对齐：`page`（引用页面）里每个 `Struct({…})` 调用点 vs `sections`（组件文件）的声明。
+ * 装配对齐（纯文本版，便于自测）：`pageSource` 里的 `Struct({…})` 调用点
+ * vs `sectionSource` 的字段声明，双向比对。
  *
  * 少传 → 组件永远用默认值（拆分后最典型的「功能还在但界面不动」）；
  * 多传 → 名字拼错，ArkTS 静默忽略（或编译期才报）。
  */
+export function wiringViolations(pageSource, structName, sectionSource) {
+  const violations = [];
+  const declared = declaredMembers(sectionSource).map((member) => member.name);
+  const passed = passedKeys(pageSource, structName);
+  if (passed === null) {
+    violations.push({ reason: `页面里找不到 ${structName}({ … }) 调用点（组件没被挂上）` });
+    return violations;
+  }
+  for (const name of declared) {
+    if (!passed.includes(name)) {
+      violations.push({ reason: `页面没给 ${structName}.${name} 传值（组件只会用默认值，拆分后数据断了）` });
+    }
+  }
+  for (const name of passed) {
+    if (!declared.includes(name)) {
+      violations.push({ reason: `页面给 ${structName} 传了未声明的 ${name}（拼错名字会被静默忽略）` });
+    }
+  }
+  return violations;
+}
+
+/** 装配对齐（文件版）：读页面与组件文件后调用 `wiringViolations`。 */
 export function propWiringViolations(pageFile, sectionFiles) {
   const violations = [];
   const page = sourceOf(pageFile);
   for (const file of sectionFiles) {
     const structName = structNameOf(file);
-    const section = sourceOf(file);
-    const declared = declaredMembers(section).map((member) => member.name);
-    const passed = passedKeys(page, structName);
-    if (passed === null) {
-      violations.push({ file: relToEts(file), reason: `页面里找不到 ${structName}({ … }) 调用点（组件没被挂上）` });
-      continue;
-    }
-    for (const name of declared) {
-      if (!passed.includes(name)) {
-        violations.push({ file: relToEts(file), reason: `页面没给 ${structName}.${name} 传值（组件只会用默认值，拆分后数据断了）` });
-      }
-    }
-    for (const name of passed) {
-      if (!declared.includes(name)) {
-        violations.push({ file: relToEts(file), reason: `页面给 ${structName} 传了未声明的 ${name}（拼错名字会被静默忽略）` });
-      }
+    for (const item of wiringViolations(page, structName, sourceOf(file))) {
+      violations.push({ file: relToEts(file), reason: item.reason });
     }
   }
   return violations;
