@@ -115,10 +115,40 @@
 - 分叉（本机与远端各有提交）是唯一真实冲突面：桥把它映射为 `FastForward` / `PushRejected`
   中文错误，`classifySyncError` 归到 `conflict` 档并提示「先拉取再推送」。
 
-## 进行中（第 4 轮，2026-11-18）
+## 进行中（第 5 轮，2026-11-18）
+
+> 优先级：用户报的**手写板 5 个缺陷** > UU 端口映射订正 > 云端对话模式 > 设置页字段说明。
+
+| 任务 | 负责人 | 状态 | 证据 |
+| --- | --- | --- | --- |
+| 手写板缺陷 1/3/4（penOnly 生效 / 工具条去横向滚动 / 撤销重做可点） | pm/exec-hw-fix | ✅ 完成（提交 `5de3211`） | 83 例全绿；build-harmony SUCCESSFUL（HAP 3,262,814 B） |
+| 手写板缺陷 2（开关移到笔迹面板，设置页删除） | pm/exec-hw-settings | ✅ 完成（同上提交） | 反向断言：设置页不得再出现该开关 |
+| UU 远程订正为「可用（需准备）：图形化端口映射」 | pm/exec-uu-plugin, exec-uu-app | ✅ 完成（提交 `79b6315`） | 插件 116 例 + App 73 例；文档/断言/README 全量订正 |
+| UU 复核（换角度查 blog/社区/帮助中心） | pm/research-uu2 | ✅ 完成 | `docs/RESEARCH-B2-uu-remote-ports.md` |
+| 设置页三字段人话说明 + 设备标识重复防护（`.device-fingerprint`） | pm/exec-device-fingerprint | 进行中 | 待评审（安全/数据边界） |
+| chat 单写者 + 租约设计（`docs/CHAT-SYNC.md`） | pm/exec-chat-design | 进行中 | 设计文档 + DATA-CONTRACT §10 |
+| chat P3 preset/工具隔离调研 | pm/research-chat-preset | 进行中 | `docs/RESEARCH-chat-preset.md` |
+| chat P1 上传 + App 只读查看 | —— | 排队 | 依赖 `docs/RESEARCH-session-import.md`（已出：slug 可复现、Node 自带 zstd、外部写入**有条件**被识别） |
+| 真机待验：笔迹过滤 / 工具条一屏 / 撤销重做可点 / 装最新 HAP / 横竖屏 | —— | **阻塞** | 平板 `hdc list targets` = `[Empty]`，需用户接回 USB 或开无线调试 |
+| 重复 DSH 后复测（插件进链路 / 设置页两 section / 内嵌 Web WS） | —— | **待用户重启 DSH** | `tools/post-restart-check.mjs` + `docs/RESTART-CHECKLIST.md` |
+
+### 第 5 轮关键事实订正
+
+- **UU 远程确实有端口映射**（官方 blog `uuyc.163.com/blog/20261117dewhjg.html`，2026-11-10：开发者向「图形化端口映射」，
+  **免费版包含**）；上一轮「无端口映射/不可用」的结论**作废**（该文档是帮助中心的孤儿页，未进索引所以被漏）。
+- 复核另发现**两版说法并存**：帮助中心某页写「把远端 TCP 服务映射到**本机端口**（`127.0.0.1:端口`），主控端与被控端
+  仅 Windows/macOS」；blog 写「把生成的访问入口发给对接方」。→ 两个待实测点：**入口形态**（域名/host:port/仅 localhost）
+  与 **WebSocket 透传**（决定内嵌 Web 能不能用）。若实测只给 localhost，则平板路径不成立、但「笔记本→家里 PC」成立。
+- **会话文件名是 `session.v4.jsonl.zstd`**（不是 `session.jsonl.zstd`），header `version=4`，zstd 是**裸帧串联**
+  （Node 24 用 `zlib.zstdDecompress` 逐帧解）；外部写入能被识别，但硬条件含 `cwd` 必须指向本机存在目录。
+
 
 > 本轮全部为**不依赖真机**的产出（平板离线，`hdc list targets` = `[Empty]`）。
 > 四条线并行，文件归属切干净：`Settings.ets` 只归 B（主题），A/C 只提供面板组件、由 pm 统一挂载。
+
+| 任务 | 负责人 | 状态 | ETA | 阻塞 |
+| --- | --- | --- | --- | --- |
+## 进行中（第 4 轮，2026-11-18）——已收口
 
 | 任务 | 负责人 | 状态 | ETA | 阻塞 |
 | --- | --- | --- | --- | --- |
