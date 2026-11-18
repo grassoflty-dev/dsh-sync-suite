@@ -6,7 +6,9 @@
  * - `messages` 由 `buildAiPrompt` 产出（system 固定整理约束 + user 记录明细），
  *   提示词里已注入当前时间与时区；
  * - 参数（temperature / max_tokens / 超时 / 重试）来自 `settingsStore`（默认 0.7 / 1024 / 30000 / 1），
- *   调用方可显式传 `AiOptions` 覆盖；
+ *   调用方可显式传 `AiOptions` 覆盖；**整体超时在真正发请求前会过 `clampAiTimeout`**：
+ *   下限 = 连接超时（`AI_CONNECT_TIMEOUT_MS` = 20s）+ 1s，上限 = `AI_MAX_TIMEOUT_MS`（180s），
+ *   所以「超时填了 5 秒」实际按 21 秒执行（否则 20s 的连接超时永远不可达）；
  * - 解析 `choices[0].message.content`，并把响应里的 `usage` 折成 `AiUsage`（拿不到就 null）；
  * - 无 key / 网络失败 / 非 200 / 空内容一律抛**带中文 message** 的 `Error`，页面直接展示；
  * - 网络错误 / 429 / 5xx 退避 1 秒后重试（次数由 `retries` 决定，默认 1 次），其余错误不重试；
@@ -38,13 +40,16 @@ import type {
   AiProviderPreset
 } from '../model/aiProvider';
 import {
+  AI_CONNECT_TIMEOUT_MS,
   AI_PROBE_MAX_TOKENS,
   AI_PROBE_PROMPT,
+  AI_READ_TIMEOUT_MS,
   AI_RETRY_BACKOFF_MS,
   AI_STATUS_NETWORK,
   AI_STATUS_TIMEOUT,
   DEFAULT_AI_MODEL,
   buildAiRequest,
+  clampAiTimeout,
   classifyAiError,
   defaultAiOptions,
   describeAiTestResult,
@@ -65,8 +70,9 @@ import type { AiPayload } from '../model/types';
 import type { AiFallbackSettings } from './settingsStore';
 import { aiBaseURLFor, settingsStore } from './settingsStore';
 
-const CONNECT_TIMEOUT_MS: number = 20000;
-const READ_TIMEOUT_MS: number = 120000;
+// 连接/读超时的**数值来源在模型层**（`model/aiRequest.ts` 的 AI_CONNECT_TIMEOUT_MS /
+// AI_READ_TIMEOUT_MS）：因为「整体超时必须 ≥ 连接超时 + 1s」这条依赖由纯函数 `clampAiTimeout`
+// 保证，纯函数只能引用模型层常量。这里只 import、不再写第二份（两处各写一份必然漂移）。
 /** 「获取模型列表」的连接/读取超时（列表比对话轻，卡住就早点失败）。 */
 const MODELS_CONNECT_TIMEOUT_MS: number = 10000;
 const MODELS_READ_TIMEOUT_MS: number = 15000;
@@ -284,14 +290,18 @@ async function attemptOnce(apiKey: string, request: AiRequest, route: AiRoute): 
       },
       extraData: request.body,
       expectDataType: http.HttpDataType.STRING,
-      connectTimeout: CONNECT_TIMEOUT_MS,
-      readTimeout: READ_TIMEOUT_MS
+      connectTimeout: AI_CONNECT_TIMEOUT_MS,
+      readTimeout: AI_READ_TIMEOUT_MS
     };
+    // 整体超时（下面 race 的计时器）必须**先过 clampAiTimeout**：它的下限是
+    // AI_CONNECT_TIMEOUT_MS + 1000，否则 race 会在建连前就 reject，`connectTimeout`/`readTimeout`
+    // 这两个配置项永远不可达（用户也分不清「连不上」与「连上但不回包」）。
+    const totalTimeoutMs: number = clampAiTimeout(request.timeoutMs);
     const timeoutPromise = new Promise<http.HttpResponse>(
       (_resolve: (value: http.HttpResponse) => void, reject: (reason: Object) => void) => {
         timer = setTimeout(() => {
           reject(new AiTimeoutError());
-        }, request.timeoutMs);
+        }, totalTimeoutMs);
       }
     );
     const tasks: Array<Promise<http.HttpResponse>> = [httpRequest.request(request.url, requestOptions), timeoutPromise];

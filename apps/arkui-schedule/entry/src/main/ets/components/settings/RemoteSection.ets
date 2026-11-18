@@ -11,8 +11,11 @@
  * - 「访问令牌（可选）」只出现在 `lan` / `ipv6` / `tailscale`（判据来自方式的 `fields` 表）：
  *   输入框只存"这次想改成的值"，已保存的令牌**只打码显示、永不回填**；
  * - 「DSH 地址」那一行既是最终链接的预览（自动拼），也是 `manual` 方式的手输框；
- * - 空地址时「打开远程控制」禁用，并在按钮**下方**给出「先填写电脑上的 DSH 地址」。
+ * - 空地址时「打开远程控制」不可用（`ActionButton` 的 `enabled` + `disabledReason`：点不动就
+ *   toast 出原因），按钮**下方**同样保留「先填写电脑上的 DSH 地址」；
+ * - 「清除令牌」是 `ActionButton` 的 ghost 档（不是裸 Text 当按钮）。
  */
+import { ActionButton } from '../ActionButton';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../../common/uiTokens';
 import {
   REMOTE_MODE_CLOUDFLARE,
@@ -295,16 +298,18 @@ export struct RemoteSection {
             .textAlign(TextAlign.Start)
         }
         if (this.hasSavedRemoteToken()) {
-          Text('清除令牌')
-            .fontSize(FONT.caption)
-            .lineHeight(LINE_HEIGHT.caption)
-            .fontColor($r('app.color.brand'))
-            .height(TOUCH_MIN)
-            .padding({ left: SPACING.md, right: SPACING.md })
-            .textAlign(TextAlign.Center)
-            .onClick(() => {
+          ActionButton({
+            label: '清除令牌',
+            enabled: true,
+            disabledReason: '',
+            busy: false,
+            variant: 'ghost',
+            block: false,
+            onTap: (): void => {
               this.onClearToken();
-            })
+            },
+            onBlockedTap: null
+          })
         }
       }
 
@@ -343,18 +348,18 @@ export struct RemoteSection {
           .textAlign(TextAlign.Start)
       }
 
-      Button('打开远程控制')
-        .width('100%')
-        .height(48)
-        .fontSize(FONT.body)
-        .backgroundColor($r('app.color.brand'))
-        .fontColor($r('app.color.text_inverse'))
-        .borderRadius(RADIUS.sm)
-        // 空地址禁用（提示写在按钮下方，用户知道先做什么）
-        .enabled(this.remoteUrl.trim().length > 0)
-        .onClick(() => {
+      ActionButton({
+        label: '打开远程控制',
+        enabled: this.remoteUrl.trim().length > 0,
+        disabledReason: '先填写电脑上的 DSH 地址',
+        busy: false,
+        variant: 'primary',
+        block: true,
+        onTap: (): void => {
           this.onOpenRemote();
-        })
+        },
+        onBlockedTap: null
+      })
       if (this.remoteUrl.trim().length === 0) {
         Text('先填写电脑上的 DSH 地址')
           .fontSize(FONT.caption)

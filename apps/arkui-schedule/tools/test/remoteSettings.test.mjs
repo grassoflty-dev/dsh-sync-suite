@@ -101,7 +101,8 @@ describe('设置页：远程控制组（DSH 地址 → 打开远程控制）', (
     assert.match(PAGE, /Text\('远程控制'\)/, '缺「远程控制」组标题');
     assert.match(REMOTE_GROUP, /this\.FieldLabel\('DSH 地址'\)/, '缺「DSH 地址」字段名');
     assert.match(REMOTE_GROUP, /TextInput\(\{ text: this\.remoteUrl, placeholder: 'http:\/\/192\.168\.1\.6:3080\/\?token=…' \}\)/);
-    assert.match(REMOTE_GROUP, /Button\('打开远程控制'\)/, '缺「打开远程控制」主按钮');
+    // A 批：主按钮换成 `ActionButton`（label 字段），不再是裸 `Button('打开远程控制')`
+    assert.match(REMOTE_GROUP, /label: '打开远程控制'/, '缺「打开远程控制」主按钮');
   });
 
   test('一行灰字说明：局域网 + token 只存本机', () => {
@@ -109,10 +110,11 @@ describe('设置页：远程控制组（DSH 地址 → 打开远程控制）', (
   });
 
   test('地址为空时按钮禁用，并在按钮下方给出「先填写…」提示', () => {
-    assert.match(REMOTE_GROUP, /\.enabled\(this\.remoteUrl\.trim\(\)\.length > 0\)/, '空地址必须 .enabled(false)');
+    // A 批：可用性从 `.enabled(...)` 改成 ActionButton 的 `enabled:` 字段
+    assert.match(REMOTE_GROUP, /enabled: this\.remoteUrl\.trim\(\)\.length > 0/, '空地址必须禁用主按钮（ActionButton.enabled=false）');
     assert.match(REMOTE_GROUP, /Text\('先填写电脑上的 DSH 地址'\)/);
     // 提示必须在按钮之后（按钮下方），不是按钮之前
-    const buttonIndex = REMOTE_GROUP.indexOf("Button('打开远程控制')");
+    const buttonIndex = REMOTE_GROUP.indexOf("label: '打开远程控制'");
     const hintIndex = REMOTE_GROUP.indexOf("Text('先填写电脑上的 DSH 地址')");
     assert.ok(buttonIndex >= 0 && hintIndex > buttonIndex, '「先填写…」提示要渲染在按钮下方');
   });
@@ -208,7 +210,7 @@ describe('访问令牌（可选）：settingsStore 成对读写 + 设置页只�
       /已保存访问令牌（\$\{maskRemoteToken\(this\.savedRemoteToken\)\}）/,
       '已保存时显示「已保存访问令牌（<mask>）」'
     );
-    assert.match(REMOTE_GROUP, /Text\('清除令牌'\)/, '缺「清除令牌」小按钮');
+    assert.match(REMOTE_GROUP, /label: '清除令牌'/, '缺「清除令牌」小按钮（ActionButton ghost）');
     assert.match(PAGE, /await settingsStore\.save\(\{ remoteToken: '' \}/, '「清除令牌」必须落盘空串');
   });
 

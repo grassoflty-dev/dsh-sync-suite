@@ -11,6 +11,8 @@
  *
  * 约定：
  * - **不做定时器 / 不用 workScheduler / 不跑后台任务**：只在显式调用点（启动、回前台、下拉）跑；
+ * - **同一时刻只允许一个 pull 在飞**（`PullGate`，复用 `model/syncGuard.ts` 的闸）：启动 pull 还没
+ *   回来时，回前台/下拉再调 `pullNow()` 一律返回 `skipped: true`，不会双发、不会互相覆盖结果；
  * - 失败只返回结果给调用方（页面层 toast + `[sync]` 日志），这里**不 toast、不打日志**；
  * - 未配置仓库（repoUrl 为空）→ 直接返回「跳过」，不算错误。
  */
@@ -21,7 +23,8 @@ import { GitSyncService } from './GitSyncService';
 import type { GitSyncConfig, GitSyncResult } from './GitSyncService';
 import { settingsStore } from './settingsStore';
 import type { ScheduleSettings } from './settingsStore';
-import { BRIDGE_NOT_READY_MESSAGE } from '../model/syncGuard';
+import { BRIDGE_NOT_READY_MESSAGE, PullGate } from '../model/syncGuard';
+import type { PullGateDecision } from '../model/syncGuard';
 import { DEFAULT_BRANCH, normalizeBranchName } from '../model/syncError';
 import { normalizeGitPlatform } from '../model/gitAuth';
 
@@ -159,7 +162,8 @@ export interface SyncOutcome {
 
 class SyncController {
   private service: GitSyncService | null = null;
-  private lastPullAt: number = 0;
+  /** pull 的在飞闸 + 上次完成时间（`model/syncGuard.ts` 的 `PullGate`，不另造状态机）。 */
+  private pullGate: PullGate = new PullGate();
   private starting: boolean = false;
   /** 桥加载失败的原因（`GitBridgeHost.onFail` 写入）。 */
   private bridgeReason: string = '';
@@ -242,45 +246,67 @@ class SyncController {
 
   /**
    * 启动 / 回前台自动 pull：**静默**、失败只返回结果、60s 节流。
-   * 下拉刷新请用 `pullNow()`（不节流）。
+   * 下拉刷新请用 `pullNow()`（不节流，但在飞时同样跳过）。
    */
   async pullOnStartup(): Promise<SyncOutcome> {
     const now: number = Date.now();
-    if (this.lastPullAt > 0 && now - this.lastPullAt < STARTUP_THROTTLE_MS) {
+    if (this.pullGate.throttled(STARTUP_THROTTLE_MS, now)) {
       return { ok: true, message: '刚刚已拉取，跳过', elapsedMs: 0, skipped: true };
     }
     return this.pullNow();
   }
 
-  /** 立即 pull（下拉刷新 / 启动强拉），不节流。**永不抛异常**。 */
+  /**
+   * 立即 pull（下拉刷新 / 启动强拉），不节流。**永不抛异常**。
+   *
+   * 重入：入口先抢闸（`PullGate.enter`，同步完成、在第一个 `await` 之前）——已有 pull 在飞时，
+   * 本次直接返回 `skipped: true`（**跳过不是失败**，调用方靠 `skipped` 区分），且**不推进**
+   * `lastPullAt`（否则「忙跳过」会把 60s 节流续上，等于一次没发生的拉取也能压住回前台拉取）。
+   * 闸在 `finally` 里放，异常/超时路径也会清掉，下一次调用能正常开始。
+   */
   async pullNow(): Promise<SyncOutcome> {
     const started: number = Date.now();
-    if (this.service === null || !this.service.isBridgeReady()) {
-      // 闪退回归：桥没好就绝不下探，直接返回可读错误给调用方展示
-      const reason: string = this.notReadyReason();
-      return { ok: false, message: reason, elapsedMs: 0, skipped: true };
+    // 判定必须在第一个 await 之前：JS 单线程下只有 await 会让出执行权，
+    // 同步抢闸后第二个入口（回前台 / 下拉刷新）才必然看得到「已在飞」。
+    const gate: PullGateDecision = this.pullGate.enter(started);
+    if (!gate.proceed) {
+      return { ok: true, message: gate.message, elapsedMs: 0, skipped: true };
     }
-    // 分支/平台可能刚在设置页改过：拉取前按最新设置重配一次（只读 preferences，不联网）
     try {
-      const settings: ScheduleSettings = await settingsStore.load();
-      await gitExtrasStore.load();
-      this.service.configure(this.toConfig(settings));
-    } catch {
-      // 读设置失败就沿用上一次的配置，不阻断这次拉取
+      const service: GitSyncService | null = this.service;
+      if (service === null || !service.isBridgeReady()) {
+        // 闪退回归：桥没好就绝不下探，直接返回可读错误给调用方展示。
+        // 这里同样不推进 lastPullAt：没真正拉取，就不该压住 60s 节流。
+        const reason: string = this.notReadyReason();
+        return { ok: false, message: reason, elapsedMs: 0, skipped: true };
+      }
+      // 分支/平台可能刚在设置页改过：拉取前按最新设置重配一次（只读 preferences，不联网）
+      try {
+        const settings: ScheduleSettings = await settingsStore.load();
+        await gitExtrasStore.load();
+        service.configure(this.toConfig(settings));
+      } catch {
+        // 读设置失败就沿用上一次的配置，不阻断这次拉取
+      }
+      let result: GitSyncResult;
+      try {
+        result = await service.pullOnStartup();
+      } catch {
+        return { ok: false, message: '自动拉取失败', elapsedMs: Date.now() - started, skipped: false };
+      }
+      const finished: number = Date.now();
+      // 只有真正发出 pull 并拿到结果（成功或失败）才推进节流基准
+      this.pullGate.markCompleted(finished);
+      return {
+        ok: result.ok,
+        message: result.message,
+        elapsedMs: finished - started,
+        skipped: false
+      };
+    } finally {
+      // 异常/超时/提前 return 都会走到这里：清掉在飞标志
+      this.pullGate.leave();
     }
-    let result: GitSyncResult;
-    try {
-      result = await this.service.pullOnStartup();
-    } catch (error) {
-      return { ok: false, message: '自动拉取失败', elapsedMs: Date.now() - started, skipped: false };
-    }
-    this.lastPullAt = Date.now();
-    return {
-      ok: result.ok,
-      message: result.message,
-      elapsedMs: this.lastPullAt - started,
-      skipped: false
-    };
   }
 }
 

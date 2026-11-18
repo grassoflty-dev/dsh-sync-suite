@@ -203,9 +203,10 @@ test('今日汇总块：持久化数据源（read/换日期 re-read/generate 失
 test('今日汇总块：是列表第一项，五态互斥，AI 汇总只从这里进入', () => {
   assert.match(INDEX_CODE, /this\.SummaryCard\(\)/, '汇总块必须被渲染');
   assert.match(INDEX_CODE, /✨ 今日汇总/);
-  assert.match(INDEX_CODE, /✨ 生成今日汇总/);
+  assert.match(INDEX_CODE, /actionLabel: '生成汇总'/, '无汇总时的生成入口走空态动作（A 批 STATE-UI §5）');
   assert.match(INDEX_CODE, /今天还没有日程/, '无日程要有灰字提示');
-  assert.match(INDEX_CODE, /正在生成今日汇总…/, '生成中要有 loading 文案');
+  assert.match(INDEX_CODE, /LoadingState\(\{/, '生成中要走 LoadingState（带进度与 3 秒后可取消）');
+  assert.match(INDEX_CODE, /loadingText\('AI 汇总'\)/, '生成中文案走 copy.loadingText');
   assert.match(INDEX_CODE, /更新于 \$\{this\.summaryUpdatedAt\}/);
   assert.match(INDEX_CODE, /重新生成/);
   assert.match(INDEX_CODE, /查看全部/, '要点超过 3 条要有「查看全部」');
@@ -217,9 +218,9 @@ test('今日汇总块：是列表第一项，五态互斥，AI 汇总只从这�
   assert.equal(/headerActionOne/.test(INDEX_CODE), false, '页头不得再有 AI 汇总图标入口');
   const calls = (INDEX_CODE.match(/this\.generateSummary\(\)/g) || []).length;
   assert.ok(calls >= 3, `汇总生成入口应有生成行/重试/重新生成，实际 ${calls} 处`);
-  // 空态文案只保留在汇总块里，不再有第二处 EmptyState/EmptyHint
+  // 空态文案只保留在汇总块里；旧的 EmptyHint 已删除，但 A 批后汇总块的空态必须走 EmptyState
   assert.equal(/EmptyHint/.test(INDEX_CODE), false, '旧的空态文案 builder 应已删除');
-  assert.equal(/EmptyState/.test(INDEX_CODE), false, '首页不再直接用 EmptyState，空态由汇总块表达');
+  assert.match(INDEX_CODE, /EmptyState\(\{/, '无汇总时的空态走 EmptyState（必须带下一步动作）');
 });
 
 

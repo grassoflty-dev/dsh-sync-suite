@@ -81,7 +81,9 @@ describe('首页页头：AI 汇总图标入口已删除', () => {
     assert.match(code, /summaryStore\.read\(this\.selectedDate\)/, '汇总必须从 summaryStore 读取');
     assert.match(code, /summaryStore\.generate\(/, '生成必须走 summaryStore（失败不覆盖旧文件）');
     assert.match(code, /✨ 今日汇总/, '块标题文案仍在');
-    assert.match(code, /✨ 生成今日汇总/, '块内「生成今日汇总」入口仍在（页头入口删除后这是唯一 AI 汇总入口）');
+    // A 批（`docs/STATE-UI.md` §5）把「生成今日汇总」那一行改成空态：
+    // 标题 + 说明 + 「生成汇总」动作（空态必须带下一步，不能再是一行可点文字）。
+    assert.match(code, /actionLabel: '生成汇总'/, '块内「生成汇总」入口仍在（页头入口删除后这是唯一 AI 汇总入口）');
     // 生成入口不止一个：生成行 / 重试 / 重新生成
     const card = memberBody('SummaryCard');
     const generateCalls = (card.match(/this\.generateSummary\(\)/g) ?? []).length;

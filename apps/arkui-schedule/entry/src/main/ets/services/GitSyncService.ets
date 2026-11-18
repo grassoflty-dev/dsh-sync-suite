@@ -28,7 +28,18 @@ import { webview } from '@kit.ArkWeb';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
-import { checkSyncPrecondition, describeBridgeFailure } from '../model/syncGuard';
+import {
+  beginExclusive,
+  busyRejection,
+  checkSyncPrecondition,
+  describeBridgeFailure,
+  endExclusive,
+  idleRunState,
+  SYNC_ACTION_PULL,
+  SYNC_ACTION_PUSH,
+  SYNC_ACTION_REGISTER,
+  SYNC_BUSY_CODE
+} from '../model/syncGuard';
 import { assertHttpsUsername, describeAuthModeBlocker, httpsAuthUsername, resolveGitUsername } from '../model/gitAuth';
 import { AUTH_HTTPS } from '../model/settingsForm';
 import {
@@ -37,7 +48,7 @@ import {
   validateBranchName
 } from '../model/syncError';
 import type { SyncStatusView } from '../model/syncError';
-import type { SyncPreconditionInput, SyncPreconditionResult } from '../model/syncGuard';
+import type { SyncPreconditionInput, SyncPreconditionResult, SyncRunBegin, SyncRunState } from '../model/syncGuard';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import {
@@ -427,6 +438,17 @@ function rejected(prefix: string, problem: string): GitSyncResult {
   return result;
 }
 
+/**
+ * 忙拒绝（重入闸）：标 `E_BUSY`，与 `rejected`（`E_INPUT`）分开。
+ *
+ * 分开的理由：`E_INPUT` 是「去改配置」，`E_BUSY` 是「等一等」——页面拿同一个 code 分不出
+ * 该引导用户改设置还是等他刚点的那次同步结束。
+ */
+function rejectedBusy(prefix: string, reason: string): GitSyncResult {
+  const result: GitSyncResult = { ok: false, message: prefix + '：' + reason, code: SYNC_BUSY_CODE };
+  return result;
+}
+
 function shortSha(sha: string): string {
   if (sha.length === 0) {
     return '（空仓库）';
@@ -589,6 +611,16 @@ export class GitSyncService {
    * 但用户仍然需要知道「这台设备换了新身份」。
    */
   private identityRecreated: boolean = false;
+  /**
+   * 重入闸状态：**当前在跑的动作 + 开始时间**（空串 = 空闲）。
+   *
+   * 为什么放**实例级**而不是模块级：`syncController` 只持有一个 `GitSyncService`
+   * （`ensureStarted` 里 `if (this.service === null)`），三条路径（启动 pull / 回前台 pull /
+   * 设置页手动同步）最终都打到同一个实例上；放实例级还能保证「Web 控制器重建 → 新实例」
+   * 时不会有上一座桥的残留状态把新实例永久锁死。判定本身是纯函数
+   * （`model/syncGuard.ts` 的 `busyRejection` / `beginExclusive`），本实例只负责持有。
+   */
+  private runState: SyncRunState = idleRunState();
 
   constructor(controller: webview.WebviewController) {
     this.controller = controller;
@@ -773,8 +805,28 @@ export class GitSyncService {
 
   // -------------------------------------------------------------- 对外操作
 
-  /** 拉取：本机无仓库时自动 clone；有仓库时 fetch + fast-forward（永不 merge）。 */
+  /**
+   * 拉取（对外入口，带重入闸）：本机无仓库时自动 clone；有仓库时 fetch + fast-forward（永不 merge）。
+   *
+   * 重入策略：忙 → **立即返回** `E_BUSY` 结构化失败（中文原因「上一次…还没结束（已 x 秒）」），
+   * 不抛、不排队、不静默丢弃。`finally` 里放闸，异常/超时路径同样会走到。
+   */
   async pull(): Promise<GitSyncResult> {
+    // 判定 + 置位都在第一个 await 之前（同步完成），第二个入口才必然被拦
+    const busy: string = this.beginRun(SYNC_ACTION_PULL);
+    if (busy.length > 0) {
+      return rejectedBusy('拉取失败', busy);
+    }
+    try {
+      return await this.pullLocked();
+    } finally {
+      // 重点：成功、失败、超时、提前 return 全部走这里（漏一次就永久「忙」）
+      this.endRun(SYNC_ACTION_PULL);
+    }
+  }
+
+  /** 拉取的持闸实现（只由 `pull()` 调用；`pull` 已抢闸，这里不许再抢）。 */
+  private async pullLocked(): Promise<GitSyncResult> {
     const guard: SyncPreconditionResult = this.precondition(false);
     if (!guard.ok) {
       return rejected('拉取失败', guard.message);
@@ -823,7 +875,8 @@ export class GitSyncService {
       // 设备编号自动登记（数据边界）：拉取后 registry 才是最新的，算号/抢占都在这一步。
       // 失败**不阻断本次拉取**（拉取本身没有写仓库），但必须把原因交回设置页（自动展开「高级」）；
       // 推送侧则是 fail-closed（见 push 里的 ensureDeviceRegistered）。
-      const registration: GitSyncResult = await this.registerDevice(true);
+      // 内部链路：`pull` 已持闸，只能调持闸实现（再抢一次会被自己的闸拒掉）
+      const registration: GitSyncResult = await this.registerDeviceLocked(true);
       if (registration.ok) {
         result.deviceId = registration.deviceId;
         result.deviceIdAuto = registration.deviceIdAuto;
@@ -844,8 +897,26 @@ export class GitSyncService {
     }
   }
 
-  /** 推送：只 add + commit `devices/<deviceId>/`，再推 origin/<branch>；永不 force。 */
+  /**
+   * 推送（对外入口，带重入闸）：只 add + commit `devices/<deviceId>/`，再推 origin/<branch>；永不 force。
+   *
+   * 重入策略同 `pull`：忙 → 立即返回 `E_BUSY`，替代「两次 push 抢同一份索引互相覆盖」。
+   */
   async push(message: string): Promise<GitSyncResult> {
+    // 判定 + 置位在第一个 await 之前（pushLocked 内部第一次 await 是设备登记）
+    const busy: string = this.beginRun(SYNC_ACTION_PUSH);
+    if (busy.length > 0) {
+      return rejectedBusy('推送失败', busy);
+    }
+    try {
+      return await this.pushLocked(message);
+    } finally {
+      this.endRun(SYNC_ACTION_PUSH);
+    }
+  }
+
+  /** 推送的持闸实现（只由 `push()` 调用；内部 `restoreQuarantined` 的 finally 仍在这里）。 */
+  private async pushLocked(message: string): Promise<GitSyncResult> {
     const guard: SyncPreconditionResult = this.precondition(false);
     if (!guard.ok) {
       return rejected('推送失败', guard.message);
@@ -962,6 +1033,12 @@ export class GitSyncService {
     if (this.config.repoUrl.trim().length === 0) {
       return { ok: true, message: '未配置同步仓库，跳过自动拉取' };
     }
+    // 重入：启动 pull / 回前台 pull / 手动同步可能同一刻发生。这里先问一次（给「自动拉取跳过」
+    // 这个更贴合场景的前缀），真正的闸在 `pull()` 里——同一 tick 内无 await，不存在中间窗口。
+    const busy: string = this.busyReason(SYNC_ACTION_PULL);
+    if (busy.length > 0) {
+      return rejectedBusy('自动拉取跳过', busy);
+    }
     const guard: SyncPreconditionResult = this.precondition(false);
     if (!guard.ok) {
       return rejected('自动拉取跳过', guard.message);
@@ -1012,8 +1089,58 @@ export class GitSyncService {
     return checkSyncPrecondition(input);
   }
 
+  // -------------------------------------------------------------- 重入闸（C 批：连点 / 双发）
+
+  /**
+   * 抢闸：同一个 repository 上一次只允许一个**写**动作。
+   *
+   * **必须在入口的第一个 `await` 之前调用**（`pull` / `push` / `registerDevice` 的第一条语句）。
+   * 原因：JS 单线程下，异步函数只有执行到 `await` 才会让出执行权。判定与置位都是同步完成的，
+   * 第二个入口才必然看到「已有动作在跑」。一旦把判定挪到某个 `await` 之后（哪怕只隔一次
+   * `settingsStore.load()`），两次调用就会同时通过判定——这就是历史上「启动 pull + 回前台 pull
+   * 双发」的形态。
+   *
+   * @returns 中文拒绝原因（空串 = 抢到闸；拒绝时**不抛异常、不排队**）
+   */
+  private beginRun(action: string): string {
+    const begin: SyncRunBegin = beginExclusive(this.runState, action);
+    return begin.ok ? '' : begin.message;
+  }
+
+  /**
+   * 放闸：把状态清回空闲。
+   *
+   * **只能在抢到闸的那个入口的 `finally` 里调用一次**——异常 / 超时 / 提前 return 三条路径
+   * 都会走到 `finally`。漏掉这一次，进程会永久停在「忙」，用户之后每次点同步都只会看到
+   * 「上一次同步还没结束」。内部嵌套链路（`pull` → 设备登记）**不再抢闸**，也不许调这里。
+   *
+   * @param action 抢闸时用的动作名：带 `owner` 校验，只有「当前持有者就是自己」时才清，
+   *               避免被拒的调用 / 嵌套链路误清别人的闸。
+   */
+  private endRun(action: string): void {
+    endExclusive(this.runState, action);
+  }
+
+  /** 当前是否有写动作在跑（给页面做禁用态用；判定本身仍走 `beginRun`）。 */
+  isBusy(): boolean {
+    return this.runState.action.length > 0;
+  }
+
+  /**
+   * 忙拒绝文案（不抢闸，只问「现在能不能开始」）：供委托型入口（`pullOnStartup`）在
+   * 调真正入口之前给出更贴合场景的前缀。
+   */
+  private busyReason(action: string): string {
+    return busyRejection(this.runState, action);
+  }
+
   /**
    * 状态：当前分支 / HEAD / ahead / behind / 冲突 / 本地改动 / 远端是否可连。
+   *
+   * **不抢重入闸**（只读）：`status` 只读本机仓库 + 发一次 `info/refs` 探测，不写工作副本、
+   * 不写远端，**不会覆盖任何同步结果**；而且设置页每次同步结束都要立刻刷新状态，拦它只会
+   * 让用户看到「正在同步，不能查看状态」的噪音。代价是同步进行中查出来的可能是中间态
+   * （例如刚被附件守卫挪走的 zip 暂时看不到），这是可接受的信息精度损失，不是数据风险。
    *
    * @param withProbe 是否额外发一次真实的 `info/refs` 探测（默认 true）。
    *                  页面里「同步完成后刷新状态」用 `false`：只看本地仓库，不额外联网。
@@ -1636,8 +1763,26 @@ export class GitSyncService {
    *
    * @returns 本次生效的设备编号、展示文案，以及 `fingerprintRecreated`（指纹丢失重建）标记
    * @throws SyncError `E_DEVICE_ID_CONFLICT`（重试用尽）/ `E_DEVICE_ID_UNREADABLE`（仓库不可读）
+   *
+   * 重入：本方法既是页面入口，也被 `pull` / `push` 内部调用（那两条链路**已经持闸**）。
+   * 所以拆成「公开入口抢闸 → `registerDeviceLocked` 干活」两段：内部只调持闸实现，
+   * 否则 pull → register 会撞上自己刚抢的闸，整条同步链直接失败。
    */
   async registerDevice(pulled: boolean = false): Promise<GitSyncResult> {
+    // 对外入口才抢闸：内部的 pull → 登记、push → 登记已经持闸，不能再抢（会自我拒绝）
+    const busy: string = this.beginRun(SYNC_ACTION_REGISTER);
+    if (busy.length > 0) {
+      return rejectedBusy('设备编号登记失败', busy);
+    }
+    try {
+      return await this.registerDeviceLocked(pulled);
+    } finally {
+      this.endRun(SYNC_ACTION_REGISTER);
+    }
+  }
+
+  /** 设备编号登记的持闸实现（只由公开入口 / `pullLocked` / `pushLocked` 调用）。 */
+  private async registerDeviceLocked(pulled: boolean = false): Promise<GitSyncResult> {
     const guard: SyncPreconditionResult = this.precondition(false);
     if (!guard.ok) {
       return rejected('设备编号登记失败', guard.message);
@@ -1761,7 +1906,8 @@ export class GitSyncService {
    * @returns 登记结果（推送侧要把 `fingerprintRecreated` / 冲突标记带回给页面）
    */
   private async ensureDeviceRegistered(pulled: boolean): Promise<GitSyncResult> {
-    const result: GitSyncResult = await this.registerDevice(pulled);
+    // push 已持闸：走持闸实现（走公开入口会被自己的闸拒绝，推送直接失败）
+    const result: GitSyncResult = await this.registerDeviceLocked(pulled);
     if (!result.ok) {
       const code: string = result.code === undefined || result.code.length === 0 ? 'E_DEVICE_ID_UNREADABLE' : result.code;
       throw new SyncError(code, result.message);

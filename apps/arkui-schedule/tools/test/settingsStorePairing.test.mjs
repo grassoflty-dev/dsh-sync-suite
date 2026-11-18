@@ -132,7 +132,13 @@ describe('设置页：仓库地址可空保存，但同步/测试连接前强校
       SETTINGS_PAGE,
       /Text\(describeLastSyncOutcome\(this\.lastSyncAt, this\.lastSyncError, this\.lastSyncAction, nowIso\(\)\)\)/
     );
-    assert.match(SETTINGS_PAGE, /if \(this\.lastSyncError\.length > 0\) \{\s*Text\(`上次错误：\$\{this\.lastSyncError\}`\)/);
+    // A 批：单行「上次错误」Text 升级为结构化错误态 ErrorState
+    //（三段式：发生了什么 / 为什么 / 下一步 + 可复制诊断 + 重试），见 docs/STATE-UI.md §4.3
+    assert.match(
+      SETTINGS_PAGE,
+      /if \(this\.lastSyncError\.length > 0\) \{\s*ErrorState\(\{\s*what: SYNC_ERROR_WHAT,\s*why: this\.errorReason\(this\.lastSyncError\)/,
+      '上次错误必须走 ErrorState（含 why = errorReason(lastSyncError)）'
+    );
     assert.match(SETTINGS_PAGE, /if \(canRetrySync\(this\.lastSyncAction, this\.syncBusy\)\) \{/, '重试按钮必须由上次动作驱动');
     assert.match(SETTINGS_PAGE, /this\.runAction\(this\.lastSyncAction\);/, '重试要重放上一次动作');
   });

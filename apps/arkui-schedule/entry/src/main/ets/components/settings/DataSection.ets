@@ -22,6 +22,12 @@ export struct DataSection {
   onPickFile: () => void = () => {};
   onConfirmImport: () => void = () => {};
   onCancel: () => void = () => {};
+  /**
+   * A 批（`docs/STATE-UI.md` §4.1）：loading 里点「取消」= **停止等待**，由页面把 `busy` 复位。
+   *
+   * 与 `onCancel`（清空 dry-run）刻意分开；这里只做转发，不碰状态（本组件不持有状态）。
+   */
+  onCancelWait: () => void = () => {};
   onCopyPath: () => void = () => {};
 
   /** 数据组：导出 / 导入（排在「关于」之前）。 */
@@ -48,6 +54,9 @@ export struct DataSection {
         },
         onCancel: (): void => {
           this.onCancel();
+        },
+        onCancelWait: (): void => {
+          this.onCancelWait();
         },
         onCopyPath: (): void => {
           this.onCopyPath();

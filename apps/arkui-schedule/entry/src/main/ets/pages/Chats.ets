@@ -9,10 +9,11 @@
  * 颜色只用 `$r('app.color.*')`、字号只用 `FONT`、触控目标 ≥ `TOUCH_MIN`。
  * **首页页头不动**（仍只有「今天 / ⚙ 设置」）：本页入口在「设置 → 云端对话」。
  *
- * 三种非常规状态（`docs/CHAT-APP.md` 逐字记录）：
- * - **空态**（`chats/index.jsonl` 不存在，`ok:true`）：给出「怎么把会话弄过来」的操作指引，
- *   不是一句「暂无数据」——用户第一次进来几乎必然是这个状态；
- * - **错误态**（读文件失败，`ok:false`）：`ErrorText` + 「重试」，可恢复；
+ * 三种非常规状态（`docs/CHAT-APP.md` 逐字记录，`docs/STATE-UI.md` §4 组件化）：
+ * - **加载中**：`LoadingState`（行内紧凑档），3 秒后可取消——取消只停止「等待」，后台读文件可能仍会完成；
+ * - **空态**（`chats/index.jsonl` 不存在，`ok:true`）：`EmptyState` 给出「怎么把会话弄过来」的操作指引
+ *   与「下拉刷新试试」，不是一句「暂无数据」——用户第一次进来几乎必然是这个状态；
+ * - **错误态**（读文件失败，`ok:false`）：`ErrorState` 三段式 + 诊断行 + 「重试」/「去设置」；
  * - **无匹配**（有会话但搜索词没命中）：提示清空搜索词，与「空态」区分开。
  *
  * 旋转/切页：数据全在 `@State` 里，`aboutToAppear` 加载一次；`onPageShow` 再读一次
@@ -20,21 +21,39 @@
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
+import { loadingText } from '../common/copy';
+import { APP_VERSION } from '../common/version';
 import { chatSummaryLine, filterChats, sortChats } from '../model/chatList';
 import type { ChatIndexEntry } from '../model/chatList';
+import { formatDiagnostics } from '../model/stateView';
+import type { DiagnosticsInput } from '../model/stateView';
 import { chatStore } from '../services/chatStore';
 import type { ChatListResult } from '../services/chatStore';
 import { describeError } from '../services/scheduleStore';
 import { syncController } from '../services/syncController';
 import type { SyncOutcome } from '../services/syncController';
+import { ActionButton } from '../components/ActionButton';
 import { PageLayout } from '../components/PageLayout';
+import { EmptyState } from '../components/state/EmptyState';
+import { ErrorState } from '../components/state/ErrorState';
+import { LoadingState } from '../components/state/LoadingState';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
-
-/** 主按钮高度：40 + 8 = 48vp（与全站按钮一致，只用令牌组合）。 */
-const BUTTON_HEIGHT: number = TOUCH_MIN + SPACING.sm;
 
 /** 宽屏下内容最大宽度（vp）：单条会话行横跨宽屏会很难读。 */
 const CONTENT_MAX_WIDTH: number = 720;
+
+/** 诊断行里的错误码（列表读取失败）：固定值，便于用户反馈时检索。 */
+const CHAT_LIST_ERROR_CODE: string = 'CHAT_LIST';
+
+/** 空态文案：一句说明 + 「怎么弄过来」的下一步（保留原来的三句关键信息）。 */
+const EMPTY_TITLE: string = '还没有云端会话';
+const EMPTY_DETAIL: string =
+  '在电脑的 DSH 上运行一次会话后，点插件「云端对话 → 导出全部」；导出并推送后回到本页下拉刷新';
+const EMPTY_ACTION: string = '下拉刷新试试';
+
+/** 错误态文案：为什么失败由 `errorText` 运行时给。 */
+const ERROR_WHAT: string = '读取会话列表失败';
+const ERROR_NEXT: string = '先确认本机拉取过同步仓库（设置 → 同步 → 立即同步）';
 
 @Entry
 @Component
@@ -128,6 +147,28 @@ struct Chats {
     await this.reload();
   }
 
+  /**
+   * 停止等待（`LoadingState.onCancel`）：只把本页的等待状态收掉，并诚实说明后台可能仍在读。
+   *
+   * **不**清 `chats`：已经读出来的列表不变；`errorText` 清空后如果仍然空，会落到空态（有出路）。
+   */
+  private stopWaiting(): void {
+    this.loading = false;
+    this.errorText = '';
+    promptAction.showToast({ message: '已停止等待：稍后可下拉刷新重试' });
+  }
+
+  /** 诊断行（`docs/STATE-UI.md` §4.3）：版本 / 设备 / 错误码 / 时间；设备 id 本页没有 → 兜底「未登记」。 */
+  private diagnosticsText(errorCode: string): string {
+    const input: DiagnosticsInput = {
+      version: APP_VERSION,
+      deviceId: '',
+      errorCode: errorCode,
+      timestamp: Date.now()
+    };
+    return formatDiagnostics(input);
+  }
+
   /** 进只读详情：只传 `id`（会话内容由详情页自己读，参数不会被长文本撑爆）。 */
   private openDetail(id: string): void {
     const params: Record<string, string> = { 'id': id };
@@ -172,17 +213,19 @@ struct Chats {
           this.applyQuery();
         })
       if (this.queryText.length > 0) {
-        Text('清空')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.brand'))
-          .height(TOUCH_MIN)
-          .padding({ left: SPACING.sm, right: SPACING.sm })
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
+        ActionButton({
+          label: '清空',
+          enabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: 'ghost',
+          block: false,
+          onTap: (): void => {
             this.queryText = '';
             this.applyQuery();
-          })
+          },
+          onBlockedTap: null
+        })
       }
     }
     .width('100%')
@@ -270,34 +313,18 @@ struct Chats {
    * 空态：**必须带操作指引**（用户第一次进来几乎必然是这个状态）。
    *
    * 文案与 `docs/CHAT-APP.md` §3 一致：说清「去哪儿导出」「怎么同步过来」，
-   * 而不是只写「暂无数据」让人无从下手。
+   * 而不是只写「暂无数据」让人无从下手；`EmptyState` 保证永远渲染一个真按钮。
    */
   @Builder
   EmptyChats() {
-    Column({ space: SPACING.md }) {
-      Text('还没有云端会话。')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-      Text('在电脑的 DSH 上运行一次会话后，点插件「云端对话 → 导出全部」即可同步到这里。')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.text_secondary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-      Text('导出并推送后，回到本页下拉刷新（或等 App 启动时自动拉取）就能看到列表。')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.text_secondary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-    }
-    .width('100%')
-    .padding({ top: SPACING.xl, bottom: SPACING.xl })
-    .alignItems(HorizontalAlign.Start)
+    EmptyState({
+      title: EMPTY_TITLE,
+      detail: EMPTY_DETAIL,
+      actionLabel: EMPTY_ACTION,
+      onAction: (): void => {
+        this.pullAndReload();
+      }
+    })
   }
 
   /** 有会话但搜索没命中：与空态区分（否则用户会以为会话被删了）。 */
@@ -317,66 +344,61 @@ struct Chats {
         .fontColor($r('app.color.text_secondary'))
         .width('100%')
         .textAlign(TextAlign.Start)
-      Button('清空搜索')
-        .height(BUTTON_HEIGHT)
-        .fontSize(FONT.body)
-        .backgroundColor($r('app.color.brand_soft'))
-        .fontColor($r('app.color.brand'))
-        .borderRadius(RADIUS.sm)
-        .onClick(() => {
+      ActionButton({
+        label: '清空搜索',
+        enabled: true,
+        disabledReason: '',
+        busy: false,
+        variant: 'secondary',
+        block: false,
+        onTap: (): void => {
           this.queryText = '';
           this.applyQuery();
-        })
+        },
+        onBlockedTap: null
+      })
     }
     .width('100%')
     .padding({ top: SPACING.xl, bottom: SPACING.xl })
     .alignItems(HorizontalAlign.Start)
   }
 
-  /** 首次读取中：一行灰字，不占整页（读取通常只有几毫秒）。 */
+  /** 首次读取中：行内紧凑档（读取通常只有几毫秒），3 秒后可取消（只停止等待）。 */
   @Builder
   LoadingHint() {
-    Text('正在读取云端会话…')
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .fontColor($r('app.color.text_secondary'))
-      .width('100%')
-      .padding({ top: SPACING.lg, bottom: SPACING.lg })
-      .textAlign(TextAlign.Start)
+    Column() {
+      LoadingState({
+        compact: true,
+        title: loadingText('云端会话'),
+        onCancel: (): void => {
+          this.stopWaiting();
+        }
+      })
+    }
+    .width('100%')
+    .padding({ top: SPACING.lg, bottom: SPACING.lg })
+    .alignItems(HorizontalAlign.Start)
   }
 
-  /** 字段级错误文案（danger 令牌，深色模式下同样可见）。 */
-  @Builder
-  ErrorText(text: string) {
-    Text(text)
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .fontColor($r('app.color.danger'))
-      .width('100%')
-      .textAlign(TextAlign.Start)
-  }
-
-  /** 错误态：`ErrorText` + 「重试」（可恢复，不把用户困在错误页）。 */
+  /** 错误态：三段式 + 诊断行 + 「重试」/「去设置」（可恢复，不把用户困在错误页）。 */
   @Builder
   ErrorBlock() {
-    Column({ space: SPACING.md }) {
-      this.ErrorText(this.errorText)
-      Text('会话列表读不出来时，先确认本机已经拉取过同步仓库（设置 → 同步 → 立即拉取）。')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.text_secondary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-      Button('重试')
-        .height(BUTTON_HEIGHT)
-        .fontSize(FONT.body)
-        .backgroundColor($r('app.color.brand'))
-        .fontColor($r('app.color.text_inverse'))
-        .borderRadius(RADIUS.sm)
-        .onClick(() => {
+    Column() {
+      ErrorState({
+        what: ERROR_WHAT,
+        why: this.errorText,
+        next: ERROR_NEXT,
+        diagnostics: this.diagnosticsText(CHAT_LIST_ERROR_CODE),
+        onRetry: (): void => {
           this.loading = true;
           this.reload();
-        })
+        },
+        onOpenSettings: (): void => {
+          router.pushUrl({ url: 'pages/Settings' }).catch((error: Error) => {
+            promptAction.showToast({ message: `打开设置页失败：${describeError(error)}` });
+          });
+        }
+      })
     }
     .width('100%')
     .padding({ top: SPACING.lg, bottom: SPACING.lg })

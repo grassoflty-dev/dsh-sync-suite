@@ -1630,6 +1630,14 @@ struct Settings {
   }
 
   private async runAction(action: string): Promise<void> {
+    // A 批（`docs/STATE-UI.md` §4.1）：LoadingState 的「取消」只停**等待**。
+    // 后台的 Git 调用可能仍在收尾，所以这里只复位忙态并如实说「已停止等待」——
+    // 绝不敢写「已取消 / 已成功」（那是假反馈），真正的结果稍后靠「查看状态」确认。
+    if (action === 'cancel-wait') {
+      this.syncBusy = false;
+      this.syncMessage = '已停止等待：后台可能仍在执行，稍后点「查看状态」确认结果';
+      return;
+    }
     if (!this.webReady) {
       this.syncMessage = '同步内核尚未就绪，请稍候再试（隐藏 Web 环境仍在加载）';
       return;
@@ -2151,6 +2159,7 @@ struct Settings {
       statusLine: this.statusLine,
       statusReadiness: this.statusReadiness(),
       lastSyncError: this.lastSyncError,
+      lastSyncAction: this.lastSyncAction,
       saveHint: this.saveHint,
       issuesSummary: this.issuesSummary,
       includeOtherDevices: this.includeOtherDevices,
@@ -2370,6 +2379,11 @@ struct Settings {
       },
       onCancel: (): void => {
         this.handleCancelImport();
+      },
+      // A 批：loading 里的「取消」只停止等待（≠ 取消导入）。文件可能已经写出一部分，
+      // 所以文案是「已停止等待」而不是「已取消」——不假装回滚。
+      onCancelWait: (): void => {
+        this.exportImport = withPanelMessage(this.exportImport, '已停止等待：文件可能已写出一部分', false);
       },
       onCopyPath: (): void => {
         this.handleCopyPath();

@@ -16,6 +16,7 @@
  * - 非法输入**不抛异常**（返回 `ok:false` / `invalid` / 兜底值）；
  *   只有「导出区间非法 / 缺 deviceId」这类**调用方编程错误**才抛中文 Error（区间必须先过 `parseDateRange`）。
  */
+import { localDateKey } from '../common/date';
 import { formatDateKey, monthGrid, parseDateKey } from './calendar';
 import { encodeRecord, recordDateKey, sortRecords } from './jsonl';
 import type { Attachment, ScheduleRecord } from './types';
@@ -1180,6 +1181,20 @@ export function copyExportImportState(source: ExportImportState): ExportImportSt
     busy: source.busy
   };
   return copy;
+}
+
+/**
+ * 本地「今天」的日期键 `YYYY-MM-DD`（本机时区）。
+ *
+ * 为什么放在模型层：面板的空态要给一个「填今天」的动作，但 `components/**` 是纯展示组件——
+ * 在里面散落 `new Date()` 会让「今天」这件事无法单测、也容易各处口径不一。
+ * 这里复用 `common/date.ts` 的 `localDateKey()`（同一个函数生成 `devices/<id>/schedules/<date>.jsonl`
+ * 的目录名），所以「填今天」填出来的日期一定落在本机当天的文件上。
+ *
+ * 纯函数：只看入参（`now` 缺省取当前时间），不读全局状态；非法 `Date` 由 `localDateKey` 自身容错。
+ */
+export function todayText(now: Date = new Date()): string {
+  return localDateKey(now);
 }
 
 /** 把 dry-run 计划写进展示状态（返回**新对象**，不改入参）。 */

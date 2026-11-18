@@ -63,6 +63,84 @@ function labelledTexts(chrome) {
   });
 }
 
+/**
+ * `topBar` 两行分支的行分配定版（2026-11-18）：第一行 7 个工具、第二行「分页组 + 完成」。
+ *
+ * 高频项（笔迹 / 橡皮 / 撤销）**必须在第一行**：它们是写字时每几秒就要按一次的键，
+ * 落到第二行等于多一次眼手定位；第二行只放低频的翻页与「完成」。
+ */
+const TWO_ROW_ORDER = {
+  first: ['CELL_EXIT', 'CELL_INK', 'CELL_ERASER', 'CELL_SELECT', 'CELL_INSERT', 'CELL_UNDO', 'CELL_REDO'],
+  second: ['CELL_FINISH']
+};
+
+/** 只取 `topBar` 的**两行分支**（`} else {` 之前），按 `Row({ space: this.controlGap() })` 切成行区间。 */
+function twoRowSegments(body) {
+  const twoRows = body.split('} else {')[0];
+  return twoRows.split('Row({ space: this.controlGap() })').slice(1);
+}
+
+/** 某段源码里按出现顺序取出的单元格 id（`this.buttonCell(CELL_XXX, …)`）。 */
+function cellIdsOf(segment) {
+  return [...(segment ?? '').matchAll(/this\.buttonCell\((CELL_[A-Z]+)/g)].map((m) => m[1]);
+}
+
+/**
+ * 「两行分支第一行含高频三项 + 9 项不重复」的判定函数。
+ *
+ * 纯函数（不碰源码文件），因此可以被**反向自测**喂进坏样本，证明断言不是空转。
+ * 返回 problems 数组：空数组 = 通过。
+ */
+function highFrequencyProblems(body) {
+  const rows = twoRowSegments(body);
+  const first = rows[0] ?? '';
+  const second = rows[1] ?? '';
+  const problems = [];
+  const count = (hay, token) => hay.split(token).length - 1;
+  const cell = (id) => `this.buttonCell(${id},`;
+
+  // 1) 行结构：两行分支必须正好两个 Row（一个 Row 装不下 9 项，三个 Row 说明又有人拆散）
+  if (rows.length !== 2) problems.push(`两行分支必须正好两个 Row，实际 ${rows.length}`);
+
+  // 2) 第一行 = 7 个工具单元格，顺序与定版逐项一致（含三项高频）
+  const gotFirst = cellIdsOf(first);
+  if (gotFirst.join('/') !== TWO_ROW_ORDER.first.join('/')) {
+    problems.push(`第一行应为 ${TWO_ROW_ORDER.first.join('/')}，实际 ${gotFirst.join('/') || '(空)'}`);
+  }
+
+  // 3) 第二行 = 只有「完成」一个单元格，且排在分页组之后（分页组是 @Builder，不计入 buttonCell）
+  const gotSecond = cellIdsOf(second);
+  if (gotSecond.join('/') !== TWO_ROW_ORDER.second.join('/')) {
+    problems.push(`第二行只允许 ${TWO_ROW_ORDER.second.join('/')}，实际 ${gotSecond.join('/') || '(空)'}`);
+  }
+  const stepAt = second.indexOf('this.pageStepper()');
+  const finishAt = second.indexOf(cell('CELL_FINISH'));
+  if (stepAt < 0) problems.push('第二行必须有分页组 this.pageStepper()');
+  if (finishAt < 0) problems.push('第二行必须有「完成」');
+  if (stepAt >= 0 && finishAt >= 0 && finishAt < stepAt) problems.push('「完成」必须在分页组之后');
+
+  // 4) 高频三项：第一行各恰好 1 次，第二行 0 次（不许挪下去，也不许两行各放一份）
+  for (const [label, id] of [['笔迹', 'CELL_INK'], ['橡皮', 'CELL_ERASER'], ['撤销', 'CELL_UNDO']]) {
+    const inFirst = count(first, cell(id));
+    const inSecond = count(second, cell(id));
+    if (inFirst !== 1) problems.push(`第一行「${label}」必须恰好 1 次，实际 ${inFirst}`);
+    if (inSecond !== 0) problems.push(`第二行不得有「${label}」（高频项必须在第一行），实际 ${inSecond}`);
+  }
+
+  // 5) 两行分支里 9 项总出现次数不变：每个标识恰好 1 次、合计 9（防有人在两行里多塞/漏放一份）
+  const all = first + second;
+  const nine = [...TWO_ROW_ORDER.first, ...TWO_ROW_ORDER.second, 'pageStepper'];
+  let total = 0;
+  for (const token of nine) {
+    const n = count(all, token === 'pageStepper' ? 'this.pageStepper()' : cell(token));
+    if (n !== 1) problems.push(`两行分支里 ${token} 必须恰好 1 次（9 项各一份），实际 ${n}`);
+    total += n;
+  }
+  if (total !== 9) problems.push(`两行分支里 9 个控件的总出现次数必须是 9，实际 ${total}`);
+
+  return problems;
+}
+
 describe('手写板工具条：宽度自适应与不截断', () => {
   test('尺寸下限：完成 ≥64 / 分页每半 ≥44 / 页码格 ≥64 / 菜单项 ≥140 / 行高 44 / chip 40', () => {
     const read = (name) => Number(new RegExp(`const ${name}: number = (\\d+(?:\\.\\d+)?);`).exec(code)?.[1]);
@@ -1077,6 +1155,50 @@ describe('缺陷 3：竖屏工具条 9 项一屏排完 / 极窄屏两行折行�
     for (const gone of ['railExitButton', 'railBrushButton', 'railToolButton', 'railHistoryButton', 'railFinishButton']) {
       assert.equal(new RegExp(gone).test(code), false, `不得再有 ${gone}`);
     }
+  });
+
+  test('两行分支第一行必须含高频三项（笔迹/橡皮/撤销），第二行只放分页组 + 完成', () => {
+    const bar = builderBody('topBar');
+    const problems = highFrequencyProblems(bar);
+    assert.deepEqual(problems, [], `两行分支行分配不对：${problems.join('；')}`);
+
+    // 第一行控件原样清单（源码顺序，带 `CELL_*` id）：钉住 7 项 + 三项高频在第一行
+    const rows = twoRowSegments(bar);
+    assert.equal(rows.length, 2, '两行分支必须恰好两个 Row');
+    assert.deepEqual(
+      cellIdsOf(rows[0]),
+      ['CELL_EXIT', 'CELL_INK', 'CELL_ERASER', 'CELL_SELECT', 'CELL_INSERT', 'CELL_UNDO', 'CELL_REDO'],
+      '两行分支第一行 = 退出/笔迹/橡皮/手动框/插入/撤销/重做（高频三项必须在这一行）'
+    );
+    // 第二行只有「完成」（分页组是 @Builder，不在 buttonCell 计数里）
+    assert.deepEqual(cellIdsOf(rows[1]), ['CELL_FINISH'], '两行分支第二行只允许「完成」');
+    assert.equal(cellIdsOf(rows[0]).length + cellIdsOf(rows[1]).length, 8, '两行分支 buttonCell 总数 = 7 + 1 = 8');
+
+    // —— 反向自测：判定函数不是空转（用 `.replace()` 造坏样本）——
+    const [twoRows, oneRow] = bar.split('} else {');
+    const undoLine = 'this.buttonCell(CELL_UNDO, LAYOUT_PORTRAIT, 0)';
+    assert.equal(twoRows.split(undoLine).length - 1, 1, '前置条件：两行分支里撤销只出现一处');
+
+    // (a) 把第一行的撤销整行删掉 → 必须判红
+    const deleted = twoRows.replace(undoLine, '') + '} else {' + oneRow;
+    const deletedProblems = highFrequencyProblems(deleted);
+    assert.notDeepEqual(deletedProblems, [], '反向自测失败：删掉第一行的撤销后仍判绿（断言在空转）');
+    assert.ok(
+      deletedProblems.some((p) => p.includes('「撤销」')) && deletedProblems.some((p) => p.includes('第一行应为')),
+      `反向自测必须点名撤销：${deletedProblems.join('；')}`
+    );
+
+    // (b) 把撤销从第一行挪到第二行（最可能发生的退化：不是消失，而是被「优化」下去）→ 也必须判红
+    const moved = twoRows
+      .replace(undoLine, '')
+      .replace('this.pageStepper()', `this.pageStepper()\n          ${undoLine}`);
+    const movedProblems = highFrequencyProblems(moved);
+    assert.ok(
+      movedProblems.some((p) => p.includes('第二行不得有「撤销」')),
+      `反向自测失败：撤销被挪到第二行后没被抓到（${movedProblems.join('；')}）`
+    );
+    // 挪动不改变 9 项总数 ⇒ 只能靠「行分配」抓住它，正是这条断言存在的理由
+    assert.equal(movedProblems.some((p) => p.includes('总出现次数')), false, '挪动不应改变 9 项总数（否则测的是计数不是行分配）');
   });
 });
 

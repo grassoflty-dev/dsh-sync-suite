@@ -11,7 +11,18 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
-const { isIpv6Literal, normalizeRemoteUrl, routeToRemote } = await import('../.build/model/remoteUrl.js');
+const {
+  isIpv6Literal,
+  normalizeRemoteUrl,
+  routeToRemote,
+  parseRemoteInput,
+  mergeRemoteToken,
+  encodeLastOk,
+  decodeLastOk,
+  canReconnect,
+  reconnectLabel,
+  sanitizeUrlForDisplay
+} = await import('../.build/model/remoteUrl.js');
 
 /** 断言「拒绝」：ok=false、url 为空串、reason 逐字匹配。 */
 function assertRejected(raw, reason) {
@@ -213,6 +224,16 @@ describe('normalizeRemoteUrl：hasToken 判定', () => {
   test('?token= 空值也算「有这个参数」（有效性由 DSH 判断）', () => {
     assert.equal(normalizeRemoteUrl('192.168.1.6:3080/?token=').hasToken, true);
   });
+
+  // 与插件侧同源：`src/remote/routes.ts` 的令牌门同时接受 `?token=` 与 `?k=`（评审 M4 让两者等价），
+  // App 侧只认 token 会把用户从插件复制来的 `?k=` 地址误判成「未包含 token」。
+  test('?k= 与 ?K= 也必须有 token（与服务端令牌门同源）', () => {
+    assert.equal(normalizeRemoteUrl('192.168.1.6:3080/?k=abc').hasToken, true);
+    assert.equal(normalizeRemoteUrl('192.168.1.6:3080/?K=abc').hasToken, true);
+    assert.equal(normalizeRemoteUrl('192.168.1.6:3080/?a=1&k=abc').hasToken, true);
+    assert.equal(normalizeRemoteUrl('192.168.1.6:3080/#/ui?k=abc').hasToken, false, 'fragment 里的 k 仍不算 query');
+    assert.equal(normalizeRemoteUrl('192.168.1.6:3080/?kay=1').hasToken, false, '相似键名 k 开头的不能误判');
+  });
 });
 
 describe('normalizeRemoteUrl：幂等与路由常量', () => {
@@ -228,5 +249,316 @@ describe('normalizeRemoteUrl：幂等与路由常量', () => {
   test('routeToRemote() 恒为 pages/RemoteControl（设置页跳转的唯一定义）', () => {
     assert.equal(routeToRemote(), 'pages/RemoteControl');
     assert.equal(routeToRemote(), routeToRemote());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 本轮新增：粘贴即用（地址 / 令牌混输）+ 一键重连判定模型。
+//
+// 这两块都是**纯函数**：不读偏好文件、不发网络请求、不碰 UI。测试只断言返回的
+// 结构化字段，因此 UI 接入方（设置页 / 远程控制页）可以按这里的口径写文案与状态机。
+// ---------------------------------------------------------------------------
+
+describe('parseRemoteInput：四类输入（url / token / empty / invalid）', () => {
+  test('整条 URL（带 token）：kind=url，url 用 normalizeRemoteUrl 的结果，token 抽出', () => {
+    const result = parseRemoteInput('http://192.168.1.6:3080/?token=abc');
+    assert.equal(result.ok, true);
+    assert.equal(result.kind, 'url');
+    assert.equal(result.url, 'http://192.168.1.6:3080/?token=abc');
+    assert.equal(result.token, 'abc');
+    assert.equal(result.reason, '');
+    assert.equal(result.hadScheme, true);
+  });
+
+  test('整条 URL（不带 token）：kind=url，token 空串', () => {
+    const result = parseRemoteInput('https://dsh.local/ui');
+    assert.equal(result.ok, true);
+    assert.equal(result.kind, 'url');
+    assert.equal(result.url, 'https://dsh.local/ui');
+    assert.equal(result.token, '');
+    assert.equal(result.hadScheme, true);
+  });
+
+  test('host:port：与整条 URL 走同一条路（补 http://、hadScheme=false、token 空）', () => {
+    const result = parseRemoteInput('192.168.1.6:3080');
+    assert.equal(result.ok, true);
+    assert.equal(result.kind, 'url');
+    assert.equal(result.url, 'http://192.168.1.6:3080');
+    assert.equal(result.token, '');
+    assert.equal(result.hadScheme, false);
+  });
+
+  test('`?k=` / `k=` / `token=` / `?k=…&…` 都识别为纯令牌片段（url 为空串）', () => {
+    for (const raw of ['?k=abc', 'k=abc', 'token=abc', '?token=abc&x=1', '?K=abc', 'TOKEN=abc']) {
+      const result = parseRemoteInput(raw);
+      assert.equal(result.ok, true, `应识别为令牌：${raw}`);
+      assert.equal(result.kind, 'token', `类别错误：${raw}`);
+      assert.equal(result.token, 'abc', `令牌值错误：${raw}`);
+      assert.equal(result.url, '', '令牌片段的 url 必须为空串（由调用方合并到已填地址）');
+      assert.equal(result.reason, '');
+      assert.equal(result.hadScheme, false);
+    }
+  });
+
+  test('空串与纯空白：kind=empty，文案与 normalizeRemoteUrl 一致', () => {
+    for (const raw of ['', '   ', '\t\n', '\u3000']) {
+      const result = parseRemoteInput(raw);
+      assert.equal(result.ok, false);
+      assert.equal(result.kind, 'empty');
+      assert.equal(result.reason, REASON_EMPTY);
+      assert.equal(result.url, '');
+      assert.equal(result.token, '');
+      assert.equal(result.hadScheme, false);
+    }
+  });
+
+  test('非法输入：file:// / javascript: / 带空格 / 只有 http:// → kind=invalid 且沿用中文原因', () => {
+    assert.equal(parseRemoteInput('file://x').kind, 'invalid');
+    assert.equal(parseRemoteInput('file://x').reason, REASON_SCHEME);
+    assert.equal(parseRemoteInput('javascript://x').reason, REASON_SCHEME);
+    // 没写 `://` 的 `javascript:alert(1)` 会被当成「host:端口」→ 端口不是数字
+    assert.equal(parseRemoteInput('javascript:alert(1)').kind, 'invalid');
+    assert.equal(parseRemoteInput('javascript:alert(1)').reason, REASON_INCOMPLETE);
+    assert.equal(parseRemoteInput('192.168.1.6 :3080').reason, REASON_SPACE);
+    assert.equal(parseRemoteInput('http://').reason, REASON_INCOMPLETE);
+    assert.equal(parseRemoteInput('http://user:pass@192.168.1.6:3080').reason, REASON_INCOMPLETE);
+    for (const raw of ['file://x', 'javascript://x', 'http://', '192.168.1.6 :3080']) {
+      const result = parseRemoteInput(raw);
+      assert.equal(result.ok, false, `应拒绝：${raw}`);
+      assert.equal(result.url, '', '非法时 url 必须为空串（fail-closed）');
+      assert.equal(result.token, '', '非法时 token 必须为空串');
+    }
+  });
+
+  test('抽不出令牌值的令牌片段：按 invalid 处理（不返回空令牌）', () => {
+    for (const raw of ['?', 'token=', 'k=', '?token=&x=1']) {
+      const result = parseRemoteInput(raw);
+      assert.equal(result.ok, false, `应拒绝：${raw}`);
+      assert.equal(result.kind, 'invalid', `类别错误：${raw}`);
+      assert.equal(result.token, '');
+      assert.notEqual(result.reason, '');
+    }
+  });
+
+  test('IPv6 方括号地址原样透传（不因粘贴层再加一套规则）', () => {
+    const result = parseRemoteInput('[::1]:3080/?k=x');
+    assert.equal(result.ok, true);
+    assert.equal(result.kind, 'url');
+    assert.equal(result.url, 'http://[::1]:3080/?k=x');
+    assert.equal(result.token, 'x');
+    assert.equal(result.hadScheme, false);
+  });
+});
+
+describe('parseRemoteInput：token 抽取口径', () => {
+  test('`token` 与 `k` 两种键都能抽（含键名大小写）', () => {
+    assert.equal(parseRemoteInput('http://a:1/?token=aaa').token, 'aaa');
+    assert.equal(parseRemoteInput('http://a:1/?k=bbb').token, 'bbb');
+    assert.equal(parseRemoteInput('http://a:1/?TOKEN=ccc').token, 'ccc');
+    assert.equal(parseRemoteInput('http://a:1/?K=ddd').token, 'ddd');
+  });
+
+  test('同时出现两个键：取第一个并保持 ok=true', () => {
+    const first = parseRemoteInput('http://a:1/?token=aaa&k=bbb');
+    assert.equal(first.ok, true);
+    assert.equal(first.kind, 'url');
+    assert.equal(first.token, 'aaa');
+    const second = parseRemoteInput('http://a:1/?k=bbb&token=aaa');
+    assert.equal(second.ok, true);
+    assert.equal(second.token, 'bbb');
+  });
+
+  test('空值不算令牌：`?token=&k=abc` 取到 abc', () => {
+    assert.equal(parseRemoteInput('http://a:1/?token=&k=abc').token, 'abc');
+  });
+
+  test('percent 编码能解；非法转义原样保留（不整条作废）', () => {
+    assert.equal(parseRemoteInput('?k=a%2Fb').token, 'a/b');
+    assert.equal(parseRemoteInput('http://a:1/?token=a%20b%2Bc').token, 'a b+c');
+    assert.equal(parseRemoteInput('http://a:1/?token=abc%ZZ').token, 'abc%ZZ');
+  });
+
+  test('相似键名不误抽：access_token / notoken / fragment 里的 token', () => {
+    assert.equal(parseRemoteInput('http://a:1/?access_token=1').token, '');
+    assert.equal(parseRemoteInput('http://a:1/?notoken=1').token, '');
+    assert.equal(parseRemoteInput('http://a:1/#/ui?token=abc').token, '');
+  });
+});
+
+describe('mergeRemoteToken：把粘贴的令牌合到已填地址', () => {
+  test('地址还没 query：追加 ?token=…', () => {
+    assert.equal(mergeRemoteToken('192.168.1.6:3080', 'abc'), 'http://192.168.1.6:3080?token=abc');
+    assert.equal(mergeRemoteToken('http://192.168.1.6:3080/', 'abc'), 'http://192.168.1.6:3080/?token=abc');
+  });
+
+  test('已有旧令牌：就地替换，其它参数保持原顺序', () => {
+    assert.equal(
+      mergeRemoteToken('http://a:1/?token=old&x=1', 'new'),
+      'http://a:1/?token=new&x=1'
+    );
+    assert.equal(mergeRemoteToken('http://a:1/?x=1&k=old', 'new'), 'http://a:1/?x=1&k=new');
+  });
+
+  test('重复令牌参数只留一个（避免服务端取到旧值）', () => {
+    assert.equal(mergeRemoteToken('http://a:1/?token=old&k=old2&x=1', 'new'), 'http://a:1/?token=new&x=1');
+  });
+
+  test('空令牌 = 只把地址归一；地址非法 = 空串（fail-closed）', () => {
+    assert.equal(mergeRemoteToken('192.168.1.6:3080', ''), 'http://192.168.1.6:3080');
+    assert.equal(mergeRemoteToken('192.168.1.6:3080', '   '), 'http://192.168.1.6:3080');
+    assert.equal(mergeRemoteToken('file://x', 'abc'), '');
+    assert.equal(mergeRemoteToken('http://', 'abc'), '');
+  });
+
+  test('令牌值写入时做 percent 编码（与 parseRemoteInput 的解码往返一致）', () => {
+    const merged = mergeRemoteToken('http://a:1/', 'a b+c/d');
+    assert.equal(merged, 'http://a:1/?token=a%20b%2Bc%2Fd');
+    assert.equal(parseRemoteInput(merged).token, 'a b+c/d');
+  });
+
+  test('fragment 保留在最后', () => {
+    assert.equal(mergeRemoteToken('http://a:1/?x=1#/ui', 'new'), 'http://a:1/?x=1&token=new#/ui');
+  });
+});
+
+describe('encodeLastOk / decodeLastOk：单行 JSON 与脏数据容忍', () => {
+  const ENTRY = { url: 'http://192.168.1.6:3080/?token=abc', at: 1732000000000 };
+
+  test('encode 就是单行 JSON（字段顺序固定）', () => {
+    assert.equal(encodeLastOk(ENTRY), '{"url":"http://192.168.1.6:3080/?token=abc","at":1732000000000}');
+  });
+
+  test('往返幂等：decode(encode(x)) 等于 x，再 encode 逐字相同', () => {
+    const decoded = decodeLastOk(encodeLastOk(ENTRY));
+    assert.deepEqual(decoded, ENTRY);
+    assert.equal(encodeLastOk(decoded), encodeLastOk(ENTRY));
+  });
+
+  test('脏数据一律 null 且不抛（空串 / {} / null / url 空 / at 非数字 / 非 JSON / 数组 / 缺字段）', () => {
+    for (const raw of [
+      '',
+      '   ',
+      '{}',
+      'null',
+      '[]',
+      'not json',
+      '{"url":"","at":1}',
+      '{"url":"   ","at":1}',
+      '{"url":"http://a:1/","at":"x"}',
+      '{"url":"http://a:1/","at":null}',
+      '{"url":"http://a:1/"}',
+      '{"at":1}',
+      '{"url":1,"at":1}',
+      '{"url":"http://a:1/","at":1'
+    ]) {
+      assert.equal(decodeLastOk(raw), null, `应判脏数据：${JSON.stringify(raw)}`);
+    }
+  });
+
+  test('非字符串输入也不抛（偏好文件读出来可能是 undefined）', () => {
+    assert.equal(decodeLastOk(undefined), null);
+    assert.equal(decodeLastOk(null), null);
+    assert.equal(decodeLastOk(123), null);
+  });
+
+  test('多余字段被忽略，只返回 url / at', () => {
+    const decoded = decodeLastOk('{"url":"http://a:1/","at":1,"way":"lan","x":true}');
+    assert.deepEqual(decoded, { url: 'http://a:1/', at: 1 });
+  });
+});
+
+describe('canReconnect：什么时候允许出「重新连接」', () => {
+  test('有合法记录 → true', () => {
+    assert.equal(canReconnect('{"url":"http://192.168.1.6:3080/?token=abc","at":1732000000000}'), true);
+    assert.equal(canReconnect('{"url":"[::1]:3080/","at":1732000000000}'), true);
+  });
+
+  test('记录里 url 非法 → false', () => {
+    assert.equal(canReconnect('{"url":"file://x","at":1}'), false);
+    assert.equal(canReconnect('{"url":"http://","at":1}'), false);
+    assert.equal(canReconnect('{"url":"http://a:1/ b","at":1}'), false);
+  });
+
+  test('空 / 脏数据 → false', () => {
+    assert.equal(canReconnect(''), false);
+    assert.equal(canReconnect('{}'), false);
+    assert.equal(canReconnect('null'), false);
+  });
+});
+
+describe('reconnectLabel：按钮文案（绝不回显令牌）', () => {
+  const NOW = 1732000000000;
+  const TOKEN_VALUE = 'S3CRET-token-value';
+
+  test('可重连 → `重新连接 <host:port>`，且不含令牌值', () => {
+    const label = reconnectLabel({ url: `http://192.168.1.6:3080/?token=${TOKEN_VALUE}`, at: NOW - 60_000 }, NOW);
+    assert.equal(label, '重新连接 192.168.1.6:3080');
+    assert.equal(label.includes(TOKEN_VALUE), false, '按钮文案绝不能回显令牌');
+    assert.equal(label.includes('token'), false, '按钮文案连键名都不该出现');
+  });
+
+  test('IPv6：authority 保留方括号，不含令牌', () => {
+    const label = reconnectLabel({ url: `http://[::1]:3080/dsh/ui?k=${TOKEN_VALUE}`, at: NOW }, NOW);
+    assert.equal(label, '重新连接 [::1]:3080');
+    assert.equal(label.includes(TOKEN_VALUE), false);
+  });
+
+  test('超过 7 天 → 文案仍给但加「（7 天前）」；正好 7 天不加', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    assert.equal(
+      reconnectLabel({ url: 'http://a:1/', at: NOW - 8 * DAY }, NOW),
+      '重新连接 a:1（7 天前）'
+    );
+    assert.equal(reconnectLabel({ url: 'http://a:1/', at: NOW - 7 * DAY }, NOW), '重新连接 a:1');
+    assert.equal(reconnectLabel({ url: 'http://a:1/', at: NOW - 1000 }, NOW), '重新连接 a:1');
+  });
+
+  test('无记录 / 记录地址非法 / now 与 at 非数字 → 空串或无后缀，不抛', () => {
+    assert.equal(reconnectLabel(null, NOW), '');
+    assert.equal(reconnectLabel({ url: 'file://x', at: NOW }, NOW), '');
+    assert.equal(reconnectLabel({ url: 'http://a:1/', at: NOW }, Number.NaN), '重新连接 a:1');
+    assert.equal(reconnectLabel({ url: 'http://a:1/', at: 0 }, NOW), '重新连接 a:1');
+  });
+});
+
+describe('sanitizeUrlForDisplay：展示/日志用地址打码', () => {
+  test('token 与 k 的值都打码，其余 query 原样保留', () => {
+    assert.equal(
+      sanitizeUrlForDisplay('http://192.168.1.6:3080/?token=secret&x=1'),
+      'http://192.168.1.6:3080/?token=***&x=1'
+    );
+    assert.equal(sanitizeUrlForDisplay('http://a:1/?k=s&b=2'), 'http://a:1/?k=***&b=2');
+    assert.equal(sanitizeUrlForDisplay('http://a:1/?k=s'), 'http://a:1/?k=***');
+  });
+
+  test('键名大小写与顺序保留，多个令牌参数全部打码', () => {
+    assert.equal(sanitizeUrlForDisplay('http://a:1/?TOKEN=s'), 'http://a:1/?TOKEN=***');
+    assert.equal(
+      sanitizeUrlForDisplay('http://a:1/?a=1&token=s1&k=s2&z=9'),
+      'http://a:1/?a=1&token=***&k=***&z=9'
+    );
+  });
+
+  test('无令牌时原样返回（可读可复制）；空输入返回空串', () => {
+    assert.equal(sanitizeUrlForDisplay('http://a:1/?x=1'), 'http://a:1/?x=1');
+    assert.equal(sanitizeUrlForDisplay('http://a:1/'), 'http://a:1/');
+    assert.equal(sanitizeUrlForDisplay('http://a:1/?access_token=1'), 'http://a:1/?access_token=1');
+    assert.equal(sanitizeUrlForDisplay(''), '');
+    assert.equal(sanitizeUrlForDisplay(undefined), '');
+  });
+
+  test('fragment 与路径不受影响；fragment 里的 token 不算 query（与 hasToken 同口径）', () => {
+    assert.equal(
+      sanitizeUrlForDisplay('http://a:1/dsh/ui?token=s#/ui'),
+      'http://a:1/dsh/ui?token=***#/ui'
+    );
+    assert.equal(sanitizeUrlForDisplay('http://a:1/#/ui?token=s'), 'http://a:1/#/ui?token=s');
+  });
+
+  test('打码结果里不含原始令牌值（回归断言）', () => {
+    const secret = 'S3CRET-token-value';
+    const shown = sanitizeUrlForDisplay(`http://192.168.1.6:3080/?token=${secret}&x=1`);
+    assert.equal(shown.includes(secret), false);
+    assert.equal(shown.includes('***'), true);
   });
 });

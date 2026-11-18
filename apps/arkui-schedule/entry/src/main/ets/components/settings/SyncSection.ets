@@ -14,19 +14,49 @@
  *   认证方式在组头「更多」弹层里（弹层仍在页面，见 `pages/Settings.ets`）；
  * - 隐藏的 Git 运行环境（1x1 全透明 Web）必须挂在本组内（`controller` 与页面是**同一个实例**，
  *   所以是普通成员而不是 `@Prop`：`@Prop` 会深拷贝，代理就注册到副本上了）。
+ *
+ * A 批（`docs/STATE-UI.md` §4/§5）：
+ * - 两个主按钮与三处文字入口统一换成 `ActionButton`（禁用也**可点**，点了给具体中文原因）；
+ * - 同步中 → `LoadingState`（>3s 出现「取消」，回调走 `runAction('cancel-wait')`，**不假装成功**）；
+ * - 没填仓库地址 → `EmptyState`（「去填仓库地址」），只占状态行位置，**不藏表单**；
+ * - `lastSyncError` 非空 → `ErrorState`（三段式 + 诊断四要素 + 重试）。
  */
 import { webview } from '@kit.ArkWeb';
+import { loadingText } from '../../common/copy';
+import { APP_VERSION } from '../../common/version';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../../common/uiTokens';
 import { AUTH_HTTPS, AUTH_SSH } from '../../model/settingsForm';
-import { DEFAULT_BRANCH } from '../../model/syncError';
+import { DEFAULT_BRANCH, canRetrySync, classifySyncError, redactSecrets } from '../../model/syncError';
+import { formatDiagnostics } from '../../model/stateView';
+import type { DiagnosticsInput } from '../../model/stateView';
 import { repoUrlPlaceholderFor } from '../../model/gitAuth';
 import { tokenPlaceholderFor } from '../../model/gitAuth';
+import { ActionButton } from '../ActionButton';
+import { EmptyState } from '../state/EmptyState';
+import { ErrorState } from '../state/ErrorState';
+import { LoadingState } from '../state/LoadingState';
 import {
   ErrorText as ErrorTextBit,
   FieldLabel as FieldLabelBit,
   FieldNote as FieldNoteBit,
   HintLine as HintLineBit
 } from './SettingsBits';
+
+/** 同步内核（隐藏 Web）没就绪时的禁用原因（两个主按钮共用一句，避免各写一份）。 */
+const KERNEL_NOT_READY: string = '同步内核还没就绪，稍等或点重试';
+
+/** 上一次同步还没收尾时两个主按钮的原因。 */
+const PREVIOUS_SYNC_RUNNING: string = '上一次同步还没结束';
+
+/** 空态的标题 / 说明 / 动作（未配置仓库时占住「状态行」的位置）。 */
+const EMPTY_SYNC_TITLE: string = '还没有配置同步仓库';
+const EMPTY_SYNC_DETAIL: string = '填好仓库地址和 token 后，这里会显示同步状态';
+const EMPTY_SYNC_ACTION: string = '去填仓库地址';
+
+/** 错误态的三段式标题与两条「下一步」（可重试 / 只能先改配置）。 */
+const SYNC_ERROR_WHAT: string = '同步失败';
+const SYNC_ERROR_NEXT_RETRY: string = '点重试重新拉取；仍失败就到设置页检查仓库地址与 token';
+const SYNC_ERROR_NEXT_FIX: string = '先按上面的原因修正，再重试';
 
 @Component
 export struct SyncSection {
@@ -68,6 +98,8 @@ export struct SyncSection {
   /** `describePushReadiness(statusView())` 的结果（页面派生，空串 = 不显示）。 */
   @Prop statusReadiness: string = '';
   @Prop lastSyncError: string = '';
+  /** 上一次同步的动作（`pull` / `push` / `status`；空串 = 还没同步过）——错误态判断「能不能重试」用。 */
+  @Prop lastSyncAction: string = '';
   @Prop saveHint: string = '';
   /** 保存校验的问题汇总：只用于决定 `saveHint` 用红字还是灰字。 */
   @Prop issuesSummary: string = '';
@@ -146,16 +178,18 @@ export struct SyncSection {
         .fontColor($r('app.color.text_primary'))
         .layoutWeight(1)
         .textAlign(TextAlign.Start)
-      Text('更多')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.brand'))
-        .height(TOUCH_MIN)
-        .padding({ left: SPACING.md, right: SPACING.md })
-        .textAlign(TextAlign.Center)
-        .onClick(() => {
+      ActionButton({
+        label: '更多',
+        enabled: true,
+        disabledReason: '',
+        busy: false,
+        variant: 'ghost',
+        block: false,
+        onTap: (): void => {
           this.onOpenSyncMore();
-        })
+        },
+        onBlockedTap: null
+      })
     }
     .width('100%')
     .alignItems(VerticalAlign.Center)
@@ -242,6 +276,99 @@ export struct SyncSection {
     .alignItems(HorizontalAlign.Start)
   }
 
+  // ---------------------------------------------------------------- 三态判定 + 按钮可用性
+  //
+  // 这一组派生都放在组件里（只读 `@Prop` / 函数 props，不写状态、不发起动作）：
+  // 按钮的 `enabled` 与 `disabledReason` 必须来自**同一个**判定，否则会出现
+  // 「灰着但原因为空」或「原因在、按钮却能点」。
+
+  /** 「立即同步」可点吗（与拆分前的条件逐字等价：不忙 + 内核就绪 + 认证可用）。 */
+  private canPull(): boolean {
+    return !this.syncBusy && this.webReady && this.authBlocker().length === 0;
+  }
+
+  /**
+   * 「立即同步」不可用的具体原因（空串 = 可以点）。
+   *
+   * 优先级：内核未就绪 → 认证不可用（用页面给的原话）→ 上一次还没结束。
+   */
+  private pullBlockedReason(): string {
+    if (!this.webReady) {
+      return KERNEL_NOT_READY;
+    }
+    const blocker: string = this.authBlocker();
+    if (blocker.length > 0) {
+      return blocker;
+    }
+    if (this.syncBusy) {
+      return PREVIOUS_SYNC_RUNNING;
+    }
+    return '';
+  }
+
+  /** 「推送」可点吗（未就绪 / SSH / 无地址 / 分支非法 / 分叉都由 `pushBlockedReason()` 给出原因）。 */
+  private canPush(): boolean {
+    return !this.syncBusy && this.webReady && this.pushBlockedReason().length === 0;
+  }
+
+  /** 「推送」不可用的具体原因（空串 = 可以点）：原因优先用页面的 `pushBlockedReason()`。 */
+  private pushBlockedText(): string {
+    if (!this.webReady) {
+      return KERNEL_NOT_READY;
+    }
+    const blocked: string = this.pushBlockedReason();
+    if (blocked.length > 0) {
+      return blocked;
+    }
+    if (this.syncBusy) {
+      return PREVIOUS_SYNC_RUNNING;
+    }
+    return '';
+  }
+
+  /** 加载态的动作说明：页面在忙时把 `syncMessage` 写成「正在拉取…」，直接复用（空则不渲染该行）。 */
+  private loadingDetail(): string {
+    return this.syncMessage;
+  }
+
+  /** 未配置仓库且不在忙碌中（此时状态行位置让给空态）。 */
+  private showEmptyState(): boolean {
+    return !this.syncBusy && this.repoUrl.trim().length === 0;
+  }
+
+  /** 错误态「为什么」：先用分级结果（已脱敏）；分级给不出内容时退回原始错误行（同样脱敏）。 */
+  private errorReason(raw: string): string {
+    const detail: string = classifySyncError('', raw).detail.trim();
+    if (detail.length > 0) {
+      return redactSecrets(detail);
+    }
+    return redactSecrets(raw);
+  }
+
+  /** 错误态「下一步」：有可重放的动作就给「重试」，否则让用户先按原因修正。 */
+  private errorNext(): string {
+    if (canRetrySync(this.lastSyncAction, this.syncBusy)) {
+      return SYNC_ERROR_NEXT_RETRY;
+    }
+    return SYNC_ERROR_NEXT_FIX;
+  }
+
+  /**
+   * 诊断单行（`formatDiagnostics` 的产物）：版本 / 设备 / 错误码 / 时间四要素永远都在。
+   *
+   * 错误码取分级结果的 `kind`（`model/syncError.ts` 没有 `code` 字段，`kind` 就是它的分类键），
+   * 不另外编一个。
+   */
+  private errorDiagnostics(raw: string): string {
+    const input: DiagnosticsInput = {
+      version: APP_VERSION,
+      deviceId: this.deviceId,
+      errorCode: classifySyncError('', raw).kind,
+      timestamp: Date.now()
+    };
+    return formatDiagnostics(input);
+  }
+
   /** 同步组：仓库地址 / token / 分支（主表单三个控件）+「高级」折叠区 / 立即同步 + 1 行状态。 */
   build() {
     Column({ space: SPACING.md }) {
@@ -253,16 +380,18 @@ export struct SyncSection {
           .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.text_secondary'))
         Blank()
-        Text('?')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.brand'))
-          .width(TOUCH_MIN)
-          .height(TOUCH_MIN)
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
+        ActionButton({
+          label: '?',
+          enabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: 'ghost',
+          block: false,
+          onTap: (): void => {
             this.onOpenRepoHelp();
-          })
+          },
+          onBlockedTap: null
+        })
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
@@ -401,43 +530,73 @@ export struct SyncSection {
           .textAlign(TextAlign.Start)
       }
 
+      // ---- 加载态（`docs/STATE-UI.md` §5）：忙时在按钮区上方给进度 + 5s 后可取消 ----
+      if (this.syncBusy) {
+        LoadingState({
+          title: loadingText('同步'),
+          detail: this.loadingDetail(),
+          progress: -1,
+          compact: true,
+          onCancel: (): void => {
+            // 只停「等待」，不假装同步已结束（后台可能仍在跑，页面只写「已停止等待」）
+            this.runAction('cancel-wait');
+          }
+        })
+      }
+
       Row({ space: SPACING.md }) {
-        Button(this.syncBusy ? '同步中…' : '立即同步')
-          .height(TOUCH_MIN + SPACING.sm)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.brand_soft'))
-          .fontColor($r('app.color.brand'))
-          .borderRadius(RADIUS.sm)
-          // 闪退回归：桥未就绪时禁用（原因显示在右侧状态行），避免未就绪就发起同步
-          .enabled(!this.syncBusy && this.webReady && this.authBlocker().length === 0)
-          .onClick(() => {
+        // 「立即同步」（= pull）：未就绪 / 认证不可用 / 忙碌时**仍可点**，点了给具体原因
+        ActionButton({
+          label: '立即同步',
+          enabled: this.canPull(),
+          disabledReason: this.pullBlockedReason(),
+          busy: this.syncBusy,
+          variant: 'secondary',
+          block: false,
+          onTap: (): void => {
             this.runAction('pull');
-          })
-        // 手动推送（A2 第 3 条）：未就绪 / SSH / 无地址 / 分支非法时禁用并给出原因
-        Button('推送')
-          .height(TOUCH_MIN + SPACING.sm)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.brand_soft'))
-          .fontColor($r('app.color.brand'))
-          .borderRadius(RADIUS.sm)
-          .enabled(!this.syncBusy && this.webReady && this.pushBlockedReason().length === 0)
-          .onClick(() => {
+          },
+          onBlockedTap: null
+        })
+        // 手动推送（A2 第 3 条）：未就绪 / SSH / 无地址 / 分支非法时给出原因
+        ActionButton({
+          label: '推送',
+          enabled: this.canPush(),
+          disabledReason: this.pushBlockedText(),
+          busy: this.syncBusy,
+          variant: 'secondary',
+          block: false,
+          onTap: (): void => {
             this.runAction('push');
-          })
+          },
+          onBlockedTap: null
+        })
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      // 状态行位置：未配置仓库 → 空态（给出「去填仓库地址」这一步），否则显示最近一次结果
+      // （状态行本身不再可点：它要保留 caption 字号与失败红字，重复入口统一走组头「更多」）
+      if (this.showEmptyState()) {
+        EmptyState({
+          title: EMPTY_SYNC_TITLE,
+          detail: EMPTY_SYNC_DETAIL,
+          actionLabel: EMPTY_SYNC_ACTION,
+          compact: true,
+          onAction: (): void => {
+            this.onOpenSyncMore();
+          }
+        })
+      } else {
         Text(this.syncMessage)
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)
           .fontColor(this.syncMessage.startsWith('❌') ? $r('app.color.danger') : $r('app.color.text_secondary'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
+          .width('100%')
           .textAlign(TextAlign.Start)
-          .onClick(() => {
-            this.onOpenSyncMore();
-          })
       }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
 
       // 推送被禁用的具体原因（未就绪/SSH/无地址/分支非法），避免「按钮灰着不知道为什么」
       if (this.pushBlockedReason().length > 0) {
@@ -477,15 +636,19 @@ export struct SyncSection {
       .height(TOUCH_MIN + SPACING.sm)
       .alignItems(VerticalAlign.Center)
 
+      // 错误态（`docs/STATE-UI.md` §4.3）：发生了什么 / 为什么 / 下一步 + 可复制诊断 + 重试
       if (this.lastSyncError.length > 0) {
-        Text(`上次错误：${this.lastSyncError}`)
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.danger'))
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-          .textAlign(TextAlign.Start)
+        ErrorState({
+          what: SYNC_ERROR_WHAT,
+          why: this.errorReason(this.lastSyncError),
+          next: this.errorNext(),
+          diagnostics: this.errorDiagnostics(this.lastSyncError),
+          compact: false,
+          onRetry: (): void => {
+            this.runAction('pull');
+          },
+          onOpenSettings: null
+        })
       }
 
       if (this.saveHint.length > 0) {

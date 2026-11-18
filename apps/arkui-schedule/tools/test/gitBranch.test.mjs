@@ -474,9 +474,11 @@ describe('设置页接线（源码级）：分支输入、推送按钮、同步�
   });
 
   test('手动推送按钮：按 pushBlockedReason 禁用，且给出禁用原因', () => {
-    assert.match(PAGE, /Button\('推送'\)/, '同步组要有手动推送按钮');
+    // A 批（交互一致性）：按钮统一换成 `ActionButton`（禁用也可点、点了给原因），
+    // 不再是裸 `Button('推送')` + `.enabled(...)`。断言改为盯 ActionButton 的字段。
+    assert.match(PAGE, /label: '推送'/, '同步组要有手动推送按钮');
     assert.match(PAGE, /this\.runAction\('push'\);/, '点推送要触发 push 动作');
-    assert.match(PAGE, /\.enabled\(!this\.syncBusy && this\.webReady && this\.pushBlockedReason\(\)\.length === 0\)/);
+    assert.match(PAGE, /enabled: this\.canPush\(\)/, '推送可用性必须走 canPush()（未就绪/SSH/无地址/分支非法都算阻塞）');
     assert.match(PAGE, /推送不可用：\$\{this\.pushBlockedReason\(\)\}/, '禁用时要写原因');
   });
 

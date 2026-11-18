@@ -5,6 +5,10 @@
  * - `buildAiRequest` 只负责拼 URL 与 JSON 请求体（`model` + `messages` + 采样参数），不发网络请求；
  * - `AiOptions`（`temperature` / `maxTokens` / `timeoutMs` / `retries`）默认 **0.7 / 1024 / 30000 / 1**，
  *   逐字段校验：类型不对或超范围回落默认/夹到边界，绝不把 NaN 写进请求体；
+ * - `clampAiTimeout` 是「整体超时」的**有效值**归一（发请求前调用）：下限 = `AI_CONNECT_TIMEOUT_MS`
+ *   （20s）+ 1000，上限 = `AI_MAX_TIMEOUT_MS`。为什么下限不是 1s：整体超时和连接超时都是
+ *   `Promise.race` 的竞争者，整体超时若 ≤ 连接超时，底层的 `connectTimeout` 永远等不到自己的 20s；
+ *   读超时 `AI_READ_TIMEOUT_MS`（120s）同理，只有整体超时 > 120s 时才可达；
  * - `classifyAiError` 把 HTTP 状态/网络异常映射成**中文**文案（页面直接展示）；源名由调用方
  *   经 `providerLabel` 传入，缺省「AI 服务」——本模块不认识任何具体服务商；
  * - `shouldRetry` 只对「网络错误 / 429 / 5xx」放行重试（超时不重试，避免用户白等两倍时间）；
@@ -37,8 +41,40 @@ export const AI_DEFAULT_RETRIES: number = 1;
 /** 参数允许范围（防止手填出离谱值）。 */
 export const AI_MIN_TEMPERATURE: number = 0;
 export const AI_MAX_TEMPERATURE: number = 2;
+/** 用户手填超时的下限（设置页输入夹取用）；**不是**真正发请求时的有效下限，后者见 `clampAiTimeout`。 */
 export const AI_MIN_TIMEOUT_MS: number = 1000;
 export const AI_MAX_TIMEOUT_MS: number = 180000;
+
+/**
+ * 单次 AI 请求的**连接超时**（毫秒）：建连（TCP + TLS）最多等 20 秒。
+ *
+ * 这个数值原来写死在 `services/deepseek.ets`（`const CONNECT_TIMEOUT_MS = 20000`）。上移到模型层
+ * 是因为「整体超时必须 ≥ 连接超时 + 1s」这条隐含依赖需要一个纯函数来保证（`clampAiTimeout`），
+ * 而纯函数只能引用模型层常量。**services 层必须 import 这一个常量，禁止再写一份**：
+ * 两处各写一份就一定会出现「改了一处、另一处没改」。
+ */
+export const AI_CONNECT_TIMEOUT_MS: number = 20000;
+
+/**
+ * 单次 AI 请求的**读超时**（毫秒）：连上之后等第一个字节最多 120 秒。
+ *
+ * 与 `AI_CONNECT_TIMEOUT_MS` 同理上移到模型层（同一份来源）。注意它与整体超时的关系：
+ * 整体超时（`AiRequest.timeoutMs`，默认 30 秒）是 `Promise.race` 的一条分支，**谁先到谁生效**，
+ * 所以 120 秒这个读超时只有在用户把整体超时调到 120 秒以上时才可能真的触发；
+ * 默认 30 秒下先到的一定是整体超时（这一句写在这里，省得下次又把它当成「120 秒的兜底」）。
+ */
+export const AI_READ_TIMEOUT_MS: number = 120000;
+
+/**
+ * 整体超时的**有效下限**（毫秒）= 连接超时 + 1 秒。
+ *
+ * 为什么不能低于「连接超时 + 1s」：整体超时是 `services/deepseek.ets` 里
+ * `Promise.race([httpRequest.request(...), timeoutPromise])` 的一条分支，谁先到谁生效。
+ * 若整体超时 ≤ 连接超时（例如用户把超时填成 5 秒，而连接超时是 20 秒），`race` 必然先 reject →
+ * 底层 `connectTimeout` 永远等不到自己的 20 秒，这个配置项形同虚设，用户也分不清
+ * 「连不上」和「连上了但不回包」。留 1 秒是给「连上之后第一个字节」的最小余量。
+ */
+export const AI_MIN_TOTAL_TIMEOUT_MS: number = AI_CONNECT_TIMEOUT_MS + 1000;
 export const AI_MIN_MAX_TOKENS: number = 1;
 export const AI_MAX_MAX_TOKENS: number = 32000;
 export const AI_MIN_RETRIES: number = 0;
@@ -238,6 +274,34 @@ function clampNumber(value: number, min: number, max: number, fallback: number):
   }
   if (value > max) {
     return max;
+  }
+  return value;
+}
+
+/**
+ * 归一「整体超时」（毫秒）：非法/未设 → 默认 30 秒；低于 `AI_MIN_TOTAL_TIMEOUT_MS` → 抬到该下限；
+ * 高于 `AI_MAX_TIMEOUT_MS` → 夹到上限。
+ *
+ * 为什么单独一个函数（而不是塞进 `normalizeAiOptions`）：解析层（`normalizeAiOptions`）只负责
+ * 「用户输入的合理范围」（1s–180s，契约与既有测试都依赖 1s 下限）；而「整体超时 ≥ 连接超时 + 1s」
+ * 是**发请求那一刻**才成立的约束（连接超时是 services 层的 `http` 参数）。所以解析保持原样，
+ * 真正发请求前（`services/deepseek.ets` 的 `attemptOnce`）必须再过一遍这个函数。
+ *
+ * 语义边界（都是故意选的）：
+ * - `undefined` / `null` / `NaN` / `Infinity` / 非数字 → **默认值**（没配就是默认，不是下限）；
+ * - `0` / 负数 / 小于下限 → **下限**（不是默认值：用户显式填了「很小」，抬到能生效的最小值）；
+ * - 小数向下取整（毫秒不需要小数）。
+ */
+export function clampAiTimeout(raw?: number): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+    return AI_TIMEOUT_MS;
+  }
+  const value: number = Math.floor(raw);
+  if (value < AI_MIN_TOTAL_TIMEOUT_MS) {
+    return AI_MIN_TOTAL_TIMEOUT_MS;
+  }
+  if (value > AI_MAX_TIMEOUT_MS) {
+    return AI_MAX_TIMEOUT_MS;
   }
   return value;
 }

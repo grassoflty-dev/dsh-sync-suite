@@ -9,13 +9,15 @@
 // 3. `classifyAiError` 的中文错误映射（401/402/403/404/429/5xx/超时/网络异常）；
 // 4. `shouldRetry`（网络 / 429 / 5xx）与 `shouldFallback`（超时/网络/429/5xx 才切源）；
 // 5. `runWithFallback` 只切一次备用源（含「不切第三次」与「确定性错误不切」）；
-// 6. `parseAiReply` / `parseAiReplyFull` / `parseUsage` / `describeUsage`。
+// 6. `parseAiReply` / `parseAiReplyFull` / `parseUsage` / `describeUsage`；
+// 7. `clampAiTimeout`：整体超时的有效下限 = 连接超时 + 1s（C 批：超时加固）。
 //
 // 该模块没有任何运行时 import，因此不需要 registerHooks 补 `.js` 后缀。
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
 const {
+  AI_CONNECT_TIMEOUT_MS,
   AI_DEFAULT_MAX_TOKENS,
   AI_DEFAULT_RETRIES,
   AI_DEFAULT_TEMPERATURE,
@@ -27,8 +29,10 @@ const {
   AI_MIN_RETRIES,
   AI_MIN_TEMPERATURE,
   AI_MIN_TIMEOUT_MS,
+  AI_MIN_TOTAL_TIMEOUT_MS,
   AI_PROBE_MAX_TOKENS,
   AI_PROBE_PROMPT,
+  AI_READ_TIMEOUT_MS,
   AI_RETRY_BACKOFF_MS,
   AI_STATUS_NETWORK,
   AI_STATUS_TIMEOUT,
@@ -38,6 +42,7 @@ const {
   AiFallbackError,
   aiChatUrl,
   buildAiRequest,
+  clampAiTimeout,
   classifyAiError,
   defaultAiOptions,
   describeAiTestResult,
@@ -503,5 +508,78 @@ describe('describeAiTestResult：设置页「测试 AI 连通性」文案', () =
     assert.match(describeAiTestResult(false, 429, 'deepseek-chat', ''), /^失败：.*AI 服务 429/);
     assert.match(describeAiTestResult(false, AI_STATUS_TIMEOUT, '', ''), /^失败：.*请求超时/);
     assert.match(describeAiTestResult(true, 200, '', ''), /deepseek-chat/, '空模型名回退默认值');
+  });
+});
+
+// ---------------------------------------------------------------- 超时的有效下限（C 批）
+//
+// 现象（`docs/FAILURE-MODES.md` §3）：`services/deepseek.ets` 里 `CONNECT_TIMEOUT_MS=20000`、
+// `READ_TIMEOUT_MS=120000`，但整体超时是 `Promise.race` 的另一条分支，用的是 `request.timeoutMs`
+// （默认 30s）。谁先到谁生效 → 用户把超时填成 3s 时，20s 的连接超时**永远不可达**。
+// 修法：发请求前过 `clampAiTimeout`，把有效下限钳到「连接超时 + 1s」。
+//
+// 这里锁死三件事：
+//   ① 下限是**从常量推导**的（`AI_CONNECT_TIMEOUT_MS + 1000`），不是散落的字面量；
+//   ② 非法/未设 → 默认值；0/负数/小于下限 → 抬到下限；超过上限 → 夹到上限；
+//   ③ 解析层（`normalizeAiOptions`）的 1s–180s 契约不变（有效下限只在发请求前收紧）。
+
+describe('clampAiTimeout：整体超时的有效下限 = 连接超时 + 1s', () => {
+  test('① 下限由导出的连接超时常量推导（不允许出现第二个 20000）', () => {
+    assert.equal(AI_CONNECT_TIMEOUT_MS, 20000, '连接超时 20s（与 services 层同一份来源）');
+    assert.equal(AI_READ_TIMEOUT_MS, 120000, '读超时 120s（同上）');
+    assert.equal(
+      AI_MIN_TOTAL_TIMEOUT_MS,
+      AI_CONNECT_TIMEOUT_MS + 1000,
+      '下限必须是「连接超时 + 1000」算出来的，不能是写字面量'
+    );
+    assert.ok(AI_MIN_TOTAL_TIMEOUT_MS > AI_CONNECT_TIMEOUT_MS, '整体超时必须大于连接超时，否则连接超时不可达');
+    assert.ok(AI_MIN_TOTAL_TIMEOUT_MS <= AI_MAX_TIMEOUT_MS, '下限不能超过上限');
+    assert.ok(AI_TIMEOUT_MS >= AI_MIN_TOTAL_TIMEOUT_MS, '默认 30s 必须满足下限（否则默认值一上线就被改）');
+  });
+
+  test('② 非法/未设 → 默认值（没配就是默认，不是下限）', () => {
+    const illegal = [undefined, null, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '30000', {}, []];
+    for (const raw of illegal) {
+      assert.equal(clampAiTimeout(raw), AI_TIMEOUT_MS, `非法输入 ${String(raw)} 应回落默认值`);
+    }
+    assert.equal(clampAiTimeout(), AI_TIMEOUT_MS, '不传参数 = 未设 = 默认值');
+  });
+
+  test('② 0 / 负数 / 小于下限 → 抬到下限（用户显式填了「很小」）', () => {
+    const tooSmall = [0, -1, -1000, 1, 999, 10000, AI_MIN_TOTAL_TIMEOUT_MS - 1];
+    for (const raw of tooSmall) {
+      assert.equal(clampAiTimeout(raw), AI_MIN_TOTAL_TIMEOUT_MS, `${raw} 应抬到下限`);
+    }
+  });
+
+  test('② 等于下限 / 正常值 → 原样（只取整，不夹）', () => {
+    assert.equal(clampAiTimeout(AI_MIN_TOTAL_TIMEOUT_MS), AI_MIN_TOTAL_TIMEOUT_MS);
+    assert.equal(clampAiTimeout(AI_TIMEOUT_MS), AI_TIMEOUT_MS);
+    assert.equal(clampAiTimeout(45000), 45000);
+    assert.equal(clampAiTimeout(45000.9), 45000, '毫秒向下取整');
+  });
+
+  test('② 超过上限 → 夹到 AI_MAX_TIMEOUT_MS（沿用既有上限，不另造）', () => {
+    assert.equal(clampAiTimeout(AI_MAX_TIMEOUT_MS), AI_MAX_TIMEOUT_MS);
+    assert.equal(clampAiTimeout(AI_MAX_TIMEOUT_MS + 1), AI_MAX_TIMEOUT_MS);
+    assert.equal(clampAiTimeout(1e9), AI_MAX_TIMEOUT_MS);
+  });
+
+  test('② 任何输入都落在 [下限, 上限] 且是整数（不会把 NaN 写进计时器）', () => {
+    const samples = [-1e9, -1, 0, 1, 12345, AI_MIN_TOTAL_TIMEOUT_MS - 1, AI_MIN_TOTAL_TIMEOUT_MS, 6e8, Number.MAX_SAFE_INTEGER];
+    for (const raw of samples) {
+      const value = clampAiTimeout(raw);
+      assert.equal(Number.isFinite(value), true, `${raw} → 必须是有限数`);
+      assert.equal(Number.isInteger(value), true, `${raw} → 必须是整数`);
+      assert.ok(value >= AI_MIN_TOTAL_TIMEOUT_MS, `${raw} → 不得低于下限：${value}`);
+      assert.ok(value <= AI_MAX_TIMEOUT_MS, `${raw} → 不得高于上限：${value}`);
+    }
+  });
+
+  test('③ 解析层契约不变：normalizeAiOptions 仍是 1s–180s（有效下限在发请求前才收紧）', () => {
+    assert.equal(normalizeAiOptions({ ...defaultAiOptions(), timeoutMs: 10 }).timeoutMs, AI_MIN_TIMEOUT_MS);
+    assert.equal(normalizeAiOptions({ ...defaultAiOptions(), timeoutMs: 30000 }).timeoutMs, 30000);
+    // 解析层放过的 1s，发请求前会被 clampAiTimeout 抬起来 —— 两者是「输入夹取」与「有效值」两层
+    assert.equal(clampAiTimeout(AI_MIN_TIMEOUT_MS), AI_MIN_TOTAL_TIMEOUT_MS);
   });
 });

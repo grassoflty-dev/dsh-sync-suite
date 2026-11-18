@@ -65,6 +65,7 @@ const {
   planImport,
   reconcileBeforeAppend,
   renderMarkdownExport,
+  todayText,
   withExportPath,
   withImportFileName,
   withPanelMessage,
@@ -168,6 +169,28 @@ describe('parseDateRange：真日历校验 + 首尾含', () => {
     assert.equal(emptyTo.ok, false);
     assert.ok(emptyTo.reason.includes('请先填写结束日期'));
     assert.equal(parseDateRange(undefined, undefined).ok, false, '非字符串也不抛');
+  });
+});
+
+// ---------------------------------------------------------------- 面板空态的「填今天」
+
+describe('todayText：面板空态的「填今天」必须落在本机当天', () => {
+  test('给定时刻：输出 YYYY-MM-DD，且与 parseDateRange 认的格式一致', () => {
+    const local = new Date(2026, 10, 3, 9, 30, 0); // 2026-11-03 09:30 本地时区
+    assert.equal(todayText(local), '2026-11-03');
+    const range = parseDateRange(todayText(local), todayText(local));
+    assert.equal(range.ok, true, '「填今天」填出来的两端必须是合法区间（同日合法）');
+    assert.equal(range.from, range.to);
+  });
+
+  test('月/日补零（个位数月份与日期也是两位）', () => {
+    assert.equal(todayText(new Date(2027, 0, 5, 23, 59, 59)), '2027-01-05');
+  });
+
+  test('缺省入参：取当前时间，且形如 YYYY-MM-DD（不依赖时区文本）', () => {
+    const text = todayText();
+    assert.match(text, /^\d{4}-\d{2}-\d{2}$/);
+    assert.equal(parseDateRange(text, text).ok, true);
   });
 });
 

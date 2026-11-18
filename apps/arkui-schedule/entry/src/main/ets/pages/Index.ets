@@ -6,7 +6,7 @@
  * AI 汇总本来就是**列表第一项**（`SummaryCard`，数据源 `summaryStore.read` / `generate`），
  * 页头再放一个 AI 汇总图标属于同一动作两处入口，且点了没有可见反馈。现在页头只留
  * `今天`（左）+ `⚙ 设置`（右），中间不放任何空按钮；AI 汇总只能从汇总块进入
- * （「✨ 生成今日汇总」/「重试」/「重新生成」/「查看全部」/ 点标题与要点）。
+ * （空态「生成汇总」/ 失败态「重试」/「重新生成」/「查看全部」/ 点标题与要点）。
  * 守卫测试：`tools/test/indexHeader.test.mjs`。
  *
  * 契约：BRIEF §3.5、`docs/CONTRACT.md` §3.4：
@@ -39,7 +39,9 @@
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
+import { loadingText } from '../common/copy';
 import { localDateKey, nextTsSameDate, nowIso } from '../common/date';
+import { APP_VERSION } from '../common/version';
 import { applyAiResult, buildAiPayload } from '../model/aiPayload';
 import type { AiPayload, ScheduleRecord } from '../model/types';
 import { cloneRecord } from '../model/types';
@@ -48,6 +50,9 @@ import type { DailySummary, SummaryDisplay } from '../model/dailySummary';
 import { applyQuery, authorsOf, hasKeyword, isFilterActive, makeFilter } from '../model/query';
 import type { QueryFilter } from '../model/query';
 import { UNDO_TTL_MS, UndoDelete, restoreRecord, softDeleteRecord, withoutDeleted } from '../model/undoDelete';
+import { formatDiagnostics } from '../model/stateView';
+import type { DiagnosticsInput } from '../model/stateView';
+import { redactSecrets } from '../model/syncError';
 import { describeError, scheduleStore } from '../services/scheduleStore';
 import { openIndexStore } from '../services/openIndexStore';
 import { summaryStore } from '../services/summaryStore';
@@ -61,6 +66,10 @@ import { webview } from '@kit.ArkWeb';
 import { RecordDetailView } from '../components/RecordDetailView';
 import { RecordEditorView } from '../components/RecordEditorView';
 import { RecordRow } from '../components/RecordRow';
+import { ActionButton } from '../components/ActionButton';
+import { LoadingState } from '../components/state/LoadingState';
+import { EmptyState } from '../components/state/EmptyState';
+import { ErrorState } from '../components/state/ErrorState';
 import {
   DIVIDER,
   FONT,
@@ -187,6 +196,14 @@ struct Index {
   @State summaryUpdatedAt: string = '';
   /** 生成失败的一行文案；空串 = 无错误。 */
   @State summaryError: string = '';
+  /**
+   * AI 候选面板里的失败原因（空串 = 无错误）。
+   *
+   * 为什么和 `summaryError` 分开：`runAi()` 的失败原先只弹 5 秒 toast，面板一关/一过就再也
+   * 看不到原因（用户在面板里点「开始汇总」，toast 消失后面板还在，却不知道刚才是为什么失败）。
+   * toast 保留（即时反馈），这条 @State 负责「可复读」。
+   */
+  @State aiPanelError: string = '';
 
   /** 撤销状态机（纯内存，5 秒窗口；墓碑在删除那一刻已落盘）。 */
   private undoState: UndoDelete = new UndoDelete();
@@ -587,6 +604,8 @@ struct Index {
         baseURL
       );
       this.applySummary(saved);
+      // 结果真的回来了：清掉「已停止等待」的提示，否则块内会同时显示旧错误与新汇总
+      this.summaryError = '';
       // 结果已经进块里了，不自动弹面板（要看全部点汇总块）
       this.aiResultVisible = false;
     } catch (error) {
@@ -600,6 +619,31 @@ struct Index {
     } finally {
       this.aiBusy = false;
     }
+  }
+
+  /**
+   * 用户点「取消」停止等待 AI 回复（`LoadingState.onCancel`）。
+   *
+   * 三条刻意的选择：
+   * 1. **不写「已取消」**：取消的是「等待」，请求本身可能已经发出去了，写「已取消」等于假成功；
+   * 2. **不宣称结果不会回来**：文案直说「模型回复可能仍会到达」，让用户知道稍后要「重新生成」覆盖；
+   * 3. **只置空闲 + 写原因**：结果若真回来了，`generateSummary` 的成功分支会清掉这条提示。
+   */
+  private cancelAiWait(): void {
+    this.aiBusy = false;
+    this.summaryError = '已停止等待：模型回复可能仍会到达，稍后点「重新生成」覆盖';
+    console.info('[ai] wait cancelled by user');
+  }
+
+  /** AI 错误态用的单行诊断（版本 / 设备 / 错误码 / 时间四段永远都在，见 `model/stateView.ts`）。 */
+  private aiDiagnostics(): string {
+    const input: DiagnosticsInput = {
+      version: APP_VERSION,
+      deviceId: '',
+      errorCode: 'AI_GENERATE',
+      timestamp: Date.now()
+    };
+    return formatDiagnostics(input);
   }
 
   /** 打开详情页。 */
@@ -820,6 +864,8 @@ struct Index {
     this.aiSelected = ids;
     this.aiPanelDate = this.selectedDate;
     this.aiBusy = false;
+    // 上一次的失败原因不带进新面板（否则一打开就顶着一条旧报错）
+    this.aiPanelError = '';
     this.showAiPanel = true;
   }
 
@@ -871,6 +917,8 @@ struct Index {
       const settings = await settingsStore.load(getContext(this) as common.UIAbilityContext);
       aiKey = settings.aiKey;
     } catch (error) {
+      // 面板还开着：除了 toast，把原因留在面板里（toast 5 秒后消失，面板里的可复读）
+      this.aiPanelError = `读取设置失败：${describeError(error)}`;
       promptAction.showToast({ message: `读取设置失败：${describeError(error)}` });
       return;
     }
@@ -880,6 +928,8 @@ struct Index {
       return;
     }
 
+    // 新一轮开始：上一次的失败原因作废（成功/失败分支会各自重新决定它）
+    this.aiPanelError = '';
     this.aiBusy = true;
     try {
       const structured = await summarize(selected, aiKey, nowIso(), deviceTimeZone());
@@ -897,10 +947,13 @@ struct Index {
         }
       }
       this.aiResultText = structured;
+      this.aiPanelError = '';
       this.aiResultVisible = true;
       this.showAiPanel = false;
       this.reload();
     } catch (error) {
+      // toast 保留即时反馈；面板里的 ErrorState 负责「可复读 + 诊断 + 重试」
+      this.aiPanelError = describeError(error);
       promptAction.showToast({ message: describeError(error), duration: 5000 });
     } finally {
       this.aiBusy = false;
@@ -914,14 +967,17 @@ struct Index {
   DateBlock() {
     Column({ space: SPACING.sm }) {
       Row({ space: SPACING.sm }) {
-        Text('‹')
-          .fontSize(FONT.title)
-          .lineHeight(LINE_HEIGHT.title)
-          .fontColor($r('app.color.brand'))
-          .width(TOUCH_MIN)
-          .height(TOUCH_MIN)
-          .textAlign(TextAlign.Center)
-          .onClick(() => this.shiftDate(-1))
+        ActionButton({
+          label: '‹',
+          enabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: 'ghost',
+          block: false,
+          onTap: (): void => {
+            this.shiftDate(-1);
+          }
+        })
 
         Column({ space: SPACING.xs }) {
           Text(this.selectedDate)
@@ -948,23 +1004,29 @@ struct Index {
           this.showDatePicker = !this.showDatePicker;
         })
 
-        Text('今天')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.brand'))
-          .height(TOUCH_MIN)
-          .padding({ left: SPACING.md, right: SPACING.md })
-          .textAlign(TextAlign.Center)
-          .onClick(() => this.goToday())
+        ActionButton({
+          label: '今天',
+          enabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: 'ghost',
+          block: false,
+          onTap: (): void => {
+            this.goToday();
+          }
+        })
 
-        Text('›')
-          .fontSize(FONT.title)
-          .lineHeight(LINE_HEIGHT.title)
-          .fontColor($r('app.color.brand'))
-          .width(TOUCH_MIN)
-          .height(TOUCH_MIN)
-          .textAlign(TextAlign.Center)
-          .onClick(() => this.shiftDate(1))
+        ActionButton({
+          label: '›',
+          enabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: 'ghost',
+          block: false,
+          onTap: (): void => {
+            this.shiftDate(1);
+          }
+        })
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
@@ -991,33 +1053,39 @@ struct Index {
   @Builder
   ModeTabs() {
     Row({ space: SPACING.sm }) {
-      Text('今日待办')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor(this.showAllPending ? $r('app.color.text_secondary') : $r('app.color.brand'))
-        .backgroundColor(this.showAllPending ? $r('app.color.page_background') : $r('app.color.brand_soft'))
-        .height(TOUCH_MIN)
-        .layoutWeight(1)
-        .maxLines(1)
-        .textAlign(TextAlign.Center)
-        .onClick(() => {
-          this.showAllPending = false;
-          this.reload();
+      // 分段控件：两段各占一半（ActionButton 撑满外层 Column，宽度仍由 layoutWeight 均分）
+      Column() {
+        ActionButton({
+          label: '今日待办',
+          enabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: this.showAllPending ? 'ghost' : 'primary',
+          block: true,
+          onTap: (): void => {
+            this.showAllPending = false;
+            this.reload();
+          }
         })
-      Text('全部未完成')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor(this.showAllPending ? $r('app.color.brand') : $r('app.color.text_secondary'))
-        .backgroundColor(this.showAllPending ? $r('app.color.brand_soft') : $r('app.color.page_background'))
-        .height(TOUCH_MIN)
-        .layoutWeight(1)
-        .maxLines(1)
-        .textAlign(TextAlign.Center)
-        .onClick(() => {
-          this.showAllPending = true;
-          this.showDatePicker = false;
-          this.reload();
+      }
+      .layoutWeight(1)
+
+      Column() {
+        ActionButton({
+          label: '全部未完成',
+          enabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: this.showAllPending ? 'primary' : 'ghost',
+          block: true,
+          onTap: (): void => {
+            this.showAllPending = true;
+            this.showDatePicker = false;
+            this.reload();
+          }
         })
+      }
+      .layoutWeight(1)
     }
     .width('100%')
   }
@@ -1052,11 +1120,11 @@ struct Index {
    * 「今日汇总」块：今日日程列表的第一项。
    *
    * 五态（同一时刻只显示一态，互斥）：
-   * ① 今日无日程 → 灰字「今天还没有日程」（无按钮）
-   * ② 生成中   → 「正在生成…」
-   * ③ 失败     → 一行错误 + 「重试」（不覆盖旧汇总，由 generateSummary 保证）
-   * ④ 无汇总   → 一行「✨ 生成今日汇总」（可点）
-   * ⑤ 有汇总   → 标题一行 + 要点 ≤3 条 +（>3 时「查看全部」）+ 「更新于 HH:MM · 重新生成」
+   * ① 今日无日程 → 灰字「今天还没有日程」（无按钮：没有记录时生成只会空转）
+   * ② 生成中     → `LoadingState`（3 秒后出现「取消」；取消只停止等待，结果真回来就用真结果）
+   * ③ 失败       → `ErrorState`（发生了什么 / 为什么 / 下一步 + 诊断 + 重试 / 去设置）
+   * ④ 无汇总     → `EmptyState`（一句说明 + 「生成汇总」；空态必须有下一步）
+   * ⑤ 有汇总     → 标题一行 + 要点 ≤3 条 +（>3 时「查看全部」）+ 「更新于 HH:MM · 重新生成」
    */
   @Builder
   SummaryCard() {
@@ -1069,16 +1137,17 @@ struct Index {
           .layoutWeight(1)
           .textAlign(TextAlign.Start)
         if (this.hasSummary() && this.summaryPointTotal > 3) {
-          Text('查看全部')
-            .fontSize(FONT.caption)
-            .lineHeight(LINE_HEIGHT.caption)
-            .fontColor($r('app.color.brand'))
-            .height(TOUCH_MIN)
-            .padding({ left: SPACING.sm, right: SPACING.sm })
-            .textAlign(TextAlign.Center)
-            .onClick(() => {
+          ActionButton({
+            label: '查看全部',
+            enabled: true,
+            disabledReason: '',
+            busy: false,
+            variant: 'ghost',
+            block: false,
+            onTap: (): void => {
               this.aiResultVisible = true;
-            })
+            }
+          })
         }
       }
       .width('100%')
@@ -1093,49 +1162,42 @@ struct Index {
           .width('100%')
           .textAlign(TextAlign.Start)
       } else if (this.aiBusy) {
-        // ② 生成中（aiBusy 由 generateSummary 维护，页头已无同源图标）
-        Text('正在生成今日汇总…')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .width('100%')
-          .textAlign(TextAlign.Start)
+        // ② 生成中：可取消（取消只停止等待，不假装成功，也不说结果不会回来）
+        LoadingState({
+          title: loadingText('AI 汇总'),
+          detail: '正在请求模型，可随时停止等待',
+          progress: -1,
+          compact: true,
+          onCancel: (): void => {
+            this.cancelAiWait();
+          }
+        })
       } else if (this.summaryError.length > 0) {
-        // ③ 失败：一行错误 + 重试；旧汇总内容保持不变
-        Row({ space: SPACING.sm }) {
-          Text(this.summaryError)
-            .fontSize(FONT.caption)
-            .lineHeight(LINE_HEIGHT.caption)
-            .fontColor($r('app.color.danger'))
-            .maxLines(2)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .layoutWeight(1)
-            .textAlign(TextAlign.Start)
-          Text('重试')
-            .fontSize(FONT.caption)
-            .lineHeight(LINE_HEIGHT.caption)
-            .fontColor($r('app.color.brand'))
-            .height(TOUCH_MIN)
-            .padding({ left: SPACING.sm, right: SPACING.sm })
-            .textAlign(TextAlign.Center)
-            .onClick(() => {
-              this.generateSummary();
-            })
-        }
-        .width('100%')
-        .alignItems(VerticalAlign.Center)
-      } else if (!this.hasSummary()) {
-        // ④ 无汇总：整行可点，直接生成
-        Text('✨ 生成今日汇总')
-          .fontSize(FONT.body)
-          .lineHeight(LINE_HEIGHT.body)
-          .fontColor($r('app.color.brand'))
-          .width('100%')
-          .height(TOUCH_MIN)
-          .textAlign(TextAlign.Start)
-          .onClick(() => {
+        // ③ 失败：三段式 + 诊断 + 重试 / 去设置；旧汇总内容保持不变
+        ErrorState({
+          what: 'AI 汇总失败',
+          why: redactSecrets(this.summaryError),
+          next: '检查设置页的 AI Key / 服务是否可用后重试',
+          diagnostics: this.aiDiagnostics(),
+          compact: true,
+          onRetry: (): void => {
             this.generateSummary();
-          })
+          },
+          onOpenSettings: (): void => {
+            this.openSettings();
+          }
+        })
+      } else if (!this.hasSummary() && this.summaryError.length === 0 && !this.aiBusy) {
+        // ④ 无汇总：空态（一句说明 + 下一步动作，不允许只留一句话）
+        EmptyState({
+          compact: true,
+          title: '今天还没有 AI 汇总',
+          detail: '有记录后点「生成」让模型总结今天的安排',
+          actionLabel: '生成汇总',
+          onAction: (): void => {
+            this.generateSummary();
+          }
+        })
       } else {
         // ⑤ 有汇总：标题 + 要点（点标题/要点 → 打开完整面板）
         Column({ space: SPACING.xs }) {
@@ -1176,17 +1238,17 @@ struct Index {
             .fontColor($r('app.color.text_secondary'))
             .layoutWeight(1)
             .textAlign(TextAlign.End)
-          Text('重新生成')
-            .fontSize(FONT.caption)
-            .lineHeight(LINE_HEIGHT.caption)
-            .fontColor($r('app.color.brand'))
-            .height(TOUCH_MIN)
-            .padding({ left: SPACING.sm, right: SPACING.sm })
-            .textAlign(TextAlign.Center)
-            .enabled(!this.aiBusy)
-            .onClick(() => {
+          ActionButton({
+            label: '重新生成',
+            enabled: !this.aiBusy,
+            disabledReason: 'AI 汇总正在生成，请稍候',
+            busy: this.aiBusy,
+            variant: 'ghost',
+            block: false,
+            onTap: (): void => {
               this.generateSummary();
-            })
+            }
+          })
         }
         .width('100%')
         .alignItems(VerticalAlign.Center)
@@ -1223,16 +1285,17 @@ struct Index {
             this.onQueryTextChange(value);
           })
         if (this.queryText.length > 0) {
-          Text('清空')
-            .fontSize(FONT.caption)
-            .lineHeight(LINE_HEIGHT.caption)
-            .fontColor($r('app.color.brand'))
-            .height(TOUCH_MIN)
-            .padding({ left: SPACING.sm, right: SPACING.sm })
-            .textAlign(TextAlign.Center)
-            .onClick(() => {
+          ActionButton({
+            label: '清空',
+            enabled: true,
+            disabledReason: '',
+            busy: false,
+            variant: 'ghost',
+            block: false,
+            onTap: (): void => {
               this.resetFilters();
-            })
+            }
+          })
         }
       }
       .width('100%')
@@ -1252,21 +1315,20 @@ struct Index {
             ForEach(
               this.authorChips,
               (author: string) => {
-                Text(author)
-                  .fontSize(FONT.caption)
-                  .lineHeight(LINE_HEIGHT.caption)
-                  .fontColor(this.authorFilter === author ? $r('app.color.brand') : $r('app.color.text_secondary'))
-                  .backgroundColor(this.authorFilter === author ? $r('app.color.brand_soft') : $r('app.color.page_background'))
-                  .height(TOUCH_MIN)
-                  .padding({ left: SPACING.md, right: SPACING.md })
-                  .maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  .textAlign(TextAlign.Center)
-                  .borderRadius(RADIUS.sm)
-                  .flexShrink(0)
-                  .onClick(() => {
-                    this.pickAuthor(author);
+                Row() {
+                  ActionButton({
+                    label: author,
+                    enabled: true,
+                    disabledReason: '',
+                    busy: false,
+                    variant: this.authorFilter === author ? 'primary' : 'ghost',
+                    block: false,
+                    onTap: (): void => {
+                      this.pickAuthor(author);
+                    }
                   })
+                }
+                .flexShrink(0)
               },
               (author: string) => `author-chip-${author}`
             )
@@ -1283,23 +1345,20 @@ struct Index {
     .alignItems(HorizontalAlign.Start)
   }
 
-  /** 状态 chip（`all` / `open` / `done`）：选中 = 品牌浅底 + 品牌字色。 */
+  /** 状态 chip（`all` / `open` / `done`）：选中 = 品牌实底反白字，未选 = 文字链形态。 */
   @Builder
   StatusChip(label: string, value: string) {
-    Text(label)
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .fontColor(this.statusFilter === value ? $r('app.color.brand') : $r('app.color.text_secondary'))
-      .backgroundColor(this.statusFilter === value ? $r('app.color.brand_soft') : $r('app.color.page_background'))
-      .height(TOUCH_MIN)
-      .padding({ left: SPACING.md, right: SPACING.md })
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.Ellipsis })
-      .textAlign(TextAlign.Center)
-      .borderRadius(RADIUS.sm)
-      .onClick(() => {
+    ActionButton({
+      label: label,
+      enabled: true,
+      disabledReason: '',
+      busy: false,
+      variant: this.statusFilter === value ? 'primary' : 'ghost',
+      block: false,
+      onTap: (): void => {
         this.pickStatus(value);
-      })
+      }
+    })
   }
 
   /**
@@ -1318,16 +1377,17 @@ struct Index {
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
           .textAlign(TextAlign.Start)
-        Text('清空')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.brand'))
-          .height(TOUCH_MIN)
-          .padding({ left: SPACING.sm, right: SPACING.sm })
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
+        ActionButton({
+          label: '清空',
+          enabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: 'ghost',
+          block: false,
+          onTap: (): void => {
             this.resetFilters();
-          })
+          }
+        })
       }
       .width('100%')
       .padding({ top: SPACING.md })
@@ -1340,16 +1400,17 @@ struct Index {
           .fontColor($r('app.color.text_secondary'))
           .width('100%')
           .textAlign(TextAlign.Start)
-        Text('清空筛选')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.brand'))
-          .height(TOUCH_MIN)
-          .padding({ left: SPACING.sm, right: SPACING.sm })
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
+        ActionButton({
+          label: '清空筛选',
+          enabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: 'ghost',
+          block: false,
+          onTap: (): void => {
             this.resetFilters();
-          })
+          }
+        })
       }
       .width('100%')
       .padding({ top: SPACING.md })
@@ -1373,17 +1434,17 @@ struct Index {
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .layoutWeight(1)
         .textAlign(TextAlign.Start)
-      Text(`撤销（${this.undoSeconds()}s）`)
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.brand'))
-        .height(TOUCH_MIN)
-        .padding({ left: SPACING.md, right: SPACING.md })
-        .textAlign(TextAlign.Center)
-        .flexShrink(0)
-        .onClick(() => {
+      ActionButton({
+        label: `撤销（${this.undoSeconds()}s）`,
+        enabled: this.undoId.length > 0,
+        disabledReason: '没有可撤销的删除',
+        busy: false,
+        variant: 'secondary',
+        block: false,
+        onTap: (): void => {
           this.undoDelete();
-        })
+        }
+      })
     }
     .width('100%')
     .padding({ left: SPACING.md, right: SPACING.sm })
@@ -1591,14 +1652,17 @@ struct Index {
           .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.text_primary'))
         Blank()
-        Text(this.aiSelected.length === this.aiCandidates.length ? '全不选' : '全选')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.brand'))
-          .height(TOUCH_MIN)
-          .padding({ left: SPACING.md, right: SPACING.md })
-          .textAlign(TextAlign.Center)
-          .onClick(() => this.selectAllAi())
+        ActionButton({
+          label: this.aiSelected.length === this.aiCandidates.length ? '全不选' : '全选',
+          enabled: this.aiCandidates.length > 0,
+          disabledReason: '没有可勾选的记录',
+          busy: false,
+          variant: 'ghost',
+          block: false,
+          onTap: (): void => {
+            this.selectAllAi();
+          }
+        })
       }
       .width('100%')
 
@@ -1609,6 +1673,23 @@ struct Index {
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .width('100%')
+
+      if (this.aiPanelError.length > 0) {
+        // 失败原因留在面板里（toast 会消失，这条可复读 + 带诊断 + 可重试）
+        ErrorState({
+          compact: true,
+          what: 'AI 生成失败',
+          why: redactSecrets(this.aiPanelError),
+          next: '检查设置页的 AI Key / 网络后重试',
+          diagnostics: this.aiDiagnostics(),
+          onRetry: (): void => {
+            this.runAi();
+          },
+          onOpenSettings: (): void => {
+            this.openSettings();
+          }
+        })
+      }
 
       List({ space: SPACING.sm }) {
         ForEach(
@@ -1654,7 +1735,22 @@ struct Index {
       .layoutWeight(1)
       .scrollBar(BarState.Auto)
 
+      if (this.aiSelected.length === 0) {
+        // 一条都没勾选：界面上的空态（toast 只有几秒，回头看不到「为什么生成按钮不动」）
+        EmptyState({
+          compact: true,
+          title: '还没有选择记录',
+          detail: '勾选要发给模型的记录，至少一条',
+          actionLabel: '全选',
+          onAction: (): void => {
+            this.selectAllAi();
+          }
+        })
+      }
+
       Row({ space: SPACING.sm }) {
+        // 「取消」是面板级关闭（不是 Text 当按钮），形态与主操作不同档：保留原 48vp 次按钮，
+        // 主操作换成 ActionButton（本批要求它走 `busy` 形态）；两者高度差 8vp 是刻意不改的既有外观。
         Button('取消')
           .layoutWeight(1)
           .height(PRIMARY_HEIGHT)
@@ -1665,17 +1761,20 @@ struct Index {
           .onClick(() => {
             this.showAiPanel = false;
           })
-        Button(this.aiBusy ? '整理中…' : '开始汇总')
-          .layoutWeight(1)
-          .height(PRIMARY_HEIGHT)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.brand'))
-          .fontColor($r('app.color.text_inverse'))
-          .borderRadius(RADIUS.sm)
-          .enabled(!this.aiBusy)
-          .onClick(() => {
-            this.runAi();
+        Column() {
+          ActionButton({
+            label: '开始汇总',
+            enabled: this.aiSelected.length > 0,
+            disabledReason: '请至少选择一条记录',
+            busy: this.aiBusy,
+            variant: 'primary',
+            block: true,
+            onTap: (): void => {
+              this.runAi();
+            }
           })
+        }
+        .layoutWeight(1)
       }
       .width('100%')
 
@@ -1704,28 +1803,30 @@ struct Index {
           .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.text_primary'))
         Blank()
-        Text('重选')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .height(TOUCH_MIN)
-          .padding({ left: SPACING.md, right: SPACING.md })
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
+        ActionButton({
+          label: '重选',
+          enabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: 'ghost',
+          block: false,
+          onTap: (): void => {
             // 逐条取消勾选的入口：关掉结果、回到候选面板
             this.aiResultVisible = false;
             this.openAiPanel();
-          })
-        Text('关闭')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.brand'))
-          .height(TOUCH_MIN)
-          .padding({ left: SPACING.md, right: SPACING.md })
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
+          }
+        })
+        ActionButton({
+          label: '关闭',
+          enabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: 'ghost',
+          block: false,
+          onTap: (): void => {
             this.aiResultVisible = false;
-          })
+          }
+        })
       }
       .width('100%')
 

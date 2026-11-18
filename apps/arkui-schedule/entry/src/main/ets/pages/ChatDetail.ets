@@ -13,25 +13,46 @@
  * 窄屏（竖屏平板 673vp、手机 360–430vp）下会把可用行宽压掉 20–30%；统一左对齐能整行铺满。
  *
  * 旋转/切页：`messages` / 标题都在 `@State`，`aboutToAppear` 读一次即可（旋转不重新读盘）。
+ *
+ * 三态（`docs/STATE-UI.md` §4）：`LoadingState`（可取消，只停止等待）/
+ * `EmptyState`（没有可读消息 → 「返回列表」）/ `ErrorState`（三段式 + 诊断 + 重试 + 「返回列表」）。
+ * 顶部只读提示 `ReadOnlyNotice` 是产品约束，**永远保留**（在滚动区之外）。
  */
-import { router } from '@kit.ArkUI';
+import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
+import { loadingText } from '../common/copy';
+import { APP_VERSION } from '../common/version';
 import { formatChatTime } from '../model/chatList';
 import type { ChatMessage } from '../model/chatList';
+import { formatDiagnostics } from '../model/stateView';
+import type { DiagnosticsInput } from '../model/stateView';
 import { chatStore } from '../services/chatStore';
 import type { ChatDetailResult } from '../services/chatStore';
 import { describeError } from '../services/scheduleStore';
+import { ActionButton } from '../components/ActionButton';
 import { PageLayout } from '../components/PageLayout';
-import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
-
-/** 主按钮高度：40 + 8 = 48vp（与全站按钮一致）。 */
-const BUTTON_HEIGHT: number = TOUCH_MIN + SPACING.sm;
+import { EmptyState } from '../components/state/EmptyState';
+import { ErrorState } from '../components/state/ErrorState';
+import { LoadingState } from '../components/state/LoadingState';
+import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING } from '../common/uiTokens';
 
 /** 宽屏下正文最大宽度（vp）：整行铺满宽屏会让 16fp 正文一行过长、难回行。 */
 const CONTENT_MAX_WIDTH: number = 720;
 
 /** 标题兜底（meta.title 缺失 / 为空时，页头也不能空着）。 */
 const FALLBACK_TITLE: string = '云端会话';
+
+/** 诊断行里的错误码（详情读取失败）：固定值，便于用户反馈时检索。 */
+const CHAT_DETAIL_ERROR_CODE: string = 'CHAT_DETAIL';
+
+/** 空态文案：文件完整但没有可读消息（全是工具/用量事件也会这样）。 */
+const EMPTY_TITLE: string = '这个会话没有可读的消息内容';
+const EMPTY_DETAIL: string = '工具输出、用量统计等事件不在只读视图里展示；换个会话看看';
+const BACK_LABEL: string = '返回列表';
+
+/** 错误态文案：为什么失败由 `errorText` 运行时给。 */
+const ERROR_WHAT: string = '读取会话失败';
+const ERROR_NEXT: string = '文件可能只同步了一半；回列表下拉刷新后再进来';
 
 @Entry
 @Component
@@ -110,6 +131,29 @@ struct ChatDetail {
       this.errorText = `读取会话失败：${describeError(error)}`;
     }
     this.loading = false;
+  }
+
+  /**
+   * 停止等待（`LoadingState.onCancel`）：收掉本页的等待状态，并给一条可重试的说明。
+   *
+   * 后台读文件可能仍会完成，所以**不**假装成功、也**不**假装文件坏了：把「已停止等待」写进
+   * `errorText`，让 `ErrorState` 同时给出原因与「重试」出路。
+   */
+  private stopWaiting(): void {
+    this.loading = false;
+    this.errorText = '已停止等待：这次没有读完会话文件，点「重试」可以重新读取';
+    promptAction.showToast({ message: '已停止等待：可以点重试，或回列表下拉刷新后再进来' });
+  }
+
+  /** 诊断行（`docs/STATE-UI.md` §4.3）：版本 / 设备 / 错误码 / 时间；设备 id 本页没有 → 兜底「未登记」。 */
+  private diagnosticsText(errorCode: string): string {
+    const input: DiagnosticsInput = {
+      version: APP_VERSION,
+      deviceId: '',
+      errorCode: errorCode,
+      timestamp: Date.now()
+    };
+    return formatDiagnostics(input);
   }
 
   /** `meta.json` → 页头标题与 `只读 · <updatedAt>` 副标题（字段缺失都安全降级）。 */
@@ -229,89 +273,75 @@ struct ChatDetail {
     .scrollBar(BarState.Off)
   }
 
-  /** 空态：文件完整但没有任何可读消息（全是工具/用量事件也会这样）。 */
+  /** 空态：文件完整但没有任何可读消息（全是工具/用量事件也会这样）→ 「返回列表」有出路。 */
   @Builder
   EmptyMessages() {
-    Column({ space: SPACING.md }) {
-      Text('这个会话没有可读的消息内容')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-      Text('工具输出、用量统计等事件不在只读视图里展示；换个会话看看。')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.text_secondary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-    }
-    .width('100%')
-    .padding({ top: SPACING.xl, bottom: SPACING.xl })
-    .alignItems(HorizontalAlign.Start)
+    EmptyState({
+      title: EMPTY_TITLE,
+      detail: EMPTY_DETAIL,
+      actionLabel: BACK_LABEL,
+      onAction: (): void => {
+        router.back();
+      }
+    })
   }
 
-  /** 字段级错误文案（danger 令牌）。 */
-  @Builder
-  ErrorText(text: string) {
-    Text(text)
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .fontColor($r('app.color.danger'))
-      .width('100%')
-      .textAlign(TextAlign.Start)
-  }
-
-  /** 错误态：原因 + 「重试」+ 返回列表的出路。 */
+  /**
+   * 错误态：三段式 + 诊断行 + 「重试」。
+   *
+   * 第二按钮**不**走 `ErrorState.onOpenSettings`（文案固定「去设置」，本页要的是「返回列表」），
+   * 所以 `onOpenSettings` 传 `null`，在组件外自己放一个 `ActionButton`。
+   */
   @Builder
   ErrorBlock() {
     Column({ space: SPACING.md }) {
-      this.ErrorText(this.errorText)
-      Text('文件可能只同步了一半；下拉刷新列表或稍后重试。')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.text_secondary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-      Row({ space: SPACING.md }) {
-        Button('重试')
-          .height(BUTTON_HEIGHT)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.brand'))
-          .fontColor($r('app.color.text_inverse'))
-          .borderRadius(RADIUS.sm)
-          .onClick(() => {
-            this.load();
-          })
-        Button('返回列表')
-          .height(BUTTON_HEIGHT)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.brand_soft'))
-          .fontColor($r('app.color.brand'))
-          .borderRadius(RADIUS.sm)
-          .onClick(() => {
+      ErrorState({
+        what: ERROR_WHAT,
+        why: this.errorText,
+        next: ERROR_NEXT,
+        diagnostics: this.diagnosticsText(CHAT_DETAIL_ERROR_CODE),
+        onRetry: (): void => {
+          this.load();
+        },
+        onOpenSettings: null
+      })
+      Row() {
+        ActionButton({
+          label: BACK_LABEL,
+          enabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: 'secondary',
+          block: false,
+          onTap: (): void => {
             router.back();
-          })
+          },
+          onBlockedTap: null
+        })
       }
       .width('100%')
-      .justifyContent(FlexAlign.Start)
+      .justifyContent(FlexAlign.Center)
     }
     .width('100%')
     .padding({ top: SPACING.lg, bottom: SPACING.lg })
     .alignItems(HorizontalAlign.Start)
   }
 
-  /** 首次读取中的一行灰字。 */
+  /** 首次读取中：行内紧凑档，3 秒后可取消（只停止等待，不假装读完）。 */
   @Builder
   LoadingHint() {
-    Text('正在读取会话…')
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .fontColor($r('app.color.text_secondary'))
-      .width('100%')
-      .padding({ top: SPACING.lg, bottom: SPACING.lg })
-      .textAlign(TextAlign.Start)
+    Column() {
+      LoadingState({
+        compact: true,
+        title: loadingText('会话'),
+        onCancel: (): void => {
+          this.stopWaiting();
+        }
+      })
+    }
+    .width('100%')
+    .padding({ top: SPACING.lg, bottom: SPACING.lg })
+    .alignItems(HorizontalAlign.Start)
   }
 
   build() {
