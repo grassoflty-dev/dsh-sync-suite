@@ -1,0 +1,33 @@
+# dsh-sync-suite 工作区专属配置（DSH profile overlay）
+#
+# 用法（仅在需要「只对本工作区生效」时）：
+#   dsh --profile desktop --patch C:\Users\GWL\Desktop\itwillclaude\dsh-sync-suite\tools\dsh-workspace.patch.yml
+# 或直接双击 tools\dsh-workspace.cmd（内部就是上面这条命令）。
+#
+# 为什么需要这个文件：
+#   DSH 的插件配置是 **profile 级**的（~/.dsh/profiles/<name>/cordis.patch.yml），
+#   没有「按工作区（目录）」生效的配置层。--patch 是唯一能在启动时叠加、
+#   且不必改 profile 的机制，因此把本项目的子代理配置放在这里，
+#   只有用上面的命令/脚本启动时才生效。
+#
+# 子代理协作约定（本项目，2026-11-18 用户确认）：
+#   总设计师   = 继承主会话模型 dsh-opencode-go / deepseek-v4.1-flash / high（不显式传参）
+#   执行子代理 = 显式 dsh-opencode-go / hy4-flash-free
+#   并行上限   = 5（同一主 Agent 下同时存活的执行子代理；主 Agent 不计入）
+#
+# 并行上限为什么也写在这里：DSH 的 subagent.maxActiveSubagents 是 profile 级，
+# 写进 profile 会连带影响其它项目；只有用本 overlay 启动时才应生效。
+# 注意：desktop profile 由 Electron 独占，CLI 无法叠加 --patch，
+#       所以本文件对 desktop profile **不适用**；它适用于 CLI 可启动的 profile。
+- id: subagent-model-selection-settings
+  config:
+    enabled: true
+    allowedModels:
+      - provider: dsh-opencode-go
+        model: hy4-flash-free
+      - provider: dsh-opencode-go
+        model: deepseek-v4.1-flash
+- id: subagent
+  config:
+    maxDepth: 2
+    maxActiveSubagents: 5
