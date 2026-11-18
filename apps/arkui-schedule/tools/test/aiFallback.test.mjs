@@ -612,4 +612,28 @@ describe('文档：决策表与隐私说明已落盘', () => {
     assert.ok(DOC.includes('不落盘') || DOC.includes('只在内存'), '必须写明诊断不落盘');
     assert.ok(DOC.includes('***'), '必须写明脱敏规则');
   });
+
+  test('402 的三方一致：文档写 next-source，且不再混进「其它 4xx → abort」', () => {
+    const lines = DOC.split('\n');
+    const tableRow = lines.find((line) => line.startsWith('|') && line.includes('402'));
+    assert.ok(tableRow !== undefined, '决策表里必须有 402 这一行');
+    assert.ok(tableRow.includes('`next-source`'), `文档里 402 必须是 next-source（实际：${tableRow}）`);
+
+    const abortRow = lines.find((line) => line.startsWith('|') && line.includes('其它 4xx'));
+    assert.ok(abortRow !== undefined, '决策表里必须有「其它 4xx」这一行');
+    assert.equal(abortRow.includes('402'), false, `402 不能出现在「其它 4xx」行（实际：${abortRow}）`);
+
+    // §7「已知限制」里那条 402 说明同样必须是 next-source（旧版这里写的是 abort，是 M3 的根因）
+    const limitRow = lines.find((line) => /^\d+\./.test(line.trim()) && line.includes('402'));
+    assert.ok(limitRow !== undefined, '§7 必须保留一条关于 402 的说明');
+    assert.ok(limitRow.includes('next-source'), `§7 的 402 说明必须写 next-source（实际：${limitRow}）`);
+    assert.equal(/按 4xx 归入/.test(limitRow), false, '§7 的 402 说明不得再写「按 4xx 归入 abort」');
+
+    // 代码侧不许回退：402 必须在 classifyAttempt 的「其它 4xx → abort」之前单判
+    const code = readFileSync(new URL('../.build/model/aiFallback.js', import.meta.url), 'utf8');
+    const payIndex = code.indexOf('status === 402');
+    const genericIndex = code.lastIndexOf('status >= 400 && status <= 499');
+    assert.ok(payIndex > 0, '代码里必须有 status === 402 的单独判定');
+    assert.ok(genericIndex > payIndex, '402 必须单判在「其它 4xx」之前（否则会被归进 abort）');
+  });
 });

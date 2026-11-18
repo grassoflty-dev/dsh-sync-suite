@@ -6,14 +6,16 @@
  *    文件名时间戳来自**记录**（`exportFileStamp`），同名时加 `-2` / `-3` 后缀（不用随机数）；
  * 2. **选文件 + 读文本**：`picker.DocumentViewPicker` 选一份 JSON，用 `openSync` + `readSync` +
  *    `decodeUtf8` 读成字符串（不新增权限）；
- * 3. **导入落盘**：只按 `ImportPlan.toAppend` 追加，**绝不重写历史行、绝不写别的设备目录**。
+ * 3. **导入落盘**：先**复核**（重读本机 + `reconcileBeforeAppend`）再按复核后的 added 追加，
+ *    **绝不重写历史行、绝不写别的设备目录**，并且在飞时拒绝第二次调用（并发闸）。
  *
  * 边界（`docs/EXPORT-IMPORT.md` §5）：
  * - 导出是只读派生：只读 `scheduleStore.readAll()`，不碰源文件；导出目录是**沙箱内**路径，
  *   不进 Git 仓库（`devices/` 之外），所以不会被同步推走；
  * - 导入**必须**先 `planImportFromText` 拿到 dry-run 结果，再由用户确认后 `appendImportPlan`；
  *   本模块不提供「分析+落盘」一步到位的函数，防止 UI 误用成「选了文件就写」；
- * - 整批写入前先把所有行编码完：任何一条编码失败就整批不写（fail-closed），
+ * - 落盘的**纯实现**在 `model/exportImport.ts` 的 `writePlan`（IO 由本文件注入，可 fake 测）；
+ *   整批写入前先把所有行编码完：任何一条编码失败就整批不写（fail-closed），
  *   不会出现「写了一半」的历史日志；
  * - 同一天多条按 `ts` 升序拼接后**一次**物理追加（定位到文件末尾写入），历史字节一个都不改。
  */
@@ -31,15 +33,19 @@ import {
   parseDateRange,
   parseJsonImport,
   planImport,
-  renderMarkdownExport
+  reconcileBeforeAppend,
+  renderMarkdownExport,
+  writePlan
 } from '../model/exportImport';
 import type {
-  ExportFileStampInput,
+  ExportStampInput,
   ImportPlan,
+  ImportWriteIo,
   JsonExportInput,
-  MarkdownExportInput
+  MarkdownExportInput,
+  ReconcileResult,
+  WritePlanResult
 } from '../model/exportImport';
-import { encodeRecord, recordDateKey, sortRecords } from '../model/jsonl';
 import type { ScheduleRecord } from '../model/types';
 import { describeError, scheduleStore } from './scheduleStore';
 import { openIndexStore } from './openIndexStore';
@@ -100,6 +106,16 @@ export interface ImportPlanResult {
   reason: string;
 }
 
+/** 复核计数（`reconfirmed`）：写盘前用**此刻**的本机记录重算出来的归属。 */
+export interface ReconfirmedCounts {
+  /** 复核后真正交给写入的条数（实际写下多少见 `appended`）。 */
+  added: number;
+  /** 复核新增的「同 id 且更旧/相同」条数。 */
+  skipped: number;
+  /** 复核新增的「同 id 且本机版本较旧、导入版本更新」条数（仍不覆盖）。 */
+  conflict: number;
+}
+
 /** 确认导入后的落盘结果。 */
 export interface ImportApplyResult {
   ok: boolean;
@@ -110,6 +126,14 @@ export interface ImportApplyResult {
   /** 实际追加到的绝对路径（按日期，去重后顺序稳定）。 */
   files: string[];
   reason: string;
+  /**
+   * 写盘前复核的计数（`reconcileBeforeAppend` 的结果）。
+   *
+   * 顶层的 `skipped` / `conflict` 已把这里的增量加进去（它们是**这一次确认**的最终归属），
+   * `reconfirmed` 单独留一份，便于面板区分「dry-run 时的统计」与「复核后的统计」。
+   * 未做复核时（存储未 ready / 计划为空 / 复核读盘失败）三个数都是 0。
+   */
+  reconfirmed: ReconfirmedCounts;
 }
 
 /** 导出目录的绝对路径（不保证已存在）。 */
@@ -253,7 +277,7 @@ export function exportSchedules(request: ExportRequestInput): ExportFileResult {
   } catch (error) {
     return failed(`生成导出内容失败：${describeError(error)}`);
   }
-  const stampInput: ExportFileStampInput = { records: inRange, now: at };
+  const stampInput: ExportStampInput = { records: inRange, now: at };
   const stamp = exportFileStamp(stampInput);
   try {
     const path = uniqueExportPath(format, stamp);
@@ -378,39 +402,81 @@ export function planImportFromText(text: string, fileName: string): ImportPlanRe
   return ok;
 }
 
-/** 把 `plan.toAppend` 按日期分组（组内按 `ts` 稳定升序）。 */
-function groupByDate(records: ScheduleRecord[]): Map<string, ScheduleRecord[]> {
-  const grouped = new Map<string, ScheduleRecord[]>();
-  for (const record of records) {
-    const date = recordDateKey(record.ts);
-    const bucket = grouped.get(date);
-    if (bucket === undefined) {
-      const created: ScheduleRecord[] = [record];
-      grouped.set(date, created);
-    } else {
-      bucket.push(record);
+/**
+ * 把纯逻辑层的 `writePlan` 接到真实文件系统上（本文件是**唯一**提供 IO 的地方）。
+ *
+ * 只交出这四个能力：建目录 / 取本机某天路径 / 末尾追加 / 维护派生索引。
+ * 没有覆盖写、没有截断写、没有删除——导入在类型层面就碰不到 `TRUNC`。
+ */
+function importWriteIo(): ImportWriteIo {
+  const io: ImportWriteIo = {
+    ensureDirs: (): void => {
+      scheduleStore.ensureDirs();
+    },
+    dayFilePath: (date: string): string => scheduleStore.dayFilePath(date),
+    appendTextAtEnd: (path: string, text: string): void => {
+      appendTextAtEnd(path, text);
+    },
+    applyRecord: (record: ScheduleRecord): void => {
+      openIndexStore.applyRecord(record);
     }
-  }
-  for (const date of Array.from(grouped.keys())) {
-    const bucket = grouped.get(date);
-    if (bucket !== undefined) {
-      grouped.set(date, sortRecords(bucket));
-    }
-  }
-  return grouped;
+  };
+  return io;
+}
+
+/**
+ * 导入落盘的**并发闸**。
+ *
+ * 为什么需要：`appendImportPlan` 是同步函数，两次极快的点击（或一次点击 + 一次重渲染前的
+ * 重复派发）可以在 ArkUI 把按钮置灰之前把它调两次 → 同一批被追加两遍。
+ * 这里**不排队**：在飞时的第二次调用直接返回 `ok:false`（排队只会把两次写都排上，
+ * 而且让「第二次到底该写什么」重新变回一个需要推理的问题）。
+ */
+let importInFlight: boolean = false;
+
+/** 复核计数（未做复核时三个数都是 0）。 */
+function noReconfirmed(): ReconfirmedCounts {
+  const counts: ReconfirmedCounts = { added: 0, skipped: 0, conflict: 0 };
+  return counts;
 }
 
 /**
  * 确认导入：把 dry-run 里 `added` 的记录追加到本设备当天的 JSONL 末尾。
  *
  * 安全性质（逐条对应 `docs/EXPORT-IMPORT.md` §3.3）：
- * - 只写 `plan.toAppend`：`conflict` / `skipped` / `invalid` 一律不写（**绝不覆盖**既有行）；
- * - 只写 `scheduleStore.dayFilePath(date)`：即 `<self>/schedules/<date>.jsonl`，别的设备目录永不触碰；
- * - **先编码、后落盘**：任意一条编码失败 → 整批返回 `ok:false`，一个字节都不写；
- * - 同一天的多条按 `ts` 升序拼成一次物理追加；
- * - 追加成功后调用 `openIndexStore.applyRecord` 维护未完成索引（派生数据，失败不影响已写入的记录）。
+ * - **并发闸**：在飞时再次调用直接返回 `ok:false`（`reason='正在导入中，请稍候'`），不排队；
+ * - **写盘前复核**：用 `scheduleStore.readAll()` 重读**此刻**的本机记录，再用
+ *   `reconcileBeforeAppend` 对 `plan.toAppend` 过滤一次——只有复核后的 `added` 才会被写。
+ *   于是「双击」「dry-run 之后本机（或远端同步）写入了同一个 id」都不会重复追加；
+ * - 只写复核后的 added（`conflict` / `skipped` / `invalid` 一律不写，**绝不覆盖**既有行）；
+ * - 只写 `scheduleStore.dayFilePath(date)`：别的设备目录永不触碰；
+ * - **先编码、后落盘** + **同一天多条只追加一次**：都在纯逻辑 `writePlan` 里，
+ *   并由 `tools/test/exportImport.test.mjs` 的 fake-IO 契约测试逐条钉住。
  */
 export function appendImportPlan(plan: ImportPlan): ImportApplyResult {
+  if (importInFlight) {
+    const busy: ImportApplyResult = {
+      ok: false,
+      appended: 0,
+      skipped: plan.skipped,
+      conflict: plan.conflict,
+      invalid: plan.invalid,
+      files: [],
+      reason: '正在导入中，请稍候',
+      reconfirmed: noReconfirmed()
+    };
+    return busy;
+  }
+  importInFlight = true;
+  try {
+    return applyImportPlanOnce(plan);
+  } finally {
+    importInFlight = false;
+  }
+}
+
+/** `appendImportPlan` 的单次实现（进入时并发闸已置位，退出时由调用方复位）。 */
+function applyImportPlanOnce(plan: ImportPlan): ImportApplyResult {
   const failed = (reason: string): ImportApplyResult => {
     const result: ImportApplyResult = {
       ok: false,
@@ -419,7 +485,8 @@ export function appendImportPlan(plan: ImportPlan): ImportApplyResult {
       conflict: plan.conflict,
       invalid: plan.invalid,
       files: [],
-      reason: reason
+      reason: reason,
+      reconfirmed: noReconfirmed()
     };
     return result;
   };
@@ -434,79 +501,51 @@ export function appendImportPlan(plan: ImportPlan): ImportApplyResult {
       conflict: plan.conflict,
       invalid: plan.invalid,
       files: [],
-      reason: ''
+      reason: '',
+      reconfirmed: noReconfirmed()
     };
     return empty;
   }
 
-  // 第一步：把每个日期要写的内容全部编码好（任何一条失败就整批放弃，绝不半写）。
-  const grouped = groupByDate(plan.toAppend);
-  const payloads = new Map<string, string>();
-  const orderedDates: string[] = [];
+  // 第一步：复核——写盘前重读本机记录；读不到就 fail-closed，绝不凭一份过期计划写盘。
+  let existingNow: ScheduleRecord[] = [];
   try {
-    for (const date of Array.from(grouped.keys())) {
-      const bucket = grouped.get(date);
-      if (bucket === undefined || bucket.length === 0) {
-        continue;
-      }
-      let text = '';
-      for (const record of bucket) {
-        text += encodeRecord(record);
-      }
-      payloads.set(date, text);
-      orderedDates.push(date);
-    }
+    existingNow = scheduleStore.readAll();
   } catch (error) {
-    return failed(`导入内容不合法，整批未写入：${describeError(error)}`);
+    return failed(`导入复核失败（读取本机日程）：${describeError(error)}`);
   }
-  if (orderedDates.length === 0) {
-    return failed('导入内容为空，未写入任何文件');
-  }
-
-  // 第二步：逐日一次物理追加。
-  const files: string[] = [];
-  let appended = 0;
-  try {
-    scheduleStore.ensureDirs();
-    for (const date of orderedDates) {
-      const text = payloads.get(date);
-      if (text === undefined) {
-        continue;
-      }
-      const path = scheduleStore.dayFilePath(date);
-      appendTextAtEnd(path, text);
-      files.push(path);
-      const bucket = grouped.get(date);
-      if (bucket !== undefined) {
-        appended += bucket.length;
-      }
-    }
-  } catch (error) {
-    const partial: ImportApplyResult = {
-      ok: false,
-      appended: appended,
-      skipped: plan.skipped,
-      conflict: plan.conflict,
-      invalid: plan.invalid,
-      files: files,
-      reason: `追加导入记录失败（已写入 ${files.length} 个文件）：${describeError(error)}`
-    };
-    return partial;
-  }
-
-  // 第三步：派生索引维护（失败只影响索引，不影响已落盘的日程）。
-  for (const record of plan.toAppend) {
-    openIndexStore.applyRecord(record);
-  }
-
-  const ok: ImportApplyResult = {
-    ok: true,
-    appended: appended,
-    skipped: plan.skipped,
-    conflict: plan.conflict,
-    invalid: plan.invalid,
-    files: files,
-    reason: ''
+  const reconciled: ReconcileResult = reconcileBeforeAppend(plan.toAppend, existingNow);
+  const counts: ReconfirmedCounts = {
+    added: reconciled.added.length,
+    skipped: reconciled.skipped,
+    conflict: reconciled.conflict
   };
-  return ok;
+  if (reconciled.added.length === 0) {
+    // 复核后没有一条还该写（典型：双击的第二下、或本机刚同步到同 id 的更新版本）。
+    const nothing: ImportApplyResult = {
+      ok: true,
+      appended: 0,
+      skipped: plan.skipped + reconciled.skipped,
+      conflict: plan.conflict + reconciled.conflict,
+      invalid: plan.invalid,
+      files: [],
+      reason: '',
+      reconfirmed: counts
+    };
+    return nothing;
+  }
+
+  // 第二步：真正落盘（编码 → 逐日一次追加 → 派生索引），全部在纯逻辑 `writePlan` 里。
+  const written: WritePlanResult = writePlan(reconciled.added, importWriteIo());
+  const result: ImportApplyResult = {
+    ok: written.ok,
+    appended: written.appended,
+    skipped: plan.skipped + reconciled.skipped,
+    conflict: plan.conflict + reconciled.conflict,
+    invalid: plan.invalid,
+    files: written.files,
+    reason: written.reason,
+    reconfirmed: counts
+  };
+  return result;
 }

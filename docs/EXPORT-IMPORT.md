@@ -5,10 +5,10 @@
 
 | 层 | 文件 | 职责 |
 | --- | --- | --- |
-| 纯逻辑（零 SDK） | `entry/src/main/ets/model/exportImport.ts` | 区间校验、Markdown/JSON 渲染、`parseJsonImport`、`planImport`、UTF-8 解码、面板状态助手 |
-| 文件 IO | `entry/src/main/ets/services/exportService.ets` | 写导出文件、选文件读文本、按计划追加、维护未完成索引 |
+| 纯逻辑（零 SDK） | `entry/src/main/ets/model/exportImport.ts` | 区间校验、Markdown/JSON 渲染、`parseJsonImport`、`planImport`、**写前复核 `reconcileBeforeAppend`**、**落盘纯实现 `writePlan`**、UTF-8 解码、面板状态助手 |
+| 文件 IO | `entry/src/main/ets/services/exportService.ets` | 写导出文件、选文件读文本、**并发闸 + 复核 + 注入真实 IO** 执行 `writePlan`、维护未完成索引 |
 | UI | `entry/src/main/ets/components/ExportImportPanel.ets` | 纯展示 + 回调，不做 IO、不做路由 |
-| 测试 | `tools/test/exportImport.test.mjs` | 56 个用例钉住下面的规则 |
+| 测试 | `tools/test/exportImport.test.mjs` | 69 个用例钉住下面的规则（含 fake-IO 落盘契约） |
 
 **不改既有契约**：日程 JSONL 仍是 `docs/DATA-CONTRACT.md` §3（一行一条、只追加），
 未完成索引仍是 §4bis；本功能不新增记录字段、不改字段名、不写 `summaries/`、不碰附件二进制。
@@ -21,6 +21,8 @@
    **绝不动源文件**（不重写、不裁剪、不迁移）。
 2. **导入是 append-only**：只在用户确认后，把 `toAppend` 里那些「本机没有的新 id」追加到
    `devices/<本机>/schedules/YYYY-MM-DD.jsonl` 末尾；历史行一个字节都不改，别的设备目录永不被写。
+   **写盘前必须再复核一次**（见 §3.3 第 2 道闸）：dry-run 到确认之间本机可能已被别的页面 /
+   另一次导入 / 另一台设备的 Git 同步写入了同 `id`，复核会把它们挡在写入之前。
 3. **绝不覆盖 / fail-closed**：
    - 同 `id` 且导入记录**更新** → 只计入 `conflict`（统计并显示给人看），**不追加、不改既有行**；
    - 同 `id` 且**更旧或相同** → `skipped`；
@@ -127,12 +129,14 @@ exportSchedules({ from, to, format, includeAttachments, includeMeta }): ExportFi
 ```
 选文件 → parseJsonImport（文件级校验）→ planImport（逐条归位，dry-run）
       → 面板显示「将新增 N 条 / 跳过 M 条（同 id 且更旧） / 冲突 K 条（同 id 且更新，不会覆盖） / 非法 J 条」
-      → 「确认导入」仅在 N > 0 && J === 0 时可点
-      → appendImportPlan（真正追加）
+      → 「确认导入」仅在 N > 0 && J === 0 时可点（且 `busy === false`）
+      → appendImportPlan（并发闸 → 写前复核 → 只追加复核后的 added）
 ```
 
 页面**只允许**通过 `planImportFromText` 拿计划、通过 `appendImportPlan` 落盘；
 `exportService` 故意不提供「分析+落盘」一步到位的函数，防止被误用成「选了文件就写」。
+「确认」时不要重新 `planImportFromText`（否则统计会和你看到的不一致）——成立的前提是
+`appendImportPlan` 内部**自己**复核（它就是这么做的）。
 
 ### 3.2 `planImport` 归属表
 
@@ -148,18 +152,28 @@ exportSchedules({ from, to, format, includeAttachments, includeMeta }): ExportFi
 - `existing` 里同 `id` 可能有多条历史行，比较基准取其中**最新**的 `ts`（即 `foldById` 后的版本）；
 - 同一批 `incoming` 里重复出现同一个新 `id`：先到的算 `added`，后到的按上面的规则算 `conflict`/`skipped`
   ——同一 `id` 在同一批里最多追加一次；
-- `toAppend` **保持 `incoming` 顺序**（服务层再按日期分组、组内 `ts` 排序后一次追加）；
+- `toAppend` **保持 `incoming` 顺序**（`writePlan` 再按日期分组 `groupImportByDate`、组内 `ts` 排序后一次追加）；
 - 逐条字段校验复用 `model/jsonl.ts` 的 `encodeRecord`（唯一校验源），并额外要求：
   扩展字段 `date`（若有）必须是真实日期、`ts` 必须能推出真实日期。
 
-### 3.3 「绝不覆盖」是怎么保证的（四道闸）
+### 3.3 「绝不覆盖」是怎么保证的（六道闸）
 
 1. **计划层**：`planImport` 只把新 `id` 放进 `toAppend`；`conflict`/`skipped`/`invalid` 一条都进不去；
-2. **编码层**：`appendImportPlan` 先把每个日期要追加的**全部行**编码完（`encodeRecord`），
-   任何一条抛错就整批 `ok:false`、一个字节都不写；
-3. **写入层**：只对 `scheduleStore.dayFilePath(date)`（即 `<本机>/schedules/<date>.jsonl`）
-   定位文件末尾写入；上一行没有换行才补 `\n`，历史字节不改；同一天多条**一次**物理追加；
-4. **读侧兜底**：即便历史里真有同 `id` 多版本，读取仍是 `parseJsonl` + `foldById`（同 id 取较晚 `ts`），
+2. **复核层（写盘前）**：`appendImportPlan` 用 `scheduleStore.readAll()` 重读**此刻**的本机记录，
+   再用纯函数 `reconcileBeforeAppend(plan.toAppend, existingNow)` 过滤一次——规则与 `planImport`
+   完全一致（新 id → `added`；同 id 且导入更新 → `conflict`；更旧/相同 → `skipped`），
+   **只有复核后的 `added` 才会被写**。读不到本机记录时 fail-closed（`ok:false`，一个字节不写）。
+   这一层挡的是两件事：双击（第二下复核必为空）与「dry-run 之后本机/远端同步写入了同 id」；
+3. **并发闸**：模块级 `inFlight`，一次导入在飞时再次调用**直接拒绝**
+   （`ok:false` + `reason='正在导入中，请稍候'`），**不排队**——排队只会把两次写都排上。
+   闸在 `finally` 里复位，异常也不会卡死后续导入；
+4. **编码层**：`writePlan` 先把每个日期要追加的**全部行**编码完（`encodeRecord`），
+   任何一条抛错就整批 `ok:false`、一个字节都不写（连目录都不建）；
+5. **写入层**：只对 `scheduleStore.dayFilePath(date)`（即 `<本机>/schedules/<date>.jsonl`）
+   定位文件末尾写入；上一行没有换行才补 `\n`，历史字节不改；同一天多条**一次**物理追加。
+   落盘的 IO 是**注入**的（`ImportWriteIo` 只有建目录 / 取路径 / 末尾追加 / 维护索引四个能力，
+   没有覆盖写和截断写），所以「追加路径碰到 `TRUNC`」在类型层面就不可能；
+6. **读侧兜底**：即便历史里真有同 `id` 多版本，读取仍是 `parseJsonl` + `foldById`（同 id 取较晚 `ts`），
    导入不会让任何既有版本「消失」。
 
 ### 3.4 `parseJsonImport` 拒绝清单（fail-closed）
@@ -187,11 +201,21 @@ exportSchedules({ from, to, format, includeAttachments, includeMeta }): ExportFi
 ### 3.6 落盘结果
 
 ```ts
-appendImportPlan(plan): { ok, appended, skipped, conflict, invalid, files, reason }
+appendImportPlan(plan): {
+  ok, appended, skipped, conflict, invalid, files, reason,
+  reconfirmed: { added, skipped, conflict }   // 写盘前复核出来的「这一次」的归属
+}
 ```
 
 - `files`：实际追加到的**绝对路径**（按日期，顺序稳定）；
-- 追加成功后调用 `openIndexStore.applyRecord` 逐条维护 `open.jsonl`（派生数据；失败不影响已写入的日程）；
+- `appended`：**已经写下**的条数（复核后 `added` 有多少就写多少；半批失败时只算已写下的）；
+- `reconfirmed`：`reconcileBeforeAppend` 的计数；顶层的 `skipped` / `conflict` 已把它加上
+  （它们表示「这一次确认」的最终归属，`reconfirmed` 单独留一份方便面板区分 dry-run 与复核）；
+- 被并发闸挡下时 `ok:false` + `reason='正在导入中，请稍候'`，`files` 为空、`reconfirmed` 全 0；
+- 复核后一条都不剩（典型：双击的第二下）时 `ok:true` + `appended:0` + `files:[]`，
+  **不会**再产生任何物理追加；
+- 追加成功后调用 `openIndexStore.applyRecord` 逐条维护 `open.jsonl`（派生数据；失败不影响已写入的日程，
+  也不会把 `ok` 翻转成 false）；
 - 部分写入失败时 `ok:false` 且 `appended`/`files` 如实报告已写入的部分（不会谎报全成功）。
 
 ---
@@ -233,24 +257,24 @@ private pendingImport: ImportPlan | null = null;
 ExportImportPanel({
   state: this.exportImport,
   onExport: (request: ExportRequest) => {
-    this.exportImport = withPanelMessage(this.exportImport, '', true);
+    this.exportImport = withPanelMessage(this.exportImport, '', true);   // busy 置位
     const result = exportSchedules(request);   // ExportRequest 字段名与 ExportRequestInput 一致，可直接透传
     this.exportImport = result.ok
       ? withExportPath(withPanelMessage(this.exportImport, `已导出 ${result.recordCount} 条`, false), result.path)
-      : withPanelMessage(this.exportImport, result.reason, false);
+      : withPanelMessage(this.exportImport, result.reason, false);       // busy 复位（成功/失败都复位）
   },
   onPickFile: () => {
-    this.exportImport = withPanelMessage(this.exportImport, '', true);
+    this.exportImport = withPanelMessage(this.exportImport, '', true);   // busy 置位
     const context = getContext(this) as common.UIAbilityContext;
     pickImportFile(context).then((picked) => {
       if (!picked.ok) {
-        this.exportImport = withPanelMessage(this.exportImport, picked.reason, false);
+        this.exportImport = withPanelMessage(this.exportImport, picked.reason, false);   // busy 复位
         return;
       }
       const planned = planImportFromText(picked.text, picked.fileName);
       this.pendingImport = planned.plan;
       if (planned.plan === null) {
-        this.exportImport = withPanelMessage(this.exportImport, planned.reason, false);
+        this.exportImport = withPanelMessage(this.exportImport, planned.reason, false);  // busy 复位
         return;
       }
       const tip = planned.plan.conflict > 0 ? '有冲突记录：本机版本不会被覆盖' : '';
@@ -261,15 +285,20 @@ ExportImportPanel({
     });
   },
   onConfirmImport: () => {
-    if (this.pendingImport === null) {
+    // busy 是 UI 层的第一道闸（第二道在 appendImportPlan 里：模块级 inFlight，在飞时直接拒绝、不排队）
+    if (this.pendingImport === null || this.exportImport.busy) {
       return;
     }
+    this.exportImport = withPanelMessage(this.exportImport, '', true);   // ← busy 置位
     const applied = appendImportPlan(this.pendingImport);
     this.pendingImport = null;
     this.exportImport = withPanelMessage(
       this.exportImport,
-      applied.ok ? `已追加 ${applied.appended} 条、跳过 ${applied.skipped} 条、冲突 ${applied.conflict} 条` : applied.reason,
-      false
+      applied.ok
+        ? `已追加 ${applied.appended} 条、跳过 ${applied.skipped} 条、冲突 ${applied.conflict} 条` +
+          `（复核后：新增 ${applied.reconfirmed.added} / 跳过 ${applied.reconfirmed.skipped} / 冲突 ${applied.reconfirmed.conflict}）`
+        : applied.reason,
+      false                                                              // ← busy 复位（成功/失败都要复位）
     );
   },
   onCancel: () => {
@@ -282,6 +311,10 @@ ExportImportPanel({
 > 注意：`onConfirmImport` 必须用**用户看过的那份计划**（`pendingImport`）落盘，
 > 不要在确认时重新 `planImportFromText`——两次读取之间本机记录可能已被其它页面改动，
 > 重新规划会得到与用户看到的统计不一致的结果。
+>
+> 但「不重解析」不等于「不复核」：`appendImportPlan` 内部会**重读本机**再复核一次（§3.3 第 2 道闸），
+> 所以过期计划不会造成同 `id` 重复追加。`busy` 置位/复位是 UI 的第一道闸（防止双击进第二次），
+> 模块级 `inFlight` 是第二道闸（即使 UI 没来得及置灰也不会写两遍）——**两道都要**。
 
 ---
 
@@ -312,10 +345,14 @@ ExportImportPanel({
 ```bash
 cd apps/arkui-schedule
 node ..\..\node_modules\typescript\bin\tsc -p tools\tsconfig.json   # 纯逻辑层编译（exit 0）
-node --test tools\test\exportImport.test.mjs                        # 56 用例 / 全部通过
+node --test tools\test\exportImport.test.mjs                        # 69 用例 / 全部通过
 node tools\validate-app.mjs                                         # 8/8
 ```
 
 测试覆盖（节选）：空区间导出、区间过滤与排序、`[x]/[ ]`、无 time、`includeAttachments`、
 `includeMeta`、JSON round-trip、`parseJsonImport` 的 12 类坏输入、`planImport` 的三种同 id 归属、
-9 类非法字段、5000 条 < 2000ms 且保序、`exportFileStamp`、`decodeUtf8`、面板状态助手。
+9 类非法字段、5000 条 < 2000ms 且保序、`exportFileStamp`、`decodeUtf8`、面板状态助手；
+**落盘契约（fake store / fake 写入器注入）**：只追加（无 `TRUNC`，历史行逐字节不变）、
+同一天多条只一次物理追加、第 2 个日期失败时 `ok:false` + `files` 只含已写文件 + 已写内容完整、
+编码失败零写入、索引异常不翻转 `ok`；**复核（M2）**：`reconcileBeforeAppend` 的三种归属、
+同批复核去重、双击端到端不产生第二次物理追加、`.ets` 侧「重读 → 复核 → 写入」顺序与并发闸的源码级断言。

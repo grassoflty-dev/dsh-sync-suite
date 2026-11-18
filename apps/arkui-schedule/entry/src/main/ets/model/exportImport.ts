@@ -4,8 +4,9 @@
  * 契约：`docs/EXPORT-IMPORT.md`（本文件的规格来源）与 `docs/DATA-CONTRACT.md` §3 / §4bis。
  * 三条硬约束：
  * 1. **导出是只读派生**：只读 `ScheduleRecord[]`、只产出文本，不碰任何源文件；
- * 2. **导入是 append-only**：本文件只算「计划」（`ImportPlan`），落盘由 `services/exportService.ets`
- *    在用户确认后按 `toAppend` 追加，绝不重写历史行、绝不写别的设备目录；
+ * 2. **导入是 append-only**：本文件算「计划」（`ImportPlan`）+ 写盘前的**幂等复核**
+ *    （`reconcileBeforeAppend`）+ 落盘的**纯实现**（`writePlan`，IO 由 `services/exportService.ets`
+ *    注入真实文件系统）；绝不重写历史行、绝不写别的设备目录；
  * 3. **绝不覆盖**：同 `id` 且 incoming 的 `ts` 更新时只计入 `conflict`（不追加、不改既有行），
  *    让「谁更新」这件事被人看见，而不是被静默丢弃或静默覆盖。
  *
@@ -16,7 +17,7 @@
  *   只有「导出区间非法 / 缺 deviceId」这类**调用方编程错误**才抛中文 Error（区间必须先过 `parseDateRange`）。
  */
 import { formatDateKey, monthGrid, parseDateKey } from './calendar';
-import { encodeRecord, recordDateKey } from './jsonl';
+import { encodeRecord, recordDateKey, sortRecords } from './jsonl';
 import type { Attachment, ScheduleRecord } from './types';
 
 /** 导出格式：Markdown。 */
@@ -778,6 +779,230 @@ export function planImport(input: PlanImportInput): ImportPlan {
     plannedAt: normalizeNow(input.now)
   };
   return plan;
+}
+
+/** `reconcileBeforeAppend` 的结果（写盘前复核后的归属）。 */
+export interface ReconcileResult {
+  /** 复核后确实还应当追加的记录（保持传入顺序，**只有它会被写**）。 */
+  added: ScheduleRecord[];
+  /** 同 id 且「更旧或相同」而不再追加的条数。 */
+  skipped: number;
+  /** 同 id 且「导入版本更新、本机版本较旧」的条数（仍**绝不覆盖**）。 */
+  conflict: number;
+}
+
+/**
+ * 写盘前的**幂等复核**（`docs/EXPORT-IMPORT.md` §3.3 第 2 道闸）。
+ *
+ * 为什么需要它：dry-run（`planImport`）与用户点「确认导入」之间可能隔着任意长时间——
+ * 期间本机可能被别的页面、另一次导入、或另一台设备经 Git 同步写入了同一个 `id`。
+ * 光靠「确认时重用用户看过的那份计划」只能保证**统计与用户看到的一致**，不能保证
+ * 「同一个 id 不被追加两次」。所以落盘前必须用**此刻**的 `existingNow` 再判一次。
+ *
+ * 判定规则与 `planImport` 完全一致（同一个 `isTsAfter`）：
+ * | 情形 | 归属 |
+ * | --- | --- |
+ * | 本机没有这个 `id` | `added`（进 `added` 数组） |
+ * | 同 `id`，planned 的 `ts` 更新 | `conflict`（不追加、不覆盖） |
+ * | 同 `id`，planned 的 `ts` 更旧或相同 | `skipped`（重复导入 / 双击就会落到这里） |
+ *
+ * 另外：`planned` 内部重复的 `id` 也只放行第一次（与 `planImport` 的 `acceptedTs` 同构），
+ * 因此「复核」本身也是幂等的——连续两次调用，第二次的 `added` 必为空。
+ * 非法/空 `id` 一律算 `skipped`：复核不做字段校验（那是 `planImport` 的职责），只保证**不写脏主键**。
+ */
+export function reconcileBeforeAppend(
+  planned: ScheduleRecord[],
+  existingNow: ScheduleRecord[]
+): ReconcileResult {
+  const plannedList: ScheduleRecord[] = Array.isArray(planned) ? planned : [];
+  const existing: ScheduleRecord[] = Array.isArray(existingNow) ? existingNow : [];
+  const latestTs = new Map<string, string>();
+  for (const record of existing) {
+    if (record === null || record === undefined) {
+      continue;
+    }
+    const id = typeof record.id === 'string' ? record.id : '';
+    if (id.length === 0) {
+      continue;
+    }
+    const ts = typeof record.ts === 'string' ? record.ts : '';
+    const known = latestTs.get(id);
+    if (known === undefined || isTsAfter(ts, known)) {
+      latestTs.set(id, ts);
+    }
+  }
+
+  const added: ScheduleRecord[] = [];
+  const acceptedTs = new Map<string, string>();
+  let skipped = 0;
+  let conflict = 0;
+  for (const record of plannedList) {
+    if (record === null || record === undefined) {
+      skipped += 1;
+      continue;
+    }
+    const id = typeof record.id === 'string' ? record.id : '';
+    const ts = typeof record.ts === 'string' ? record.ts : '';
+    if (id.length === 0) {
+      skipped += 1;
+      continue;
+    }
+    const known = latestTs.get(id);
+    const accepted = acceptedTs.get(id);
+    let baseline: string | undefined = known;
+    if (accepted !== undefined && (baseline === undefined || isTsAfter(accepted, baseline))) {
+      baseline = accepted;
+    }
+    if (baseline !== undefined) {
+      if (isTsAfter(ts, baseline)) {
+        conflict += 1;
+      } else {
+        skipped += 1;
+      }
+      continue;
+    }
+    acceptedTs.set(id, ts);
+    added.push(record);
+  }
+
+  const result: ReconcileResult = { added: added, skipped: skipped, conflict: conflict };
+  return result;
+}
+
+/**
+ * `writePlan` 需要的**全部 IO 能力**（由 `services/exportService.ets` 用真实文件系统实现，
+ * 测试用假写入器注入）。
+ *
+ * 刻意只开这三个写入口：**没有**「覆盖写 / 截断写 / 删除」这类能力——追加计划在类型层面
+ * 就碰不到 `TRUNC`，历史字节改不了。要加新写法先改这个接口，评审一定会看到。
+ */
+export interface ImportWriteIo {
+  /** 幂等创建目录（含父目录）。 */
+  ensureDirs(): void;
+  /** 某天的 JSONL 绝对路径（**唯一**写入目标来源；调用方不许自己拼路径）。 */
+  dayFilePath(date: string): string;
+  /** 定位到文件末尾追加（实现方**不得**使用截断/覆盖写）。 */
+  appendTextAtEnd(path: string, text: string): void;
+  /** 维护派生索引（可选；约定不抛异常，抛了也只影响索引，不影响已落盘的日程）。 */
+  applyRecord?: (record: ScheduleRecord) => void;
+}
+
+/** `writePlan` 的结果（`files` 只含**已成功追加**的文件，失败时如实报告半批）。 */
+export interface WritePlanResult {
+  ok: boolean;
+  /** 已追加的记录条数（按成功写下的日期桶累加）。 */
+  appended: number;
+  /** 已成功追加的绝对路径（按日期，去重后顺序稳定）。 */
+  files: string[];
+  /** 失败时的中文原因（含「已写入 N 个文件」）；成功为空串。 */
+  reason: string;
+}
+
+/**
+ * 把待追加记录按 `ts` 的日期分组（组内按 `ts` 稳定升序）。
+ *
+ * 抽到模型层的原因：它是「同一天多条只发生**一次**物理追加」这条契约的判定依据，
+ * 必须能被 Node 直接测到（服务层 `.ets` 跑不进 `node --test`）。
+ */
+export function groupImportByDate(records: ScheduleRecord[]): Map<string, ScheduleRecord[]> {
+  const list: ScheduleRecord[] = Array.isArray(records) ? records : [];
+  const grouped = new Map<string, ScheduleRecord[]>();
+  for (const record of list) {
+    const date = recordDateKey(record.ts);
+    const bucket = grouped.get(date);
+    if (bucket === undefined) {
+      const created: ScheduleRecord[] = [record];
+      grouped.set(date, created);
+    } else {
+      bucket.push(record);
+    }
+  }
+  for (const date of Array.from(grouped.keys())) {
+    const bucket = grouped.get(date);
+    if (bucket !== undefined) {
+      grouped.set(date, sortRecords(bucket));
+    }
+  }
+  return grouped;
+}
+
+/**
+ * 导入落盘的**纯实现**（`appendImportPlan` 的全部副作用都经由注入的 `io`）。
+ *
+ * 保证（逐条对应 `docs/EXPORT-IMPORT.md` §3.3，并由 `tools/test/exportImport.test.mjs` 的
+ * fake-IO 契约测试钉住）：
+ * 1. **先编码、后落盘**：任一记录编码失败 → 整批 `ok:false`、`files` 为空、一个字节不写；
+ * 2. **同一天多条只追加一次**：按日期分组后，每个日期只调一次 `io.appendTextAtEnd`；
+ * 3. **只追加**：唯一的写入口是 `appendTextAtEnd`（没有截断写），历史行逐字节不变；
+ * 4. **半批如实报告**：第 N 个日期失败时 `ok:false`，`files` 只含已写成功的文件，
+ *    `appended` 只算已写下的条数（不虚报）；
+ * 5. 派生索引在**写入成功之后**才维护，且索引异常不会把「已落盘」改报成失败。
+ */
+export function writePlan(records: ScheduleRecord[], io: ImportWriteIo): WritePlanResult {
+  const list: ScheduleRecord[] = Array.isArray(records) ? records : [];
+  const failed = (reason: string, appended: number, files: string[]): WritePlanResult => {
+    const result: WritePlanResult = { ok: false, appended: appended, files: files, reason: reason };
+    return result;
+  };
+
+  let grouped: Map<string, ScheduleRecord[]> = new Map<string, ScheduleRecord[]>();
+  const payloads = new Map<string, string>();
+  const orderedDates: string[] = [];
+  try {
+    grouped = groupImportByDate(list);
+    for (const date of Array.from(grouped.keys())) {
+      const bucket = grouped.get(date);
+      if (bucket === undefined || bucket.length === 0) {
+        continue;
+      }
+      let text = '';
+      for (const record of bucket) {
+        text += encodeRecord(record);
+      }
+      payloads.set(date, text);
+      orderedDates.push(date);
+    }
+  } catch (error) {
+    return failed(`导入内容不合法，整批未写入：${describe(error)}`, 0, []);
+  }
+  if (orderedDates.length === 0) {
+    return failed('导入内容为空，未写入任何文件', 0, []);
+  }
+
+  const files: string[] = [];
+  let appended = 0;
+  try {
+    io.ensureDirs();
+    for (const date of orderedDates) {
+      const text = payloads.get(date);
+      if (text === undefined) {
+        continue;
+      }
+      const path = io.dayFilePath(date);
+      io.appendTextAtEnd(path, text);
+      files.push(path);
+      const bucket = grouped.get(date);
+      if (bucket !== undefined) {
+        appended += bucket.length;
+      }
+    }
+  } catch (error) {
+    return failed(`追加导入记录失败（已写入 ${files.length} 个文件）：${describe(error)}`, appended, files);
+  }
+
+  const applyRecord = io.applyRecord;
+  if (applyRecord !== undefined) {
+    for (const record of list) {
+      try {
+        applyRecord(record);
+      } catch {
+        // 派生索引（未完成清单）失败只影响索引，不影响已经落盘的日程。
+      }
+    }
+  }
+
+  const ok: WritePlanResult = { ok: true, appended: appended, files: files, reason: '' };
+  return ok;
 }
 
 /**

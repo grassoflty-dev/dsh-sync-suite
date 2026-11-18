@@ -1,6 +1,14 @@
 /**
- * 设置页：五组（同步 / AI 汇总 / 手写 / 远程控制 / 关于），长说明收进 `?` 弹层。
+ * 设置页：六组（同步 / AI 汇总 / 手写 / 远程控制 / 数据 / 关于），长说明收进 `?` 弹层。
  * （同步组因为「分支 / 推送 / 状态」三项新需求变长，次要项继续收在组头「更多」里。）
+ *
+ * 「数据」组（导出 / 导入，`docs/EXPORT-IMPORT.md` §4）：只放 `ExportImportPanel` 一个组件，
+ * 页面负责调 `services/exportService.ets` 并把结果写回 `exportImport`；导入**必须两步**
+ * （选文件 → dry-run 统计 → 用户点确认才 `appendImportPlan` 落盘，且用同一份计划）。
+ *
+ * AI 组内的「多源 fallback」（`docs/AI-FALLBACK.md` §8）排在「高级」折叠区之前：开关 +
+ * 最多 3 个备用源 + 尝试次数 + 本次会话的诊断；三个持久化键由 `applySettings` / `saveSettings`
+ * 读写，诊断只留在内存（不落盘、不进同步载荷）。
  *
  * 本页仍做四件事（逻辑未改）：内嵌隐藏 Web 跑 isomorphic-git、注册代理、按钮触发
  * pull/push/status、保存前做表单校验。
@@ -34,6 +42,7 @@
 import { promptAction, router } from '@kit.ArkUI';
 import { webview } from '@kit.ArkWeb';
 import { common } from '@kit.AbilityKit';
+import { pasteboard } from '@kit.BasicServicesKit';
 import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { nowIso } from '../common/date';
@@ -140,6 +149,40 @@ import type { PlatformResolution } from '../model/gitAuth';
 import { gitExtrasStore } from '../services/syncController';
 import type { GitSyncExtras } from '../services/syncController';
 import { PageLayout } from '../components/PageLayout';
+import { AiFallbackPanel } from '../components/AiFallbackPanel';
+import { ExportImportPanel } from '../components/ExportImportPanel';
+import {
+  DEFAULT_MAX_ATTEMPTS,
+  MAX_FALLBACK_SOURCES,
+  normalizeMaxAttempts,
+  parseFallbackOrder,
+  serializeFallbackOrder,
+  sourceLabel
+} from '../model/aiFallback';
+import type { FallbackDiagnostic, FallbackSource, FallbackSourcePatch } from '../model/aiFallback';
+import {
+  applyPlan,
+  clearDryRun,
+  defaultExportImportState,
+  withExportPath,
+  withImportFileName,
+  withPanelMessage
+} from '../model/exportImport';
+import type { ExportImportState, ExportRequest, ImportPlan } from '../model/exportImport';
+import {
+  appendImportPlan,
+  exportSchedules,
+  exportsDirPath,
+  pickImportFile,
+  planImportFromText
+} from '../services/exportService';
+import type {
+  ExportFileResult,
+  ExportRequestInput,
+  ImportApplyResult,
+  ImportFilePickResult,
+  ImportPlanResult
+} from '../services/exportService';
 import { DIVIDER, FONT, HOME_INCLUDE_OTHER_KEY, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
 import { applyThemeMode, isSystemDark } from '../common/themeApply';
 import { THEME_MODE_ORDER, normalizeThemeMode, resolveTheme, themeModeHint, themeModeLabel } from '../model/theme';
@@ -161,6 +204,14 @@ const THEME_CHIP_MIN_WIDTH: number = 56;
 
 /** 展示用版本号：与 `AppScope/app.json5` 的 versionName 保持一致（改版本时两处同步）。 */
 const APP_VERSION: string = '1.0.0';
+
+/**
+ * 本页会话内最多保留几条 fallback 诊断。
+ *
+ * 诊断只用于「刚才那次为什么失败」的即时排查，不落盘、不跨页面；留 10 条足够覆盖
+ * 「主源 + 3 个备用源」的两轮尝试，再多就只是在设置页里堆噪音。
+ */
+const MAX_SESSION_DIAGNOSTICS: number = 10;
 
 /** 弹层标识：同一时刻只开一个。 */
 const PANEL_NONE: string = '';
@@ -255,6 +306,27 @@ struct Settings {
   @State penOnlyInput: boolean = false;
 
   /**
+   * 导出 / 导入面板的展示状态（`components/ExportImportPanel.ets` 的 `@Prop state`）。
+   *
+   * 组件只读它渲染，交互（区间 / 格式 / 两个开关）在组件本地承接并通过 `ExportRequest`
+   * 回传；本页只负责把**结果**（导出路径 / dry-run 计数 / 提示文案 / busy）写回来。
+   */
+  @State exportImport: ExportImportState = defaultExportImportState();
+
+  /** 是否启用「多源 fallback」（默认关闭：关闭时内容只发给主源，见 `docs/AI-FALLBACK.md` §6）。 */
+  @State aiFallbackEnabled: boolean = false;
+  /** 备用源顺序（不含主源，最多 3 个；`parseFallbackOrder` / `serializeFallbackOrder` 归一）。 */
+  @State aiFallbackSources: FallbackSource[] = [];
+  /** 最多尝试几次（含主源）。 */
+  @State aiFallbackMaxAttempts: number = DEFAULT_MAX_ATTEMPTS;
+  /**
+   * 本次页面会话内的 fallback 诊断（源名 / 原因 / 耗时，已由运行器脱敏）。
+   *
+   * **只在内存里**：不写 preferences、不进 Git 载荷；条数上限见 `MAX_SESSION_DIAGNOSTICS`。
+   */
+  @State aiFallbackDiagnostics: FallbackDiagnostic[] = [];
+
+  /**
    * 深色模式三态（`system` | `light` | `dark`）。
    *
    * 切换即生效（`setColorMode` + 落盘，见 `saveThemeMode`），不等底部「保存设置」——
@@ -308,6 +380,14 @@ struct Settings {
   private pageScroller: Scroller = new Scroller();
   /** 远程控制的「旧数据 → manual」迁移是否已经做过（只做一次，见 `applySettings`）。 */
   private remoteMigrated: boolean = false;
+  /**
+   * 待用户确认的导入计划（**就是 dry-run 那一份**）。
+   *
+   * 确认导入时直接把它交给 `appendImportPlan`，**绝不重新解析文件**：两次读取之间本机记录
+   * 可能已被别的页面改动，重新规划会得到与用户看到的统计不一致的结果（`docs/EXPORT-IMPORT.md` §4.1）。
+   * `null` = 没有待确认的计划（没选文件 / 已取消 / 已确认落盘）。
+   */
+  private pendingImport: ImportPlan | null = null;
 
   aboutToAppear(): void {
     this.platformText = isHarmonyOS() ? 'HarmonyOS' : 'Android';
@@ -396,6 +476,11 @@ struct Settings {
     this.aiModel = settings.aiModel;
     this.aiProviderId = settings.aiProviderId;
     this.aiBaseURL = settings.aiBaseURL;
+    // 多源 fallback（`docs/AI-FALLBACK.md` §4）：三个键都由 store 归一过，这里只铺回表单；
+    // 备用源的 key（`aiFallbackKey`）不在本页建输入框——保存时不传该键就保留原值。
+    this.aiFallbackEnabled = settings.aiFallbackEnabled;
+    this.aiFallbackSources = parseFallbackOrder(settings.aiFallbackOrder);
+    this.aiFallbackMaxAttempts = normalizeMaxAttempts(settings.aiFallbackMaxAttempts);
     this.gitPlatform = normalizePlatform(settings.gitPlatform);
     this.authMode = normalizeAuthMode(settings.authMode);
     this.penOnlyInput = settings.penOnlyInput;
@@ -653,7 +738,13 @@ struct Settings {
         remoteManualUrl: this.remoteManualUrl,
         // 访问令牌：输入框留空 = 沿用已保存的（**不能**把空串写进去，那等于悄悄清除令牌）；
         // 想清除只有「清除令牌」那一个入口。
-        remoteToken: this.effectiveRemoteToken()
+        remoteToken: this.effectiveRemoteToken(),
+        // 多源 fallback：开关 / 次数 / 备用顺序（顺序先过 serializeFallbackOrder：去重 + 最多 3 条）。
+        // 备用源的共用 key（`aiFallbackKey`）**不传**——不传即保留 preferences 里的原值，
+        // 本页没有这个输入框，也就不该在保存时把它写空。
+        aiFallbackEnabled: this.aiFallbackEnabled,
+        aiFallbackMaxAttempts: normalizeMaxAttempts(this.aiFallbackMaxAttempts),
+        aiFallbackOrder: serializeFallbackOrder(this.aiFallbackSources)
       };
       const saved = await settingsStore.save(patch, context);
       if (this.disposed) {
@@ -886,6 +977,303 @@ struct Settings {
         this.aiTestBusy = false;
       }
     }
+  }
+
+  // ------------------------------------------------------------------ 导出 / 导入（A 线）
+
+  /**
+   * 导出：把面板回传的区间 / 格式 / 两个开关交给 `exportSchedules`（只读派生，不改源文件）。
+   *
+   * 说明：`ExportRequest` 的字段是 `fromText` / `toText`，服务层的 `ExportRequestInput` 是
+   * `from` / `to`——**不是同名透传**，这里显式映射（只改调用侧，不动服务层与组件）。
+   */
+  private handleExport(request: ExportRequest): void {
+    if (this.disposed) {
+      return;
+    }
+    this.exportImport = withPanelMessage(this.exportImport, '', true);
+    const input: ExportRequestInput = {
+      from: request.fromText,
+      to: request.toText,
+      format: request.format,
+      includeAttachments: request.includeAttachments,
+      includeMeta: request.includeMeta
+    };
+    try {
+      const result: ExportFileResult = exportSchedules(input);
+      if (this.disposed) {
+        return;
+      }
+      if (!result.ok) {
+        this.exportImport = withPanelMessage(this.exportImport, `导出失败：${result.reason}`, false);
+        return;
+      }
+      this.exportImport = withExportPath(
+        withPanelMessage(this.exportImport, `已导出 ${result.recordCount} 条（${result.fileName}）`, false),
+        result.path
+      );
+      promptAction.showToast({ message: '已导出', duration: toastMsFor(false) });
+    } catch (error) {
+      if (this.disposed) {
+        return;
+      }
+      this.exportImport = withPanelMessage(this.exportImport, `导出失败：${describeError(error)}`, false);
+    }
+  }
+
+  /**
+   * 导入第一步：选文件 → dry-run 统计（**一个字节都不写**）。
+   *
+   * 把计划存进 `pendingImport`，等用户点「确认导入」才落盘；选文件失败 / 文件不可解析都只改
+   * `exportImport.message`（中文），绝不留半份计划。
+   */
+  private async handlePickImportFile(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    this.exportImport = withPanelMessage(this.exportImport, '', true);
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const picked: ImportFilePickResult = await pickImportFile(context);
+      if (this.disposed) {
+        return;
+      }
+      if (!picked.ok) {
+        this.pendingImport = null;
+        this.exportImport = withPanelMessage(this.exportImport, `选择文件失败：${picked.reason}`, false);
+        return;
+      }
+      const planned: ImportPlanResult = planImportFromText(picked.text, picked.fileName);
+      if (this.disposed) {
+        return;
+      }
+      if (planned.plan === null) {
+        this.pendingImport = null;
+        this.exportImport = withPanelMessage(this.exportImport, `无法读取导入文件：${planned.reason}`, false);
+        return;
+      }
+      this.pendingImport = planned.plan;
+      const tip: string =
+        planned.plan.conflict > 0 ? '有冲突记录（同 id 且更新）：本机版本不会被覆盖，需人工决定' : '';
+      this.exportImport = applyPlan(
+        withImportFileName(withPanelMessage(this.exportImport, tip, false), picked.fileName),
+        planned.plan
+      );
+    } catch (error) {
+      if (this.disposed) {
+        return;
+      }
+      this.pendingImport = null;
+      this.exportImport = withPanelMessage(this.exportImport, `选择文件失败：${describeError(error)}`, false);
+    }
+  }
+
+  /**
+   * 导入第二步：用户点「确认导入」，把**同一份 dry-run 计划**追加落盘。
+   *
+   * 落盘后清掉 dry-run（避免同一份文件被连点两次追加两遍），提示里保留追加 / 跳过 / 冲突计数。
+   */
+  private handleConfirmImport(): void {
+    const plan: ImportPlan | null = this.pendingImport;
+    if (plan === null) {
+      if (this.disposed) {
+        return;
+      }
+      this.exportImport = withPanelMessage(this.exportImport, '没有待确认的导入计划：请先选择 JSON 文件', false);
+      return;
+    }
+    try {
+      const applied: ImportApplyResult = appendImportPlan(plan);
+      this.pendingImport = null;
+      if (this.disposed) {
+        return;
+      }
+      if (!applied.ok) {
+        this.exportImport = withPanelMessage(this.exportImport, `导入失败：${applied.reason}`, false);
+        return;
+      }
+      const done: string =
+        `已追加 ${applied.appended} 条、跳过 ${applied.skipped} 条、冲突 ${applied.conflict} 条` +
+        `（非法 ${applied.invalid} 条未写入）`;
+      this.exportImport = withPanelMessage(clearDryRun(this.exportImport), done, false);
+      promptAction.showToast({ message: `已导入 ${applied.appended} 条`, duration: toastMsFor(false) });
+    } catch (error) {
+      if (this.disposed) {
+        return;
+      }
+      this.exportImport = withPanelMessage(this.exportImport, `导入失败：${describeError(error)}`, false);
+    }
+  }
+
+  /** 取消导入：丢掉待确认计划 + 清空 dry-run 统计（本机记录没有任何改动）。 */
+  private handleCancelImport(): void {
+    this.pendingImport = null;
+    if (this.disposed) {
+      return;
+    }
+    this.exportImport = withPanelMessage(clearDryRun(this.exportImport), '已取消导入（本机记录没有任何改动）', false);
+  }
+
+  /**
+   * 复制导出路径到系统剪贴板（面板里也有「长按路径可复制」这一条退路）。
+   *
+   * 复制目标优先「最近一次导出的文件路径」，还没导出过就复制导出目录（`exportsDirPath()`），
+   * 用户至少知道文件在哪。剪贴板写入失败不弹崩溃，只把原因写进面板提示。
+   */
+  private async handleCopyPath(): Promise<void> {
+    const target: string = this.exportImport.exportPath.length > 0 ? this.exportImport.exportPath : exportsDirPath();
+    try {
+      const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, target);
+      await pasteboard.getSystemPasteboard().setData(data);
+      if (this.disposed) {
+        return;
+      }
+      promptAction.showToast({ message: '路径已复制', duration: toastMsFor(false) });
+    } catch (error) {
+      if (this.disposed) {
+        return;
+      }
+      this.exportImport = withPanelMessage(
+        this.exportImport,
+        `复制路径失败：${describeError(error)}（可在面板里长按路径手动复制）`,
+        false
+      );
+    }
+  }
+
+  // ------------------------------------------------------------------ 多源 fallback（C 线）
+
+  /** 主源的展示名（`AiFallbackPanel` 的 `primaryLabel`，用于「备用源里不要再选它」的说明）。 */
+  private primarySourceLabel(): string {
+    const primary: FallbackSource = { providerId: this.aiProviderId, modelId: this.aiModel };
+    return sourceLabel(primary);
+  }
+
+  /**
+   * 新增一个备用源的初值：优先挑「既不是主源、也还没被用过」的预设源。
+   *
+   * 不选「自定义」：它必须手填 baseURL，作为自动加进来的初值只会让人以为配好了却发不出去。
+   * 预设源都被占用时退回主源（运行器会去重，界面上也不会多出一条假源）。
+   */
+  private defaultFallbackSource(): FallbackSource {
+    let picked: string = '';
+    for (const preset of AI_PROVIDERS) {
+      if (preset.id === CUSTOM_PROVIDER_ID || preset.id === this.aiProviderId) {
+        continue;
+      }
+      let used: boolean = false;
+      for (const item of this.aiFallbackSources) {
+        if (item.providerId === preset.id) {
+          used = true;
+          break;
+        }
+      }
+      if (!used) {
+        picked = preset.id;
+        break;
+      }
+    }
+    if (picked.length === 0) {
+      picked = this.aiProviderId;
+    }
+    const source: FallbackSource = { providerId: picked, modelId: defaultModelOf(picked) };
+    return source;
+  }
+
+  /** 添加备用源（满 `MAX_FALLBACK_SOURCES` 个就不再加；组件里的按钮同时会禁用）。 */
+  private addFallbackSource(): void {
+    if (this.aiFallbackSources.length >= MAX_FALLBACK_SOURCES) {
+      return;
+    }
+    const next: FallbackSource[] = [];
+    for (const item of this.aiFallbackSources) {
+      next.push(item);
+    }
+    next.push(this.defaultFallbackSource());
+    this.aiFallbackSources = next;
+    this.clampMaxAttempts();
+  }
+
+  /** 删除第 `index` 个备用源（越界直接忽略，空列表也不会崩）。 */
+  private removeFallbackSource(index: number): void {
+    if (index < 0 || index >= this.aiFallbackSources.length) {
+      return;
+    }
+    const next: FallbackSource[] = [];
+    for (let cursor = 0; cursor < this.aiFallbackSources.length; cursor++) {
+      if (cursor !== index) {
+        next.push(this.aiFallbackSources[cursor]);
+      }
+    }
+    this.aiFallbackSources = next;
+    this.clampMaxAttempts();
+  }
+
+  /** 上移 / 下移第 `index` 个备用源（`offset` = -1 上移 / +1 下移；越界不动）。 */
+  private moveFallbackSource(index: number, offset: number): void {
+    const length: number = this.aiFallbackSources.length;
+    const target: number = index + offset;
+    if (index < 0 || index >= length || target < 0 || target >= length || target === index) {
+      return;
+    }
+    const next: FallbackSource[] = [];
+    for (const item of this.aiFallbackSources) {
+      next.push(item);
+    }
+    const moved: FallbackSource = next[index];
+    next[index] = next[target];
+    next[target] = moved;
+    this.aiFallbackSources = next;
+  }
+
+  /**
+   * 改写第 `index` 个备用源的一个或多个字段（`FallbackSourcePatch`）。
+   *
+   * ArkTS 不支持对象展开，因此逐字段合并并**重建**一条源；`baseURL` 补丁为空串表示清空
+   * （切换 provider 时组件就是用它来丢掉旧地址的）。
+   */
+  private patchFallbackSource(index: number, patch: FallbackSourcePatch): void {
+    if (index < 0 || index >= this.aiFallbackSources.length) {
+      return;
+    }
+    const current: FallbackSource = this.aiFallbackSources[index];
+    const providerId: string = patch.providerId === undefined ? current.providerId : patch.providerId;
+    const modelId: string = patch.modelId === undefined ? current.modelId : patch.modelId;
+    const currentBaseURL: string = current.baseURL === undefined ? '' : current.baseURL;
+    const baseURL: string = patch.baseURL === undefined ? currentBaseURL : patch.baseURL;
+    const updated: FallbackSource = { providerId: providerId, modelId: modelId };
+    if (baseURL.length > 0) {
+      updated.baseURL = baseURL;
+    }
+    const next: FallbackSource[] = [];
+    for (let cursor = 0; cursor < this.aiFallbackSources.length; cursor++) {
+      next.push(cursor === index ? updated : this.aiFallbackSources[cursor]);
+    }
+    this.aiFallbackSources = next;
+  }
+
+  /** 尝试次数归一（夹到 `1..MAX_ATTEMPTS_LIMIT`；备用源增减后重新夹一次）。 */
+  private clampMaxAttempts(): void {
+    this.aiFallbackMaxAttempts = normalizeMaxAttempts(this.aiFallbackMaxAttempts);
+  }
+
+  /**
+   * 记一条 fallback 诊断（`runWithFallback` 的 `onAttempt` 回调落点）。
+   *
+   * 只保留**本次页面会话内**最近 `MAX_SESSION_DIAGNOSTICS` 条：诊断是即时排查用的，
+   * 不落盘、不进同步载荷（`docs/AI-FALLBACK.md` §6），页面销毁后自然消失。
+   */
+  private recordFallbackDiagnostic(diagnostic: FallbackDiagnostic): void {
+    if (this.disposed) {
+      return;
+    }
+    const next: FallbackDiagnostic[] = [];
+    for (const item of this.aiFallbackDiagnostics) {
+      next.push(item);
+    }
+    next.push(diagnostic);
+    const start: number = next.length > MAX_SESSION_DIAGNOSTICS ? next.length - MAX_SESSION_DIAGNOSTICS : 0;
+    this.aiFallbackDiagnostics = next.slice(start);
   }
 
   // ------------------------------------------------------------------ AI 源
@@ -1962,6 +2350,39 @@ struct Settings {
           .textAlign(TextAlign.Start)
       }
 
+      // 多源 fallback（`docs/AI-FALLBACK.md` §8 的挂载片段）：放在「高级」折叠区**之前**，
+      // 因为「主源失败后要不要发给别家」是隐私决策，不能藏在折叠里。组件自带开关 / 列表 /
+      // 次数 / 诊断，本页只接回调（改状态）与三个持久化键（保存时写回）。
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+
+      AiFallbackPanel({
+        fallbackEnabled: this.aiFallbackEnabled,
+        sources: this.aiFallbackSources,
+        maxAttempts: this.aiFallbackMaxAttempts,
+        diagnostics: this.aiFallbackDiagnostics,
+        primaryLabel: this.primarySourceLabel(),
+        onToggle: (isOn: boolean): void => {
+          this.aiFallbackEnabled = isOn;
+        },
+        onAdd: (): void => {
+          this.addFallbackSource();
+        },
+        onRemove: (index: number): void => {
+          this.removeFallbackSource(index);
+        },
+        onMove: (index: number, offset: number): void => {
+          this.moveFallbackSource(index, offset);
+        },
+        onChange: (index: number, patch: FallbackSourcePatch): void => {
+          this.patchFallbackSource(index, patch);
+        },
+        onMaxAttempts: (value: number): void => {
+          this.aiFallbackMaxAttempts = normalizeMaxAttempts(value);
+        }
+      })
+
       Row({ space: SPACING.sm }) {
         Text(this.advancedOpen ? '高级 ▾' : '高级 ▸')
           .fontSize(FONT.caption)
@@ -2493,6 +2914,46 @@ struct Settings {
     .alignItems(HorizontalAlign.Start)
   }
 
+  /**
+   * 数据组：导出 / 导入（排在「关于」之前）。
+   *
+   * 组内**只有** `ExportImportPanel` 一个组件：区间 / 格式 / 两个开关 / 导出按钮 / 选文件 /
+   * dry-run 统计 / 确认 / 取消都在组件内部，这里再包一层控件就会变成两套语义。
+   */
+  @Builder
+  DataGroup() {
+    Column({ space: SPACING.md }) {
+      Text('数据')
+        .fontSize(FONT.body)
+        .lineHeight(LINE_HEIGHT.body)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+
+      ExportImportPanel({
+        state: this.exportImport,
+        onExport: (request: ExportRequest): void => {
+          this.handleExport(request);
+        },
+        onPickFile: (): void => {
+          this.handlePickImportFile();
+        },
+        onConfirmImport: (): void => {
+          this.handleConfirmImport();
+        },
+        onCancel: (): void => {
+          this.handleCancelImport();
+        },
+        onCopyPath: (): void => {
+          this.handleCopyPath();
+        }
+      })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
   /** 页面唯一主操作：保存设置（三组共用一份表单）。 */
   @Builder
   SaveButton() {
@@ -2509,7 +2970,7 @@ struct Settings {
       })
   }
 
-  /** 紧凑屏：五组自上而下。 */
+  /** 紧凑屏：六组自上而下。 */
   @Builder
   CompactBody() {
     Column({ space: SPACING.md }) {
@@ -2532,6 +2993,10 @@ struct Settings {
           Divider()
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
+          this.DataGroup()
+          Divider()
+            .strokeWidth(DIVIDER)
+            .color($r('app.color.divider'))
           this.AboutGroup()
         }
         .width('100%')
@@ -2549,7 +3014,7 @@ struct Settings {
     .height('100%')
   }
 
-  /** 宽屏/横屏：左（同步 + 手写 + 远程控制 + 关于）/ 右（AI），底部统一保存。 */
+  /** 宽屏/横屏：左（同步 + 手写 + 远程控制 + 数据 + 关于）/ 右（AI），底部统一保存。 */
   @Builder
   WideBody() {
     Column({ space: SPACING.md }) {
@@ -2567,6 +3032,10 @@ struct Settings {
                 .strokeWidth(DIVIDER)
                 .color($r('app.color.divider'))
               this.RemoteGroup()
+              Divider()
+                .strokeWidth(DIVIDER)
+                .color($r('app.color.divider'))
+              this.DataGroup()
               Divider()
                 .strokeWidth(DIVIDER)
                 .color($r('app.color.divider'))

@@ -12,7 +12,7 @@
  *   组件既不缓存也不持久化；诊断已由运行器 `sanitizeDiagnostic` 脱敏，因此这里可以放心显示 message。
  *
  * 回调契约（父页面负责真正改状态/落盘）：
- * - `onToggle(enabled)`；
+ * - `onToggle(fallbackEnabled)`；
  * - `onAdd()` / `onRemove(index)` / `onMove(index, offset)`（offset = -1 上移 / +1 下移）；
  * - `onChange(index, patch)`：`patch.providerId` 变更时同时给出该源默认 `modelId` 与空 `baseURL`
  *   （表示「换源了，旧地址/旧模型不再适用」）；`patch.modelId` / `patch.baseURL` 是单字段输入；
@@ -35,7 +35,7 @@ import type { AiProviderPreset } from '../model/aiProvider';
 @Component
 export struct AiFallbackPanel {
   /** 是否启用 fallback（默认关闭；关闭时内容只发给主源）。 */
-  @Prop enabled: boolean = false;
+  @Prop fallbackEnabled: boolean = false;
   /** 备用源顺序（最多 3 个；不含主源）。 */
   @Prop sources: FallbackSource[] = [];
   /** 最多尝试几次（含主源）。 */
@@ -246,7 +246,7 @@ export struct AiFallbackPanel {
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
 
-      Toggle({ type: ToggleType.Switch, isOn: this.enabled })
+      Toggle({ type: ToggleType.Switch, isOn: this.fallbackEnabled })
         .selectedColor($r('app.color.brand'))
         .onChange((isOn: boolean) => {
           this.emitToggle(isOn);

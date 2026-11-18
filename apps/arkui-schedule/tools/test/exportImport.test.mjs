@@ -11,8 +11,11 @@
 // `exportImport.ts` 运行期 import `./calendar` / `./jsonl`（无扩展名），Node 的 ESM 不做扩展名
 // 推断，这里只为测试进程补 `.js` 后缀（与 remoteAccess.test.mjs / attachmentMerge.test.mjs 同一套写法）。
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
+import { join } from 'node:path';
 import { describe, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -52,6 +55,7 @@ const {
   exportFileName,
   exportFileStamp,
   exportRecordsInRange,
+  groupImportByDate,
   importBlockedTip,
   importRecordProblem,
   isDryRunEmpty,
@@ -59,10 +63,12 @@ const {
   parseDateRange,
   parseJsonImport,
   planImport,
+  reconcileBeforeAppend,
   renderMarkdownExport,
   withExportPath,
   withImportFileName,
-  withPanelMessage
+  withPanelMessage,
+  writePlan
 } = await import('../.build/model/exportImport.js');
 
 // ---------------------------------------------------------------- 造数据
@@ -900,5 +906,345 @@ describe('exportRecordsInRange：只读选行，不改入参', () => {
     assert.deepEqual(exportRecordsInRange(undefined, '2026-11-01', '2026-11-30'), []);
     assert.deepEqual(exportRecordsInRange([rec({ ts: '' })], '2026-11-01', '2026-11-30'), []);
     assert.deepEqual(exportRecordsInRange([rec({ ts: '2026-02-30T09:00:00+08:00' })], '2026-02-01', '2026-03-01'), []);
+  });
+});
+// ---------------------------------------------------------------- 导入落盘契约（fake IO）+ 写前复核
+//
+// 这一段补的是评审 M2 / M6：唯一碰盘的两处（`appendImportPlan` / `writePlan`）此前零测试。
+// `services/exportService.ets` 跑不进 `node --test`，因此落盘的纯实现被抽到
+// `model/exportImport.ts` 的 `writePlan(records, io)`，这里用**假 store + 假写入器**注入：
+// - 假写入器复刻 `appendTextAtEnd` 的追加语义（上一行没换行才补 `\n`，然后写正文）；
+// - 它**没有任何截断/覆盖能力**，`writePlan` 一旦伸手去够别的能力就当场炸（Proxy 看门）。
+// 另用源码级断言钉住 `.ets` 侧的复核顺序、并发闸与「追加路径没有 TRUNC」。
+
+const APP_ROOT = fileURLToPath(new URL('../../', import.meta.url));
+const SERVICE_SOURCE = readFileSync(
+  join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'services', 'exportService.ets'),
+  'utf8'
+).replace(/\r\n/g, '\n');
+
+/** 本机某天 JSONL 的假路径。 */
+const DAY_PATH = (date) => `/fake/filesDir/git-repo/devices/pad-a/schedules/${date}.jsonl`;
+
+/**
+ * 假 store + 假写入器。
+ *
+ * @param {object} [options]
+ * @param {Record<string,string>} [options.seeds] 预置文件内容（path → 文本），模拟历史行
+ * @param {string|null} [options.failOnDate] 该日期的追加抛错（模拟「第 2 个日期写失败」）
+ */
+function fakeIo(options = {}) {
+  const seeds = options.seeds ?? {};
+  const failOnDate = options.failOnDate ?? null;
+  const files = new Map(Object.entries(seeds));
+  const appends = [];
+  const applied = [];
+  const calls = { ensureDirs: 0, applyRecord: 0 };
+  const io = {
+    ensureDirs() {
+      calls.ensureDirs += 1;
+    },
+    dayFilePath(date) {
+      return DAY_PATH(date);
+    },
+    appendTextAtEnd(path, text) {
+      if (failOnDate !== null && path === DAY_PATH(failOnDate)) {
+        throw new Error(`模拟写盘失败（${path}）`);
+      }
+      const before = files.get(path) ?? '';
+      const needsNewline = before.length > 0 && !before.endsWith('\n');
+      const after = `${before}${needsNewline ? '\n' : ''}${text}`;
+      files.set(path, after);
+      appends.push({ path, text, before, after, needsNewline });
+    },
+    applyRecord(record) {
+      calls.applyRecord += 1;
+      applied.push(record);
+    }
+  };
+  return { io, files, appends, applied, calls };
+}
+
+/** 把 IO 包成「只允许读写已声明的四个能力」的看门对象（够到别的成员立刻抛）。 */
+function watchedIo(io) {
+  return new Proxy(io, {
+    get(target, key) {
+      if (typeof key === 'string' && !(key in target)) {
+        throw new Error(`writePlan 试图使用未声明的 IO 能力：${key}（导入只允许追加）`);
+      }
+      return target[key];
+    }
+  });
+}
+
+/** 取 `source` 里某个顶层函数的方法体（本仓库顶层函数以行首 `}` 结束）。 */
+function topLevelFunctionBody(source, signature) {
+  const start = source.indexOf(signature);
+  assert.ok(start >= 0, `exportService.ets 里找不到 ${signature}`);
+  const open = source.indexOf('{', start);
+  const end = source.indexOf('\n}\n', open);
+  assert.ok(open >= 0 && end > open, `${signature} 的方法体边界没找到`);
+  return source.slice(open, end + 2);
+}
+
+describe('writePlan：只追加、同一天一次、半批如实报告、历史行逐字节不变', () => {
+  test('① 只用「追加」这一个写入口：IO 面上没有截断能力，历史行逐字节原样保留', () => {
+    const historyLine1 = '{"id":"h1","ts":"2026-11-03T08:00:00+08:00","title":"旧行"}\n';
+    // 末尾故意不带换行：追加方必须自己补一个，且不能改动这两个字节之外的任何东西
+    const history = `${historyLine1}{"id":"h2","ts":"2026-11-03T08:30:00+08:00","title":"旧行2"}`;
+    const { io, files, appends } = fakeIo({ seeds: { [DAY_PATH('2026-11-03')]: history } });
+
+    assert.deepEqual(
+      Object.keys(io).sort(),
+      ['appendTextAtEnd', 'applyRecord', 'dayFilePath', 'ensureDirs'],
+      'IO 契约只能有这四个能力：没有 writeTextFile / truncate / remove'
+    );
+
+    const plan = planImport({
+      existing: [],
+      incoming: [rec({ id: 'n1', ts: '2026-11-03T09:00:00+08:00', title: '新行' })],
+      now: '2026-11-18T00:00:00Z'
+    });
+    const written = writePlan(plan.toAppend, watchedIo(io));
+    assert.equal(written.ok, true);
+    assert.equal(appends.length, 1, '一条记录 = 一次物理追加');
+    assert.equal(appends[0].before, history, '追加前的内容必须与历史行逐字节相同');
+    assert.equal(appends[0].needsNewline, true, '历史行末尾没换行时必须补一个 \\n');
+    const after = files.get(DAY_PATH('2026-11-03'));
+    assert.ok(after.startsWith(history), '历史行必须是结果的前缀（没有被重写/截断）');
+    assert.equal(after, `${history}\n${appends[0].text}`);
+    assert.ok(!Object.prototype.hasOwnProperty.call(io, 'writeTextFile'), '导入不得拿到覆盖写能力');
+
+    // 源码级：`.ets` 里唯一的 TRUNC 属于**导出**写入，追加路径一个都不能有
+    const truncCount = (SERVICE_SOURCE.match(/OpenMode\.TRUNC/g) ?? []).length;
+    assert.equal(truncCount, 1, `exportService.ets 里只允许导出用的 1 处 TRUNC，实际 ${truncCount} 处`);
+    const appendBody = topLevelFunctionBody(SERVICE_SOURCE, 'function appendTextAtEnd(');
+    assert.match(appendBody, /OpenMode\.READ_WRITE \| fs\.OpenMode\.CREATE/, '追加必须是 READ_WRITE|CREATE');
+    assert.equal(/TRUNC/.test(appendBody), false, '追加路径不许出现 TRUNC（否则会覆盖历史行）');
+    const exportBody = topLevelFunctionBody(SERVICE_SOURCE, 'function writeTextFile(');
+    assert.match(exportBody, /OpenMode\.TRUNC/, '唯一的 TRUNC 必须留在「新建导出文件」那处');
+  });
+
+  test('② 同一天多条只发生一次物理追加（且组内按 ts 升序、跨日期各一次）', () => {
+    const { io, appends } = fakeIo();
+    const plan = planImport({
+      existing: [],
+      incoming: [
+        rec({ id: 'late', ts: '2026-11-03T18:00:00+08:00' }),
+        rec({ id: 'early', ts: '2026-11-03T07:00:00+08:00' }),
+        rec({ id: 'mid', ts: '2026-11-03T12:00:00+08:00' }),
+        rec({ id: 'other-day', ts: '2026-11-05T09:00:00+08:00' })
+      ],
+      now: '2026-11-18T00:00:00Z'
+    });
+    const written = writePlan(plan.toAppend, watchedIo(io));
+    assert.equal(written.ok, true);
+    assert.equal(written.appended, 4);
+    assert.deepEqual(written.files, [DAY_PATH('2026-11-03'), DAY_PATH('2026-11-05')]);
+    assert.equal(appends.length, 2, '两个日期 → 两次物理追加（同一天三条合成一次）');
+
+    const dayLines = appends[0].text.split('\n').filter((line) => line.length > 0);
+    assert.equal(dayLines.length, 3, '同一天的三条必须在**一次**追加里');
+    assert.deepEqual(
+      dayLines.map((line) => JSON.parse(line).id),
+      ['early', 'mid', 'late'],
+      '组内必须按 ts 升序（不是 incoming 顺序）'
+    );
+    assert.equal(appends[1].text.split('\n').filter((line) => line.length > 0).length, 1);
+  });
+
+  test('③ 第 2 个日期写失败：ok:false、files 只含已写文件、已写内容完整', () => {
+    const firstDayHistory = '{"id":"old","ts":"2026-11-03T06:00:00+08:00","title":"旧行"}\n';
+    const { io, files, appends } = fakeIo({
+      seeds: { [DAY_PATH('2026-11-03')]: firstDayHistory },
+      failOnDate: '2026-11-05'
+    });
+    const plan = planImport({
+      existing: [],
+      incoming: [
+        rec({ id: 'a', ts: '2026-11-03T09:00:00+08:00' }),
+        rec({ id: 'b', ts: '2026-11-03T10:00:00+08:00' }),
+        rec({ id: 'c', ts: '2026-11-05T09:00:00+08:00' })
+      ],
+      now: '2026-11-18T00:00:00Z'
+    });
+    const written = writePlan(plan.toAppend, watchedIo(io));
+    assert.equal(written.ok, false, '半批写入必须报 ok:false');
+    assert.equal(written.appended, 2, '只算**已写下**的条数，不虚报第 3 条');
+    assert.deepEqual(written.files, [DAY_PATH('2026-11-03')], 'files 只含已成功写入的文件');
+    assert.ok(written.reason.includes('已写入 1 个文件'), `实际原因：${written.reason}`);
+    assert.equal(appends.length, 1);
+    assert.equal(files.has(DAY_PATH('2026-11-05')), false, '第 2 个日期一个字节都不许写');
+
+    const firstDay = files.get(DAY_PATH('2026-11-03'));
+    assert.ok(firstDay.startsWith(firstDayHistory), '已写文件的历史行仍然逐字节不变');
+    const lines = firstDay.split('\n').filter((line) => line.length > 0);
+    assert.equal(lines.length, 3, '第 1 个日期的两条必须完整写下（旧行 + 2 新行）');
+    assert.deepEqual(lines.slice(1).map((line) => JSON.parse(line).id), ['a', 'b']);
+  });
+
+  test('④ 追加前已存在的历史行逐字节不变（多行 + 末尾带换行 / 不带换行两种）', () => {
+    const withNewline = '{"id":"x","ts":"2026-11-03T06:00:00+08:00","title":"一"}\n{"id":"y","ts":"2026-11-03T06:30:00+08:00","title":"二"}\n';
+    const withoutNewline = '{"id":"z","ts":"2026-11-05T06:00:00+08:00","title":"三"}';
+    const { io, files, appends } = fakeIo({
+      seeds: {
+        [DAY_PATH('2026-11-03')]: withNewline,
+        [DAY_PATH('2026-11-05')]: withoutNewline
+      }
+    });
+    const plan = planImport({
+      existing: [],
+      incoming: [
+        rec({ id: 'n3', ts: '2026-11-03T09:00:00+08:00' }),
+        rec({ id: 'n5', ts: '2026-11-05T09:00:00+08:00' })
+      ],
+      now: '2026-11-18T00:00:00Z'
+    });
+    const written = writePlan(plan.toAppend, watchedIo(io));
+    assert.equal(written.ok, true);
+    assert.equal(appends[0].before, withNewline);
+    assert.equal(appends[1].before, withoutNewline);
+    assert.equal(appends[0].needsNewline, false, '末尾已有换行就不该多补一个空行');
+    assert.equal(appends[1].needsNewline, true);
+    assert.equal(files.get(DAY_PATH('2026-11-03')), `${withNewline}${appends[0].text}`);
+    assert.equal(files.get(DAY_PATH('2026-11-05')), `${withoutNewline}\n${appends[1].text}`);
+    // 历史行的字节（UTF-8）逐字节出现在结果开头
+    assert.equal(
+      Buffer.from(files.get(DAY_PATH('2026-11-03'))).subarray(0, Buffer.byteLength(withNewline)).equals(
+        Buffer.from(withNewline)
+      ),
+      true
+    );
+  });
+
+  test('编码失败 = 零写入（fileIo 之前就整批放弃）；空输入不建目录', () => {
+    const { io, appends, calls } = fakeIo();
+    // 三条都不合法：坏 id / 坏字段类型 / null（复核不负责校验，这里必须 fail-closed 而不是抛异常）
+    const broken = [rec({ id: '' }), rec({ id: 'bad', title: 42 }), null];
+    const written = writePlan(broken, watchedIo(io));
+    assert.equal(written.ok, false);
+    assert.deepEqual(written.files, []);
+    assert.equal(written.appended, 0);
+    assert.ok(written.reason.includes('整批未写入'), `实际原因：${written.reason}`);
+    assert.equal(appends.length, 0);
+    assert.equal(calls.ensureDirs, 0, '编码失败时连目录都不该建');
+
+    const empty = writePlan([], watchedIo(io));
+    assert.equal(empty.ok, false);
+    assert.equal(empty.reason, '导入内容为空，未写入任何文件');
+    assert.equal(appends.length, 0);
+  });
+
+  test('派生索引在写入之后维护：抛错不把「已落盘」改报成失败', () => {
+    const { io, appends } = fakeIo();
+    io.applyRecord = () => {
+      throw new Error('索引写失败（模拟）');
+    };
+    const written = writePlan([rec({ id: 'n1', ts: '2026-11-03T09:00:00+08:00' })], watchedIo(io));
+    assert.equal(written.ok, true, '索引是派生数据，失败不该翻转 ok');
+    assert.equal(appends.length, 1);
+  });
+});
+
+describe('reconcileBeforeAppend：写盘前的幂等复核（M2）', () => {
+  const existing = [rec({ id: 'same', ts: '2026-11-03T09:00:00+08:00' })];
+
+  test('新 id → added；同 id 更新 → conflict；同 id 更旧/相同 → skipped', () => {
+    const planned = [
+      rec({ id: 'fresh', ts: '2026-11-03T10:00:00+08:00' }),
+      rec({ id: 'same', ts: '2026-11-03T09:30:00+08:00' }),
+      rec({ id: 'same', ts: '2026-11-03T08:00:00+08:00' }),
+      rec({ id: 'same', ts: '2026-11-03T09:00:00+08:00' })
+    ];
+    const result = reconcileBeforeAppend(planned, existing);
+    assert.deepEqual(result.added.map((item) => item.id), ['fresh']);
+    assert.equal(result.conflict, 1, 'incoming 更新的一条 = conflict（绝不覆盖）');
+    assert.equal(result.skipped, 2, '更旧 + 相同 ts 各算一次 skipped');
+  });
+
+  test('同一批复核里重复的新 id：先到 added，后到按规则 conflict / skipped', () => {
+    const planned = [
+      rec({ id: 'dup', ts: '2026-11-03T09:00:00+08:00' }),
+      rec({ id: 'dup', ts: '2026-11-03T09:00:00+08:00' }),
+      rec({ id: 'dup', ts: '2026-11-03T11:00:00+08:00' }),
+      rec({ id: 'dup', ts: '2026-11-03T07:00:00+08:00' })
+    ];
+    const result = reconcileBeforeAppend(planned, []);
+    assert.equal(result.added.length, 1, '同一个 id 在一批复核里最多放行一次');
+    assert.equal(result.skipped, 2);
+    assert.equal(result.conflict, 1, '同批里更晚的那条算 conflict（不覆盖已接收的）');
+  });
+
+  test('空/非法 id 一律 skipped（复核不写脏主键）；非数组入参回空结果', () => {
+    const result = reconcileBeforeAppend(
+      [rec({ id: '' }), rec({ id: undefined }), null, rec({ id: 'ok', ts: '2026-11-03T09:00:00+08:00' })],
+      []
+    );
+    assert.deepEqual(result.added.map((item) => item.id), ['ok']);
+    assert.equal(result.skipped, 3);
+    const empty = reconcileBeforeAppend(undefined, undefined);
+    assert.deepEqual(empty, { added: [], skipped: 0, conflict: 0 });
+  });
+
+  test('「双击」端到端：第一次写完后复核为空，不会再产生任何物理追加', () => {
+    const planned = [
+      rec({ id: 'a', ts: '2026-11-03T09:00:00+08:00' }),
+      rec({ id: 'b', ts: '2026-11-03T10:00:00+08:00' })
+    ];
+    const { io, appends, files } = fakeIo();
+    const first = reconcileBeforeAppend(planned, []);
+    assert.equal(first.added.length, 2);
+    writePlan(first.added, watchedIo(io));
+    assert.equal(appends.length, 1);
+
+    // 第二下点击：本机已经有这两条（同 id、同 ts）→ 复核必须把两条都拦成 skipped
+    const existingNow = files
+      .get(DAY_PATH('2026-11-03'))
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line));
+    const second = reconcileBeforeAppend(planned, existingNow);
+    assert.deepEqual(second.added, [], '双击的第二下不该再有可写记录');
+    assert.equal(second.skipped, 2);
+    assert.equal(second.conflict, 0);
+    if (second.added.length > 0) {
+      writePlan(second.added, watchedIo(io));
+    }
+    assert.equal(appends.length, 1, '物理追加次数必须还是 1（没有第二次写）');
+  });
+
+  test('planImport → reconcile：dry-run 之后本机同步到同 id 也不会重复追加', () => {
+    const planned = planImport({
+      existing: [],
+      incoming: [rec({ id: 'synced', ts: '2026-11-03T09:00:00+08:00' })],
+      now: '2026-11-18T00:00:00Z'
+    }).toAppend;
+    // dry-run 之后，另一台设备经 Git 同步写入了同 id 的**更新**版本
+    const synced = [rec({ id: 'synced', ts: '2026-11-03T12:00:00+08:00' })];
+    const result = reconcileBeforeAppend(planned, synced);
+    assert.deepEqual(result.added, [], '本机已有同 id 时绝不能再追加');
+    assert.equal(result.skipped, 1, '导入版本更旧 → skipped（不覆盖、也不报冲突）');
+    assert.equal(result.conflict, 0);
+  });
+});
+
+describe('exportService.ets 接线：复核顺序 + 并发闸（源码级契约）', () => {
+  test('写盘前先重读本机再 reconcile，最后才 writePlan', () => {
+    const readIndex = SERVICE_SOURCE.indexOf('existingNow = scheduleStore.readAll()');
+    const reconcileIndex = SERVICE_SOURCE.indexOf('reconcileBeforeAppend(plan.toAppend, existingNow)');
+    const writeIndex = SERVICE_SOURCE.indexOf('writePlan(reconciled.added, importWriteIo())');
+    assert.ok(readIndex > 0, '写盘前必须重读本机记录');
+    assert.ok(reconcileIndex > readIndex, '重读之后必须复核');
+    assert.ok(writeIndex > reconcileIndex, '只有复核后的 added 才交给 writePlan');
+    assert.match(SERVICE_SOURCE, /if \(reconciled\.added\.length === 0\)/, '复核为空时必须直接返回、不写盘');
+  });
+
+  test('并发闸：在飞时直接拒绝（不排队），退出时复位', () => {
+    assert.match(SERVICE_SOURCE, /let importInFlight: boolean = false;/, '并发闸必须是模块级布尔');
+    assert.match(SERVICE_SOURCE, /if \(importInFlight\) \{/, '再次调用必须命中并发闸');
+    assert.match(SERVICE_SOURCE, /reason: '正在导入中，请稍候'/, '拒绝原因是中文固定文案');
+    assert.match(SERVICE_SOURCE, /importInFlight = false;/, '无论成功失败都要复位');
+    assert.match(SERVICE_SOURCE, /\} finally \{/, '复位必须放在 finally 里');
+    assert.match(SERVICE_SOURCE, /reconfirmed: counts/, '返回值必须带复核后的计数');
   });
 });

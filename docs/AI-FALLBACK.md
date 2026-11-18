@@ -25,7 +25,8 @@
 | 网络错误（`kind==='network'` 或伪状态码 `0`） | `next-source` | 无法判断何时恢复 |
 | 5xx（500–599） | `next-source` | 服务端故障 |
 | 解析失败（`kind==='parse'`，可能是 HTTP 200） | `next-source` | 返回体不可用，别的源通常能给正文 |
-| 其它 4xx（400 / 402 / 404 / 422 / 499 …） | `abort` | **我们自己的请求**有问题，换源也一样错，别浪费额度 |
+| 402（余额/配额不足，Payment Required） | `next-source` | 是**这家**的账务问题，换一家通常立刻可用（同一个源重试只会继续 402） |
+| 其它 4xx（400 / 404 / 422 / 499 …） | `abort` | **我们自己的请求**有问题，换源也一样错，别浪费额度 |
 | 本地配置问题（`kind==='config'`：缺 key / 地址非法 / 未知源） | `next-source` | 每个源有独立配置，且**一个字节都没发出去** |
 | 其它（无状态码且无类别 / 3xx / 2xx 但 `ok=false`） | `abort` | 无法证明「换源有用」时保守停下 |
 | `retry-same` | 保留 | 当前决策表**从不产出**；运行器仍限制了同源重试次数（防死循环） |
@@ -95,8 +96,10 @@ const result = await runWithFallback(payload, sources, {
 1. **备用源共用一个 key**：设置里只有一个 `aiFallbackKey`，三个备用源（可能属于不同厂商）
    只能共用一个密钥。若要「每个备用源各自一把 key」，需要把 `aiFallbackOrder` 的元素扩成
    `{providerId, modelId, baseURL, keyRef}` 并让设置页多一个密码框——属于设置模型变更，未在本轮做。
-2. **402（余额不足）按 4xx 归入 `abort`**：符合「4xx 其它 → abort」的字面规则，但 `402` 换源
-   其实常常有效。要改成 `next-source` 只需在 `classifyAttempt` 加一行，测试同步加一条。
+2. **402（余额不足）归 `next-source`**：`classifyAttempt` 在「其它 4xx → `abort`」之前**单判 402**，
+   因为它是**这家的账务问题**，换一家通常立刻可用；所以 402 **不属于**「其它 4xx」那一行
+   （`400 / 404 / 422 / 499` 才是「我们自己的请求有问题」）。`tools/test/aiFallback.test.mjs`
+   把 402 → `next-source` 钉死，文档与代码/测试三方一致。
 3. **诊断列表只有「上一次」**：面板显示的是父页面传进来的最近一次运行结果，不保留历史。
 4. **组件挂载由设置页负责**：本轮不改 `pages/Settings.ets`，挂载片段见 §8。
 

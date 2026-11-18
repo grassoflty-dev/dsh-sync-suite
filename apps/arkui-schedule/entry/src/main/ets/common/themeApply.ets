@@ -14,6 +14,9 @@
  * 传 `COLOR_MODE_LIGHT` 会把 App 钉死在浅色、系统切深色时不再跟随。
  */
 import { ConfigurationConstant, common } from '@kit.AbilityKit';
+// `Configuration.colorMode` 的类型来自 `resourceManager`，比较时必须用它的枚举（不要用
+// `ConfigurationConstant.ColorMode`，那是「设置入口」用的另一套枚举，两者不能互比）。
+import { resourceManager } from '@kit.LocalizationKit';
 import { clampFontScale, normalizeThemeMode } from '../model/theme';
 import type { ThemeMode } from '../model/theme';
 
@@ -54,9 +57,10 @@ export function applyThemeMode(context: common.Context, mode: string): boolean {
  */
 export function isSystemDark(context: common.Context): boolean {
   try {
-    // 类型由 getConfigurationSync() 推导（`Configuration`），不额外 import SDK 类型
+    // 本 SDK 的 `Configuration.colorMode` 是 `resourceManager.ColorMode`，
+    // **不能**与 `ConfigurationConstant.ColorMode` 比较（枚举不同名空间，编译期就报错）。
     const configuration = context.resourceManager.getConfigurationSync();
-    return configuration.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+    return configuration.colorMode === resourceManager.ColorMode.DARK;
   } catch {
     return false;
   }
@@ -67,13 +71,12 @@ export function isSystemDark(context: common.Context): boolean {
  *
  * 仅供**需要自己算宽度/高度的非文本控件**参考：`fp` 字号本身已跟随系统缩放，
  * 页面**不需要**拿它去乘字号（乘了会放大两次）。
+ *
+ * 说明：本 SDK 的 `resourceManager.Configuration` **没有** `fontSizeScale` 字段
+ * （那是 `ConfigurationConstant` 之外的另一套 API），所以这里不读系统值、直接回 1.0；
+ * 保留函数是为了让调用方接口稳定（将来 SDK 提供该字段时只改这一处）。
  */
 export function systemFontScale(context: common.Context): number {
-  try {
-    const configuration = context.resourceManager.getConfigurationSync();
-    const scale = configuration.fontSizeScale;
-    return clampFontScale(typeof scale === 'number' ? scale : 1);
-  } catch {
-    return clampFontScale(1);
-  }
+  void context;
+  return clampFontScale(1);
 }
