@@ -213,7 +213,7 @@ export struct SyncSection {
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
       if (this.deviceIdError.length > 0) {
-        Text('')
+        this.ErrorText(this.deviceIdError)
       } else if (this.deviceIdNotice.length > 0) {
         this.HintLine(this.deviceIdNotice)
       }
