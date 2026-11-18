@@ -28,9 +28,17 @@
  * - 上面那些写死的 48 / 72 / 44 / 40 全部作废：工具条控件的**宽/高/间距/图标/字号**改为从
  *   `toolbarMetrics(视口宽, 视口高, 横屏?)` 取（竖屏 `barThickness`=顶部条高度、横屏=rail 宽度）；
  * - 分页区**放宽**：`−`/`+`、`‹`/`›` 每半 ≥44vp、`1/1` 格 ≥64vp、格间距 = `max(8vp, metrics.gap)`；
- * - 放不下就滚动、**不压缩控件**：竖屏工具按钮横向 Scroll、横屏 rail 中段竖向 Scroll（「完成」永远固定）；
+ * - 放不下就折行、**不压缩控件**：竖屏顶部条一屏排完 9 项，极窄屏折成两行；
+ *   横屏 rail 中段竖向 Scroll（「完成」永远固定）；
  * - 页面侧只读派生方法（`barThickness()/itemSize()/controlGap()/iconSize()/toolbarFontSize()`），
- *   除「屏太小连固定段都放不下」时把分页组并进 Scroll 外，两套布局的组件树结构保持恒定。
+ *   两套布局的组件树结构保持恒定。
+ *
+ * 2026-11-18 真机缺陷修复（用户报的三条，见 `docs/UI-DESIGN.md` §9）：
+ * - 竖屏顶部条**删掉横向 Scroll**（工具项被滚出屏幕 = 用户以为按钮没了），9 项一屏排完，
+ *   极窄屏（<640vp 或实算放不下）折成**两行**，绝不用滚动；
+ * - 「仅手写笔输入」开关从设置页搬到**笔迹面板「更多」**二级菜单，切换即落盘并立刻生效；
+ * - 撤销/重做按钮改成 `Row` + `.onClick`（不是裸 `Text`），禁用时仍可点并 toast 说明，
+ *   `onStatsChange → touchUi()` 保证撤销栈一变工具条就重建。
  *
  * 布局不用 `if/else` 切横竖屏（会重建 `HandwritingPager`，画布已画的像素会丢）：
  * rail 宽度、顶部条高度随 `landscape` 变化，组件树结构保持恒定。
@@ -53,6 +61,7 @@ import {
 import { OcrBatchManager } from '../ocr/OcrBatchManager';
 import { attachmentStore } from '../services/attachmentStore';
 import { draftStore } from '../services/draftStore';
+import { settingsStore } from '../services/settingsStore';
 import { localDateKey } from '../common/date';
 import { describeError, scheduleStore } from '../services/scheduleStore';
 import { BRUSHES, brushSpec } from '../model/brush';
@@ -132,6 +141,14 @@ const PAGER_HALF_MIN: number = 44;
 const PAGER_LABEL_MIN: number = 64;
 /** 控件间距的硬下限（vp）：分页区三个单元格挨太近会误触。 */
 const GAP_MIN: number = 8;
+/**
+ * 竖屏顶部条「一屏一行」的宽度下限（vp，缺陷 3）。
+ *
+ * 低于它（手机竖屏 / 分屏）不可能把 9 项挤进一行，**直接折成两行**；
+ * 高于它还要再按 `topBarRequiredWidth()` 实算一次，实算放不下才折行。
+ * 任何情况下都**不许再用横向 `Scroll`**（真机上工具按钮被滚走 = 用户找不到）。
+ */
+const TOP_BAR_SINGLE_ROW_MIN: number = 640;
 /** 二级面板每行高度（vp）。 */
 const MENU_ROW_HEIGHT: number = 44;
 /** 二级面板每项最小宽度（vp）——用户定版 ≥140。 */
@@ -228,6 +245,19 @@ struct Handwriting {
    */
   @State uiTick: number = 0;
   @State busy: boolean = false;
+  /**
+   * 「仅手写笔输入」（缺陷 1/2 的开关值，页面侧镜像）。
+   *
+   * 读取路径：`aboutToAppear → settingsStore.load() → penOnlyInput`；
+   * 写入路径：笔迹面板「更多 → 仅手写笔输入」→ `savePenOnlyInput()` →
+   * ① 立刻写 `pagerState.setPenOnlyInput()`（画布下一次触摸即生效，不用退出重进）
+   * ② `settingsStore.save({ penOnlyInput })` 落盘。
+   */
+  @State penOnlyInput: boolean = false;
+  /** 笔迹面板的二级菜单（「更多 ▸」）是否展开。 */
+  @State inkMoreOpen: boolean = false;
+  /** 上一次打印过的「撤销/重做可用性」组合（只在变化时打日志 + 触发重建）。 */
+  private lastHistoryKey: string = '';
   private manager: OcrBatchManager | null = null;
   private tipLoaded: boolean = false;
   /** 草稿键：编辑已有记录 = recordId，新建 = new-<时间戳>（由 Edit 页路由参数传入）。 */
@@ -311,7 +341,52 @@ struct Handwriting {
 
   /** 竖屏顶部条容器高度（含 1vp 分割线；横屏为 0）。 */
   private topBarTotalHeight(): number {
-    return this.landscape ? 0 : this.barThickness() + DIVIDER;
+    return this.landscape ? 0 : this.topBarHeight() + DIVIDER;
+  }
+
+  /**
+   * 竖屏顶部条内容高度（vp，不含分割线）：一行 = `barThickness`，两行 = 2 × `barThickness`。
+   *
+   * 折行后**必须把高度一起放大**：`build()` 里装工具条的 `Column` 带 `clip(true)`，
+   * 高度不变的话第二行会被裁掉（这正是「工具项看不见」的另一种死法）。
+   */
+  private topBarHeight(): number {
+    return this.topBarTwoRows() ? 2 * this.barThickness() : this.barThickness();
+  }
+
+  /**
+   * 竖屏顶部条是否折成**两行**（缺陷 3 的唯一判据；横屏 rail 不参与）。
+   *
+   * 1. 极窄屏（`pageW < TOP_BAR_SINGLE_ROW_MIN` = 640vp）：9 项不可能一行放下 → 直接两行；
+   * 2. 否则按**真实控件宽度**实算（`topBarRequiredWidth()`），超过可用宽度才折行。
+   *
+   * 屏幕尺寸还没量出来（`pageW === 0`）时先按一行画，`onAreaChange` 一到就重算 —— 不猜设备。
+   */
+  private topBarTwoRows(): boolean {
+    if (this.landscape) {
+      return false;
+    }
+    if (this.pageW <= 0) {
+      return false;
+    }
+    if (this.pageW < TOP_BAR_SINGLE_ROW_MIN) {
+      return true;
+    }
+    return this.topBarRequiredWidth() > this.pageW;
+  }
+
+  /**
+   * 竖屏一行放下 **9 项**所需的宽度（vp）：控件宽度之和 + 8 个间距 + 两侧 padding。
+   *
+   * 9 项 = 退出 / 笔迹 / 橡皮 / 手动框 / 插入 / ↶ / ↷ / 分页组 / 完成。
+   * 「笔迹」比 `itemSize` 宽（文字 + 色块 + ▾ 三段），按两侧 padding 兜住。
+   */
+  private topBarRequiredWidth(): number {
+    // 8 个单控件里，只有「完成」用 finishWidth()（≥64vp），其余 7 个都按 itemSize 兜
+    const singles: number = 7 * this.itemSize() + this.finishWidth();
+    const brushExtra: number = 2 * SPACING.sm;
+    const gaps: number = 8 * this.controlGap();
+    return singles + brushExtra + this.pagerTotalWidth() + gaps + 2 * SPACING.sm;
   }
 
   /**
@@ -347,21 +422,9 @@ struct Handwriting {
   /**
    * 竖屏顶部条里，分页组是否**固定在横向 Scroll 之外**（永远可见）。
    *
-   * 平板竖屏放得下 → 固定（真机上曾被 Scroll 边缘裁掉，这条是 P0 修复）；
-   * 窄屏（连「退出 + 笔迹 + 分页组 + 完成 + 一个工具」都放不下）→ 把分页组并进 Scroll，
-   * **宁可横向滚动，也不压缩控件**（用户定版）。
+   * ⚠ 2026-11-18 起这条判断已作废：横向 Scroll 整体删除（缺陷 3），9 项要么一行、
+   * 要么两行（`topBarTwoRows()`），分页组永远在可视区内。保留此注释只为说明历史原因。
    */
-  private pagerPinned(): boolean {
-    if (this.landscape) {
-      return false;
-    }
-    const exitW: number = this.itemSize();
-    const brushW: number = this.itemSize() + 2 * SPACING.sm;
-    const fixed: number =
-      2 * SPACING.sm + exitW + brushW + this.finishWidth() + this.pagerTotalWidth() + 4 * this.controlGap();
-    // 再留出「一个控件」给中间那条横向 Scroll，否则工具按钮会被挤成 0 宽
-    return fixed + this.itemSize() <= this.pageW;
-  }
 
   /** 「完成」按钮宽度（vp）：≥64vp，且不小于控件边长。 */
   private finishWidth(): number {
@@ -371,9 +434,14 @@ struct Handwriting {
   aboutToAppear(): void {
     this.draftKey = this.resolveDraftKey();
     this.loadTipFlag();
+    // 「仅手写笔输入」：从 settingsStore 读一次（笔迹面板里改，退出重进也保持）
+    this.loadPenOnlyInput();
     // 画布尺寸变化/落笔/改框都通过 state 的钩子回调本页（父页面拿不到子组件实例）
     this.pagerState.dirtyImpl = () => {
       this.scheduleDraftSave();
+      // 抬笔后撤销按钮要立刻变成可点（缺陷 4b：以前只改 @Observed 字段，
+      // 个别 ArkUI 版本不重建父页面，按钮就一直是「变灰但点不动」）
+      this.touchUi();
     };
     this.pagerState.canvasReadyImpl = () => {
       this.applyPendingDraft();
@@ -397,6 +465,100 @@ struct Handwriting {
     this.saveDraftNow(false);
     // 返回 false = 仍按系统默认行为退出页面（此时草稿已落盘）
     return false;
+  }
+
+  // ------------------------------------------------------------------ 仅手写笔输入（缺陷 1 / 2）
+
+  /**
+   * 读「仅手写笔输入」并铺到画布（进入页面时一次）。
+   *
+   * 读失败不阻塞手写：日志记一笔、按默认「手指 + 笔都能写」跑（旧数据缺键也是 false）。
+   */
+  private async loadPenOnlyInput(): Promise<void> {
+    try {
+      const settings = await settingsStore.load(getContext(this) as common.UIAbilityContext);
+      this.penOnlyInput = settings.penOnlyInput === true;
+    } catch (error) {
+      console.error(`[hw] penOnly load failed, fallback=false: ${describeError(error)}`);
+      this.penOnlyInput = false;
+    }
+    // 画布用的是 pagerState 里的同一份值（@Observed），这里同步过去即立刻生效
+    this.pagerState.setPenOnlyInput(this.penOnlyInput);
+    console.info(`[hw] penOnly=${this.penOnlyInput ? 1 : 0} source=settings`);
+  }
+
+  /**
+   * 笔迹面板「更多 → 仅手写笔输入」切换：**先作用于画布、再落盘**。
+   *
+   * 先作用于画布是刻意的：落盘失败也不该让用户「拨了开关却还能用手指写」。
+   * 落盘失败回退界面状态并 toast（与设置页的处理一致）。
+   */
+  private async savePenOnlyInput(enabled: boolean): Promise<void> {
+    const next: boolean = enabled === true;
+    this.penOnlyInput = next;
+    this.pagerState.setPenOnlyInput(next);
+    this.touchUi();
+    console.info(`[hw] penOnly=${next ? 1 : 0} source=panel`);
+    try {
+      await settingsStore.save({ penOnlyInput: next }, getContext(this) as common.UIAbilityContext);
+    } catch (error) {
+      this.penOnlyInput = !next;
+      this.pagerState.setPenOnlyInput(!next);
+      this.touchUi();
+      promptAction.showToast({ message: `保存「仅手写笔输入」失败：${describeError(error)}`, duration: 4000 });
+      console.error(`[hw] penOnly save failed: ${describeError(error)}`);
+    }
+  }
+
+  /** 二级菜单「更多 ▸」开合（笔迹面板底部；展开后才出现开关，面板默认只有笔形/粗细/颜色三段）。 */
+  private toggleInkMore(): void {
+    this.inkMoreOpen = !this.inkMoreOpen;
+    console.info(`[hw] ink more open=${this.inkMoreOpen ? 1 : 0} panel=open`);
+  }
+
+  // ------------------------------------------------------------------ 撤销 / 重做（缺陷 4）
+
+  /**
+   * 撤销/重做可用性变化（`HandwritingPager.onStatsChange` 回调）→ 让工具条重建。
+   *
+   * 为什么还要重建：`undoSteps / redoAvailable` 是 `@Observed` 字段，但个别 ArkUI 版本
+   * 不会因此重跑父页面 `build()`，于是按钮停在旧状态（真机「↶ 点不动 / 变灰了也不弹提示」）。
+   * 子组件在 `aboutToAppear` 里也会回调一次（那一刻父页面正在 build），
+   * 所以统一延到下一拍再写 `@State`，避免「build 期间改状态」。
+   */
+  private onHistoryStats(undoSteps: number, redoAvailable: boolean): void {
+    const key: string = `${undoSteps > 0 ? 1 : 0}${redoAvailable ? 1 : 0}`;
+    if (key === this.lastHistoryKey) {
+      return;
+    }
+    this.lastHistoryKey = key;
+    console.info(`[hw] history undo=${undoSteps} redo=${redoAvailable ? 1 : 0}`);
+    setTimeout(() => {
+      this.touchUi();
+    }, 0);
+  }
+
+  /**
+   * 撤销 / 重做点击。
+   *
+   * 禁用态（没有可撤销/可重做的笔画）**仍然可点**：点下去 toast 说明原因，
+   * 而不是让按钮变成「看着能点、点了没反应」（缺陷 4b）。
+   * 点击后 `touchUi()`：撤销/重做会改可用性，工具条必须立刻跟着变。
+   */
+  private onHistoryTap(kind: string, available: boolean): void {
+    if (!available) {
+      promptAction.showToast({
+        message: kind === 'redo' ? '没有可重做的笔画' : '没有可撤销的笔画',
+        duration: 1600
+      });
+      return;
+    }
+    if (kind === 'undo') {
+      this.pagerState.applyUndo();
+    } else {
+      this.pagerState.applyRedo();
+    }
+    this.touchUi();
   }
 
   // ------------------------------------------------------------------ 草稿（退出暂存 / 再进恢复）
@@ -796,6 +958,10 @@ struct Handwriting {
     this.confirmStage = CONFIRM_NONE;
     const next: string = this.panel === name ? '' : name;
     this.panel = next;
+    // 换到别处（或关面板）就收起「更多」：下次点「笔迹」仍是最常用的笔形/粗细/颜色三段
+    if (next !== PANEL_INK) {
+      this.inkMoreOpen = false;
+    }
     // 真机自证（Popup/自定义浮层不一定出现在 `ui layout` 里）：
     // hilog | grep '[hw] menu=' 就能看到「点了哪个菜单、开还是关」
     console.info(`[hw] menu=${name} open=${next.length === 0 ? 0 : 1} panel=${next.length === 0 ? 'none' : next}`);
@@ -1066,6 +1232,7 @@ struct Handwriting {
     }
     this.panel = '';
     this.confirmStage = CONFIRM_NONE;
+    this.inkMoreOpen = false;
   }
 
   private pickBrush(kind: BrushKind): void {
@@ -1534,33 +1701,38 @@ struct Handwriting {
     })
   }
 
-  /** 撤销 / 重做（图标按钮；`kind` 分发，避免把回调传进 @Builder）。 */
+  /**
+   * 撤销 / 重做（**真按钮**：`Row` + `.onClick`；`kind` 分发，避免把回调传进 @Builder）。
+   *
+   * 缺陷 4 的两个成因都在这里收口：
+   * - (a) 手势被 Scrollable 抢走：历史按钮现在在 `topBar` 的**普通 Row** 里（横向 Scroll 已删），
+   *   竖向 rail 的那条 Scroll 不会吃横向点击；控件是有独立点击区的 `Row`，不是裸 `Text`；
+   * - (b) 禁用态哑巴：**不再用 `.enabled(false)`**（真机会出现「看着能点、点了没反应」），
+   *   按钮永远可点，只在字色上体现「没东西可撤销」，点下去 toast 说明原因；
+   *   可用性由父页面 build 里读 `pagerState.undoSteps / redoAvailable` 传入，
+   *   `onStatsChange → touchUi()` 保证撤销栈一变工具条就重建。
+   */
   @Builder
-  historyButton(kind: string, label: string, enabled: boolean) {
-    Text(label)
-      .height(this.itemSize())
-      .constraintSize({ minWidth: this.itemSize() })
-      .padding({ left: SPACING.sm, right: SPACING.sm })
-      .fontSize(this.toolbarFontSize())
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.None })
-      .textAlign(TextAlign.Center)
-      .borderRadius(RADIUS.sm)
-      .backgroundColor($r('app.color.field_fill'))
-      // 禁用态：只改颜色，不整体透明（真机上透明会被误认为「按钮没了」）
-      .fontColor(enabled ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
-      .enabled(enabled)
-      .flexShrink(0)
-      .onClick(() => {
-        if (!enabled) {
-          return;
-        }
-        if (kind === 'undo') {
-          this.pagerState.applyUndo();
-        } else {
-          this.pagerState.applyRedo();
-        }
-      })
+  historyButton(kind: string, label: string, available: boolean) {
+    Row() {
+      Text(label)
+        .fontSize(this.toolbarFontSize())
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .textAlign(TextAlign.Center)
+        // 禁用态只改字色（不降透明度：真机上透明会被误认为「按钮没了」）
+        .fontColor(available ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
+    }
+    .height(this.itemSize())
+    .constraintSize({ minWidth: this.itemSize() })
+    .padding({ left: SPACING.sm, right: SPACING.sm })
+    .justifyContent(FlexAlign.Center)
+    .borderRadius(RADIUS.sm)
+    .backgroundColor($r('app.color.field_fill'))
+    .flexShrink(0)
+    .onClick(() => {
+      this.onHistoryTap(kind, available);
+    })
   }
 
   /**
@@ -1758,58 +1930,78 @@ struct Handwriting {
   }
 
   /**
-   * 竖屏：顶部单行工具条（高度 = `metrics.barThickness`，48~64vp）。
+   * 竖屏：顶部工具条（**9 项一屏排完，绝不横向滚动**）。
    *
    * ```
-   * [‹ 退出] [笔迹▾] [Scroll: 橡皮 手动框 插入▾ ↶ ↷] [ [−|+] [1/1] [‹|›] ] [完成]
+   * 宽屏（一屏一行）：
+   * [‹] [笔迹▾] [橡皮] [手动框] [插入▾] [↶] [↷] [ −|+ ][n/m][‹|› ] [完成]
+   *
+   * 极窄屏（两行折行，`topBarTwoRows()` 为真）：
+   * 第一行 [‹] [笔迹▾] [橡皮] [手动框] [插入▾] [↶] [↷]
+   * 第二行 [ −|+ ][n/m][‹|› ] [完成]
    * ```
-   * - 退出 / 笔迹 / 分页组 / 完成**不参与横向滚动**（永远可见：真机上分页组曾被 Scroll 边缘裁成 20px）；
-   * - 只有中间那组工具按钮横向滚动 —— 屏再窄也**不压缩控件**（用户定版）；
-   * - 窄屏（`pagerPinned() === false`：连固定段都放不下）时，分页组也并进同一条 Scroll，
-   *   保证整条工具条不溢出屏幕。**注意**：这里只是「同一个 builder 出现两次」的 if 分支，
-   *   画布（`HandwritingPager`）始终在 `build()` 的同一位置，不会因方向/宽度变化被重建。
+   *
+   * 缺陷 3 的定版：**删掉包裹工具项的 `Scroll().scrollable(Horizontal)`** —— 真机上
+   * 橡皮/手动框/插入/撤销/重做 被滚出屏幕、用户以为「按钮没了」；而且这条横向 Scroll
+   * 会抢走历史按钮的点击手势（缺陷 4a）。现在要么一行、要么两行，**两种都是静态布局**：
+   * - 一行判据：`pageW ≥ 640vp` 且 `topBarRequiredWidth() ≤ pageW`（按真实控件宽度实算）；
+   * - 否则两行：第一行 7 个工具按钮 + 第二行「分页组 + 完成」（两行都放得下才叫折行，
+   *   控件尺寸一律不压缩、不隐藏）；顶部条高度由 `topBarHeight()` 一起放大到 2 × 厚度。
+   * - **注意**：这里只是同一个 builder 的两个 if 分支，画布（`HandwritingPager`）始终在
+   *   `build()` 的同一位置，不会因宽度变化被重建（重建会丢掉已经画好的像素）。
    */
   @Builder
   topBar() {
-    Row({ space: this.controlGap() }) {
-      this.exitButton()
-
-      // 「笔迹设置」：笔形/粗细/颜色三合一入口，固定在 Scroll 之外（主操作，不被滚走）
-      this.brushMenuButton()
-
-      Scroll() {
+    if (this.topBarTwoRows()) {
+      // ---- 极窄屏：两行折行（不用滚动，也不隐藏任何控件）
+      Column() {
         Row({ space: this.controlGap() }) {
+          this.exitButton()
+          this.brushMenuButton()
           this.toolButton('橡皮', HW_TOOL_ERASER)
           this.toolButton('手动框', HW_TOOL_SELECT)
           this.insertMenuButton()
           this.historyButton('undo', '↶', this.pagerState.undoSteps > 0)
           this.historyButton('redo', '↷', this.pagerState.redoAvailable)
-          // 窄屏：分页组并进 Scroll（宁可横向滚动，也不把分页区压小）
-          if (!this.pagerPinned()) {
-            this.pageStepper()
-          }
         }
-        .height(this.itemSize())
+        .width('100%')
+        .height(this.barThickness())
+        .justifyContent(FlexAlign.Center)
+        .alignItems(VerticalAlign.Center)
+
+        Row({ space: this.controlGap() }) {
+          this.pageStepper()
+          this.finishButton()
+        }
+        .width('100%')
+        .height(this.barThickness())
+        .justifyContent(FlexAlign.Center)
         .alignItems(VerticalAlign.Center)
       }
-      .scrollable(ScrollDirection.Horizontal)
-      .scrollBar(BarState.Off)
-      .layoutWeight(1)
-      .height(this.itemSize())
-      .align(Alignment.Start)
-
-      // 宽屏：分页三单元格固定在 Scroll 之外、完成左侧，永远可见
-      if (this.pagerPinned()) {
+      .width('100%')
+      .height(this.topBarHeight())
+      .padding({ left: SPACING.sm, right: SPACING.sm })
+      .backgroundColor($r('app.color.page_background'))
+      .justifyContent(FlexAlign.Center)
+    } else {
+      // ---- 宽屏：9 项一屏一行
+      Row({ space: this.controlGap() }) {
+        this.exitButton()
+        this.brushMenuButton()
+        this.toolButton('橡皮', HW_TOOL_ERASER)
+        this.toolButton('手动框', HW_TOOL_SELECT)
+        this.insertMenuButton()
+        this.historyButton('undo', '↶', this.pagerState.undoSteps > 0)
+        this.historyButton('redo', '↷', this.pagerState.redoAvailable)
         this.pageStepper()
+        this.finishButton()
       }
-
-      this.finishButton()
+      .width('100%')
+      .height(this.barThickness())
+      .padding({ left: SPACING.sm, right: SPACING.sm })
+      .backgroundColor($r('app.color.page_background'))
+      .alignItems(VerticalAlign.Center)
     }
-    .width('100%')
-    .height(this.barThickness())
-    .padding({ left: SPACING.sm, right: SPACING.sm })
-    .backgroundColor($r('app.color.page_background'))
-    .alignItems(VerticalAlign.Center)
   }
 
   /** 竖屏：工具条与画布之间的 1vp 横分割线（用户反馈两者「糊在一起」）。 */
@@ -1950,30 +2142,26 @@ struct Handwriting {
       })
   }
 
-  /** rail 的撤销 / 重做。 */
+  /** rail 的撤销 / 重做（与竖屏同一套语义：`Row` + 永远可点 + 禁用只有字色，见 `historyButton`）。 */
   @Builder
-  railHistoryButton(kind: string, label: string, enabled: boolean) {
-    Text(label)
-      .width('100%')
-      .height(this.itemSize())
-      .fontSize(this.toolbarFontSize())
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.None })
-      .textAlign(TextAlign.Center)
-      .borderRadius(RADIUS.sm)
-      .backgroundColor($r('app.color.field_fill'))
-      .fontColor(enabled ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
-      .enabled(enabled)
-      .onClick(() => {
-        if (!enabled) {
-          return;
-        }
-        if (kind === 'undo') {
-          this.pagerState.applyUndo();
-        } else {
-          this.pagerState.applyRedo();
-        }
-      })
+  railHistoryButton(kind: string, label: string, available: boolean) {
+    Row() {
+      Text(label)
+        .fontSize(this.toolbarFontSize())
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.None })
+        .textAlign(TextAlign.Center)
+        .width('100%')
+        .fontColor(available ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
+    }
+    .width('100%')
+    .height(this.itemSize())
+    .justifyContent(FlexAlign.Center)
+    .borderRadius(RADIUS.sm)
+    .backgroundColor($r('app.color.field_fill'))
+    .onClick(() => {
+      this.onHistoryTap(kind, available);
+    })
   }
 
   /** rail 底部「完成」：满 rail 宽 × `metrics.itemSize` 实底品牌蓝 + 白字，固定底部、不参与滚动。 */
@@ -2471,6 +2659,67 @@ struct Handwriting {
         }
         .width('100%')
         .height(CHIP_HEIGHT)
+
+        // ---- 二级菜单入口「更多 ▸」：把「仅手写笔输入」这类不常改的开关收在面板第二层，
+        // 视觉上仍守住「每屏 1 个主操作、其余进更多」（docs/UI-DESIGN.md §9）。
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+          .width('100%')
+
+        Row({ space: SPACING.xs }) {
+          Text('更多')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.None })
+            .fontColor($r('app.color.text_primary'))
+            .layoutWeight(1)
+          Text(this.inkMoreOpen ? '▾' : '▸')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.None })
+            .fontColor($r('app.color.text_secondary'))
+        }
+        .width('100%')
+        .height(CHIP_HEIGHT)
+        .padding({ left: SPACING.sm, right: SPACING.sm })
+        .borderRadius(RADIUS.sm)
+        .onClick(() => {
+          this.toggleInkMore();
+        })
+
+        if (this.inkMoreOpen) {
+          // 缺陷 2：「仅手写笔输入」的开关落在手写板自己的笔迹面板里（设置页那条已删除）。
+          // 切换即落盘（settingsStore.save）+ 立刻作用于画布（pagerState.setPenOnlyInput）。
+          Row({ space: SPACING.sm }) {
+            Text('仅手写笔输入')
+              .fontSize(FONT.caption)
+              .lineHeight(LINE_HEIGHT.caption)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.None })
+              .fontColor($r('app.color.text_primary'))
+              .layoutWeight(1)
+            Toggle({ type: ToggleType.Switch, isOn: this.penOnlyInput })
+              .selectedColor($r('app.color.brand'))
+              .onChange((isOn: boolean) => {
+                this.savePenOnlyInput(isOn);
+              })
+          }
+          .width('100%')
+          .height(CHIP_HEIGHT)
+          .padding({ left: SPACING.sm, right: SPACING.sm })
+          .alignItems(VerticalAlign.Center)
+
+          Text('开启后手指不能写，只能用手写笔')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.None })
+            .fontColor($r('app.color.text_secondary'))
+            .padding({ left: SPACING.sm, right: SPACING.sm })
+        }
       } else if (this.panel === PANEL_INSERT) {
         // ---- 「插入」二级菜单：图片 / 表格（表格带 行×列 步进，1..10）
         Text('插入')
@@ -2809,9 +3058,14 @@ struct Handwriting {
           HandwritingPager({
             state: this.pagerState,
             maxPages: MAX_HANDWRITING_PAGES,
-            // 页码/撤销可用性都直接读 pagerState（唯一真相源）；这个回调只用来**触发重绘**
+            // 页码都直接读 pagerState（唯一真相源）；这个回调只用来**触发重绘**
             onStateChange: () => {
               this.touchUi();
+            },
+            // 撤销/重做可用性变化 → 工具条重建（缺陷 4b：子组件只改 @Observed 字段时，
+            // 个别 ArkUI 版本不会重跑父页面 build，按钮就停在旧状态）
+            onStatsChange: (undoSteps: number, redoAvailable: boolean) => {
+              this.onHistoryStats(undoSteps, redoAvailable);
             }
           })
             .width('100%')

@@ -53,6 +53,7 @@ import type { Stroke, StrokePoint } from '../model/strokeHistory';
 import { DEFAULT_BRUSH, paintFor, pressureWidth, speedWidthScaleFor, jitterPoint } from '../model/brush';
 import type { BrushKind, BrushPaint } from '../model/brush';
 import { smoothPath } from '../model/strokeSmooth';
+import { FINGER_TOOL, fingerRejectNoticeOnBoard, shouldAcceptTouch, shouldShowRejectNotice } from '../model/penInput';
 import { StylusAssist } from './StylusAssist';
 import type { RegionBox } from '../model/types';
 import { CANVAS_PAINTS } from '../model/theme';
@@ -133,6 +134,19 @@ export class HandwritingPagerState {
   undoSteps: number = 0;
   /** 是否有可重做的笔。 */
   redoAvailable: boolean = false;
+  /**
+   * 「仅手写笔输入」（缺陷 1 的开关值，**唯一真相源**）。
+   *
+   * 父页面（`pages/Handwriting.ets`）在 `aboutToAppear` 从 `settingsStore` 读到后写入，
+   * 笔迹面板的「更多 → 仅手写笔输入」切换时立刻写回 —— 画布在 `handleTouch` 里
+   * **每次触摸现读**这个字段，所以切换后不需要退出重进、也不需要重建画布。
+   */
+  penOnlyInput: boolean = false;
+
+  /** 设置「仅手写笔输入」（只认 `true`，其余一律按关处理，避免坏值把笔锁死）。 */
+  setPenOnlyInput(enabled: boolean): void {
+    this.penOnlyInput = enabled === true;
+  }
 
   /**
    * 区域填白实现（由 `HandwritingPager` 在 `aboutToAppear` 注册）。
@@ -497,6 +511,15 @@ export struct HandwritingPager {
   /** 手写笔快捷操作（轻捏切橡皮 / 双击撤销）是否注册成功。 */
   private stylusShortcuts: boolean = false;
 
+  /**
+   * 连续被「仅手写笔输入」拒绝的手指触摸次数。
+   *
+   * 只在**触摸起点**（`TouchType.Down` / 框选手势起手）累加：一次手指点击会先后产生
+   * Down/Move/Up 三条事件，若每条都数，点两下就到阈值，提示会糊在画布上。
+   * 任何非手指输入（笔 / Unknown）进来立刻清零 —— 这是「连续」的语义。
+   */
+  private fingerRejectCount: number = 0;
+
   aboutToAppear(): void {
     this.state.setMaxPages(this.maxPages);
     // 注册填白实现：父页面通过 state.maskPage() 用到它
@@ -585,6 +608,44 @@ export struct HandwritingPager {
 
   private isEraseMode(): boolean {
     return this.state.tool === HW_TOOL_ERASER;
+  }
+
+  // ------------------------------------------------------------------ 「仅手写笔输入」过滤（缺陷 1）
+
+  /**
+   * 这次输入要不要交给画布（`true` = 放行）。
+   *
+   * 三条硬规则（纯函数在 `model/penInput`，`tools/test/penInput.test.mjs` 全矩阵覆盖）：
+   * 1. `penOnlyInput=false`：一律放行（默认，手指 + 笔都能写）；
+   * 2. `penOnlyInput=true`：**只拒绝 `SourceTool.Finger`**；笔、`Unknown`（拿不到笔类型的设备）
+   *    以及其它任何取值一律放行 —— 宁可漏放一次手指，也不能让笔写不了字；
+   * 3. 被拒时累加「连续拒绝次数」，达到 `FINGER_REJECT_THRESHOLD` 且是它的整数倍才 toast 一次
+   *    （`shouldShowRejectNotice`），其余静默；任何非手指输入把计数清零。
+   *
+   * 被拒的输入**不落笔、不进橡皮、不进框选、不动撤销栈**：调用点都在各自的最前面 return。
+   *
+   * @param sourceTool 本次输入的 `event.sourceTool`（`SourceTool` 枚举，页面传数值）
+   * @param countRejection 是否把这次算进「连续拒绝次数」（只有触摸起点算，Move/Up 不算）
+   */
+  private penInputAllowedFor(sourceTool: number, countRejection: boolean): boolean {
+    if (shouldAcceptTouch(this.state.penOnlyInput, sourceTool)) {
+      if (sourceTool !== FINGER_TOOL) {
+        // 笔 / Unknown 进来了：手指的「连续」被打算断
+        this.fingerRejectCount = 0;
+      }
+      return true;
+    }
+    if (!countRejection) {
+      return false;
+    }
+    this.fingerRejectCount = this.fingerRejectCount + 1;
+    if (shouldShowRejectNotice(this.fingerRejectCount)) {
+      promptAction.showToast({
+        message: fingerRejectNoticeOnBoard(this.fingerRejectCount),
+        duration: 3000
+      });
+    }
+    return false;
   }
 
   // ------------------------------------------------------------------ 笔迹绘制
@@ -811,6 +872,12 @@ export struct HandwritingPager {
   }
 
   private handleTouch(pageId: string, event: TouchEvent): void {
+    // 缺陷 1：「仅手写笔输入」必须在这里判（画布触摸的**唯一**入口）——被拒的触摸
+    // 直接 return：不落笔、不进橡皮、不进框选、不动撤销栈（也不写草稿）。
+    // 只有触摸起点（Down）计入「连续拒绝次数」，Move/Up 跟着被丢但不重复计数。
+    if (!this.penInputAllowedFor(Number(event.sourceTool), event.type === TouchType.Down)) {
+      return;
+    }
     // 框选模式下画布不落笔（触摸交给 overlay 层建框）
     if (this.isSelectMode()) {
       return;
@@ -944,6 +1011,11 @@ export struct HandwritingPager {
 
   /** 手势开始：命中框 → 移动/改大小；空白处 → 新建。 */
   private handleGestureStart(event: GestureEvent): void {
+    // 缺陷 1 的第二个入口：`手动框` 走的是 overlay 上的 PanGesture（不经过 handleTouch），
+    // 所以「只接受手写笔」时手指也不能拉框 —— 一次起手算一次连续拒绝。
+    if (!this.penInputAllowedFor(Number(event.sourceTool), true)) {
+      return;
+    }
     if (this.canvasW <= 0 || this.canvasH <= 0) {
       return;
     }

@@ -138,12 +138,16 @@ describe('手写板工具条：宽度自适应与不截断', () => {
     assert.ok(/currentColorLabel\(\)/.test(summary), '文案必须含当前色名（钢笔 · 3.5 · 黑）');
   });
 
-  test('溢出时该行横向滚动：Scroll + 横向 + 无滚动条 + 高度 = metrics.barThickness（不换行不加高）', () => {
+  test('竖屏顶部条**没有横向 Scroll**：工具项一屏排完，放不下就折行（缺陷 3 定版）', () => {
     const bar = builderBody('topBar');
-    assert.ok(/Scroll\(\)/.test(bar), '工具条必须包在 Scroll 里');
-    assert.ok(/\.scrollable\(ScrollDirection\.Horizontal\)/.test(bar), '必须横向滚动');
-    assert.ok(/\.scrollBar\(BarState\.Off\)/.test(bar), '不显示滚动条');
-    assert.ok(/\.height\(this\.barThickness\(\)\)/.test(bar), '工具条高度必须取 metrics.barThickness（48~64vp）');
+    assert.equal(/Scroll\(/.test(bar), false, 'topBar 不得再包 Scroll（真机上工具项被滚走 = 按钮「消失」）');
+    assert.equal(/\.scrollable\(/.test(bar), false, 'topBar 不得再设 scrollable');
+    assert.equal(/ScrollDirection\.Horizontal/.test(bar), false, 'topBar 不得有横向滚动方向');
+    // 一屏一行：9 项按顺序排在一个 Row 里，高度 = metrics.barThickness
+    assert.ok(/Row\(\{ space: this\.controlGap\(\) \}\)/.test(bar), '顶部条必须是普通 Row（不是 Scroll）');
+    assert.ok(/\.height\(this\.barThickness\(\)\)/.test(bar), '工具条一行高度必须取 metrics.barThickness（48~64vp）');
+    // 折行分支：两行都用 barThickness 高，整体高度 = topBarHeight()
+    assert.ok(/this\.topBarHeight\(\)/.test(bar), '折行分支的整体高度必须用 topBarHeight()');
   });
 
   test('「笔迹设置」面板 = 笔形 + 粗细 + 颜色 三段：标题、chip、档位格、色块、两条 1vp 分割线', () => {
@@ -229,9 +233,13 @@ describe('手写板工具条：宽度自适应与不截断', () => {
   });
 
   test('禁用态不用整体 opacity 变透明（真机「−」消失的回归）', () => {
-    const chrome = ['historyButton', 'pageStepper'].map((name) => builderBody(name)).join('\n');
+    const chrome = ['pageStepper', 'insertDeleteCell', 'prevNextCell'].map((name) => builderBody(name)).join('\n');
     assert.equal(/\.opacity\(0?\.\d+\)/.test(chrome), false, '不得用 opacity 表达禁用态');
-    assert.ok(/\.enabled\(/.test(chrome), '禁用必须用 enabled');
+    assert.ok(/\.enabled\(/.test(chrome), '分页区的禁用必须用 enabled（只对 `−`/`+`/`‹`/`›` 这类页面动作）');
+    // 历史按钮相反：**不许**用 enabled（缺陷 4b：enabled=false 会变成「看着能点、点了没反应」）
+    const history = builderBody('historyButton');
+    assert.equal(/\.enabled\(/.test(history), false, '历史按钮不得用 enabled 表达禁用（改用可点 + toast）');
+    assert.equal(/\.opacity\(/.test(history), false, '历史按钮禁用态不得用 opacity');
   });
 
   test('完成按钮：实底品牌蓝 + 白字 + 不收缩 + 竖屏 ≥64', () => {
@@ -247,13 +255,14 @@ describe('手写板工具条：宽度自适应与不截断', () => {
     assert.ok(/Math\.max\(FINISH_MIN_WIDTH, this\.itemSize\(\)\)/.test(builderBody('finishWidth')), 'finishWidth() 必须 ≥64');
   });
 
-  test('工具条顺序 = 退出/笔形/粗细/颜色/橡皮/手动框/撤销/重做/步进器/完成', () => {
+  test('工具条顺序 = 退出/笔迹/橡皮/手动框/插入/撤销/重做/步进器/完成（9 项，无 Scroll）', () => {
     const bar = builderBody('topBar');
     const order = [
       'this.exitButton()',
       'this.brushMenuButton()',
       "this.toolButton('橡皮'",
       "this.toolButton('手动框'",
+      'this.insertMenuButton()',
       "this.historyButton('undo'",
       "this.historyButton('redo'",
       'this.pageStepper()',
@@ -266,10 +275,14 @@ describe('手写板工具条：宽度自适应与不截断', () => {
       assert.ok(at > cursor, `${token} 顺序不对`);
       cursor = at;
     }
-    // 退出按钮在 Scroll 之外（永远可见，不会被横向滚动藏起来）
-    const exitAt = bar.indexOf('this.exitButton()');
-    const scrollAt = bar.indexOf('Scroll()');
-    assert.ok(exitAt >= 0 && scrollAt > exitAt, '退出按钮必须在 Scroll 之前（不参与横向滚动）');
+    // 9 项一屏排完：没有任何一项被 Scroll 包住（旧实现里「橡皮→↷ + 分页组」都在横向 Scroll 里）
+    assert.equal(/Scroll\(/.test(bar), false, '工具条内不得出现 Scroll（否则工具项会被滚出屏幕）');
+    // 计数：退出 1 / 笔迹 1 / 工具 2 / 插入 1 / 历史 2 / 分页组 1 / 完成 1（两个分支各一套，共 2 套）
+    const count = (token) => (bar.split(token).length - 1);
+    assert.equal(count('this.exitButton()'), 2, '退出按钮应在「一行 / 两行」两个分支里各出现一次');
+    assert.equal(count('this.finishButton()'), 2, '完成按钮应在两个分支里各出现一次');
+    assert.equal(count("this.historyButton('undo'"), 2, '撤销应在两个分支里各出现一次');
+    assert.equal(count("this.historyButton('redo'"), 2, '重做应在两个分支里各出现一次');
   });
 
   test('菜单开合有 hilog 自证标记 `[hw] menu=<name> open=<0|1>` / `[hw] ink …`', () => {
@@ -347,23 +360,33 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     assert.ok(finishAt > scrollEnd, '「完成」必须在竖向 Scroll 之外（不随滚动跑掉）');
   });
 
-  test('竖屏：分页三单元格默认在横向 Scroll 之外（固定可见，不被裁切）', () => {
+  test('竖屏：分页三单元格与「完成」都在可视区内（两个分支各一套，无 Scroll 遮挡）', () => {
     const bar = builderBody('topBar');
-    const scrollAt = bar.indexOf('Scroll()');
-    const finishAt = bar.indexOf('this.finishButton()');
-    const exitAt = bar.indexOf('this.exitButton()');
-    assert.ok(exitAt >= 0 && exitAt < scrollAt, '退出按钮在 Scroll 之前');
-    // 分页组出现两次：Scroll 内的「窄屏兜底」分支 + Scroll 外的「宽屏固定」分支
-    const pinnedAt = bar.indexOf('if (this.pagerPinned())');
-    const narrowAt = bar.indexOf('if (!this.pagerPinned())');
-    const stepperAt = bar.indexOf('this.pageStepper()', pinnedAt);
-    assert.ok(narrowAt > scrollAt && narrowAt < bar.indexOf('.align(Alignment.Start)'), '窄屏兜底分支必须在 Scroll 内');
-    assert.ok(pinnedAt > bar.indexOf('.align(Alignment.Start)'), '宽屏固定分支必须在 Scroll 之后');
-    assert.ok(stepperAt > pinnedAt, '分页组必须渲染在 Scroll 之外的固定分支里');
-    assert.ok(finishAt > stepperAt, '分页组固定在「完成」左侧');
-    assert.ok(bar.indexOf('this.pageStepper()') < pinnedAt, '窄屏兜底分支里也要有分页组（Scroll 内）');
+    // 旧实现的两个 bug 都不许回来：横向 Scroll 包裹工具项 + pagerPinned 两分支
+    assert.equal(/Scroll\(/.test(bar), false, '顶部条不得含 Scroll');
+    assert.equal(/pagerPinned/.test(bar), false, 'pagerPinned 分支已作废（没有 Scroll 就没有「滚不滚得走」）');
+    // 一行分支：顺序必须是 … 分页组 → 完成（分页组在完成左侧）
+    // `builderBody()` 取的是**去注释**源码，所以用 `} else {` 切两个分支
+    const rowStart = bar.indexOf('} else {');
+    assert.ok(rowStart > 0, '顶部条必须保留「两行 / 一行」两个分支');
+    const row = bar.slice(rowStart);
+    assert.ok(row.indexOf('this.pageStepper()') >= 0, '一行分支必须有分页组');
+    assert.ok(
+      row.indexOf('this.pageStepper()') < row.indexOf('this.finishButton()'),
+      '分页组必须在「完成」左侧（一行分支）'
+    );
+    // 两行分支：分页组 + 完成在**第二行**同一个 Row 里
+    const twoRow = bar.slice(0, rowStart);
+    assert.ok(/this\.topBarTwoRows\(\)/.test(twoRow), '两行分支必须以 topBarTwoRows() 为判据');
+    const secondRowAt = twoRow.indexOf('this.pageStepper()');
+    assert.ok(secondRowAt > 0, '两行分支第二行必须有分页组');
+    assert.ok(
+      twoRow.indexOf('this.finishButton()') > secondRowAt,
+      '两行分支里「完成」必须跟在分页组后面（同一个 Row）'
+    );
+    // 9 项在两个分支里都在（一行分支 7+1+1，两行分支 7 / 1+1）
     for (const tool of ["this.toolButton('橡皮'", "this.toolButton('手动框'"]) {
-      assert.ok(bar.indexOf(tool) > scrollAt, `Scroll 内必须保留工具按钮 ${tool}`);
+      assert.ok(bar.indexOf(tool) >= 0, `工具按钮丢了：${tool}`);
     }
   });
 
@@ -552,14 +575,18 @@ describe('手写板横屏 rail：宽度、纵向步进器与完整文案', () =>
     assert.ok(finishAt > bar.indexOf('.align(Alignment.Top)'), '「完成」必须在竖向 Scroll 之后（不随滚动跑掉）');
   });
 
-  test('竖屏「完成」也在针向 Scroll 之外（不会被横向滚走）', () => {
+  test('竖屏「完成」永远在同一屏内（一行在右端、两行在第二行末，不被滚走也不被裁掉）', () => {
     const bar = builderBody('topBar');
-    const scrollAt = bar.indexOf('Scroll()');
+    assert.equal(/Scroll\(/.test(bar), false, '顶部条不得含 Scroll（「完成」靠布局而不是靠滚动保证可见）');
     const finishAt = bar.indexOf('this.finishButton()');
-    assert.ok(scrollAt >= 0 && finishAt > scrollAt, '竖屏「完成」必须在 Scroll 之外');
-    // 退出按钮也在 Scroll 之外，且最靠左
-    const exitAt = bar.indexOf('this.exitButton()');
-    assert.ok(exitAt >= 0 && exitAt < scrollAt, '竖屏「‹」退出必须在 Scroll 之外（固定可见）');
+    assert.ok(finishAt > 0, '顶部条必须有「完成」');
+    // 两个分支都要有「完成」，且两行分支里它排在该行末尾
+    const branches = bar.split('this.finishButton()').length - 1;
+    assert.equal(branches, 2, '「完成」必须在一行 / 两行两个分支里各出现一次');
+    assert.ok(
+      /this\.pageStepper\(\)\s*\n\s*this\.finishButton\(\)/.test(bar),
+      '两个分支里「完成」都必须紧跟分页组（布局固定，不依赖滚动）'
+    );
   });
 
   test('颜色并入面板：色名表 + 面板内 5 个色块（工具条不再有颜色按钮）', () => {
@@ -667,8 +694,12 @@ describe('手写板工具条与画布的分界线', () => {
     const build = builderBody('build');
     assert.ok(/this\.topBarDivider\(\)/.test(build), 'build 必须渲染顶部横分割线');
     const total = builderBody('topBarTotalHeight');
-    assert.ok(/this\.barThickness\(\) \+ DIVIDER/.test(total), '顶部条高度必须 = metrics.barThickness + DIVIDER');
+    assert.ok(/this\.topBarHeight\(\) \+ DIVIDER/.test(total), '顶部条高度必须 = topBarHeight()（一行/两行各自的高度）+ DIVIDER');
     assert.ok(/this\.landscape \? 0 :/.test(total), '顶部条高度只在竖屏非 0');
+    // 折行后高度必须翻倍，否则第二行会被 build() 的 clip(true) 裁掉
+    const height = builderBody('topBarHeight');
+    assert.ok(/2 \* this\.barThickness\(\)/.test(height), '两行时顶部条高度必须 = 2 × metrics.barThickness');
+    assert.ok(/this\.topBarTwoRows\(\)/.test(height), '高度必须由 topBarTwoRows() 决定');
     assert.ok(/\.height\(this\.topBarTotalHeight\(\)\)/.test(build), 'build 必须用 topBarTotalHeight()');
   });
 });
@@ -882,5 +913,166 @@ describe('reviewer 阻塞缺陷 D2 / D4 的源码级回归', () => {
     assert.equal(/this\.releasePixelMap\(/.test(timeoutBranch), false, '超时分支不得直接释放（use-after-release）');
     assert.match(manager, /private drainDeferred\(\): void/, '必须有整批收尾释放');
     assert.match(manager, /this\.drainDeferred\(\)/, 'run() 收尾必须调用 drainDeferred()');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2026-11-18 用户报的 P0（本轮修复的静态回归）：
+//   缺陷 3：竖屏顶部工具条被塞进横向 Scroll —— 工具项被滚出屏幕，用户以为「按钮没了」。
+//           定版：删掉 Scroll，9 项一屏排完；极窄屏（<640vp 或实算放不下）**折成两行**。
+//   缺陷 4：撤销 / 重做点不动 —— ①手势被 Scrollable 抢走 ②enabled=false 且状态不刷新。
+//           定版：历史按钮 = `Row` + `.onClick`（不是裸 `Text`），禁用时仍可点并 toast。
+//   缺陷 2：penOnly 开关搬到笔迹面板「更多」二级菜单（设置页那条由别人删）。
+// ---------------------------------------------------------------------------
+
+describe('缺陷 3：竖屏工具条 9 项一屏排完 / 极窄屏两行折行（绝不横向滚动）', () => {
+  test('topBar 内不含 Scroll / scrollable / 横向滚动（一行 + 两行两个分支都是静态布局）', () => {
+    const bar = builderBody('topBar');
+    assert.equal(/Scroll\(/.test(bar), false, 'topBar 内不得出现 Scroll(');
+    assert.equal(/\.scrollable\(/.test(bar), false, 'topBar 内不得出现 scrollable(');
+    assert.equal(/ScrollDirection\.Horizontal/.test(bar), false, 'topBar 内不得出现横向滚动方向');
+    assert.equal(/scrollBar\(/.test(bar), false, 'topBar 内不得设置滚动条');
+    // 两个分支：if (this.topBarTwoRows()) { Column(两行) } else { Row(一行) }
+    assert.ok(/if \(this\.topBarTwoRows\(\)\) \{/.test(bar), 'topBar 必须按 topBarTwoRows() 分两行 / 一行');
+    assert.ok(/\} else \{/.test(bar), 'topBar 必须保留「一行」分支');
+    const branches = bar.split('} else {');
+    assert.equal(branches.length, 2, '顶部条只允许「两行 / 一行」两个分支');
+    // 两行分支 = 两个 Row（第一行 7 个工具按钮、第二行分页组 + 完成）
+    const twoRows = branches[0];
+    assert.equal((twoRows.match(/Row\(\{ space: this\.controlGap\(\) \}\)/g) ?? []).length, 2, '两行分支必须是两个 Row');
+    assert.ok(/Column\(\) {/.test(twoRows), '两行分支外层必须是 Column');
+    // 一行分支 = 一个 Row
+    assert.equal((branches[1].match(/Row\(\{ space: this\.controlGap\(\) \}\)/g) ?? []).length, 1, '一行分支必须是一个 Row');
+  });
+
+  test('折行判据：640vp 下限 + 按真实控件宽度实算（不是写死 / 不猜机型）', () => {
+    assert.ok(/const TOP_BAR_SINGLE_ROW_MIN: number = 640;/.test(code), '必须有 640vp 的极窄屏下限常量');
+    const rows = builderBody('topBarTwoRows');
+    assert.ok(/this\.pageW < TOP_BAR_SINGLE_ROW_MIN/.test(rows), '低于 640vp 必须直接折行');
+    assert.ok(/this\.topBarRequiredWidth\(\) > this\.pageW/.test(rows), '否则必须按实算宽度比较');
+    assert.ok(/this\.landscape/.test(rows), '横屏 rail 不参与折行判断');
+    // 宽度实算 = 7 个单控件 + 完成 + 笔迹额外 + 分页组 + 8 个间距 + 两侧 padding
+    const required = builderBody('topBarRequiredWidth');
+    assert.ok(/7 \* this\.itemSize\(\) \+ this\.finishWidth\(\)/.test(required), '9 项里的 8 个单控件必须逐个算进来');
+    assert.ok(/this\.pagerTotalWidth\(\)/.test(required), '分页组宽度必须算进来');
+    assert.ok(/8 \* this\.controlGap\(\)/.test(required), '8 个间距必须算进来');
+    // 数值自证（真机 1600×2560 @2.375 ⇒ 673.7vp 宽、itemSize=64、gap=9.6）：
+    const item = 64;
+    const gap = Math.max(8, item * 0.15);
+    const half = Math.max(44, item * 0.75);
+    const pager = 2 * (2 * half + 1) + Math.max(64, item * 1.1) + 2 * gap;
+    const requiredW = 7 * item + Math.max(64, item) + 2 * 8 + pager + 8 * gap + 2 * 8;
+    assert.ok(requiredW > 673.7, `真机竖屏 ${requiredW.toFixed(1)}vp > 673.7vp：9 项一行物理上放不下 → 必须折两行`);
+    // 每行都放得下（否则「折行」等于换一种裁切）
+    const row1 = 7 * item + 2 * 8 + 6 * gap + 2 * 8;
+    const row2 = pager + Math.max(64, item) + gap + 2 * 8;
+    assert.ok(row1 <= 673.7, `第一行 ${row1.toFixed(1)}vp 必须放得下`);
+    assert.ok(row2 <= 673.7, `第二行 ${row2.toFixed(1)}vp 必须放得下`);
+    // 宽屏（≥1024vp）仍然一屏一行
+    assert.ok(requiredW <= 1024, `${requiredW.toFixed(1)}vp ≤ 1024vp：宽屏必须是一行`);
+  });
+
+  test('9 个控件都在 topBar 里（退出/笔迹/橡皮/手动框/插入/↶/↷/分页组/完成，关键标识逐个点名）', () => {
+    const bar = builderBody('topBar');
+    const items = [
+      ['退出', 'this.exitButton()'],
+      ['笔迹', 'this.brushMenuButton()'],
+      ['橡皮', "this.toolButton('橡皮'"],
+      ['手动框', "this.toolButton('手动框'"],
+      ['插入', 'this.insertMenuButton()'],
+      ['撤销', "this.historyButton('undo'"],
+      ['重做', "this.historyButton('redo'"],
+      ['分页组', 'this.pageStepper()'],
+      ['完成', 'this.finishButton()']
+    ];
+    assert.equal(items.length, 9, '定版就是 9 项');
+    for (const [label, token] of items) {
+      assert.ok(bar.includes(token), `topBar 缺少「${label}」（${token}）`);
+      // 每个控件在一行 / 两行两个分支里各出现一次 = 2 次（分页组与完成也是 2 次）
+      const times = bar.split(token).length - 1;
+      assert.equal(times, 2, `「${label}」必须在一行/两行两个分支里各出现一次，实际 ${times} 次`);
+    }
+    // 9 项之外不许再冒出别的控件（防止有人又塞进一个「更多」把工具条挤爆）
+    const calls = (bar.match(/this\.[a-zA-Z]+Button\(/g) ?? []).length;
+    assert.equal(calls, 16, `顶部条 builder 调用数必须是 8 个单控件 × 2 分支 = 16，实际 ${calls}`);
+  });
+});
+
+describe('缺陷 4：撤销 / 重做点不动（真按钮 + 响应式可用性 + 禁用仍可点）', () => {
+  test('历史按钮是 Row + onClick，**不是** Text(...) + .enabled(...)', () => {
+    for (const name of ['historyButton', 'railHistoryButton']) {
+      const body = builderBody(name);
+      assert.ok(/Row\(\) \{/.test(body), `${name} 必须是 Row 容器（真正的可点组件）`);
+      assert.ok(/\.onClick\(\(\) => \{/.test(body), `${name} 必须有 onClick`);
+      assert.equal(/\.enabled\(/.test(body), false, `${name} 不得再用 .enabled（会变成「看着能点、点了没反应」）`);
+      // 反例：不允许「Text(...) 一直挂到 .enabled(」
+      assert.equal(/Text\([^)]*\)[\s\S]*\.enabled\(/.test(body), false, `${name} 不得是 Text + enabled 的组合`);
+      assert.ok(/this\.onHistoryTap\(kind, available\)/.test(body), `${name} 的点击必须走 onHistoryTap(kind, available)`);
+    }
+    // 历史按钮不能在 Scrollable 容器里：顶部条没有 Scroll；rail 的 Scroll 是竖向
+    assert.equal(/Scroll\(/.test(builderBody('topBar')), false, '顶部条不得含 Scroll（否则点按会被滚动手势吃掉）');
+    assert.ok(
+      /\.scrollable\(ScrollDirection\.Vertical\)/.test(builderBody('railBar')),
+      'rail 保留竖向 Scroll（用户没投诉，别动）'
+    );
+    assert.equal(/ScrollDirection\.Horizontal/.test(code), false, '全页不得再有横向 ScrollDirection');
+  });
+
+  test('禁用态是响应式判断 + 点了有反馈：applyUndo/applyRedo 真被调用，没有可撤销时 toast', () => {
+    const tap = builderBody('onHistoryTap');
+    assert.ok(/this\.pagerState\.applyUndo\(\)/.test(tap), '撤销必须调用现有的 applyUndo()');
+    assert.ok(/this\.pagerState\.applyRedo\(\)/.test(tap), '重做必须调用现有的 applyRedo()');
+    assert.ok(/this\.touchUi\(\)/.test(tap), '撤销/重做之后必须 touchUi()（可用性会变）');
+    assert.ok(/没有可撤销的笔画/.test(tap), '没有可撤销笔画时必须 toast 说明');
+    assert.ok(/没有可重做的笔画/.test(tap), '没有可重做笔画时必须 toast 说明');
+    assert.ok(/promptAction\.showToast/.test(tap), '必须用 toast 给反馈');
+    // 工具条里读的是 pagerState 的当前值（响应式判断），不是构造时的一次性快照
+    const bar = builderBody('topBar');
+    assert.ok(/this\.pagerState\.undoSteps > 0/.test(bar), '撤销可用性必须在 build 里读 pagerState.undoSteps');
+    assert.ok(/this\.pagerState\.redoAvailable/.test(bar), '重做可用性必须在 build 里读 pagerState.redoAvailable');
+  });
+
+  test('撤销栈变化会重建工具条：onStatsChange → onHistoryStats → touchUi（不靠 @Observed 碰运气）', () => {
+    const build = builderBody('build');
+    assert.ok(/onStatsChange: \(undoSteps: number, redoAvailable: boolean\) => \{/.test(build), 'build 必须接 onStatsChange');
+    assert.ok(/this\.onHistoryStats\(undoSteps, redoAvailable\)/.test(build), 'onStatsChange 必须转给 onHistoryStats');
+    const stats = builderBody('onHistoryStats');
+    assert.ok(/this\.lastHistoryKey/.test(stats), '只在可用性变化时才重建（避免每笔都重绘）');
+    assert.ok(/this\.touchUi\(\)/.test(stats), '可用性变化必须 touchUi() 触发工具条重建');
+    // 抬笔（dirty）也要重建：画完第一笔撤销按钮必须立刻可用
+    assert.ok(/this\.touchUi\(\);/.test(source.slice(source.indexOf('dirtyImpl'), source.indexOf('canvasReadyImpl'))), '抬笔存草稿时也要 touchUi()');
+  });
+});
+
+describe('缺陷 1 / 2：仅手写笔输入（penOnly）接进画布与笔迹面板', () => {
+  test('笔迹面板有「更多 ▸」二级入口 + 开关 + 说明文案', () => {
+    const panel = builderBody('overlayPanel');
+    assert.ok(/Text\('更多'\)/.test(panel), '笔迹面板底部必须有「更多」二级入口');
+    assert.ok(/this\.toggleInkMore\(\)/.test(panel), '点「更多」必须走 toggleInkMore()');
+    assert.ok(/if \(this\.inkMoreOpen\)/.test(panel), '「更多」必须是可展开的二级菜单');
+    assert.ok(
+      /Toggle\(\{ type: ToggleType\.Switch, isOn: this\.penOnlyInput \}\)/.test(panel),
+      '开关必须绑定 this.penOnlyInput'
+    );
+    assert.ok(/this\.savePenOnlyInput\(isOn\)/.test(panel), '切换必须调 savePenOnlyInput(isOn)');
+    assert.ok(/Text\('仅手写笔输入'\)/.test(panel), '开关标题必须是「仅手写笔输入」');
+    assert.ok(/Text\('开启后手指不能写，只能用手写笔'\)/.test(panel), '必须有一行说明「开启后手指不能写，只能用手写笔」');
+  });
+
+  test('切换即落盘、并立刻传给画布（不需要退出重进）', () => {
+    const save = builderBody('savePenOnlyInput');
+    assert.ok(/settingsStore\.save\(\{ penOnlyInput: next \}/.test(save), '必须 settingsStore.save({ penOnlyInput }) 落盘');
+    assert.ok(/this\.pagerState\.setPenOnlyInput\(next\)/.test(save), '必须先写画布状态（立刻生效）');
+    assert.ok(
+      save.indexOf('this.pagerState.setPenOnlyInput(next)') < save.indexOf('await settingsStore.save('),
+      '顺序：先作用于画布，再落盘（落盘失败不该让开关变成假开关）'
+    );
+    assert.ok(/this\.penOnlyInput = !next;/.test(save), '落盘失败必须回退界面状态');
+    // 进页面读设置并铺给画布
+    const load = builderBody('loadPenOnlyInput');
+    assert.ok(/settingsStore\.load\(/.test(load), '进页面必须从 settingsStore 读 penOnlyInput');
+    assert.ok(/settings\.penOnlyInput === true/.test(load), '读出来的值必须按 === true 归一');
+    assert.ok(/this\.pagerState\.setPenOnlyInput\(this\.penOnlyInput\)/.test(load), '读到的值必须传给画布');
+    assert.ok(/this\.loadPenOnlyInput\(\)/.test(builderBody('aboutToAppear')), 'aboutToAppear 必须发起读取');
   });
 });

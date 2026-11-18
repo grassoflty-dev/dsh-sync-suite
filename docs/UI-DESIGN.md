@@ -284,3 +284,88 @@ Index 侧 :146-153 的断言（`settingsStore.load(` 必须早于 `await summari
    在设置页切三态后回到手写页会重建，没问题；但**停留在手写页时**系统切深色，画布内的对象框颜色不会立即重画
    （界面其余部分由系统重载资源，会变）。要彻底实时需把 config 变化回调接进 `HandwritingPager` 并重画。
 3. **无真机验证**：本轮所有结论来自静态断言 + 纯函数计算，深色实机观感、系统字体缩放 ×1.5 的真机排版**未验证**。
+
+
+## 9. 手写板工具条与笔过滤（2026-11-18，用户报的三个 P0）
+
+> 本节**只追加**，不改 §1–§8 的任何结论。涉及文件仅三个：`entry/src/harmony/ets/pages/Handwriting.ets`、
+> `entry/src/harmony/ets/handwriting/HandwritingPager.ets`、`entry/src/main/ets/model/penInput.ts`（只加导出）。
+
+### 9.1 缺陷 3：竖屏顶部工具条不再进横向 Scroll
+
+| 项 | 旧（缺陷） | 新（定版） |
+| --- | --- | --- |
+| 容器 | `Scroll().scrollable(Horizontal)` 包住「橡皮/手动框/插入/↶/↷（+窄屏分页组）」 | **没有任何 Scroll**：`if (topBarTwoRows())` → 两行 `Column`；否则一行 `Row` |
+| 9 项 | 退出 / 笔迹 / 橡皮 / 手动框 / 插入 / ↶ / ↷ / 分页组 / 完成，其中 5 项会被滚出屏幕 | 全部静态可见：一行排完，或折成两行 |
+| 用户症状 | 「工具按钮没了」；历史按钮点不动（手势被 Scrollable 吃掉） | 点得到、看得见 |
+
+**折行判据（`topBarTwoRows()`，两行都是静态布局，绝不滚动）**：
+
+1. `pageW < TOP_BAR_SINGLE_ROW_MIN`（**640vp**）→ 极窄屏，直接两行；
+2. 否则实算 `topBarRequiredWidth() > pageW` 才折行 —— 公式 = `7 × itemSize + finishWidth + 笔迹额外 16 + pagerTotalWidth + 8 × controlGap + 两侧 16`。
+
+**两行怎么分**：第一行 `[‹][笔迹▾][橡皮][手动框][插入▾][↶][↷]`，第二行 `[ −|+ ][n/m][‹|› ][完成]`
+（导航在上、翻页与主操作在下）；顶部条整体高度 = `topBarHeight()` = 两行时 `2 × barThickness`，
+`topBarTotalHeight()` = 它 + 1vp 分割线（**高度必须跟着翻倍，否则第二行会被 `clip(true)` 裁掉**）。
+
+**真机数值自证**（1600×2560 @2.375 ⇒ 673.7vp 宽，`itemSize=64`、`gap=9.6`、`barThickness=64`）：
+一行需要 **904.4vp > 673.7vp** ⇒ 物理上不可能一行放下 9 项（分页区每半 ≥44vp 是既有硬约束），
+因此**真机竖屏实际走两行**：第一行 537.6vp、第二行 373.2vp，两行都放得下。宽屏（≥1024vp）仍是一行。
+> 待用户决策：若坚持「673.7vp 也一行」，只能把分页区每半压到 <44vp（与 §2 触控 ≥40vp 及既有测试冲突），不建议。
+
+### 9.2 缺陷 4：撤销 / 重做点不动（两个成因都排除）
+
+| 成因 | 处理 |
+| --- | --- |
+| (a) 手势被 Scrollable 抢走 | §9.1 已删除横向 Scroll；历史按钮改成**真组件** `Row` + `.onClick`（竖屏 `historyButton`、横屏 `railHistoryButton` 同一套），不再是裸 `Text` 平铺 |
+| (b) `enabled=false` + 状态不刷新 | **不再用 `.enabled()`**：按钮永远可点，禁用只改字色；`onHistoryTap(kind, available)` 在无可用笔画时 toast「没有可撤销/可重做的笔画」。可用性在 `build()` 里**现读** `pagerState.undoSteps / redoAvailable`，并由 `onStatsChange → onHistoryStats → touchUi()`（延一拍避免 build 期间改状态）与「抬笔 dirty → touchUi()」双路保证重建 |
+
+点击链：`Row.onClick → onHistoryTap → pagerState.applyUndo()/applyRedo() → touchUi()`（方法名沿用既有 `applyUndo/applyRedo`）。
+
+### 9.3 缺陷 1：`penOnly` 终于作用到画布（`shouldAcceptTouch` 原来零调用点）
+
+- **值从哪来**：`Handwriting.aboutToAppear → settingsStore.load() → penOnlyInput`（`=== true` 归一，缺键/读失败 = false）
+  → `pagerState.setPenOnlyInput()`；开关切换时 `savePenOnlyInput()` 先写 `pagerState`（**立刻生效**）再 `settingsStore.save({ penOnlyInput })`。
+- **在哪里拦**（两个入口，都是各自的第一条语句）：
+  `HandwritingPager.handleTouch()`（落笔/橡皮的唯一入口）与 `handleGestureStart()`（`手动框` 走 PanGesture，不经过 handleTouch）。
+- **规则**（纯函数 `model/penInput.ts`，Node 单测全矩阵）：`penOnly=true` 时**只拒 `SourceTool.Finger`**；
+  笔 / `Unknown`（拿不到笔类型的设备）/ 其它任何取值一律放行——宁可漏放一次手指，也不能让笔写不了字。
+- **计数与提示**：`fingerRejectCount` 只在触摸起点（`TouchType.Down` / 手势起手）累加，
+  `shouldShowRejectNotice(count)` 为真（阈值 `FINGER_REJECT_THRESHOLD=3` 的整数倍）才 `promptAction.showToast` 一次，
+  文案用新增的 `fingerRejectNoticeOnBoard()`（指出关闭位置 =「笔迹 → 更多」，不再指去已删除的设置页开关）；
+  任何**非手指**输入进来立即把计数清零（「连续」语义）。
+- **被拒的触摸**：不落笔、不进橡皮、不进框选、不动撤销栈（直接 `return`）。
+
+### 9.4 缺陷 2：开关挪进手写板「笔迹」面板的二级菜单
+
+```
+笔迹设置
+  笔形      [钢笔][圆珠笔][铅笔][马克笔][荧光笔]
+  ─────────────────────────────
+  粗细      [· 1][·· 2][··· 3][···· 4][····· 5]
+  ─────────────────────────────
+  颜色      [■黑][■红][■蓝][■绿][■橙]
+  ─────────────────────────────
+  更多 ▸    ← 二级入口（默认收起，`inkMoreOpen`）
+    ┌ 仅手写笔输入            [ Switch ]
+    └ 开启后手指不能写，只能用手写笔
+```
+
+- 切换即落盘（`settingsStore.save({ penOnlyInput })`）并**立即**作用于画布（不需要退出重进）；
+  落盘失败回退界面状态 + toast（不让用户「拨了开关却还是能用手写」）。
+- 点面板外（scrim）/ 切到别个面板都会收起「更多」。
+- 设置页那条同名开关由另一个任务删除，本文件不再引用它。
+
+### 9.5 合规与测试
+
+- 新增 UI 只用令牌：`$r('app.color.*')`（`brand / divider / text_primary / text_secondary / selection_fill`）、
+  `FONT.caption` + `LINE_HEIGHT.caption`、`SPACING.*`、`RADIUS.sm`、`DIVIDER`、`CHIP_HEIGHT=40`（触控 ≥40vp）；
+  **没有新增任何字面色 / `Color.X` / `rgba()`**（`theme.test.mjs` 的白名单条目数与字面量条数保持不变）。
+- `tools/test/penInput.test.mjs`（24 例）：`shouldAcceptTouch` 四态全矩阵（penOnly × FINGER/UNKNOWN/PEN/其它值，
+  另含「非布尔真值一律按关处理」）、`fingerRejectNotice` / `fingerRejectNoticeOnBoard` 边界（0 / 负数 / NaN / Infinity / 小数）、
+  `shouldShowRejectNotice` 节流边界，以及 **pager 接线**回归（两个入口都过滤、只在 Down 计数、state 上存值）。
+- `tools/test/handwritingToolbar.test.mjs`（59 例）：新增「缺陷 3」「缺陷 4」「缺陷 1/2」三个 describe ——
+  `topBar` 内不含 `Scroll(`、9 项逐个数（每个 2 次 = 一行+两行各一套）、640vp + 实算折行判据与数值自证、
+  历史按钮是 `Row + onClick` 且**不含 `.enabled(`**、`applyUndo/applyRedo` 真被调用、`onStatsChange → touchUi` 接线、
+  面板「更多 / 仅手写笔输入 / 说明文案 / 切换即落盘并传画布」。
+

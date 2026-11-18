@@ -1,6 +1,10 @@
 /**
- * 设置页：六组（同步 / AI 汇总 / 手写 / 远程控制 / 数据 / 关于），长说明收进 `?` 弹层。
+ * 设置页：五组（同步 / AI 汇总 / 远程控制 / 数据 / 关于），长说明收进 `?` 弹层。
  * （同步组因为「分支 / 推送 / 状态」三项新需求变长，次要项继续收在组头「更多」里。）
+ *
+ * 「仅手写笔输入」的入口在**手写板 → 笔迹面板**（`pages/harmony/Handwriting.ets`），
+ * 本页不再重复提供该开关；`settingsStore.penOnlyInput` 键仍保留（笔迹面板读写它），
+ * 本页保存时**不传**该字段（不传＝不改，见 `settingsStore.save` 的 patch 语义）。
  *
  * 「数据」组（导出 / 导入，`docs/EXPORT-IMPORT.md` §4）：只放 `ExportImportPanel` 一个组件，
  * 页面负责调 `services/exportService.ets` 并把结果写回 `exportImport`；导入**必须两步**
@@ -68,7 +72,6 @@ import {
   REMOTE_MODE_ORDER,
   REMOTE_MODE_TAILSCALE,
   REMOTE_MODES,
-  REMOTE_MODE_UU,
   buildRemoteAccessUrl,
   defaultRemoteAccessConfig,
   findRemoteMode,
@@ -302,8 +305,6 @@ struct Settings {
   @State advancedOpen: boolean = false;
   /** 首页是否展示其他设备的只读记录（写 AppStorage，首页读取）。 */
   @State includeOtherDevices: boolean = false;
-  /** 仅手写笔输入（手写板开关：开 → 手指不能写；切换即落盘，手写页读同一份设置）。 */
-  @State penOnlyInput: boolean = false;
 
   /**
    * 导出 / 导入面板的展示状态（`components/ExportImportPanel.ets` 的 `@Prop state`）。
@@ -483,7 +484,6 @@ struct Settings {
     this.aiFallbackMaxAttempts = normalizeMaxAttempts(settings.aiFallbackMaxAttempts);
     this.gitPlatform = normalizePlatform(settings.gitPlatform);
     this.authMode = normalizeAuthMode(settings.authMode);
-    this.penOnlyInput = settings.penOnlyInput;
     // 深色模式三态（旧数据没有该键 → system，由 settingsStore / normalizeThemeMode 归一）
     this.themeMode = normalizeThemeMode(settings.themeMode);
     this.remoteUrl = settings.remoteUrl;
@@ -521,26 +521,6 @@ struct Settings {
     this.lastSyncAt = settings.lastSyncAt;
     this.lastSyncError = settings.lastSyncError;
     this.lastSyncAction = normalizeSyncAction(settings.lastSyncAction);
-  }
-
-  /**
-   * 「仅手写笔输入」开关：切换即保存（不等底部「保存设置」——手写页读的是落盘值，
-   * 用户切完开关就去写字，中间不该再有一步）。
-   */
-  private async savePenOnlyInput(isOn: boolean): Promise<void> {
-    this.penOnlyInput = isOn;
-    const context = getContext(this) as common.UIAbilityContext;
-    const patch: SettingsPatch = { penOnlyInput: isOn };
-    try {
-      await settingsStore.save(patch, context);
-    } catch (error) {
-      if (this.disposed) {
-        return;
-      }
-      // 写盘失败就退回原状态，避免界面显示「已开」但手写板仍能用手指
-      this.penOnlyInput = !isOn;
-      this.saveHint = `「仅手写笔输入」保存失败：${describeError(error)}`;
-    }
   }
 
   /**
@@ -1668,7 +1648,7 @@ struct Settings {
   }
 
   /**
-   * 「清除令牌」：把已保存的令牌置空并立即落盘（与「仅手写笔输入」同样是即时生效项）。
+   * 「清除令牌」：把已保存的令牌置空并立即落盘（与深色模式同样是即时生效项）。
    *
    * 失败时把内存里的旧值放回去，避免界面显示"已清除"但下次读盘又冒出来。
    */
@@ -1719,15 +1699,13 @@ struct Settings {
    * 方式字段一变就重算「DSH 地址」那一行（它就是最终要打开的链接，用户看得到拼出来的结果）。
    *
    * `manual` 不重算：那一行就是用户正在手输的完整地址，边打边归一（补 `http://`）会把光标顶走。
-   * `uu` 清空：它拼不出地址，「打开远程控制」按钮必须跟着禁用，而不是「点了才报错」。
+   *
+   * `uu` 与其它方式一样参与重算：它把「对外入口地址」归一成可打开链接（第 5 轮订正 ——
+   * UU 远程确实有图形化端口映射，见 `docs/REMOTE-ACCESS-OPTIONS.md` §2.6）。
    */
   private refreshRemotePreview(): void {
     const mode: string = normalizeRemoteMode(this.remoteMode);
     if (mode === REMOTE_MODE_MANUAL) {
-      return;
-    }
-    if (mode === REMOTE_MODE_UU) {
-      this.remoteUrl = '';
       return;
     }
     const built: RemoteAccessUrlResult = buildRemoteAccessUrl(this.remoteAccessConfig());
@@ -1779,7 +1757,7 @@ struct Settings {
     const config: RemoteAccessConfig = this.remoteAccessConfig();
     const built: RemoteAccessUrlResult = buildRemoteAccessUrl(config);
     if (!built.ok) {
-      // 方式侧的中文原因（缺字段 / 隧道域名带路径 / uu 不可用）
+      // 方式侧的中文原因（缺字段 / 隧道域名带路径 / UU 入口为空 等）
       const why: string = built.reason.trim();
       this.remoteUrlError = why.length > 0 ? `地址不可用：${why}` : '地址不可用：请先填写电脑上的 DSH 地址';
       return;
@@ -2445,50 +2423,6 @@ struct Settings {
     .alignItems(HorizontalAlign.Start)
   }
 
-  /** 手写组：手写板的输入方式（目前只有「仅手写笔输入」一项）。 */
-  @Builder
-  PenGroup() {
-    Column({ space: SPACING.md }) {
-      Text('手写')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-
-      Row({ space: SPACING.sm }) {
-        Column({ space: SPACING.xs }) {
-          Text('仅手写笔输入')
-            .fontSize(FONT.body)
-            .lineHeight(LINE_HEIGHT.body)
-            .fontColor($r('app.color.text_primary'))
-            .width('100%')
-            .textAlign(TextAlign.Start)
-          Text('开启后手指不能书写，只能用手写笔')
-            .fontSize(FONT.caption)
-            .lineHeight(LINE_HEIGHT.caption)
-            .fontColor($r('app.color.text_secondary'))
-            .width('100%')
-            .textAlign(TextAlign.Start)
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
-
-        Toggle({ type: ToggleType.Switch, isOn: this.penOnlyInput })
-          .selectedColor($r('app.color.brand'))
-          .onChange((isOn: boolean) => {
-            this.savePenOnlyInput(isOn);
-          })
-      }
-      .width('100%')
-      .height(TOUCH_MIN + SPACING.sm)
-      .alignItems(VerticalAlign.Center)
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
-  }
-
   /**
    * 远程控制组：访问方式（六选一）+ 该方式的字段 + 最终「DSH 地址」+ 打开按钮。
    *
@@ -2970,7 +2904,7 @@ struct Settings {
       })
   }
 
-  /** 紧凑屏：六组自上而下。 */
+  /** 紧凑屏：五组自上而下。 */
   @Builder
   CompactBody() {
     Column({ space: SPACING.md }) {
@@ -2982,10 +2916,6 @@ struct Settings {
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
           this.AiGroup()
-          Divider()
-            .strokeWidth(DIVIDER)
-            .color($r('app.color.divider'))
-          this.PenGroup()
           Divider()
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
@@ -3014,7 +2944,7 @@ struct Settings {
     .height('100%')
   }
 
-  /** 宽屏/横屏：左（同步 + 手写 + 远程控制 + 数据 + 关于）/ 右（AI），底部统一保存。 */
+  /** 宽屏/横屏：左（同步 + 远程控制 + 数据 + 关于）/ 右（AI），底部统一保存。 */
   @Builder
   WideBody() {
     Column({ space: SPACING.md }) {
@@ -3024,10 +2954,6 @@ struct Settings {
           Row({ space: SPACING.xl }) {
             Column({ space: SPACING.xl }) {
               this.SyncGroup()
-              Divider()
-                .strokeWidth(DIVIDER)
-                .color($r('app.color.divider'))
-              this.PenGroup()
               Divider()
                 .strokeWidth(DIVIDER)
                 .color($r('app.color.divider'))
@@ -3370,7 +3296,7 @@ struct Settings {
     Stack({ alignContent: Alignment.Center }) {
       PageLayout({
         title: '设置',
-        subtitle: this.saveHint.length > 0 ? this.saveHint : '同步 / AI / 手写 / 远程 / 关于',
+        subtitle: this.saveHint.length > 0 ? this.saveHint : '同步 / AI / 远程 / 数据 / 关于',
         onBack: () => {
           router.back();
         },
