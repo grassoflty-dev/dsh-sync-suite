@@ -337,6 +337,24 @@ probe: unknown 本机检查通过，但公网可达性必须从外网确认
 - 插件在 `~/.dsh/profiles/desktop` 是 **junction 链接**（`link:`），重启 DSH 即加载新 `dist/`；
   **本轮按用户决定不重启**，因此「设置页两个 section 的真实 GUI 渲染」仍未验证（见上表待办）。
 
+### 社区版远程插件移除 + DSH-Dots 改名收尾（2026-11-18）
+
+- **备份先行**：`~/.dsh/profiles/web/{package.json,cordis.patch.yml,pnpm-lock.yaml}` →
+  `C:\Users\GWL\Desktop\itwillclaude\.tmp\web-profile-backup-dotslead-20261118\`，三份 SHA256 与现行文件逐一相等。
+- **按规范移除**：`dsh plugin --profile web remove @feiyang666/dsh-mobile-remote` 已执行，CLI 返回
+  `ERR_PNPM_CANNOT_REMOVE_MISSING_DEPS: no such dependency found`（roster 早已没有该依赖，属预期 no-op）。
+  静态复核：现行三件套中 `feiyang` / `mobile-remote` / `0.0.0.0` / `git-config-sync` **均为 0 命中**，
+  无需再清理 cordis.patch.yml 遗留插件行或 `webserver.host: '0.0.0.0'`。
+- **残留物理目录**：`~/.dsh/profiles/web/node_modules/@feiyang666/` 仍存在，但**内容为空（0 个条目）**。
+  它是 pnpm 生成物、不进 git，按约定**不手工删除、不手改 node_modules**；
+  以后 `pnpm install` 会以 package.json/lockfile 为准，不会再把它装回来。看到它不要误判为"没删干净"。
+- **桌面 profile link 已改名**：`~/.dsh/profiles/desktop/package.json` 的 bundle 与依赖 key 由
+  `dsh-git-config-sync` 改为 `dsh-dots`，link 指向
+  `link:C:/Users/GWL/Desktop/itwillclaude/dsh-sync-suite/packages/dsh-dots`。
+- **待用户重启后确认**：本轮**不重启 DSH**（会杀主会话）。link 生效、设置页两个 section 的真实 GUI 渲染、
+  RPC 旧路径兼容是否被调用，均待用户重启后按 `docs/RESTART-CHECKLIST.md` 与
+  `node packages/dsh-dots/tools/post-restart-check.mjs` 复测；真机验证同样挂起（`hdc list targets` = `[Empty]`）。
+
 ### 真机验收结论（2026-11-17，`6MFBB25C27205131`）
 
 HAP `dist-harmony/arkui-schedule-harmony-debug-signed.hap` **2,881,758 B**
