@@ -866,9 +866,9 @@ hiai.vision/OCR_LIB_MSG: InitLibrary::ocr finish : 205.51 ms
 | --- | --- |
 | 设备 | `MLR-AL00`，serial `6MFBB25C27205131`（USB），API 26 |
 | 平板 IP / 电脑 IP | `192.168.1.10` (wlan0) / `192.168.1.6` (WLAN 3)，同一 `/24` |
-| 对照实例 | `http://192.168.1.6:3080/?token=<已脱敏>`（仅此端口，未连其他实例） |
+| 对照实例 | `http://192.168.1.6:3080/?token=<已脱敏>`（仅此端口，未连其他实例；token 值不落库，2026-11-19 清理） |
 | 构建 | `powershell -File tools/build-harmony.ps1` → `BUILD SUCCESSFUL in 2 min 59 s`；`node tools/overlay.mjs status` → `[overlay] applied=false` |
-| 签名 | `powershell -File tools/sign-hap.ps1 -Deliver -StorePass <已脱敏>` |
+| 签名 | `powershell -File tools/sign-hap.ps1 -Deliver -StorePass <已脱敏>`（口令只放 `signing/pass.txt`，git-ignored） |
 | HAP | `dist-harmony/arkui-schedule-harmony-debug-signed.hap`，**2,881,758 B** |
 | SHA256 | `C2455DBC5FED2FEC86D9811A865BEA267B099D388688F2080F0E6F9E0E5D219B` |
 | 安装 | `hdc -t 6MFBB25C27205131 install -r <hap>` → `install bundle successfully`（**覆盖安装，全程未 uninstall**） |

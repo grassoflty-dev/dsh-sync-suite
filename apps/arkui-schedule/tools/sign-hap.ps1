@@ -8,12 +8,12 @@
   strings that DevEco Studio writes (it fails with 00303116 "The length of the
   storePassword or keyPassword field ... is less than 32" on plaintext). This
   script bypasses hvigor and drives the SDK's hap-sign-tool.jar directly with
-  plaintext passwords, using the signing material committed under signing/.
+  plaintext passwords, using the local signing material (git-ignored).
 
   It signs an unsigned HAP into a signed HAP, then verifies the result.
 
   Signing material (apps/arkui-schedule/signing/):
-    itwill-debug.p12   key store   (alias debugkey, storepass/keypass <已脱敏>)
+    itwill-debug.p12   key store   (alias debugkey，口令见 signing/pass.txt，绝不写进源码/文档)
     itwill-debug.cer   cert chain  (AGC debug certificate, valid until 2027-11-15)
     itwill-debug.p7b   profile     (AGC debug profile, bound to bundle + device UDID)
 
