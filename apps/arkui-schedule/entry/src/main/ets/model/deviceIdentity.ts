@@ -1,19 +1,37 @@
 /**
  * 设备身份（纯逻辑：不 import 任何 SDK，不碰文件系统，可在 Node 直接跑）。
  *
- * 背景：`deviceId` 决定本机只写 `devices/<deviceId>/`。旧校验只看「格式合法 + 非空」，
+ * ## 一个身份，两处存放
+ *
+ * 本文件把「设备身份」收敛成**一个 uuid**，两个存放点内容必须相同：
+ * 1. 本机 settings（`deviceUuid`，旧键 `deviceFingerprint` 同值）；
+ * 2. 仓库 `devices/<id>/.device-fingerprint`（随 git 提交，提交后 `devices/registry.jsonl`
+ *    里该行 `uuid` 就是它）。**不再独立生成第二个身份串**——两个随机串各写各的，会让
+ *    「本机指纹」与「登记表 uuid」永远对不上，从而误报 / 漏报冲突。
+ *
+ * ## 判定（`resolveIdentity`，四态 + 两种冲突）
+ *
+ * - `reuse`：registry 里有本机 uuid 的行 → 用该行 `deviceId`（日常启动）；
+ * - `register-existing`：registry 里没有该 uuid，但本机已有 `deviceId` 且目录存在 →
+ *   **用现有 deviceId 补登记一行，绝不重新编号**（老用户升级）；
+ * - `claim-new`：没有该 uuid 的行、也没有可沿用的本机编号 → 抢新号；
+ * - `recreate`：指纹读不到 → 只能当新设备（生成新 uuid + 抢号，调用方标记 `fingerprintRecreated`）。
+ *
+ * 冲突两种，文案不同：
+ * - `duplicate-device`：同一个 `deviceId` 出现两个 uuid（两台设备撞号）；
+ * - `fingerprint-overwritten`：本机 uuid **不在**该 `deviceId` 的行里（本机指纹被另一台覆盖）。
+ *
+ * ## 背景
+ *
+ * `deviceId` 决定本机只写 `devices/<deviceId>/`。旧校验只看「格式合法 + 非空」，
  * 因此**两台设备填同一个 id 时校验会通过**，后果是两份日程写进同一目录、附件 zip
  * `devices/<id>/attachments/<date>.zip` 互相覆盖、历史混在一起，而同步本身不会报错。
- *
- * 这里用「每台设备一个随机指纹」把这种冲突变成可检测、可拦截的事实（`docs/DATA-CONTRACT.md` §6.1）：
- * 1. 本机指纹存 `settingsStore.deviceFingerprint`，并写进仓库 `devices/<id>/.device-fingerprint`；
- * 2. 拉取后比对：远端缺 → 首次（写入本机指纹，不报警）；等于本机 → 正常；
- *    不等于本机 → **两台设备用了同一个 deviceId**（设置页常驻警告）；
- * 3. 推送前看附件 zip：远端 sha 与本机基线不一致、且远端指纹也不是本机 → 拒推该附件（fail-closed）。
+ * 推送前还会按附件 zip 的 sha + 指纹归属做 fail-closed 拦截（`shouldBlockAttachmentPush`）。
  *
  * `.device-fingerprint` 跟着 git 一起提交（它在 `devices/<id>/` 下），但**不是 secret**：
  * 内容只是一个随机身份串，不含 token / 邮箱 / 机型等任何信息，泄露它没有任何凭据价值。
  */
+import type { RegistryEntry } from './deviceRegistry';
 
 /** 指纹文件名（放在 `devices/<deviceId>/` 目录里，随 git 提交）。 */
 export const DEVICE_FINGERPRINT_FILE: string = '.device-fingerprint';
@@ -24,9 +42,19 @@ const DEVICE_ID_RE: RegExp = /^[a-z0-9][a-z0-9-]{0,31}$/;
 /** 指纹文本格式：UUID / 十六进制等「8–64 位字母数字短横线」，不含空白与换行。 */
 const FINGERPRINT_RE: RegExp = /^[0-9a-z][0-9a-z-]{7,63}$/;
 
-/** 冲突文案模板：`{deviceId}` 会被替换成用户填的设备标识（设置页逐字展示）。 */
-export const IDENTITY_CONFLICT_TEMPLATE: string =
-  '这台设备和另一台设备用了同一个设备标识（{deviceId}），附件 zip 会互相覆盖、历史会混在一起。请改成唯一值。';
+/** 冲突种类（`none` 正常；两种可区分的中文文案见下）。 */
+export type IdentityConflictKind = 'none' | 'duplicate-device' | 'fingerprint-overwritten';
+
+/** 身份解析的四种动作（调用方据此决定「抢不抢号、写不写文件」）。 */
+export type IdentityAction = 'reuse' | 'register-existing' | 'claim-new' | 'recreate';
+
+/** 撞号文案模板：同一个 `deviceId` 出现两个 uuid。 */
+export const DUPLICATE_DEVICE_CONFLICT_TEMPLATE: string =
+  '这台设备和另一台设备用了同一个设备标识（{deviceId}），附件 zip 会互相覆盖、历史会混在一起。';
+
+/** 被覆盖文案模板：本机 uuid 不在该 `deviceId` 的登记行里。 */
+export const FINGERPRINT_OVERWRITTEN_TEMPLATE: string =
+  '本机设备指纹被另一台设备覆盖（{deviceId}），可能是两台设备共用了同一份应用数据。';
 
 /** 冲突的机器可读原因（`IdentityCheck.reason`；面向用户的完整句子用 `describeIdentityConflict`）。 */
 export const IDENTITY_CONFLICT_REASON: string = '远端 .device-fingerprint 与本机不一致：另一台设备用了同一个设备标识';
@@ -40,13 +68,177 @@ export const ATTACHMENT_BASELINE_MISSING_REASON: string =
   '附件缺少本机基线记录，无法确认没有被别的设备改过，已停止推送该附件（请先「拉取」一次再推送）';
 
 /**
- * 冲突提示（逐字文案，只替换设备标识）。
+ * 冲突提示（逐字文案，只替换设备标识；两种冲突用两句话区分）。
  *
  * 设备标识为空/非字符串时用 `(未填写)` 占位，保证文案不会出现空括号。
+ * 第二参数缺省 = 撞号（兼容旧调用点；新代码应显式传 `resolveIdentity` 给出的 `conflict`）。
  */
-export function describeIdentityConflict(deviceId: string): string {
+export function describeIdentityConflict(
+  deviceId: string,
+  conflict: IdentityConflictKind = 'duplicate-device'
+): string {
   const id: string = typeof deviceId === 'string' ? deviceId.trim() : '';
-  return IDENTITY_CONFLICT_TEMPLATE.replace('{deviceId}', id.length > 0 ? id : '(未填写)');
+  const template: string =
+    conflict === 'fingerprint-overwritten' ? FINGERPRINT_OVERWRITTEN_TEMPLATE : DUPLICATE_DEVICE_CONFLICT_TEMPLATE;
+  return template.replace('{deviceId}', id.length > 0 ? id : '(未填写)');
+}
+
+/** 身份解析结果（`resolveIdentity` 的返回值；调用方按 `action` 决定下一步）。 */
+export interface IdentityResolution {
+  /** 本机身份 uuid（`.device-fingerprint` 的内容；`recreate` 时是本次新生成的）。 */
+  uuid: string;
+  /** 已确定的设备目录名；`null` = 需要调用方去抢号（`claim-new` / `recreate`）。 */
+  deviceId: string | null;
+  /** 四态动作。 */
+  action: IdentityAction;
+  /** 冲突种类（与 `action` 正交：`reuse` 可能带 `duplicate-device`）。 */
+  conflict: IdentityConflictKind;
+}
+
+/** 归一 uuid（与指纹同一字符集，规则完全一致；不合法 → 空串）。 */
+function normalizeIdentityUuid(raw: string | null | undefined): string {
+  return normalizeFingerprint(raw);
+}
+
+/** 归一设备目录名（小写；不合法 → 空串）。 */
+function normalizeIdentityDeviceId(raw: string | null | undefined): string {
+  const id: string = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  return DEVICE_ID_RE.test(id) ? id : '';
+}
+
+/** registry 里的一行是否可用（调用方可能传进裸数组，逐字段兜底）。 */
+function entryUuid(entry: RegistryEntry): string {
+  return entry === null || entry === undefined ? '' : normalizeIdentityUuid(entry.uuid);
+}
+
+/** 该行的设备目录名（归一后）。 */
+function entryDeviceId(entry: RegistryEntry): string {
+  return entry === null || entry === undefined ? '' : normalizeIdentityDeviceId(entry.deviceId);
+}
+
+/** 该行是否参与判定（两个字段都必须合法；坏行一律当不存在，避免用半行数据判出假冲突）。 */
+function usableRow(entry: RegistryEntry): boolean {
+  return entryDeviceId(entry).length > 0 && entryUuid(entry).length > 0;
+}
+
+/** 找出「本机 uuid 的登记行」用的目录名（没有 → 空串；registry 只追加，取第一行）。 */
+function findRowDeviceId(entries: RegistryEntry[], uuid: string): string {
+  for (let index = 0; index < entries.length; index++) {
+    if (!usableRow(entries[index])) {
+      continue;
+    }
+    if (entryUuid(entries[index]) === uuid) {
+      const id: string = entryDeviceId(entries[index]);
+      if (id.length > 0) {
+        return id;
+      }
+    }
+  }
+  return '';
+}
+
+/** 某个目录名下的有效行数（同一 id 反复登记也算多行）。 */
+function countRowsOf(entries: RegistryEntry[], deviceId: string): number {
+  let count: number = 0;
+  for (let index = 0; index < entries.length; index++) {
+    if (!usableRow(entries[index])) {
+      continue;
+    }
+    if (entryDeviceId(entries[index]) === deviceId) {
+      count++;
+    }
+  }
+  return count;
+}
+
+/** 该目录名下是否还有**别的** uuid（撞号判定）。 */
+function hasForeignUuid(entries: RegistryEntry[], deviceId: string, uuid: string): boolean {
+  for (let index = 0; index < entries.length; index++) {
+    if (!usableRow(entries[index])) {
+      continue;
+    }
+    if (entryDeviceId(entries[index]) === deviceId && entryUuid(entries[index]) !== uuid) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 身份解析（纯函数；规则逐条可测，`docs/DATA-CONTRACT.md`「devices/registry.jsonl」）。
+ *
+ * 判定顺序：
+ * 1. `localUuid` 读不到（空/非法）→ `recreate`：生成新 uuid、`deviceId: null`（当新设备去抢号）；
+ * 2. registry 里有本机 uuid 的行 → `reuse`：用该行 `deviceId`；同 id 还有别的 uuid → `duplicate-device`；
+ * 3. 没有本机 uuid 的行，但给了 `localDeviceId`（调用方已确认 `devices/<id>/` 目录存在）：
+ *    - 该 id 已被**别的** uuid 登记 → `claim-new` + `fingerprint-overwritten`（本机指纹被覆盖，
+ *      不能再往别人的目录里写）；
+ *    - 该 id 空闲 → `register-existing`：补登记一行，**绝不重新编号**；
+ * 4. 以上都不成立 → `claim-new`（抢新号）。
+ *
+ * `localDeviceId` 的语义是「本机已有、且仓库里确实存在 `devices/<id>/` 目录」的编号：
+ * 目录不存在的默认值（`phone-a`）必须由调用方传 `null`，否则新设备会去占一个不存在的老号。
+ */
+export function resolveIdentity(input: {
+  localUuid: string | null;
+  localDeviceId: string | null;
+  registry: RegistryEntry[];
+}): IdentityResolution {
+  const entries: RegistryEntry[] = Array.isArray(input.registry) ? input.registry : [];
+  const localUuid: string = normalizeIdentityUuid(input.localUuid);
+  const localDeviceId: string = normalizeIdentityDeviceId(input.localDeviceId);
+  // ① 指纹读不到：只能当新设备（uuid 由这里生成，调用方负责写回文件并标记 fingerprintRecreated）
+  if (localUuid.length === 0) {
+    const recreated: IdentityResolution = {
+      uuid: generateFingerprint(),
+      deviceId: null,
+      action: 'recreate',
+      conflict: 'none'
+    };
+    return recreated;
+  }
+  // ② registry 里有本机 uuid 的行 → 复用该行编号（同 id 出现别的 uuid = 撞号）
+  const known: string = findRowDeviceId(entries, localUuid);
+  if (known.length > 0) {
+    const conflict: IdentityConflictKind = hasForeignUuid(entries, known, localUuid)
+      ? 'duplicate-device'
+      : 'none';
+    const reused: IdentityResolution = {
+      uuid: localUuid,
+      deviceId: known,
+      action: 'reuse',
+      conflict: conflict
+    };
+    return reused;
+  }
+  // ③ 没有本机 uuid 的行：看本机现有编号还能不能用
+  if (localDeviceId.length > 0) {
+    if (countRowsOf(entries, localDeviceId) > 0) {
+      // 本机 uuid 不在这些行里 → 本机指纹被另一台设备覆盖（不能再写这个目录）
+      const overwritten: IdentityResolution = {
+        uuid: localUuid,
+        deviceId: null,
+        action: 'claim-new',
+        conflict: 'fingerprint-overwritten'
+      };
+      return overwritten;
+    }
+    const upgraded: IdentityResolution = {
+      uuid: localUuid,
+      deviceId: localDeviceId,
+      action: 'register-existing',
+      conflict: 'none'
+    };
+    return upgraded;
+  }
+  // ④ 无行、无可沿用的本机编号 → 抢新号
+  const fresh: IdentityResolution = {
+    uuid: localUuid,
+    deviceId: null,
+    action: 'claim-new',
+    conflict: 'none'
+  };
+  return fresh;
 }
 
 /**

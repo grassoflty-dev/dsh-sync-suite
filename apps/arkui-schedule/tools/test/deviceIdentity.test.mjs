@@ -9,12 +9,14 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
+import { readSettingsSources } from './settingsSources.mjs';
 
 const {
   ATTACHMENT_BASELINE_MISSING_REASON,
   ATTACHMENT_OVERWRITE_REASON,
   DEVICE_FINGERPRINT_FILE,
-  IDENTITY_CONFLICT_TEMPLATE,
+  DUPLICATE_DEVICE_CONFLICT_TEMPLATE,
+  FINGERPRINT_OVERWRITTEN_TEMPLATE,
   checkDeviceIdentity,
   describeAttachmentPushBlock,
   describeIdentityConflict,
@@ -23,6 +25,7 @@ const {
   generateFingerprint,
   isFingerprint,
   normalizeFingerprint,
+  resolveIdentity,
   shouldBlockAttachmentPush
 } = await import('../.build/model/deviceIdentity.js');
 
@@ -30,6 +33,10 @@ const UA = 'a'.repeat(64);
 const UB = 'b'.repeat(64);
 const FP_A = '11111111-2222-4333-8444-555555555555';
 const FP_B = '66666666-7777-4888-9999-aaaaaaaaaaaa';
+const FP_C = 'cccccccc-dddd-4eee-8fff-000000000000';
+
+/** registry 一行（`{deviceId, uuid, at}`，与 `toRegistryLine` 同形）。 */
+const row = (deviceId, uuid) => ({ deviceId, uuid, at: '2026-11-18T00:00:00.000Z' });
 
 describe('指纹文本：归一 / 形态 / 文件内容', () => {
   test('normalizeFingerprint：去 BOM、去换行、转小写；非法一律空串', () => {
@@ -76,19 +83,37 @@ describe('指纹文本：归一 / 形态 / 文件内容', () => {
   });
 });
 
-describe('冲突文案：逐字（含 <id> 替换）', () => {
-  test('describeIdentityConflict("phone-a") 逐字等于契约文案', () => {
+describe('冲突文案：两种逐字（含 <id> 替换）', () => {
+  test('describeIdentityConflict("phone-a") 默认 = 撞号文案，逐字等于契约', () => {
     assert.equal(
       describeIdentityConflict('phone-a'),
-      '这台设备和另一台设备用了同一个设备标识（phone-a），附件 zip 会互相覆盖、历史会混在一起。请改成唯一值。'
+      '这台设备和另一台设备用了同一个设备标识（phone-a），附件 zip 会互相覆盖、历史会混在一起。'
     );
   });
 
+  test('被覆盖走另一句文案（两种冲突必须能区分）', () => {
+    assert.equal(
+      describeIdentityConflict('device-2', 'fingerprint-overwritten'),
+      '本机设备指纹被另一台设备覆盖（device-2），可能是两台设备共用了同一份应用数据。'
+    );
+    assert.notEqual(
+      describeIdentityConflict('device-2', 'fingerprint-overwritten'),
+      describeIdentityConflict('device-2', 'duplicate-device'),
+      '两种冲突的文案不能相同'
+    );
+    assert.equal(describeIdentityConflict('device-2', 'none'), describeIdentityConflict('device-2'), 'none 走撞号文案（兼容旧调用）');
+  });
+
   test('模板只替换 {deviceId}，其余字符不变；空 id 用占位符而不是空括号', () => {
-    assert.equal(IDENTITY_CONFLICT_TEMPLATE.includes('{deviceId}'), true);
+    assert.equal(DUPLICATE_DEVICE_CONFLICT_TEMPLATE.includes('{deviceId}'), true);
+    assert.equal(FINGERPRINT_OVERWRITTEN_TEMPLATE.includes('{deviceId}'), true);
     assert.equal(
       describeIdentityConflict('pc-b'),
-      IDENTITY_CONFLICT_TEMPLATE.replace('{deviceId}', 'pc-b')
+      DUPLICATE_DEVICE_CONFLICT_TEMPLATE.replace('{deviceId}', 'pc-b')
+    );
+    assert.equal(
+      describeIdentityConflict('pc-b', 'fingerprint-overwritten'),
+      FINGERPRINT_OVERWRITTEN_TEMPLATE.replace('{deviceId}', 'pc-b')
     );
     assert.equal(describeIdentityConflict('   ').includes('（(未填写)）'), true);
     assert.equal(describeIdentityConflict('').includes('{}'), false);
@@ -100,6 +125,131 @@ describe('冲突文案：逐字（含 <id> 替换）', () => {
       '附件已被另一台设备更新，已停止推送以免覆盖（请先改一个唯一的设备标识）'
     );
     assert.match(ATTACHMENT_BASELINE_MISSING_REASON, /缺少本机基线记录/);
+  });
+});
+
+describe('resolveIdentity：一个 uuid 的四态 + 两种冲突', () => {
+  test('同一 uuid 命中 registry → reuse（日常启动按行里的 deviceId，不重新编号）', () => {
+    const resolution = resolveIdentity({
+      localUuid: FP_A,
+      localDeviceId: 'device-9',
+      registry: [row('device-1', FP_B), row('device-2', FP_A)]
+    });
+    assert.equal(resolution.action, 'reuse');
+    assert.equal(resolution.deviceId, 'device-2', '必须用 registry 行里的 deviceId，不是本机旧值');
+    assert.equal(resolution.uuid, FP_A, 'uuid 原样沿用');
+    assert.equal(resolution.conflict, 'none');
+  });
+
+  test('老用户升级：registry 没有该 uuid、但本机 deviceId 目录存在 → register-existing（绝不换号）', () => {
+    const resolution = resolveIdentity({
+      localUuid: FP_C,
+      localDeviceId: 'phone-a',
+      registry: [row('device-1', FP_A), row('device-2', FP_B)]
+    });
+    assert.equal(resolution.action, 'register-existing');
+    assert.equal(resolution.deviceId, 'phone-a', '沿用原标识，不许改成 device-3');
+    assert.equal(resolution.uuid, FP_C);
+    assert.equal(resolution.conflict, 'none');
+  });
+
+  test('老用户升级：编号是自动分配的 device-2 时同样不换号', () => {
+    const resolution = resolveIdentity({
+      localUuid: FP_C,
+      localDeviceId: 'device-2',
+      registry: [row('device-1', FP_A)]
+    });
+    assert.equal(resolution.action, 'register-existing');
+    assert.equal(resolution.deviceId, 'device-2');
+  });
+
+  test('同 deviceId 两个 uuid（本机 uuid 在行里）→ duplicate-device，文案是「撞号」那句', () => {
+    const resolution = resolveIdentity({
+      localUuid: FP_A,
+      localDeviceId: null,
+      registry: [row('device-2', FP_A), row('device-2', FP_B)]
+    });
+    assert.equal(resolution.action, 'reuse');
+    assert.equal(resolution.deviceId, 'device-2');
+    assert.equal(resolution.conflict, 'duplicate-device');
+    assert.equal(
+      describeIdentityConflict(resolution.deviceId, resolution.conflict),
+      '这台设备和另一台设备用了同一个设备标识（device-2），附件 zip 会互相覆盖、历史会混在一起。'
+    );
+  });
+
+  test('本机 uuid 不在该 deviceId 的行里 → fingerprint-overwritten，文案是「被覆盖」那句', () => {
+    const resolution = resolveIdentity({
+      localUuid: FP_B,
+      localDeviceId: 'device-2',
+      registry: [row('device-2', FP_A)]
+    });
+    assert.equal(resolution.action, 'claim-new', '不能往别人的目录里补登记');
+    assert.equal(resolution.deviceId, null, '必须换一个编号');
+    assert.equal(resolution.conflict, 'fingerprint-overwritten');
+    assert.equal(
+      describeIdentityConflict('device-2', resolution.conflict),
+      '本机设备指纹被另一台设备覆盖（device-2），可能是两台设备共用了同一份应用数据。'
+    );
+  });
+
+  test('指纹丢失（localUuid 读不到）→ recreate：生成新 uuid，不认领旧目录', () => {
+    for (const localUuid of [null, '', '   ', 'abc', undefined]) {
+      const resolution = resolveIdentity({
+        localUuid,
+        localDeviceId: 'device-2',
+        registry: [row('device-2', FP_A)]
+      });
+      assert.equal(resolution.action, 'recreate', `localUuid=${JSON.stringify(localUuid)} 必须走新设备流程`);
+      assert.equal(resolution.deviceId, null, 'recreate 不能直接认领旧编号');
+      assert.equal(resolution.conflict, 'none', '指纹丢失本身不是冲突');
+      assert.match(resolution.uuid, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      assert.notEqual(resolution.uuid, FP_A, '新 uuid 不能等于 registry 里别人的 uuid');
+      assert.notEqual(resolution.uuid, resolution.uuid.toUpperCase(), '必须是归一形态（小写）');
+    }
+  });
+
+  test('无 deviceId 且 registry 无该 uuid → claim-new', () => {
+    for (const localDeviceId of [null, '', '   ', 'Phone A']) {
+      const resolution = resolveIdentity({
+        localUuid: FP_B,
+        localDeviceId,
+        registry: [row('device-1', FP_A)]
+      });
+      assert.equal(resolution.action, 'claim-new', `localDeviceId=${JSON.stringify(localDeviceId)}`);
+      assert.equal(resolution.deviceId, null);
+      assert.equal(resolution.conflict, 'none');
+      assert.equal(resolution.uuid, FP_B, 'claim-new 沿用本机 uuid，只换编号');
+    }
+  });
+
+  test('空 registry + 有 uuid + 无 deviceId → claim-new（首次接入的新设备）', () => {
+    const resolution = resolveIdentity({ localUuid: FP_A, localDeviceId: null, registry: [] });
+    assert.equal(resolution.action, 'claim-new');
+    assert.equal(resolution.uuid, FP_A);
+    assert.equal(resolution.deviceId, null);
+  });
+
+  test('registry 里的坏行（缺 uuid / deviceId 非法）不参与判定，也不崩', () => {
+    const resolution = resolveIdentity({
+      localUuid: FP_A,
+      localDeviceId: 'device-2',
+      registry: [null, {}, { deviceId: 'device-2', uuid: '' }, { deviceId: '../evil', uuid: FP_A }, row('device-2', FP_A)]
+    });
+    assert.equal(resolution.action, 'reuse');
+    assert.equal(resolution.deviceId, 'device-2');
+    assert.equal(resolution.conflict, 'none');
+  });
+
+  test('uuid 大小写/空白差异仍算同一个身份（不误判成新设备）', () => {
+    const resolution = resolveIdentity({
+      localUuid: `  ${FP_A.toUpperCase()}  `,
+      localDeviceId: null,
+      registry: [row('device-3', FP_A)]
+    });
+    assert.equal(resolution.action, 'reuse');
+    assert.equal(resolution.deviceId, 'device-3');
+    assert.equal(resolution.uuid, FP_A);
   });
 });
 
@@ -225,7 +375,9 @@ describe('shouldBlockAttachmentPush：6 种组合（fail-closed）', () => {
 const ETS = new URL('../../entry/src/main/ets/', import.meta.url);
 const SETTINGS_STORE = readFileSync(new URL('services/settingsStore.ets', ETS), 'utf8');
 const GIT_SERVICE = readFileSync(new URL('services/GitSyncService.ets', ETS), 'utf8');
-const SETTINGS_PAGE = readFileSync(new URL('pages/Settings.ets', ETS), 'utf8');
+// 因 A2 拆分移动：同步组（含常驻 warning 的渲染）搬到了 components/settings/SyncSection.ets，
+// 这里要审计的是「设置页整体」，所以锚点是页面 + 五个 section 的合并源码；断言不变。
+const SETTINGS_PAGE = readSettingsSources();
 
 describe('接线：settingsStore 的 deviceFingerprint 成对读写', () => {
   test('键常量 + load 读 + save 写（缺一个就会「每次都生成新指纹」）', () => {
@@ -237,18 +389,41 @@ describe('接线：settingsStore 的 deviceFingerprint 成对读写', () => {
 });
 
 describe('接线：GitSyncService 的指纹写入 / 比对 / 拒推', () => {
-  test('首次同步生成指纹并写进仓库 devices/<id>/.device-fingerprint', () => {
-    assert.match(GIT_SERVICE, /generateFingerprint\(\)/, '本机首次同步要生成随机指纹');
-    assert.match(GIT_SERVICE, /deviceFingerprint: fingerprint/, '生成的指纹要落进 settingsStore');
-    assert.match(GIT_SERVICE, /deviceFingerprintPath\(/, '仓库里的写入路径必须走纯函数');
-    assert.match(GIT_SERVICE, /fingerprintCache: string =/, '内存里要缓存本机指纹，避免每次同步都读盘');
+  test('一个 uuid 两处存放：指纹文件与 registry 用同一个值，不独立生成', () => {
+    assert.match(GIT_SERVICE, /resolveIdentity\(\{/, '四态判定必须走纯函数');
+    assert.match(GIT_SERVICE, /loadLocalIdentity\(\)/, '日常启动要先读指纹文件');
+    assert.match(GIT_SERVICE, /readRepoFingerprint\(\)/, '必须读 devices/<id>/.device-fingerprint');
+    assert.match(
+      GIT_SERVICE,
+      /deviceUuid: uuid,\s*deviceFingerprint: uuid/,
+      'settings 的两个键必须写同一个 uuid（否则又变成两套身份）'
+    );
+    assert.match(GIT_SERVICE, /adoptRepoFingerprintUnder\(/, '仓库里的写入路径必须走纯函数');
+    assert.match(GIT_SERVICE, /fingerprintCache: string =/, '内存里要缓存本机身份，避免每次同步都读盘');
+    assert.equal(
+      /generateFingerprint\(\)/.test(GIT_SERVICE),
+      false,
+      'uuid 只由纯函数 resolveIdentity 生成（服务里不许再独立生成一个）'
+    );
+  });
+
+  test('升级兼容：本机编号目录存在才算「已有 deviceId」，补登记不换号', () => {
+    assert.match(GIT_SERVICE, /existingLocalDeviceId\(\)/, '必须只认同目录真实存在的本机编号');
+    assert.match(GIT_SERVICE, /register-existing/, '四态里的补登记分支要接到服务上');
+  });
+
+  test('指纹丢失：结果里带 fingerprintRecreated 标记，pull/push 都要透传', () => {
+    assert.match(GIT_SERVICE, /result\.fingerprintRecreated = true/);
+    assert.match(GIT_SERVICE, /fingerprintRecreated\?: boolean/, 'GitSyncResult 必须有该可选字段');
+    assert.match(GIT_SERVICE, /registration\.fingerprintRecreated === true/, 'pull 要透传登记结果里的重建标记');
   });
 
   test('拉取/推送后做身份比对，冲突时带 identityConflict 标记', () => {
-    assert.match(GIT_SERVICE, /checkDeviceIdentity\(remote, local\)/);
+    assert.match(GIT_SERVICE, /checkDeviceIdentity\(remote, localUuid\)/);
     assert.match(GIT_SERVICE, /result\.identityConflict = true/);
     assert.match(GIT_SERVICE, /describeIdentityConflict\(/, '身份冲突要给出逐字文案');
     assert.match(GIT_SERVICE, /identityConflict\?: boolean/, 'GitSyncResult 必须有该可选字段');
+    assert.match(GIT_SERVICE, /identityStickyConflict/, '冲突横幅要常驻（解决后也不立刻消失）');
   });
 
   test('push 前调 shouldBlockAttachmentPush，被挡的 zip 不提交（其它文件照常推）', () => {

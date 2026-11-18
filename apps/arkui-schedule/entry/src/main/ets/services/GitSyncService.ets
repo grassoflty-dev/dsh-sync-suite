@@ -52,19 +52,24 @@ import {
   describeIdentityConflict,
   deviceFingerprintPath,
   fingerprintFileText,
-  generateFingerprint,
   normalizeFingerprint,
+  resolveIdentity,
   shouldBlockAttachmentPush
 } from '../model/deviceIdentity';
-import type { AttachmentPushDecision, IdentityCheck } from '../model/deviceIdentity';
+import type {
+  AttachmentPushDecision,
+  IdentityCheck,
+  IdentityConflictKind,
+  IdentityResolution
+} from '../model/deviceIdentity';
 import {
   DEVICES_DIR,
   REGISTRY_PATH,
   claimDeviceId,
   describeClaimOutcome,
-  normalizeUuid
+  parseRegistry
 } from '../model/deviceRegistry';
-import type { ClaimOutcome, DeviceRegistryPort } from '../model/deviceRegistry';
+import type { ClaimOutcome, DeviceRegistryPort, RegistryEntry, RegistryParseResult } from '../model/deviceRegistry';
 import { sha256Hex } from '../model/sha256';
 import { settingsStore } from './settingsStore';
 
@@ -120,7 +125,8 @@ export interface GitSyncResult {
   /** 远端是否已配置（仅 status 返回）。 */
   remoteConfigured?: boolean;
   /**
-   * 两台设备用了同一个设备标识（`devices/<id>/.device-fingerprint` 与本机不同）。
+   * 设备身份冲突（两种，见 `model/deviceIdentity.ts#resolveIdentity`）：
+   * 两台设备撞号 / 本机指纹被另一台设备覆盖。
    *
    * true 时设置页要显示**常驻**警告（warning 档），而不是一闪而过的 toast；
    * 文案见 `identityWarning`（逐字文案，含设备标识）。
@@ -128,6 +134,12 @@ export interface GitSyncResult {
   identityConflict?: boolean;
   /** 身份冲突的中文说明（`identityConflict === true` 时给出）。 */
   identityWarning?: string;
+  /**
+   * true = 本机 `.device-fingerprint` 读不到，本次按「新设备」重新生成了 uuid。
+   *
+   * 这种情况下会**另抢一个设备编号**（旧目录不动），因此要让用户知道身份换了。
+   */
+  fingerprintRecreated?: boolean;
   /** 本次因「附件可能被别的设备改过」而暂停推送的附件个数（不影响其它文件）。 */
   attachmentsBlocked?: number;
   /** 附件被暂停推送的中文原因（`attachmentsBlocked > 0` 时给出）。 */
@@ -148,6 +160,21 @@ export interface GitSyncResult {
    * 非空时设置页要把「高级」自动展开并显示这一行；**推送**不会继续（fail-closed）。
    */
   deviceRegistrationError?: string;
+}
+
+/**
+ * 本机身份读取结果（`GitSyncService.loadLocalIdentity`）。
+ *
+ * `uuid` 是**一个**身份串：`.device-fingerprint` 的内容、settings 的 `deviceUuid`/`deviceFingerprint`、
+ * registry 里的 `uuid` 三者必须是同一个值。
+ */
+interface LocalIdentity {
+  /** 归一后的 uuid（空串 = 读不到，需要走 `recreate`）。 */
+  uuid: string;
+  /** true = 指纹文件与设置都没有，本次按「新设备」处理。 */
+  recreated: boolean;
+  /** 来源，仅用于排查：`cache` | `repo` | `settings` | `missing`。 */
+  source: string;
 }
 
 // ---------------------------------------------------------------- 桥协议类型
@@ -540,12 +567,28 @@ export class GitSyncService {
   private bridgeReady: boolean = false;
   /** 桥不可用的原因（空串表示没有失败）。 */
   private bridgeError: string = '';
-  /** 本机设备指纹缓存（`settingsStore.deviceFingerprint`；空串 = 还没生成）。 */
+  /** 本机设备指纹缓存（= 统一后的身份 uuid；空串 = 还没解析/生成）。 */
   private fingerprintCache: string = '';
-  /** 最近一次身份比对的结论文案（空串 = 正常；非空 = 两台设备用了同一个设备标识）。 */
+  /** 最近一次身份比对的结论文案（空串 = 正常；非空 = 撞号 / 指纹被覆盖）。 */
   private identityNotice: string = '';
   /** 最近一次身份比对是否冲突（与 `identityNotice` 成对）。 */
   private identityConflict: boolean = false;
+  /**
+   * 本会话已确认过的冲突种类（`none` = 没有）。
+   *
+   * 为什么不每次重算：`fingerprint-overwritten` 在解决之后（本机换到新编号目录）证据会消失，
+   * 而设置页要的是**常驻**横幅——用户得有机会看到「我的指纹被别人覆盖过」。
+   * 重启后按最新证据重算（不同步恢复，避免历史噪音永久粘住）。
+   */
+  private identityStickyConflict: IdentityConflictKind = 'none';
+  /**
+   * 本会话里发生过「指纹丢失」（仓库里本机目录还在、uuid 读不到）。
+   *
+   * 单独记一个标记的原因：`applyIdentityCheck` 可能先把新 uuid 生成并落盘，等
+   * `registerDevice` 再解析时已经「读得到」了，于是 `recreate` 这一态就看不到了——
+   * 但用户仍然需要知道「这台设备换了新身份」。
+   */
+  private identityRecreated: boolean = false;
 
   constructor(controller: webview.WebviewController) {
     this.controller = controller;
@@ -785,6 +828,9 @@ export class GitSyncService {
         result.deviceId = registration.deviceId;
         result.deviceIdAuto = registration.deviceIdAuto;
         result.deviceIdNotice = registration.deviceIdNotice;
+        if (registration.fingerprintRecreated === true) {
+          result.fingerprintRecreated = true;
+        }
         if (registration.message.length > 0) {
           result.message = result.message + '；' + registration.message;
         }
@@ -810,8 +856,10 @@ export class GitSyncService {
     }
     // 设备编号登记（数据边界，**fail-closed**）：必须先在 devices/registry.jsonl 里有本机的行，
     // 才能写 devices/<deviceId>/。抢不到编号 → 整次推送失败，绝不用一个可能撞车的号继续写。
+    let fingerprintRecreated: boolean = false;
     try {
-      await this.ensureDeviceRegistered(false);
+      const registration: GitSyncResult = await this.ensureDeviceRegistered(false);
+      fingerprintRecreated = registration.fingerprintRecreated === true;
     } catch (error) {
       const registrationFailure: GitSyncResult = failed('推送失败', error as Object);
       if (registrationFailure.code === undefined || registrationFailure.code.length === 0) {
@@ -883,6 +931,9 @@ export class GitSyncService {
       if (this.identityConflict) {
         result.identityConflict = true;
         result.identityWarning = this.identityNotice;
+      }
+      if (fingerprintRecreated) {
+        result.fingerprintRecreated = true;
       }
       // 推送成功后把「本次真正推上去的附件」记成基线（被挪走的那几个不在工作副本里，不会被记）
       try {
@@ -1265,50 +1316,56 @@ export class GitSyncService {
   }
 
   /**
-   * 本机指纹：内存 → settingsStore → 都没有就**生成一个随机 UUID 并落盘**。
+   * 本机身份 uuid（= `devices/<id>/.device-fingerprint` 的内容 = registry 里的 `uuid`，**同一个值**）。
    *
-   * 只在这里生成（首次同步时发生），所以「旧数据没有该键」不会在只读路径写盘。
+   * 读取顺序（`docs/DATA-CONTRACT.md`「devices/registry.jsonl」）：
+   * 1. 内存缓存（本次运行已解析过）；
+   * 2. 仓库 `devices/<当前 id>/.device-fingerprint`（**日常启动先读指纹文件**）；
+   * 3. settingsStore 的 `deviceUuid`（旧版本只在 `deviceFingerprint` 存过同一个值）；
+   * 4. 都没有 → 不在这里生成，交给纯函数 `resolveIdentity` 的 `recreate` 分支生成
+   *    （保证「四态」只有一处判定），调用方据此标记 `fingerprintRecreated`。
+   *
+   * 注意：**只读**，不写文件；落盘（settings 的 `deviceUuid`/`deviceFingerprint`）由
+   * `resolveLocalIdentity` / `registerDevice` 在拿到最终 uuid 后一次性写入。
    */
-  private async ensureLocalFingerprint(): Promise<string> {
+  private async loadLocalIdentity(): Promise<LocalIdentity> {
     const cached: string = normalizeFingerprint(this.fingerprintCache);
     if (cached.length > 0) {
-      return cached;
+      const fromCache: LocalIdentity = { uuid: cached, recreated: false, source: 'cache' };
+      return fromCache;
     }
     let stored: string = '';
-    let identity: string = '';
     try {
       const settings = await settingsStore.load();
-      stored = normalizeFingerprint(settings.deviceFingerprint);
-      identity = normalizeUuid(settings.deviceUuid);
+      stored = normalizeFingerprint(settings.deviceUuid);
+      if (stored.length === 0) {
+        stored = normalizeFingerprint(settings.deviceFingerprint);
+      }
     } catch (error) {
       stored = '';
     }
-    if (stored.length > 0) {
-      this.fingerprintCache = stored;
-      return stored;
+    const fromRepo: string = this.readRepoFingerprint();
+    let uuid: string = fromRepo;
+    let source: string = 'repo';
+    if (uuid.length === 0) {
+      uuid = stored;
+      source = 'settings';
     }
-    // 与设备编号登记合并：身份 uuid 已存在就沿用它当指纹（两个键从此指向同一个身份，
-    // 不会因为「先有 uuid 后生成指纹」而让 `.device-fingerprint` 与 registry 对不上）
-    if (identity.length > 0) {
-      this.fingerprintCache = identity;
+    if (uuid.length === 0) {
+      const missing: LocalIdentity = { uuid: '', recreated: true, source: 'missing' };
+      return missing;
+    }
+    this.fingerprintCache = uuid;
+    if (source !== 'repo' || stored !== uuid) {
+      // 两个键从此指向同一个身份（旧数据只有 deviceFingerprint 时补写 deviceUuid）
       try {
-        await settingsStore.save({ deviceFingerprint: identity });
+        await settingsStore.save({ deviceUuid: uuid, deviceFingerprint: uuid });
       } catch (error) {
-        // 写盘失败：本次用内存值即可
+        // 设置存储未初始化 / 写盘失败：本次用内存值即可（下次同步再试）
       }
-      return identity;
     }
-    const fingerprint: string = generateFingerprint();
-    if (fingerprint.length === 0) {
-      return '';
-    }
-    this.fingerprintCache = fingerprint;
-    try {
-      await settingsStore.save({ deviceFingerprint: fingerprint });
-    } catch (error) {
-      // 设置存储未初始化 / 写盘失败：本次先用内存指纹，下次同步再试（不阻断同步）
-    }
-    return fingerprint;
+    const loaded: LocalIdentity = { uuid: uuid, recreated: false, source: source };
+    return loaded;
   }
 
   /** 仓库里 `devices/<id>/.device-fingerprint` 的绝对路径（设备标识非法 → 空串）。 */
@@ -1335,40 +1392,152 @@ export class GitSyncService {
     return normalizeFingerprint(this.readTextFile(path));
   }
 
+  /** 仓库里指定设备目录下的指纹文件绝对路径（设备标识非法 → 空串）。 */
+  private repoFingerprintFilePathUnder(deviceId: string): string {
+    let id: string = '';
+    try {
+      id = normalizeDeviceId(deviceId);
+    } catch (error) {
+      return '';
+    }
+    const relPath: string = deviceFingerprintPath(id);
+    if (relPath.length === 0) {
+      return '';
+    }
+    return this.getRepoRoot() + '/' + relPath;
+  }
+
+  /** 指定设备目录下的指纹（不存在 / 非法 → 空串）。 */
+  private readRepoFingerprintUnder(deviceId: string): string {
+    const path: string = this.repoFingerprintFilePathUnder(deviceId);
+    if (path.length === 0) {
+      return '';
+    }
+    return normalizeFingerprint(this.readTextFile(path));
+  }
+
   /**
-   * 首次同步：把本机指纹写进仓库工作副本（随后被 push 提交）。
+   * 首次同步：把本机 uuid 写进 `devices/<id>/.device-fingerprint`（随后被 push 提交）。
    *
-   * **已存在则绝不覆盖**：覆盖就等于掩盖「两台设备同 id」这件事。
+   * **已存在则绝不覆盖**：覆盖就等于掩盖「两台设备同 id」这件事（也是 `fingerprint-overwritten`
+   * 冲突判定的证据来源）。
    */
-  private adoptRepoFingerprint(fingerprint: string): void {
-    const path: string = this.repoFingerprintFilePath();
-    if (path.length === 0 || fingerprint.length === 0) {
+  private adoptRepoFingerprintUnder(deviceId: string, fingerprint: string): void {
+    const path: string = this.repoFingerprintFilePathUnder(deviceId);
+    const uuid: string = normalizeFingerprint(fingerprint);
+    if (path.length === 0 || uuid.length === 0) {
       return;
     }
-    if (this.readRepoFingerprint().length > 0) {
+    if (this.readRepoFingerprintUnder(deviceId).length > 0) {
       return;
     }
-    const text: string = fingerprintFileText(fingerprint);
+    const text: string = fingerprintFileText(uuid);
     if (text.length === 0) {
       return;
     }
     this.writeTextFile(path, text);
   }
 
+  /** 当前 `config.deviceId` 对应的目录（`adoptRepoFingerprint` 的旧签名入口）。 */
+  private adoptRepoFingerprint(fingerprint: string): void {
+    this.adoptRepoFingerprintUnder(this.config.deviceId, fingerprint);
+  }
+
+  /** 归一后的当前设备标识（非法 / 未填 → 空串，不抛异常）。 */
+  private currentDeviceId(): string {
+    try {
+      return normalizeDeviceId(this.config.deviceId);
+    } catch (error) {
+      return '';
+    }
+  }
+
+  /**
+   * 本机「已有、且仓库里确有 `devices/<id>/` 目录」的设备编号（没有 → `null`）。
+   *
+   * 这是升级兼容（`register-existing`）的前提：只有目录真存在，才说明这台设备以前就在用这个号；
+   * 否则（`settingsStore` 的默认值 `phone-a`、或别人手填过的值）应该去抢新号。
+   */
+  private existingLocalDeviceId(): string | null {
+    const id: string = this.currentDeviceId();
+    if (id.length === 0) {
+      return null;
+    }
+    const dir: string = normalizePath(this.getRepoRoot() + '/' + DEVICES_DIR + '/' + id);
+    return this.isDirectory(dir) ? id : null;
+  }
+
+  /** registry 的当前内容（解析后的行；读不到 / 坏行 → 可用的行或空数组）。 */
+  private readRegistryEntries(): RegistryEntry[] {
+    try {
+      const parsed: RegistryParseResult = parseRegistry(this.readTextFile(this.registryFilePath()));
+      return parsed.entries;
+    } catch (error) {
+      return [];
+    }
+  }
+
+  /**
+   * 身份解析：`model/deviceIdentity.ts#resolveIdentity` 的接线（四态 + 两种冲突）。
+   *
+   * 同时把结论落到 `identityConflict` / `identityNotice`（设置页常驻警告靠它们）。
+   * `recreate`（指纹读不到）时这里生成的新 uuid 会立刻写回 settings，避免下次又换一个。
+   */
+  private async resolveLocalIdentity(): Promise<IdentityResolution> {
+    const local: LocalIdentity = await this.loadLocalIdentity();
+    const uuid: string = normalizeFingerprint(local.uuid);
+    const localDirId: string | null = this.existingLocalDeviceId();
+    const resolution: IdentityResolution = resolveIdentity({
+      localUuid: uuid.length > 0 ? uuid : null,
+      localDeviceId: localDirId,
+      registry: this.readRegistryEntries()
+    });
+    const resolvedUuid: string = normalizeFingerprint(resolution.uuid);
+    if (resolvedUuid.length > 0 && resolvedUuid !== uuid) {
+      this.fingerprintCache = resolvedUuid;
+      try {
+        await settingsStore.save({ deviceUuid: resolvedUuid, deviceFingerprint: resolvedUuid });
+      } catch (error) {
+        // 设置写不进去不影响本次判定（内存里已是新 uuid）
+      }
+    }
+    // 指纹「丢失」= 仓库里本机目录还在、但 uuid 读不到了；全新安装（目录都没有）不算丢失。
+    if (resolution.action === 'recreate' && localDirId !== null) {
+      this.identityRecreated = true;
+    }
+    // 兜底：仓库 `devices/<id>/.device-fingerprint` 与本机不一致（没有 registry 证据时仍算撞号）
+    const remote: string = this.readRepoFingerprint();
+    const localUuid: string = normalizeFingerprint(this.fingerprintCache);
+    const legacy: IdentityCheck = checkDeviceIdentity(remote, localUuid);
+    let kind: IdentityConflictKind = resolution.conflict;
+    if (kind === 'none' && legacy.conflict) {
+      kind = 'duplicate-device';
+    }
+    const displayId: string = resolution.deviceId !== null ? resolution.deviceId : this.currentDeviceId();
+    if (kind !== 'none') {
+      this.identityStickyConflict = kind;
+      this.identityNotice = describeIdentityConflict(displayId, kind);
+    } else if (this.identityStickyConflict !== 'none' && this.identityNotice.length === 0) {
+      this.identityNotice = describeIdentityConflict(displayId, this.identityStickyConflict);
+    }
+    this.identityConflict = kind !== 'none' || this.identityStickyConflict !== 'none';
+    return resolution;
+  }
+
   /**
    * 身份比对（拉取后 / 推送前 / 设置页进页面时调用）。
    *
-   * @param adopt true = 远端缺指纹时写入本机指纹（首次同步）；false = 只读比对（页面查询用）。
+   * @param adopt true = 编号已确定时把 uuid 补写进 `devices/<id>/.device-fingerprint`
+   *              （首次同步 / 老用户升级）；false = 只读比对（页面查询用）。
    */
   private async applyIdentityCheck(adopt: boolean): Promise<void> {
-    const local: string = await this.ensureLocalFingerprint();
-    const remote: string = this.readRepoFingerprint();
-    const check: IdentityCheck = checkDeviceIdentity(remote, local);
-    if (adopt && check.adoptFingerprint && local.length > 0) {
-      this.adoptRepoFingerprint(local);
+    const resolution: IdentityResolution = await this.resolveLocalIdentity();
+    const uuid: string = normalizeFingerprint(this.fingerprintCache);
+    if (!adopt || uuid.length === 0 || resolution.deviceId === null) {
+      // `claim-new` / `recreate` 还没有确定编号：不能先往默认/别人的目录里写指纹
+      return;
     }
-    this.identityConflict = check.conflict;
-    this.identityNotice = check.conflict ? describeIdentityConflict(this.config.deviceId) : '';
+    this.adoptRepoFingerprintUnder(resolution.deviceId, uuid);
   }
 
   /**
@@ -1450,49 +1619,22 @@ export class GitSyncService {
   }
 
   /**
-   * 本机身份 uuid：内存/设置 → 都没有就生成一个并落盘。
-   *
-   * 与既有「设备指纹」半成品**合并**：有指纹就沿用同一个值（`.device-fingerprint` 与
-   * `devices/registry.jsonl` 从此指向同一个身份，不会因为两个随机串不一致而误报冲突）。
-   */
-  private async ensureDeviceUuid(): Promise<string> {
-    let existing: string = '';
-    let fingerprint: string = '';
-    try {
-      const settings = await settingsStore.load();
-      existing = normalizeUuid(settings.deviceUuid);
-      fingerprint = normalizeFingerprint(settings.deviceFingerprint);
-    } catch (error) {
-      existing = '';
-    }
-    if (existing.length > 0) {
-      return existing;
-    }
-    const generated: string = fingerprint.length > 0 ? fingerprint : generateFingerprint();
-    const uuid: string = normalizeUuid(generated);
-    if (uuid.length === 0) {
-      throw new SyncError('E_DEVICE_ID_UNREADABLE', '无法生成设备身份串，请稍后重试');
-    }
-    try {
-      await settingsStore.save({ deviceUuid: uuid, deviceFingerprint: fingerprint.length > 0 ? fingerprint : uuid });
-    } catch (error) {
-      // 设置存储未初始化（页面还没 bootstrap）：本次先用内存值，下次接入再落盘
-    }
-    this.fingerprintCache = fingerprint.length > 0 ? fingerprint : uuid;
-    return uuid;
-  }
-
-  /**
-   * 设备编号登记（**主流程**）：拉取 → 注册/抢占 → 写回设置。失败即 fail-closed。
+   * 设备编号登记（**主流程**）：读身份 → 拉取 → 四态判定 → 登记/抢号 → 写回设置。
+   * 失败即 fail-closed。
    *
    * 步骤（`docs/DATA-CONTRACT.md`「devices/registry.jsonl」）：
-   * 1. 拉取远端（fast-forward only）——`pulled` 为 true 时跳过（调用方刚拉过）；
-   * 2. registry 里有本机 uuid 的行 → 直接用该行 `deviceId`（不重复登记）；
-   * 3. 否则算下一个编号（老标识目录已在仓库则沿用）→ 追加一行 → 提交+推送；
+   * 1. 读本机身份 uuid：`devices/<id>/.device-fingerprint` → settings → **生成新的**（`recreate`）；
+   * 2. 拉取远端（fast-forward only）——`pulled` 为 true 时跳过（调用方刚拉过）；
+   * 3. 纯逻辑四态 `resolveIdentity`：
+   *    - `reuse`：registry 里有本机 uuid 的行 → 用该行 `deviceId`（不重复登记）；
+   *    - `register-existing`：没有该 uuid 的行、但本机编号目录在仓库里 → **补登记一行，绝不换号**；
+   *    - `claim-new` / `recreate`：算下一个编号（空洞不回填）→ 追加一行；
+   *    - 升级兼容与首次接入都在**登记前**把 uuid 写进 `devices/<id>/.device-fingerprint`；
    * 4. push 被拒（别人抢先）→ 重新拉取 → 重算 → 重试，最多 5 次；
-   * 5. 成功后写 `{deviceId, deviceIdAuto, deviceUuid}` 到设置。
+   * 5. 成功后写 `{deviceId, deviceIdAuto, deviceUuid, deviceFingerprint}` 到设置
+   *    （两个键同一个值：`.device-fingerprint` 的内容就是 registry 里的 uuid）。
    *
-   * @returns 本次生效的设备编号与展示文案
+   * @returns 本次生效的设备编号、展示文案，以及 `fingerprintRecreated`（指纹丢失重建）标记
    * @throws SyncError `E_DEVICE_ID_CONFLICT`（重试用尽）/ `E_DEVICE_ID_UNREADABLE`（仓库不可读）
    */
   async registerDevice(pulled: boolean = false): Promise<GitSyncResult> {
@@ -1505,14 +1647,57 @@ export class GitSyncService {
       return rejected('设备编号登记失败', problem);
     }
     try {
-      const uuid: string = await this.ensureDeviceUuid();
-      const outcome: ClaimOutcome = await claimDeviceId(this.registryPort(), {
-        localDeviceId: this.config.deviceId,
+      // 1. 本机身份（先读指纹文件；读不到才由 resolveIdentity 生成新的）
+      const local: LocalIdentity = await this.loadLocalIdentity();
+      const localUuid: string = normalizeFingerprint(local.uuid);
+      // 2. registry 必须是最新的，否则可能给已有 uuid 重复登记（多一行、多一个号）
+      const port: DeviceRegistryPort = this.registryPort();
+      if (!pulled) {
+        try {
+          await port.pull();
+        } catch (error) {
+          const unreadable: GitSyncResult = rejected(
+            '设备编号登记失败',
+            '读不到仓库里的设备登记表（拉取失败）'
+          );
+          unreadable.code = 'E_DEVICE_ID_UNREADABLE';
+          unreadable.deviceRegistrationError = unreadable.message;
+          return unreadable;
+        }
+      }
+      // 3. 四态判定（纯逻辑）：指纹读不到 → 生成新 uuid 并当新设备处理
+      const localDirId: string | null = this.existingLocalDeviceId();
+      const resolution: IdentityResolution = resolveIdentity({
+        localUuid: localUuid.length > 0 ? localUuid : null,
+        localDeviceId: localDirId,
+        registry: this.readRegistryEntries()
+      });
+      const uuid: string = normalizeFingerprint(resolution.uuid);
+      if (uuid.length === 0) {
+        throw new SyncError('E_DEVICE_ID_UNREADABLE', '无法生成设备身份串，请稍后重试');
+      }
+      // uuid 变了（recreate）→ 先落盘，保证「写进文件的 uuid」与「登记进 registry 的 uuid」是同一个
+      this.fingerprintCache = uuid;
+      try {
+        await settingsStore.save({ deviceUuid: uuid, deviceFingerprint: uuid });
+      } catch (error) {
+        // 设置写不进去不影响本次登记（内存里已是同一个 uuid）
+      }
+      // 升级兼容 / 复用：编号已确定 → **先写指纹文件再登记**（规则：写文件 → 抢号）
+      if (resolution.deviceId !== null) {
+        this.adoptRepoFingerprintUnder(resolution.deviceId, uuid);
+      }
+      // 只有「补登记本机老编号」才把老标识交给 claimDeviceId；`claim-new`/`recreate` 必须抢新号
+      const reuseLocalId: string =
+        resolution.action === 'register-existing' && resolution.deviceId !== null ? resolution.deviceId : '';
+      const outcome: ClaimOutcome = await claimDeviceId(port, {
+        localDeviceId: reuseLocalId,
         uuid: uuid,
         at: new Date().toISOString(),
         // host 只写「本机接入前的原标识」，纯排查线索（不含 token / 机型等任何信息）
-        host: this.config.deviceId,
-        pulled: pulled
+        host: this.currentDeviceId(),
+        // 循环前已经拉过（见步骤 2），不再多拉一次
+        pulled: true
       });
       if (!outcome.ok) {
         const failure: GitSyncResult = rejected('设备编号登记失败', outcome.message);
@@ -1521,23 +1706,44 @@ export class GitSyncService {
         return failure;
       }
       this.config.deviceId = outcome.deviceId;
+      // 编号确定后补写指纹文件（首次接入：新目录此刻才存在）
+      this.adoptRepoFingerprintUnder(outcome.deviceId, outcome.uuid);
       try {
         await settingsStore.save({
           deviceId: outcome.deviceId,
           deviceIdAuto: outcome.auto,
-          deviceUuid: outcome.uuid
+          deviceUuid: outcome.uuid,
+          deviceFingerprint: outcome.uuid
         });
       } catch (error) {
         // 设置写不进去不影响本次同步（编号已在内存里生效），下次接入会再写一次
       }
+      const recreated: boolean =
+        (resolution.action === 'recreate' && localDirId !== null) || this.identityRecreated;
+      this.identityRecreated = false;
       const notice: string = describeClaimOutcome(outcome.deviceId, outcome.auto);
+      let message: string = notice + (outcome.registered ? '（已在仓库登记）' : '（仓库里已登记）');
+      if (recreated) {
+        message = message + '；本机设备指纹文件缺失，已按新设备重新登记';
+      }
       const result: GitSyncResult = {
         ok: true,
-        message: notice + (outcome.registered ? '（已在仓库登记）' : '（仓库里已登记）'),
+        message: message,
         deviceId: outcome.deviceId,
         deviceIdAuto: outcome.auto,
         deviceIdNotice: notice
       };
+      if (recreated) {
+        result.fingerprintRecreated = true;
+      }
+      // 冲突（撞号 / 被覆盖）要立刻反映到常驻警告，不等到下一次 pull
+      if (resolution.conflict !== 'none') {
+        this.identityStickyConflict = resolution.conflict;
+        this.identityConflict = true;
+        this.identityNotice = describeIdentityConflict(outcome.deviceId, resolution.conflict);
+        result.identityConflict = true;
+        result.identityWarning = this.identityNotice;
+      }
       return result;
     } catch (error) {
       const failure: GitSyncResult = failed('设备编号登记失败', error as Object);
@@ -1550,13 +1756,15 @@ export class GitSyncService {
    * 同步流程里的「确保已登记」：失败抛 `SyncError`（推送必须**停下**，不许随便用一个号继续写）。
    *
    * @param pulled true = 调用方刚拉取过（省一次 pull）
+   * @returns 登记结果（推送侧要把 `fingerprintRecreated` / 冲突标记带回给页面）
    */
-  private async ensureDeviceRegistered(pulled: boolean): Promise<void> {
+  private async ensureDeviceRegistered(pulled: boolean): Promise<GitSyncResult> {
     const result: GitSyncResult = await this.registerDevice(pulled);
     if (!result.ok) {
       const code: string = result.code === undefined || result.code.length === 0 ? 'E_DEVICE_ID_UNREADABLE' : result.code;
       throw new SyncError(code, result.message);
     }
+    return result;
   }
 
   /** 文件内容的 sha256（hex；读失败 → 空串）。附件 zip 的「版本指纹」。 */
