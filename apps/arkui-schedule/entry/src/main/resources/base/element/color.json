@@ -5,12 +5,8 @@
       "value": "#FFFFFF"
     },
     {
-      "name": "brand",
-      "value": "#007DFF"
-    },
-    {
-      "name": "brand_soft",
-      "value": "#E8F1FF"
+      "name": "canvas",
+      "value": "#FFFFFF"
     },
     {
       "name": "page_background",
@@ -21,6 +17,38 @@
       "value": "#FFFFFF"
     },
     {
+      "name": "surface_raised",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "control_fill",
+      "value": "#F1F3F5"
+    },
+    {
+      "name": "control_fill_alt",
+      "value": "#F7F8FA"
+    },
+    {
+      "name": "field_fill",
+      "value": "#EEF1F4"
+    },
+    {
+      "name": "brand",
+      "value": "#007DFF"
+    },
+    {
+      "name": "brand_soft",
+      "value": "#E8F1FF"
+    },
+    {
+      "name": "selection_fill",
+      "value": "#E8F1FF"
+    },
+    {
+      "name": "selection_stroke",
+      "value": "#0A59F7"
+    },
+    {
       "name": "text_primary",
       "value": "#182431"
     },
@@ -29,12 +57,24 @@
       "value": "#66182431"
     },
     {
+      "name": "text_inverse",
+      "value": "#FFFFFF"
+    },
+    {
       "name": "divider",
       "value": "#33182431"
     },
     {
+      "name": "border",
+      "value": "#DDDDDD"
+    },
+    {
+      "name": "grid_line",
+      "value": "#8A93A0"
+    },
+    {
       "name": "danger",
-      "value": "#D94838"
+      "value": "#C0392B"
     },
     {
       "name": "warning",
@@ -45,16 +85,44 @@
       "value": "#FFF3E6"
     },
     {
+      "name": "success",
+      "value": "#188038"
+    },
+    {
+      "name": "region_fill",
+      "value": "#1AF59E0B"
+    },
+    {
       "name": "scrim",
       "value": "#66000000"
+    },
+    {
+      "name": "shadow",
+      "value": "#1A000000"
     },
     {
       "name": "preview_background",
       "value": "#000000"
     },
     {
-      "name": "text_inverse",
+      "name": "qr_light",
       "value": "#FFFFFF"
+    },
+    {
+      "name": "qr_dark",
+      "value": "#000000"
+    },
+    {
+      "name": "ink_paper",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "ink_pencil",
+      "value": "#8A8A8A"
+    },
+    {
+      "name": "ink_highlighter",
+      "value": "#F5B700"
     }
   ]
 }

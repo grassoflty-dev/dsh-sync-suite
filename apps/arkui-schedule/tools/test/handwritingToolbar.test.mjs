@@ -647,10 +647,13 @@ describe('手写板工具条与画布的分界线', () => {
     assert.ok(/\.width\(this\.railWidth\(\) \+ DIVIDER\)/.test(bar), 'rail 容器宽 = railWidth() + DIVIDER');
   });
 
-  test('横屏 rail 底色略浅且不投影', () => {
+  test('横屏 rail 底色略浅且不投影（浅色档 RAIL_BG / 深色档 theme 令牌）', () => {
     const bar = builderBody('railBar');
-    assert.ok(/\.backgroundColor\(RAIL_BG\)/.test(bar), 'rail 必须用 RAIL_BG（#F7F9FB）');
-    assert.ok(/const RAIL_BG: string = '#F7F9FB';/.test(code), 'RAIL_BG 必须是 #F7F9FB');
+    // 第 4 轮起 rail 底色走 `railBackground()`：浅色档仍是 RAIL_BG，深色档取 theme.ts 的深色回退，
+    // 否则深色主题下会出现「浅灰条 + 浅灰字」看不见。
+    assert.ok(/\.backgroundColor\(this\.railBackground\(\)\)/.test(bar), 'rail 必须用 railBackground()（深浅两档）');
+    assert.ok(/const RAIL_BG: string = '#F7F9FB';/.test(code), 'RAIL_BG 仍是浅色档 #F7F9FB');
+    assert.ok(/railBackground\(\): ResourceColor \{\s*return this\.isDarkTheme\(\) \? DARK_FALLBACK\.railFill : RAIL_BG;/.test(code), 'railBackground 必须按深浅返回不同值');
     assert.equal(/\.shadow\(/.test(bar), false, 'rail 不得有投影');
   });
 

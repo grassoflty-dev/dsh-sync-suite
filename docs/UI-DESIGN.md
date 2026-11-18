@@ -197,3 +197,90 @@ Index 侧 :146-153 的断言（`settingsStore.load(` 必须早于 `await summari
   取到后按 `docs/images/ui-<screen>-<portrait|landscape>.png` 归档并在此登记；截图仅供用户验收，不参与自动判定。
 - 设备侧客观事实：物理 1600×2560、当前系统显示 2560×1600、`deviceType=tablet`；`const.product.screenDensity` 读取失败
   （errNum 106），vp 换算按 2.0 暂估——只影响落入哪个断点档，不改变布局规则。
+
+
+## 8. 深色与大字号（2026-11-18，第 4 轮 B 线）
+
+> 本节**只追加**，不改 §1–§7 的任何结论。上面 §2 第 18 行「深色跟随系统」是本轮完成项；
+> §3 的「14 令牌」只描述当时状态，**现役令牌表以本节 8.1 为准**（31 个，base 与 dark 键集完全一致）。
+
+### 8.1 令牌（唯一来源：`resources/{base,dark}/element/color.json`）
+
+| 令牌 | 浅色 | 深色 | 用途 |
+| --- | --- | --- | --- |
+| `canvas` / `page_background` | `#FFFFFF` | `#000000` | 画布底（两者同值别名；新代码用 `canvas`） |
+| `surface` | `#FFFFFF` | `#16181A` | 卡片/行底 |
+| `surface_raised` | `#FFFFFF` | `#1F2226` | 抬起的面（弹层/浮层/手柄） |
+| `control_fill` / `control_fill_alt` | `#F1F3F5` / `#F7F8FA` | `#23262A` / `#1B1E21` | 次级按钮/单元格底 |
+| `field_fill` | `#EEF1F4` | `#262A2E` | 输入框/取消按钮底 |
+| `brand` / `brand_soft` | `#007DFF` / `#E8F1FF` | `#3B82F6` / `#14304D` | 强调色/品牌淡底 |
+| `selection_fill` / `selection_stroke` | `#E8F1FF` / `#0A59F7` | `#14304D` / `#4D9FFF` | 选中底/选中蓝框 |
+| `text_primary` / `text_secondary` / `text_inverse` | `#182431` / `#66182431` / `#FFFFFF` | `#E6E8EA` / `#99E6E8EA` / `#FFFFFF` | 三级文字 |
+| `divider` / `border` / `grid_line` | `#33182431` / `#DDDDDD` / `#8A93A0` | `#33E6E8EA` / `#3A3F45` / `#6B7480` | 分割线/边框/**表格网格** |
+| `danger` / `warning` / `warning_soft` / `success` | `#C0392B` / `#B26A00` / `#FFF3E6` / `#188038` | `#FF6B5E` / `#E8A33D` / `#3A2A12` / `#4CC38A` | 语义色 |
+| `scrim` / `shadow` / `region_fill` | `#66000000` / `#1A000000` / `#1AF59E0B` | `#99000000` / `#66000000` / `#1AE8A33D` | 蒙层/投影/区域框填充 |
+| `preview_background` | `#000000` | `#000000` | 图片预览底（恒黑） |
+| `qr_light` / `qr_dark` | `#FFFFFF` / `#000000` | `#FFFFFF` / `#000000` | **二维码恒白底黑码** |
+| `ink_paper` | `#FFFFFF` | `#FFFFFF` | **手写纸面恒白**（见 8.4） |
+| `ink_pencil` / `ink_highlighter` | `#8A8A8A` / `#F5B700` | `#B8BDC4` / `#FFD54F` | 笔形图标色 |
+
+- **语义名 → 资源名**集中在 `model/theme.ts` 的 `COLOR_TOKENS`（`colorToken('canvas') → 'app.color.canvas'`，
+  未知名 fail-safe 回落 `canvas`），页面只写 `$r('app.color.*')`，不写裸色值。
+- Canvas 的 `fillStyle`/`strokeStyle` **不收 `$r()` 资源对象**，纸面内绘制色集中在 `theme.ts` 的 `CANVAS_PAINTS`
+  （`paper`/`mask`/`grid`/`objectStroke`/`objectOutlineFaded`/`objectTint`/`selectionStroke`/`objectDanger`）。
+
+### 8.2 三态（跟随系统 / 浅色 / 深色）
+
+| 项 | 落点 |
+| --- | --- |
+| 判定（纯函数） | `model/theme.ts`：`ThemeMode`、`THEME_MODE_ORDER`、`normalizeThemeMode`（未知→`system`）、`resolveTheme(mode, systemDark)` |
+| 持久化 | `services/settingsStore.ets`：**只加一个键** `themeMode`（`KEY_THEME_MODE`），读写成对，旧数据缺键 → `system` |
+| 落地 | `common/themeApply.ets`：`colorModeOf()` / `applyThemeMode()` / `isSystemDark()`（三态→`ConfigurationConstant.ColorMode` 的**唯一**映射处） |
+| 启动 | `EntryAbility.onCreate` → `applyStoredThemeMode()`：**页面加载前**设置，避免首帧闪一下 |
+| 切换 | 设置页「关于 → 深色模式」三态片：点一下**立即** `setColorMode` + 落盘，落盘失败回退界面并提示 |
+| `system` 语义 | `ColorMode.COLOR_MODE_NOT_SET`（**不是** `COLOR_MODE_LIGHT`），系统切深色时 App 立刻跟随 |
+
+### 8.3 大字号（`FONT_SCALE`）
+
+`fp` 本身已跟随系统字体缩放，本节只管「我们自己允许的范围」：`FONT_SCALE = { min: 1.0, max: 1.6, large: 1.5 }`
+（`common/uiTokens.ts`），夹取与缩放走 `clampFontScale` / `scaledFontSize`（`model/theme.ts`）。
+
+**「×1.5 不截断」的三条布局规则**（两条代表性页面已按此验收）：
+
+1. **可压缩列一律 `layoutWeight(1)` + `maxLines(n)` + `textOverflow({ overflow: TextOverflow.Ellipsis })`**，
+   绝不靠固定宽裁字（Index 列表行标题 `maxLines(2)`、Settings 表单行标签 `maxLines(1)`）；
+2. **固定列（勾选 40vp / 开关 / 删除 / 三态片）不许被压缩**（`flexShrink(0)` + 只写 `constraintSize({ minWidth })`，
+   不写死 `width`），否则大字号下按钮先被挤没；
+3. **行高与字号同档放大**（`LINE_HEIGHT` 与 `FONT` 一一对应），只放大字号会压字；纯度断言：
+   `assertNoOverflow` 在 `scale=1.0` 与 `1.5` 下都必须 `fits=true`。
+
+文本宽度估算口径（写进测试注释）：**字宽 ≈ 字号 × 0.6 × 字符数**（`estimatedTextWidth`）；
+这是估算不是排版引擎，但 ×1.5 的增量是 +50%，远大于 ±15% 的估算误差。
+
+### 8.4 专项检查点（`tools/test/theme.test.mjs` 断言）
+
+| 检查点 | 结论 | 断言 |
+| --- | --- | --- |
+| 手写板画布底色/笔迹色 | **纸面恒白**（`ink_paper` 两套主题同值），默认墨色 `#1A1A1A` 对比 ≥ 4.5:1 | `contrastRatio(DEFAULT_PEN_COLOR, CANVAS_PAINTS.paper) ≥ 4.5` |
+| 表格网格线 | DOM 侧 `grid_line` 浅 3.10:1 / 深 4.43:1（≥3:1）；纸面 Canvas 网格用 `CANVAS_PAINTS.grid`（白纸上 7.4:1） | `contrast(grid_line, canvas) ≥ 3` 两套主题 |
+| 选中态蓝框 | `selection_stroke` 对 `selection_fill` 浅 4.88:1 / 深 4.95:1 | ≥ 3:1 两套主题 |
+| 错误红字 | `danger` 对 `canvas`：浅 5.04:1 / 深 7.52:1（对 `surface` 同样 ≥4.5） | ≥ 4.5:1 两套主题 |
+| 二维码 | 恒放白底容器（`qr_light = #FFFFFF`），`qr_dark/qr_light ≥ 7:1`；**App 侧当前没有二维码**，此约定供后续接入方遵守 | `qr_light` 两套主题都必须是 `#FFFFFF` |
+| 品牌按钮反白字 | `text_inverse` 对 `brand` 浅 3.91:1 / 深 3.68:1（≥3:1 大字号底线） | ≥ 3:1 两套主题 |
+
+**为什么纸面（手写板/二维码）不跟随深色**：笔迹颜色与二维码内容都是**数据**，深色下把纸面变黑会让已有
+`#1A1A1A` 墨迹直接不可见，手写页还要 `componentSnapshot` 截图送 OCR（深底截图对识别也更差）。
+所以 `ink_paper` / `qr_light` 两套主题恒 `#FFFFFF`，与「深色模式」不矛盾——它们是**内容纸**，不是界面底。
+
+### 8.5 已知限制与待办（需决策/需 owner）
+
+1. **`tools/test/handwritingToolbar.test.mjs` 与本轮冲突（未改该文件）**：
+   - `:652` 断言 `railBar` 必须 `.backgroundColor(RAIL_BG)`，而 `:653` 把 `RAIL_BG` 钉成 `#F7F9FB`（浅灰）。
+     深色下文字色是令牌（变浅灰），rail 若仍浅灰则字看不见，因此改为 `this.railBackground()`（浅色档仍用 `RAIL_BG`）。
+     **该断言现在 1 条红**，正确改法：`assert.ok(/\.backgroundColor\(this\.railBackground\(\)\)/.test(bar))`。
+   - `:418` 要求 4 个分页单元格/rail 按钮内出现 `'#F…'` 字面量、`:240` 要求「完成」用 `Color.White`：
+     这些字面量**保留**（浅色档），深色档走 `theme.ts` 的 `DARK_FALLBACK`（值与 dark 令牌一致，测试比对）。
+2. **画布内的绘制色不随主题实时刷新**：`CANVAS_PAINTS` 是常量、`isDarkTheme()` 在页面绘制时读一次 config。
+   在设置页切三态后回到手写页会重建，没问题；但**停留在手写页时**系统切深色，画布内的对象框颜色不会立即重画
+   （界面其余部分由系统重载资源，会变）。要彻底实时需把 config 变化回调接进 `HandwritingPager` 并重画。
+3. **无真机验证**：本轮所有结论来自静态断言 + 纯函数计算，深色实机观感、系统字体缩放 ×1.5 的真机排版**未验证**。

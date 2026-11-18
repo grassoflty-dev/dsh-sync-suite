@@ -97,6 +97,9 @@ export struct RecordRow {
               .fontSize(FONT.caption)
               .lineHeight(LINE_HEIGHT.caption)
               .fontColor($r('app.color.text_secondary'))
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .flexShrink(0)
             if (this.record.author.length > 0) {
               Text(this.record.author)
                 .fontSize(FONT.caption)

@@ -59,6 +59,16 @@ export interface LineHeightTokens {
   caption: number;
 }
 
+/** 大字号令牌：系统字体缩放的夹取区间，以及「×1.5 不截断」的验收档位。 */
+export interface FontScaleTokens {
+  /** 不跟随缩小的下限（系统调小时我们不缩）。 */
+  min: number;
+  /** 跟随放大的上限（系统拉到 2× 以上按这个截断）。 */
+  max: number;
+  /** 大字号验收档位（文档与测试都用它，别再写 1.5 字面量）。 */
+  large: number;
+}
+
 /**
  * 断点表（升序，`minWidth` 单调递增）。
  *
@@ -86,6 +96,21 @@ export const FONT: FontTokens = { title: 20, body: 16, caption: 14 };
 
 /** 行高：标题 28 / 正文 24 / 辅助 20（fp）。 */
 export const LINE_HEIGHT: LineHeightTokens = { title: 28, body: 24, caption: 20 };
+
+/**
+ * 大字号（无障碍字体缩放）。
+ *
+ * 前提：ArkUI 的 `fp` **本身已经跟随系统字体缩放**，页面不需要自己乘系数。
+ * 这个令牌只表达「我们自己允许的范围」与「验收档位」：
+ * - `min` 1.0：系统把字调小时界面不跟着缩（小于 14fp 的正文在平板上不可读）；
+ * - `max` 1.6：系统调到 2× 以上时按 1.6 截断，否则工具栏与表格会被挤爆；
+ * - `large` 1.5：**验收档**——「×1.5 不截断」的三条布局规则见 `docs/UI-DESIGN.md` §8：
+ *   ① 文本用 `maxLines(n)` + `TextOverflow.Ellipsis`，绝不靠固定宽裁字；
+ *   ② 可压缩列一律 `layoutWeight(1)`，固定列（勾选/开关/删除）不许被压；
+ *   ③ 行高与字号同档放大（`LINE_HEIGHT`），禁止只放大字号导致压字。
+ * 判定函数在 `model/theme.ts`（`clampFontScale` / `scaledFontSize` / `assertNoOverflow`）。
+ */
+export const FONT_SCALE: FontScaleTokens = { min: 1.0, max: 1.6, large: 1.5 };
 
 /** 触控目标最小边长（vp）：小于它的可点击控件必须补 padding 或 hitTestBehavior。 */
 export const TOUCH_MIN: number = 40;

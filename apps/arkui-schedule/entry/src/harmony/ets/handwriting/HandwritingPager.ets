@@ -55,16 +55,23 @@ import type { BrushKind, BrushPaint } from '../model/brush';
 import { smoothPath } from '../model/strokeSmooth';
 import { StylusAssist } from './StylusAssist';
 import type { RegionBox } from '../model/types';
+import { CANVAS_PAINTS } from '../model/theme';
+import { FONT } from '../common/uiTokens';
 
 export { MAX_HANDWRITING_PAGES };
 
 /** 每页截图组件的 id 前缀：`hw-page-0`、`hw-page-1` …（OCR 截图按 id 定位）。 */
 export const HANDWRITING_PAGE_ID_PREFIX: string = 'hw-page-';
 
-/** 区域框描边色（overlay 专用，绝不进截图）。 */
-const REGION_STROKE: string = '#F59E0B';
-/** 区域框填充色（半透明，便于确认范围）。 */
-const REGION_FILL: string = 'rgba(245,158,11,0.10)';
+/**
+ * 区域框描边色（overlay 专用，绝不进截图）。
+ *
+ * 走 `warning` 令牌：浅色是深琥珀、深色是亮琥珀，两套主题下都在纸面上可辨
+ * （纸面恒白，见 `model/theme.ts` 的 `CANVAS_PAINTS` 注释）。
+ */
+const REGION_STROKE: ResourceColor = $r('app.color.warning');
+/** 区域框填充色（半透明，便于确认范围）：10% 琥珀，浅/深各自一档。 */
+const REGION_FILL: ResourceColor = $r('app.color.region_fill');
 /** 右下角改大小手柄的边长（vp）。 */
 const HANDLE_SIZE: number = 14;
 /** 右上角删除按钮的边长（vp）。 */
@@ -1061,7 +1068,9 @@ export struct HandwritingPager {
     const rects: MaskRect[] = regionsToMaskRects(regions, context.width, context.height);
     context.save();
     context.globalCompositeOperation = 'source-over';
-    context.fillStyle = '#FFFFFF';
+    // 遮白必须与纸面同色（`CANVAS_PAINTS.mask === CANVAS_PAINTS.paper`，测试钉住）：
+    // 画布 `fillStyle` 不收 `$r()` 资源对象，只能取常量。
+    context.fillStyle = CANVAS_PAINTS.mask;
     for (let index = 0; index < rects.length; index++) {
       const rect: MaskRect = rects[index];
       context.fillRect(rect.x, rect.y, rect.w, rect.h);
@@ -1078,11 +1087,11 @@ export struct HandwritingPager {
       Text('×')
         .width(DELETE_SIZE)
         .height(DELETE_SIZE)
-        .fontSize(12)
+        .fontSize(FONT.caption)
         .textAlign(TextAlign.Center)
         .borderRadius(DELETE_SIZE / 2)
-        .backgroundColor(Color.White)
-        .fontColor('#C0392B')
+        .backgroundColor($r('app.color.surface_raised'))
+        .fontColor($r('app.color.danger'))
         .border({ width: 1, color: REGION_STROKE })
         .position({ x: Math.max(0, box.w * this.canvasW - DELETE_SIZE - 2), y: 2 })
         .onClick(() => {
@@ -1091,7 +1100,7 @@ export struct HandwritingPager {
       Text('')
         .width(HANDLE_SIZE)
         .height(HANDLE_SIZE)
-        .backgroundColor(Color.White)
+        .backgroundColor($r('app.color.surface_raised'))
         .border({ width: 1, color: REGION_STROKE })
         .borderRadius(3)
         .position({
@@ -1129,7 +1138,8 @@ export struct HandwritingPager {
             .id(`${HANDWRITING_PAGE_ID_PREFIX}${pageId}`)
             .width('100%')
             .height('100%')
-            .backgroundColor(Color.White)
+            // 纸面恒白（ink_paper 两套主题同值）：笔迹颜色是持久化数据，纸面一变黑旧墨迹就看不见
+            .backgroundColor($r('app.color.ink_paper'))
             .opacity(pageId === this.currentPageId() ? 1 : 0)
             // 框选模式下画布不接收触摸（交给上面的 overlay）
             .hitTestBehavior(
@@ -1189,7 +1199,7 @@ export struct HandwritingPager {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(Color.White)
+    .backgroundColor($r('app.color.ink_paper'))
     .clip(true)
     .onAreaChange((_oldValue: Area, newValue: Area) => {
       // 画布 vp 尺寸：归一化坐标 = 触摸坐标 / 尺寸（换算处都做了除零保护）

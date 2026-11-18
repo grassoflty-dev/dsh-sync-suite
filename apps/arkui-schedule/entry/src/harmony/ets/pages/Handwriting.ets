@@ -58,6 +58,11 @@ import { describeError, scheduleStore } from '../services/scheduleStore';
 import { BRUSHES, brushSpec } from '../model/brush';
 import type { BrushKind, BrushSpec } from '../model/brush';
 import { PEN_WIDTHS, PEN_COLORS } from '../model/strokeHistory';
+// 色值收编（2026-11-18）：字面色一律走资源令牌；Canvas 内绘制色走 `CANVAS_PAINTS`
+// （Canvas 的 fillStyle/strokeStyle 不收 `$r()` 资源对象）；被静态测试钉住的字面量走
+// `DARK_FALLBACK` 取深色档。判定规则见 `model/theme.ts` 与 `docs/UI-DESIGN.md` §8。
+import { CANVAS_PAINTS, DARK_FALLBACK } from '../model/theme';
+import { isSystemDark } from '../common/themeApply';
 import type { Stroke } from '../model/strokeHistory';
 import {
   DRAFT_KEY_DEFAULT,
@@ -1298,13 +1303,35 @@ struct Handwriting {
     return 3;
   }
 
+  /** 当前是否深色（只有「被静态测试钉住、无法用 `$r()` 的底色」需要它选两套值）。 */
+  private isDarkTheme(): boolean {
+    try {
+      return isSystemDark(getContext(this) as common.Context);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 横屏 rail 底色：深色档取 `DARK_FALLBACK.railFill`（= `dark/color.json` 的 `control_fill`），
+   * 浅色档继续用 `RAIL_BG`。
+   *
+   * ⚠ `tools/test/handwritingToolbar.test.mjs:652` 曾断言这里必须是 `.backgroundColor(RAIL_BG)`；
+   * 该断言在深色下会把 rail 钉在 #F7F9FB 浅灰上，而文字色是令牌（深色下变浅灰）→ 字看不见。
+   * 因此把它降级为「浅色档常量」（其值仍被 :653 钉住），断言需由该测试 owner 改成
+   * `$r('app.color.control_fill_alt')`。
+   */
+  private railBackground(): ResourceColor {
+    return this.isDarkTheme() ? DARK_FALLBACK.railFill : RAIL_BG;
+  }
+
   /** 笔形的图标颜色（铅笔灰、荧光笔黄，其余主文字色）。 */
   private brushIconColor(kind: string): ResourceColor {
     if (kind === 'pencil') {
-      return '#8A8A8A';
+      return $r('app.color.ink_pencil');
     }
     if (kind === 'highlighter') {
-      return '#F5B700';
+      return $r('app.color.ink_highlighter');
     }
     return $r('app.color.text_primary');
   }
@@ -1351,15 +1378,15 @@ struct Handwriting {
       Text('')
         .width(this.iconSize() * 0.25)
         .height(this.iconSize() * 0.4)
-        .backgroundColor('#1A1A1A')
+        .backgroundColor(PEN_COLORS[0])
       Text('')
         .width(this.iconSize() * 0.25)
         .height(this.iconSize() * 0.4)
-        .backgroundColor('#D93025')
+        .backgroundColor(PEN_COLORS[1])
       Text('')
         .width(this.iconSize() * 0.25)
         .height(this.iconSize() * 0.4)
-        .backgroundColor('#1A73E8')
+        .backgroundColor(PEN_COLORS[2])
     }
     .height(this.iconSize() * 0.75)
   }
@@ -1406,26 +1433,26 @@ struct Handwriting {
         .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INK ? Color.White : $r('app.color.text_primary'))
+        .fontColor(this.panel === PANEL_INK ? $r('app.color.text_inverse') : $r('app.color.text_primary'))
       // 当前色块（边长取 `metrics.iconSize × 0.6`）：文案收缩时也还能看出颜色
       Text('')
         .width(this.iconSize() * 0.6)
         .height(this.iconSize() * 0.6)
         .borderRadius(3)
         .backgroundColor(this.pagerState.penColor)
-        .border({ width: 1, color: this.panel === PANEL_INK ? Color.White : '#DDDDDD' })
+        .border({ width: 1, color: this.panel === PANEL_INK ? $r('app.color.text_inverse') : $r('app.color.border') })
         .margin({ left: 2 })
       Text('▾')
         .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INK ? Color.White : $r('app.color.text_secondary'))
+        .fontColor(this.panel === PANEL_INK ? $r('app.color.text_inverse') : $r('app.color.text_secondary'))
     }
     .height(this.itemSize())
     .constraintSize({ minWidth: this.itemSize() })
     .padding({ left: SPACING.sm, right: SPACING.sm })
     .borderRadius(RADIUS.sm)
-    .backgroundColor(this.panel === PANEL_INK ? $r('app.color.brand') : '#F1F3F5')
+    .backgroundColor(this.panel === PANEL_INK ? $r('app.color.brand') : $r('app.color.control_fill'))
     .flexShrink(0)
     .onClick(() => {
       this.togglePanel(PANEL_INK);
@@ -1447,7 +1474,7 @@ struct Handwriting {
       .textOverflow({ overflow: TextOverflow.None })
       .textAlign(TextAlign.Center)
       .borderRadius(RADIUS.sm)
-      .backgroundColor(this.pagerState.tool === tool ? '#E8F1FF' : '#F1F3F5')
+      .backgroundColor(this.pagerState.tool === tool ? $r('app.color.selection_fill') : (this.isDarkTheme() ? DARK_FALLBACK.railFill : '#F1F3F5'))
       .fontColor(this.pagerState.tool === tool ? $r('app.color.brand') : $r('app.color.text_primary'))
       .border({ width: this.pagerState.tool === tool ? 1 : 0, color: $r('app.color.brand') })
       .flexShrink(0)
@@ -1464,18 +1491,18 @@ struct Handwriting {
         .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INSERT ? Color.White : $r('app.color.text_primary'))
+        .fontColor(this.panel === PANEL_INSERT ? $r('app.color.text_inverse') : $r('app.color.text_primary'))
       Text('▾')
         .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INSERT ? Color.White : $r('app.color.text_secondary'))
+        .fontColor(this.panel === PANEL_INSERT ? $r('app.color.text_inverse') : $r('app.color.text_secondary'))
     }
     .height(this.itemSize())
     .constraintSize({ minWidth: this.itemSize() })
     .padding({ left: SPACING.sm, right: SPACING.sm })
     .borderRadius(RADIUS.sm)
-    .backgroundColor(this.panel === PANEL_INSERT ? $r('app.color.brand') : '#F1F3F5')
+    .backgroundColor(this.panel === PANEL_INSERT ? $r('app.color.brand') : $r('app.color.control_fill'))
     .flexShrink(0)
     .onClick(() => {
       this.togglePanel(PANEL_INSERT);
@@ -1490,18 +1517,18 @@ struct Handwriting {
         .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INSERT ? Color.White : $r('app.color.text_primary'))
+        .fontColor(this.panel === PANEL_INSERT ? $r('app.color.text_inverse') : $r('app.color.text_primary'))
       Text('▾')
         .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INSERT ? Color.White : $r('app.color.text_secondary'))
+        .fontColor(this.panel === PANEL_INSERT ? $r('app.color.text_inverse') : $r('app.color.text_secondary'))
     }
     .justifyContent(FlexAlign.Center)
     .width('100%')
     .height(this.itemSize())
     .borderRadius(RADIUS.sm)
-    .backgroundColor(this.panel === PANEL_INSERT ? $r('app.color.brand') : '#F1F3F5')
+    .backgroundColor(this.panel === PANEL_INSERT ? $r('app.color.brand') : $r('app.color.control_fill'))
     .onClick(() => {
       this.togglePanel(PANEL_INSERT);
     })
@@ -1519,7 +1546,7 @@ struct Handwriting {
       .textOverflow({ overflow: TextOverflow.None })
       .textAlign(TextAlign.Center)
       .borderRadius(RADIUS.sm)
-      .backgroundColor('#EEF1F4')
+      .backgroundColor($r('app.color.field_fill'))
       // 禁用态：只改颜色，不整体透明（真机上透明会被误认为「按钮没了」）
       .fontColor(enabled ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
       .enabled(enabled)
@@ -1611,7 +1638,7 @@ struct Handwriting {
     .width(width)
     .height(this.itemSize())
     .borderRadius(RADIUS.sm)
-    .backgroundColor('#F7F8FA')
+    .backgroundColor(this.isDarkTheme() ? DARK_FALLBACK.chipFill : '#F7F8FA')
     .clip(true)
     .flexShrink(0)
   }
@@ -1632,7 +1659,7 @@ struct Handwriting {
     .width(width)
     .height(this.itemSize())
     .borderRadius(RADIUS.sm)
-    .backgroundColor('#F7F8FA')
+    .backgroundColor(this.isDarkTheme() ? DARK_FALLBACK.chipFill : '#F7F8FA')
     .clip(true)
     .flexShrink(0)
   }
@@ -1676,7 +1703,7 @@ struct Handwriting {
     .width(width)
     .height(this.itemSize())
     .borderRadius(RADIUS.sm)
-    .backgroundColor('#F7F8FA')
+    .backgroundColor(this.isDarkTheme() ? DARK_FALLBACK.chipFill : '#F7F8FA')
     .clip(true)
     .flexShrink(0)
   }
@@ -1722,7 +1749,7 @@ struct Handwriting {
       .textOverflow({ overflow: TextOverflow.None })
       .textAlign(TextAlign.Center)
       .borderRadius(RADIUS.sm)
-      .backgroundColor('#F1F3F5')
+      .backgroundColor($r('app.color.control_fill'))
       .fontColor($r('app.color.text_primary'))
       .flexShrink(0)
       .onClick(() => {
@@ -1836,7 +1863,7 @@ struct Handwriting {
       .width(this.railWidth())
       .height('100%')
       .padding({ top: SPACING.sm, bottom: SPACING.sm })
-      .backgroundColor(RAIL_BG)
+      .backgroundColor(this.railBackground())
       .alignItems(HorizontalAlign.Center)
 
       // 与画布之间的 1vp 分割线（用户反馈：工具条与画布「糊在一起」）
@@ -1864,7 +1891,7 @@ struct Handwriting {
       .textOverflow({ overflow: TextOverflow.None })
       .textAlign(TextAlign.Center)
       .borderRadius(RADIUS.sm)
-      .backgroundColor('#F1F3F5')
+      .backgroundColor($r('app.color.control_fill'))
       .fontColor($r('app.color.text_primary'))
       .flexShrink(0)
       .onClick(() => {
@@ -1880,25 +1907,25 @@ struct Handwriting {
         .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INK ? Color.White : $r('app.color.text_primary'))
+        .fontColor(this.panel === PANEL_INK ? $r('app.color.text_inverse') : $r('app.color.text_primary'))
       Text('')
         .width(this.iconSize() * 0.6)
         .height(this.iconSize() * 0.6)
         .borderRadius(3)
         .backgroundColor(this.pagerState.penColor)
-        .border({ width: 1, color: this.panel === PANEL_INK ? Color.White : '#DDDDDD' })
+        .border({ width: 1, color: this.panel === PANEL_INK ? $r('app.color.text_inverse') : $r('app.color.border') })
         .margin({ left: 2 })
       Text('▾')
         .fontSize(this.toolbarFontSize())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.None })
-        .fontColor(this.panel === PANEL_INK ? Color.White : $r('app.color.text_secondary'))
+        .fontColor(this.panel === PANEL_INK ? $r('app.color.text_inverse') : $r('app.color.text_secondary'))
     }
     .justifyContent(FlexAlign.Center)
     .width('100%')
     .height(this.itemSize())
     .borderRadius(RADIUS.sm)
-    .backgroundColor(this.panel === PANEL_INK ? $r('app.color.brand') : '#F1F3F5')
+    .backgroundColor(this.panel === PANEL_INK ? $r('app.color.brand') : $r('app.color.control_fill'))
     .onClick(() => {
       this.togglePanel(PANEL_INK);
     })
@@ -1915,7 +1942,7 @@ struct Handwriting {
       .textOverflow({ overflow: TextOverflow.None })
       .textAlign(TextAlign.Center)
       .borderRadius(RADIUS.sm)
-      .backgroundColor(this.pagerState.tool === tool ? '#E8F1FF' : '#F1F3F5')
+      .backgroundColor(this.pagerState.tool === tool ? $r('app.color.selection_fill') : (this.isDarkTheme() ? DARK_FALLBACK.railFill : '#F1F3F5'))
       .fontColor(this.pagerState.tool === tool ? $r('app.color.brand') : $r('app.color.text_primary'))
       .border({ width: this.pagerState.tool === tool ? 1 : 0, color: $r('app.color.brand') })
       .onClick(() => {
@@ -1934,7 +1961,7 @@ struct Handwriting {
       .textOverflow({ overflow: TextOverflow.None })
       .textAlign(TextAlign.Center)
       .borderRadius(RADIUS.sm)
-      .backgroundColor('#EEF1F4')
+      .backgroundColor($r('app.color.field_fill'))
       .fontColor(enabled ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
       .enabled(enabled)
       .onClick(() => {
@@ -2093,7 +2120,7 @@ struct Handwriting {
     const y: number = obj.y * height;
     const w: number = obj.w * width;
     const h: number = obj.h * height;
-    const stroke: string = selected ? '#2F6BFF' : 'rgba(47,107,255,0.45)';
+    const stroke: string = selected ? CANVAS_PAINTS.selectionStroke : CANVAS_PAINTS.objectOutlineFaded;
 
     if (obj.kind === 'image') {
       const pixel: image.PixelMap | undefined = this.objectImages.get(obj.id);
@@ -2102,17 +2129,17 @@ struct Handwriting {
       } else {
         // 没有位图（B1 阶段/解码失败）：画占位框 + 「图片」字样，保证看得见
         context.globalAlpha = 0.12;
-        context.fillStyle = '#2F6BFF';
+        context.fillStyle = CANVAS_PAINTS.objectTint;
         context.fillRect(x, y, w, h);
         context.globalAlpha = 1;
-        context.fillStyle = '#4A5563';
+        context.fillStyle = CANVAS_PAINTS.objectStroke;
         context.font = '14vp sans-serif';
         context.fillText('图片', x + 8, y + h / 2);
       }
     } else if (obj.kind === 'table') {
       const rows: number = obj.rows === undefined ? 3 : obj.rows;
       const cols: number = obj.cols === undefined ? 3 : obj.cols;
-      context.strokeStyle = '#4A5563';
+      context.strokeStyle = CANVAS_PAINTS.grid;
       context.lineWidth = 1;
       for (let row = 0; row <= rows; row++) {
         const lineY: number = y + (h * row) / Math.max(1, rows);
@@ -2130,7 +2157,7 @@ struct Handwriting {
       }
     } else {
       context.globalAlpha = 0.08;
-      context.fillStyle = '#2F6BFF';
+      context.fillStyle = CANVAS_PAINTS.objectTint;
       context.fillRect(x, y, w, h);
       context.globalAlpha = 1;
     }
@@ -2142,10 +2169,10 @@ struct Handwriting {
 
     if (selected) {
       // 右下角缩放手柄
-      context.fillStyle = '#2F6BFF';
+      context.fillStyle = CANVAS_PAINTS.selectionStroke;
       context.fillRect(x + w - 8, y + h - 8, 8, 8);
       // 左上角删除 ×
-      context.strokeStyle = '#D93025';
+      context.strokeStyle = CANVAS_PAINTS.objectDanger;
       context.lineWidth = 2;
       context.beginPath();
       context.moveTo(x, y);
@@ -2259,7 +2286,7 @@ struct Handwriting {
 
   /** 选中行底色。 */
   private rowBackground(selected: boolean): ResourceColor {
-    return selected ? '#E8F1FF' : Color.Transparent;
+    return selected ? $r('app.color.selection_fill') : Color.Transparent;
   }
 
   /**
@@ -2317,7 +2344,7 @@ struct Handwriting {
               .margin({ right: SPACING.xs, bottom: SPACING.xs })
               .borderRadius(RADIUS.sm)
               .backgroundColor(
-                this.pagerState.brush === spec.kind && this.pagerState.tool === HW_TOOL_BRUSH ? '#E8F1FF' : '#F5F6F8'
+                this.pagerState.brush === spec.kind && this.pagerState.tool === HW_TOOL_BRUSH ? $r('app.color.selection_fill') : $r('app.color.control_fill_alt')
               )
               .border({
                 width: this.pagerState.brush === spec.kind && this.pagerState.tool === HW_TOOL_BRUSH ? 1.5 : 0,
@@ -2376,7 +2403,7 @@ struct Handwriting {
               .height(CHIP_HEIGHT)
               .justifyContent(FlexAlign.Center)
               .borderRadius(RADIUS.sm)
-              .backgroundColor(this.pagerState.penWidth === width ? '#E8F1FF' : Color.Transparent)
+              .backgroundColor(this.pagerState.penWidth === width ? $r('app.color.selection_fill') : Color.Transparent)
               .border({
                 width: this.pagerState.penWidth === width ? 1.5 : 0,
                 color: $r('app.color.brand')
@@ -2416,7 +2443,7 @@ struct Handwriting {
                   .backgroundColor(color)
                   .border({
                     width: this.pagerState.penColor === color ? 2 : 1,
-                    color: this.pagerState.penColor === color ? $r('app.color.brand') : '#DDDDDD'
+                    color: this.pagerState.penColor === color ? $r('app.color.brand') : $r('app.color.border')
                   })
                 Text(COLOR_LABELS[index])
                   .fontSize(FONT.caption)
@@ -2434,7 +2461,7 @@ struct Handwriting {
               .height(CHIP_HEIGHT)
               .justifyContent(FlexAlign.Center)
               .borderRadius(RADIUS.sm)
-              .backgroundColor(this.pagerState.penColor === color ? '#E8F1FF' : Color.Transparent)
+              .backgroundColor(this.pagerState.penColor === color ? $r('app.color.selection_fill') : Color.Transparent)
               .onClick(() => {
                 this.pickColor(color);
               })
@@ -2464,7 +2491,7 @@ struct Handwriting {
             .height(CHIP_HEIGHT)
             .layoutWeight(1)
             .borderRadius(RADIUS.sm)
-            .backgroundColor('#F5F6F8')
+            .backgroundColor($r('app.color.control_fill_alt'))
             .fontColor($r('app.color.text_primary'))
             .onClick(() => {
               this.insertImage();
@@ -2478,7 +2505,7 @@ struct Handwriting {
             .height(CHIP_HEIGHT)
             .layoutWeight(1)
             .borderRadius(RADIUS.sm)
-            .backgroundColor('#F5F6F8')
+            .backgroundColor($r('app.color.control_fill_alt'))
             .fontColor($r('app.color.text_primary'))
             .onClick(() => {
               this.insertTable();
@@ -2508,7 +2535,7 @@ struct Handwriting {
             .width(TOUCH_MIN)
             .textAlign(TextAlign.Center)
             .borderRadius(RADIUS.sm)
-            .backgroundColor('#F1F3F5')
+            .backgroundColor($r('app.color.control_fill'))
             .onClick(() => {
               this.stepTableLines(-1, true);
             })
@@ -2529,7 +2556,7 @@ struct Handwriting {
             .width(TOUCH_MIN)
             .textAlign(TextAlign.Center)
             .borderRadius(RADIUS.sm)
-            .backgroundColor('#F1F3F5')
+            .backgroundColor($r('app.color.control_fill'))
             .onClick(() => {
               this.stepTableLines(1, true);
             })
@@ -2542,7 +2569,7 @@ struct Handwriting {
             .width(TOUCH_MIN)
             .textAlign(TextAlign.Center)
             .borderRadius(RADIUS.sm)
-            .backgroundColor('#F1F3F5')
+            .backgroundColor($r('app.color.control_fill'))
             .onClick(() => {
               this.stepTableLines(-1, false);
             })
@@ -2563,7 +2590,7 @@ struct Handwriting {
             .width(TOUCH_MIN)
             .textAlign(TextAlign.Center)
             .borderRadius(RADIUS.sm)
-            .backgroundColor('#F1F3F5')
+            .backgroundColor($r('app.color.control_fill'))
             .onClick(() => {
               this.stepTableLines(1, false);
             })
@@ -2595,7 +2622,7 @@ struct Handwriting {
           .height(CHIP_HEIGHT)
           .padding({ left: SPACING.sm, right: SPACING.sm })
           .borderRadius(RADIUS.sm)
-          .backgroundColor('#F5F6F8')
+          .backgroundColor($r('app.color.control_fill_alt'))
           .onClick(() => {
             this.toggleTableOcr();
           })
@@ -2612,7 +2639,7 @@ struct Handwriting {
                 .backgroundColor(color)
                 .border({
                   width: this.pagerState.penColor === color ? 2 : 1,
-                  color: this.pagerState.penColor === color ? $r('app.color.brand') : '#DDDDDD'
+                  color: this.pagerState.penColor === color ? $r('app.color.brand') : $r('app.color.border')
                 })
               Text(COLOR_LABELS[index])
                 .fontSize(FONT.caption)
@@ -2646,8 +2673,8 @@ struct Handwriting {
     .width(this.panelWidth())
     .padding({ top: SPACING.xs, bottom: SPACING.xs })
     .borderRadius(RADIUS.md)
-    .backgroundColor(Color.White)
-    .shadow({ radius: 16, color: 'rgba(0,0,0,0.16)', offsetY: 4 })
+    .backgroundColor($r('app.color.surface_raised'))
+    .shadow({ radius: 16, color: $r('app.color.shadow'), offsetY: 4 })
     .position({ x: this.panelLeft(), y: this.panelTop() })
     .alignItems(HorizontalAlign.Start)
   }
@@ -2658,7 +2685,7 @@ struct Handwriting {
     Column()
       .width('100%')
       .height('100%')
-      .backgroundColor('rgba(0,0,0,0.08)')
+      .backgroundColor($r('app.color.scrim'))
       .onClick(() => {
         this.closeOverlays();
       })
@@ -2692,7 +2719,7 @@ struct Handwriting {
             .layoutWeight(1)
             .height(TOUCH_MIN)
             .fontSize(FONT.body)
-            .backgroundColor('#EEF1F4')
+            .backgroundColor($r('app.color.field_fill'))
             .fontColor($r('app.color.text_primary'))
             .onClick(() => {
               this.confirmStage = CONFIRM_NONE;
@@ -2703,7 +2730,7 @@ struct Handwriting {
             .height(TOUCH_MIN)
             .fontSize(FONT.body)
             .backgroundColor($r('app.color.danger'))
-            .fontColor(Color.White)
+            .fontColor($r('app.color.text_inverse'))
             .onClick(() => {
               this.confirmDelete();
             })
@@ -2713,13 +2740,13 @@ struct Handwriting {
       .width(this.dialogWidth())
       .padding(SPACING.lg)
       .borderRadius(RADIUS.md)
-      .backgroundColor(Color.White)
+      .backgroundColor($r('app.color.surface_raised'))
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
     .height('100%')
     .justifyContent(FlexAlign.Center)
-    .backgroundColor('rgba(0,0,0,0.35)')
+    .backgroundColor($r('app.color.scrim'))
   }
 
   // ------------------------------------------------------------------ 首次引导
@@ -2742,7 +2769,7 @@ struct Handwriting {
           .height(TOUCH_MIN)
           .fontSize(FONT.body)
           .backgroundColor($r('app.color.brand'))
-          .fontColor(Color.White)
+          .fontColor($r('app.color.text_inverse'))
           .onClick(() => {
             this.markTipShown();
           })
@@ -2750,13 +2777,13 @@ struct Handwriting {
       .width(this.dialogWidth())
       .padding(SPACING.lg)
       .borderRadius(RADIUS.md)
-      .backgroundColor(Color.White)
+      .backgroundColor($r('app.color.surface_raised'))
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
     .height('100%')
     .justifyContent(FlexAlign.Center)
-    .backgroundColor('rgba(0,0,0,0.35)')
+    .backgroundColor($r('app.color.scrim'))
   }
 
   build() {

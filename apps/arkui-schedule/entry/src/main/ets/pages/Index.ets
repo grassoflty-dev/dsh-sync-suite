@@ -412,8 +412,9 @@ struct Index {
         title: '放弃当前编辑？',
         message: '右栏有未保存的内容，切换后会丢失。',
         buttons: [
-          { text: '继续编辑', color: '#182431' },
-          { text: '放弃修改', color: '#0A59F7' }
+          // 颜色一律走资源令牌（深色下系统对话框是深底，写死深灰字会直接看不见）
+          { text: '继续编辑', color: $r('app.color.text_primary') },
+          { text: '放弃修改', color: $r('app.color.selection_stroke') }
         ]
       })
       .then((result: promptAction.ShowDialogSuccessResponse) => {
@@ -941,12 +942,16 @@ struct Index {
             .lineHeight(LINE_HEIGHT.body)
             .fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.text_primary'))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
             .width('100%')
             .textAlign(TextAlign.Start)
           Text(this.weekdayLabel())
             .fontSize(FONT.caption)
             .lineHeight(LINE_HEIGHT.caption)
             .fontColor($r('app.color.text_secondary'))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
             .width('100%')
             .textAlign(TextAlign.Start)
         }
@@ -1006,6 +1011,7 @@ struct Index {
         .backgroundColor(this.showAllPending ? $r('app.color.page_background') : $r('app.color.brand_soft'))
         .height(TOUCH_MIN)
         .layoutWeight(1)
+        .maxLines(1)
         .textAlign(TextAlign.Center)
         .onClick(() => {
           this.showAllPending = false;
@@ -1018,6 +1024,7 @@ struct Index {
         .backgroundColor(this.showAllPending ? $r('app.color.brand_soft') : $r('app.color.page_background'))
         .height(TOUCH_MIN)
         .layoutWeight(1)
+        .maxLines(1)
         .textAlign(TextAlign.Center)
         .onClick(() => {
           this.showAllPending = true;
@@ -1265,6 +1272,8 @@ struct Index {
                   .backgroundColor(this.authorFilter === author ? $r('app.color.brand_soft') : $r('app.color.page_background'))
                   .height(TOUCH_MIN)
                   .padding({ left: SPACING.md, right: SPACING.md })
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
                   .textAlign(TextAlign.Center)
                   .borderRadius(RADIUS.sm)
                   .flexShrink(0)
@@ -1297,6 +1306,8 @@ struct Index {
       .backgroundColor(this.statusFilter === value ? $r('app.color.brand_soft') : $r('app.color.page_background'))
       .height(TOUCH_MIN)
       .padding({ left: SPACING.md, right: SPACING.md })
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.Ellipsis })
       .textAlign(TextAlign.Center)
       .borderRadius(RADIUS.sm)
       .onClick(() => {
@@ -1608,6 +1619,8 @@ struct Index {
         .fontSize(FONT.caption)
         .lineHeight(LINE_HEIGHT.caption)
         .fontColor($r('app.color.text_secondary'))
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
         .width('100%')
 
       List({ space: SPACING.sm }) {

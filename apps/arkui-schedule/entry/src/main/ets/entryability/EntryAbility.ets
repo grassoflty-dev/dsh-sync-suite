@@ -11,6 +11,11 @@
  *    生命周期；检测/装配失败时 hilog 记录并按 Android 降级。
  * 3. 最后初始化日程存储（`<filesDir>/git-repo/devices/<deviceId>/`），页面加载首页 `pages/Index`。
  *
+ * 深色模式（三态 `system`/`light`/`dark`，持久化在 `settingsStore` 的 `themeMode`）：
+ * `onCreate` 里读一次并 `applicationContext.setColorMode()`——`system` 传
+ * `COLOR_MODE_NOT_SET`（跟随系统），`light`/`dark` 强制。**必须在页面加载前设置**，
+ * 否则首帧会先按系统档画一次、再闪一下换成用户档。切换由设置页调同一个函数立即生效。
+ *
  * 本文件只 import 共享层模块（`../common/devicePlatform`、`../common/platformFeatures` 在 Android
  * 产物里解析到不带 @ohos SDK 的共享实现），不引用任何 OCR / 手写 / 截图代码，Android 侧可正常编译。
  */
@@ -20,7 +25,9 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { detectPlatform } from '../common/devicePlatform';
 import { getPlatform, setPlatform } from '../common/platform';
 import { installPlatformFeatures } from '../common/platformFeatures';
+import { applyThemeMode } from '../common/themeApply';
 import { scheduleStore } from '../services/scheduleStore';
+import { settingsStore } from '../services/settingsStore';
 
 const DOMAIN: number = 0x0000;
 const TAG: string = 'ScheduleEntry';
@@ -31,6 +38,9 @@ export default class EntryAbility extends UIAbility {
     setPlatform('android');
     installPlatformFeatures();
     hilog.info(DOMAIN, TAG, 'EntryAbility 启动，平台能力已装配（fail-closed 初值）');
+
+    // 深色模式：先按持久化值落地（不 await，失败只记日志，绝不挡住启动）
+    this.applyStoredThemeMode();
 
     // 第二道防线：异步探测真实设备平台，结果覆盖上面的初值；不阻塞生命周期
     detectPlatform()
@@ -58,6 +68,25 @@ export default class EntryAbility extends UIAbility {
 
   onDestroy(): void {
     hilog.info(DOMAIN, TAG, 'EntryAbility onDestroy');
+  }
+
+  /**
+   * 按持久化值设置深色模式（`themeMode`）。
+   *
+   * 失败不阻断启动：读设置/设色抛错时只记日志，界面按系统当前档继续跑（与升级前一致）。
+   */
+  private async applyStoredThemeMode(): Promise<void> {
+    try {
+      await settingsStore.init(this.context);
+      const settings = await settingsStore.load();
+      if (applyThemeMode(this.context, settings.themeMode)) {
+        hilog.info(DOMAIN, TAG, '深色模式已应用：%{public}s', settings.themeMode);
+      } else {
+        hilog.error(DOMAIN, TAG, '深色模式设置失败（继续按系统档运行）：%{public}s', settings.themeMode);
+      }
+    } catch (error) {
+      hilog.error(DOMAIN, TAG, '读取深色模式设置失败：%{public}s', (error as Error).message);
+    }
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {

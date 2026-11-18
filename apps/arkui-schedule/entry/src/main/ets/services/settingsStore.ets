@@ -28,9 +28,16 @@ import {
   normalizeBaseURL,
   resolveModel as resolveAiModel
 } from '../model/aiProvider';
+import {
+  DEFAULT_MAX_ATTEMPTS,
+  normalizeMaxAttempts,
+  parseFallbackOrder,
+  serializeFallbackOrder
+} from '../model/aiFallback';
 import { AUTH_HTTPS, PLATFORM_GITHUB, normalizeAuthMode, normalizePlatform } from '../model/settingsForm';
 import { normalizeSyncAction } from '../model/syncError';
 import { REMOTE_MODE_LAN, normalizeRemoteMode, normalizeRemotePort } from '../model/remoteAccess';
+import { normalizeThemeMode } from '../model/theme';
 
 /** 设备标识默认值：首次启动即 `phone-a`，可在设置页修改。 */
 export const DEFAULT_DEVICE_ID: string = 'phone-a';
@@ -70,6 +77,20 @@ export interface ScheduleSettings {
   aiFallbackBaseURL: string;
   /** 备用源密钥（仅存本机；与主源 key 分开，允许不同服务商）。 */
   aiFallbackKey: string;
+  /**
+   * 是否启用「多源 fallback」（默认 `false`：未开启时内容只发给主源，
+   * 见 `docs/AI-FALLBACK.md` 的隐私红线）。
+   */
+  aiFallbackEnabled: boolean;
+  /** 最多尝试几次（含主源；默认 `DEFAULT_MAX_ATTEMPTS`=2，夹到 1..4）。 */
+  aiFallbackMaxAttempts: number;
+  /**
+   * 备用源顺序（JSON 字符串，如 `[{"providerId":"opencode-go","modelId":"deepseek-v4-pro"}]`）。
+   *
+   * 坏数据（非 JSON / 非数组 / 未知源 id）在读到时逐条丢弃，整体不可解析回落 `[]`；
+   * 写入前统一过 `serializeFallbackOrder`（去重、最多 3 条），因此落盘值永远是规范形态。
+   */
+  aiFallbackOrder: string;
   /** 作者名，写入日程记录的 author 字段。 */
   author: string;
   /** 托管平台：`github` | `gitee`（只影响提示文案与示例）。 */
@@ -80,6 +101,11 @@ export interface ScheduleSettings {
   authMode: string;
   /** 仅手写笔输入：true 时手写板拒绝手指、只接受手写笔（默认 false；旧数据缺字段 = false）。 */
   penOnlyInput: boolean;
+  /**
+   * 深色模式三态：`system` | `light` | `dark`（**只有这一个键**，`model/theme.ts` 的
+   * `normalizeThemeMode` 归一；旧数据缺字段 / 未知值 → `system`）。
+   */
+  themeMode: string;
   /**
    * 电脑上的 DSH Web 地址（设置页「远程控制」内嵌加载那个地址）。
    *
@@ -145,11 +171,15 @@ export interface SettingsPatch {
   aiFallbackModel?: string;
   aiFallbackBaseURL?: string;
   aiFallbackKey?: string;
+  aiFallbackEnabled?: boolean;
+  aiFallbackMaxAttempts?: number;
+  aiFallbackOrder?: string;
   author?: string;
   gitPlatform?: string;
   gitUsername?: string;
   authMode?: string;
   penOnlyInput?: boolean;
+  themeMode?: string;
   remoteUrl?: string;
   remoteMode?: string;
   remoteLanAddress?: string;
@@ -187,11 +217,15 @@ const KEY_AI_FALLBACK_PROVIDER_ID: string = 'aiFallbackProviderId';
 const KEY_AI_FALLBACK_MODEL: string = 'aiFallbackModel';
 const KEY_AI_FALLBACK_BASE_URL: string = 'aiFallbackBaseURL';
 const KEY_AI_FALLBACK_KEY: string = 'aiFallbackKey';
+const KEY_AI_FALLBACK_ENABLED: string = 'aiFallbackEnabled';
+const KEY_AI_FALLBACK_MAX_ATTEMPTS: string = 'aiFallbackMaxAttempts';
+const KEY_AI_FALLBACK_ORDER: string = 'aiFallbackOrder';
 const KEY_AUTHOR: string = 'author';
 const KEY_GIT_PLATFORM: string = 'gitPlatform';
 const KEY_GIT_USERNAME: string = 'gitUsername';
 const KEY_AUTH_MODE: string = 'authMode';
 const KEY_PEN_ONLY_INPUT: string = 'penOnlyInput';
+const KEY_THEME_MODE: string = 'themeMode';
 const KEY_REMOTE_URL: string = 'remoteUrl';
 const KEY_REMOTE_MODE: string = 'remoteMode';
 const KEY_REMOTE_LAN_ADDRESS: string = 'remoteLanAddress';
@@ -314,6 +348,14 @@ export class SettingsStore {
     const aiFallbackModelRaw = readString(await prefs.get(KEY_AI_FALLBACK_MODEL, ''), '');
     const aiFallbackBaseURLRaw = readString(await prefs.get(KEY_AI_FALLBACK_BASE_URL, ''), '');
     const aiFallbackKeyRaw = readString(await prefs.get(KEY_AI_FALLBACK_KEY, ''), '');
+    // 多源 fallback：旧数据没有这三个键 → 默认「关闭 / 2 次 / 空顺序」，与升级前行为一致。
+    // 顺序串一律过 parseFallbackOrder（坏 JSON、未知源 id 逐条丢弃）再 serializeFallbackOrder
+    // （去重、最多 3 条），因此内存与落盘都是规范形态，界面不需要再兜坏数据。
+    const aiFallbackEnabled = readBoolean(await prefs.get(KEY_AI_FALLBACK_ENABLED, false), false);
+    const aiFallbackMaxAttemptsRaw = readNumber(await prefs.get(KEY_AI_FALLBACK_MAX_ATTEMPTS, DEFAULT_MAX_ATTEMPTS), DEFAULT_MAX_ATTEMPTS);
+    const aiFallbackMaxAttempts: number = normalizeMaxAttempts(aiFallbackMaxAttemptsRaw);
+    const aiFallbackOrderRaw = readString(await prefs.get(KEY_AI_FALLBACK_ORDER, ''), '');
+    const aiFallbackOrder: string = serializeFallbackOrder(parseFallbackOrder(aiFallbackOrderRaw));
     const author = readString(await prefs.get(KEY_AUTHOR, ''), '');
     const gitPlatform = readString(await prefs.get(KEY_GIT_PLATFORM, PLATFORM_GITHUB), PLATFORM_GITHUB);
     // 向后兼容：旧版本没有这个键 → 读成空串（Gitee 场景由 assertHttpsUsername 提示补填）
@@ -321,6 +363,8 @@ export class SettingsStore {
     const authMode = readString(await prefs.get(KEY_AUTH_MODE, AUTH_HTTPS), AUTH_HTTPS);
     // 旧数据没有这个键 → false（手指 + 笔都能写，与升级前行为一致）
     const penOnlyInput = readBoolean(await prefs.get(KEY_PEN_ONLY_INPUT, false), false);
+    // 深色模式三态：旧数据没有这个键 → system（跟随系统，与升级前行为一致）
+    const themeMode = readString(await prefs.get(KEY_THEME_MODE, 'system'), 'system');
     // 远程控制地址：旧数据没有这个键 → 空串（「打开远程控制」按钮此时禁用）
     const remoteUrl = readString(await prefs.get(KEY_REMOTE_URL, ''), '');
     // 远程访问方式与字段：旧数据没有这些键 → lan / 0 / 空串；未知值按 §3 表归一，
@@ -356,11 +400,15 @@ export class SettingsStore {
       aiFallbackModel: aiFallbackProviderId.length > 0 ? resolveAiModel(aiFallbackProviderId, aiFallbackModelRaw) : '',
       aiFallbackBaseURL: aiFallbackBaseURLFor(aiFallbackProviderId, aiFallbackBaseURLRaw),
       aiFallbackKey: aiFallbackProviderId.length > 0 ? aiFallbackKeyRaw.trim() : '',
+      aiFallbackEnabled: aiFallbackEnabled,
+      aiFallbackMaxAttempts: aiFallbackMaxAttempts,
+      aiFallbackOrder: aiFallbackOrder,
       author: author,
       gitPlatform: normalizePlatform(gitPlatform),
       gitUsername: gitUsername.trim(),
       authMode: normalizeAuthMode(authMode),
       penOnlyInput: penOnlyInput,
+      themeMode: normalizeThemeMode(themeMode),
       remoteUrl: remoteUrl,
       remoteMode: normalizeRemoteMode(remoteModeRaw),
       remoteLanAddress: remoteLanAddress.trim(),
@@ -486,6 +534,16 @@ export class SettingsStore {
       requestedFallbackProviderId.length > 0
         ? resolveAiModel(requestedFallbackProviderId, fallbackModelRaw)
         : '';
+    // 多源 fallback：三项互相独立，缺省沿用当前值；顺序串先解析（丢坏条目）再序列化（去重、≤3 条），
+    // 因此落盘值永远是规范 JSON，运行器不必再兜坏数据。
+    const nextFallbackEnabled: boolean =
+      patch.aiFallbackEnabled === undefined ? current.aiFallbackEnabled : patch.aiFallbackEnabled === true;
+    const nextFallbackMaxAttempts: number = normalizeMaxAttempts(
+      patch.aiFallbackMaxAttempts === undefined ? current.aiFallbackMaxAttempts : patch.aiFallbackMaxAttempts
+    );
+    const nextFallbackOrder: string = serializeFallbackOrder(
+      parseFallbackOrder(patch.aiFallbackOrder === undefined ? current.aiFallbackOrder : patch.aiFallbackOrder)
+    );
     const next: ScheduleSettings = {
       deviceId: patch.deviceId === undefined ? current.deviceId : normalizeDeviceId(patch.deviceId),
       repoUrl: patch.repoUrl === undefined ? current.repoUrl : patch.repoUrl.trim(),
@@ -511,11 +569,17 @@ export class SettingsStore {
         requestedFallbackProviderId.length > 0
           ? (patch.aiFallbackKey === undefined ? current.aiFallbackKey : patch.aiFallbackKey).trim()
           : '',
+      aiFallbackEnabled: nextFallbackEnabled,
+      aiFallbackMaxAttempts: nextFallbackMaxAttempts,
+      aiFallbackOrder: nextFallbackOrder,
       author: patch.author === undefined ? current.author : patch.author.trim(),
       gitPlatform: patch.gitPlatform === undefined ? current.gitPlatform : normalizePlatform(patch.gitPlatform),
       gitUsername: patch.gitUsername === undefined ? current.gitUsername : patch.gitUsername.trim(),
       authMode: patch.authMode === undefined ? current.authMode : normalizeAuthMode(patch.authMode),
       penOnlyInput: patch.penOnlyInput === undefined ? current.penOnlyInput : patch.penOnlyInput === true,
+      // 深色模式三态：只传了别的字段时沿用当前值；未知值归一为 system（绝不留脏值）
+      themeMode:
+        patch.themeMode === undefined ? current.themeMode : normalizeThemeMode(patch.themeMode),
       // 远程控制地址：只去首尾空白，不做 URL 归一（归一在 model/remoteUrl 的 normalizeRemoteUrl）
       remoteUrl: patch.remoteUrl === undefined ? current.remoteUrl : patch.remoteUrl.trim(),
       // 远程访问方式与字段：方式按枚举归一（未知 → lan），端口夹到 0–65535，地址字段只去空白；
@@ -554,11 +618,15 @@ export class SettingsStore {
     await prefs.put(KEY_AI_FALLBACK_MODEL, next.aiFallbackModel);
     await prefs.put(KEY_AI_FALLBACK_BASE_URL, next.aiFallbackBaseURL);
     await prefs.put(KEY_AI_FALLBACK_KEY, next.aiFallbackKey);
+    await prefs.put(KEY_AI_FALLBACK_ENABLED, next.aiFallbackEnabled);
+    await prefs.put(KEY_AI_FALLBACK_MAX_ATTEMPTS, next.aiFallbackMaxAttempts);
+    await prefs.put(KEY_AI_FALLBACK_ORDER, next.aiFallbackOrder);
     await prefs.put(KEY_AUTHOR, next.author);
     await prefs.put(KEY_GIT_PLATFORM, next.gitPlatform);
     await prefs.put(KEY_GIT_USERNAME, next.gitUsername);
     await prefs.put(KEY_AUTH_MODE, next.authMode);
     await prefs.put(KEY_PEN_ONLY_INPUT, next.penOnlyInput);
+    await prefs.put(KEY_THEME_MODE, next.themeMode);
     await prefs.put(KEY_REMOTE_URL, next.remoteUrl);
     await prefs.put(KEY_REMOTE_MODE, next.remoteMode);
     await prefs.put(KEY_REMOTE_LAN_ADDRESS, next.remoteLanAddress);
@@ -605,11 +673,15 @@ export class SettingsStore {
       aiFallbackModel: current.aiFallbackModel,
       aiFallbackBaseURL: current.aiFallbackBaseURL,
       aiFallbackKey: current.aiFallbackKey,
+      aiFallbackEnabled: current.aiFallbackEnabled,
+      aiFallbackMaxAttempts: current.aiFallbackMaxAttempts,
+      aiFallbackOrder: current.aiFallbackOrder,
       author: current.author,
       gitPlatform: current.gitPlatform,
       gitUsername: current.gitUsername,
       authMode: current.authMode,
       penOnlyInput: current.penOnlyInput,
+      themeMode: current.themeMode,
       remoteUrl: current.remoteUrl,
       remoteMode: current.remoteMode,
       remoteLanAddress: current.remoteLanAddress,
