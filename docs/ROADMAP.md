@@ -131,7 +131,9 @@
 | chat P1 上传 + App 只读查看 | —— | 排队 | 依赖 `docs/RESEARCH-session-import.md`（已出：slug 可复现、Node 自带 zstd、外部写入**有条件**被识别） |
 | 手写板 5 项 / 工具条两行真机复验 | —— | **挂起：用户要求先优化代码** | 设备离线，且用户明确"暂时不实测" |
 | 装最新 HAP / 横竖屏往返 / chat 内嵌 Web / UU 两实测点 | —— | **挂起：用户要求先优化代码** | 同上；UU 两实测点仍需用户用 UU 客户端验 |
-| 代码质量优化 A–E（拆分去重 / 常量文案 / 死码 / 性能度量 / APK 收尾） | pm + exec-* | 进行中（A1/C/D 并行，A2/E 排队） | 纯重构不许改行为；每批全量 + validate + tsc |
+| 代码质量优化 A–E（拆分去重 / 常量文案 / 死码 / 性能度量 / APK 收尾） | pm + exec-* | 进行中：A1/C/D ✅（`42fb967`）、**A2 拆分进行中**、E APK 进行中、B 排队 | 纯重构不许改行为；每批全量 + validate + tsc |
+| 身份合并：`.device-fingerprint` = registry uuid（Lead 批准） | pm/exec-uuid-merge | 进行中 | 4 条用例：同 uuid 复用 / 老用户升级补登记不换号 / 同 deviceId 不同 uuid 报警 / 指纹丢失走新设备 |
+| `deny.ts` 注释绝对路径 → `<repo>/…` 占位符 | pm/exec-uuid-merge | 进行中 | 理由：注释会被复制、会贴进 issue，绝对路径属环境信息 |
 | chat P1 上传 + App 只读查看（实现） | pm/exec-chat-upload | 排队 | 设计已定：`docs/CHAT-SYNC.md` §2/§3/§7；格式事实见 `docs/RESEARCH-session-import.md` §2/§6.2 |
 | chat P2 导入回 DSH（`session.v4.jsonl.zstd`） | pm/exec-chat-import | 排队 | 依赖 `docs/RESEARCH-session-import.md` §1.1/§6.1/§6.3（slug 复刻、header `version=4`、`cwd` 必须指向本机存在目录） |
 | chat P3 纯对话 preset（工具隔离） | pm/exec-chat-preset | 调研中 | 依赖 `docs/RESEARCH-chat-preset.md`（待产出） |
