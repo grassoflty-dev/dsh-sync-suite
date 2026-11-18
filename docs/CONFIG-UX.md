@@ -306,8 +306,11 @@
   再用"远控 = 画面串流 → 不可能有网络能力"把空缺补成了否定结论（`docs/REMOTE-ACCESS-OPTIONS.md:322-346`
   的勘误）。这条教训直接支持上面那条纪律：**判定"官方有没有某能力"至少查四类入口**
   （功能页 / 帮助中心 / 官方 blog / 客户端设置页），`uu` 就是漏在第三类。
-- 代码里还有旧判定的残留（`remote/probe.ts` 的 `uu-unsupported` 与 `MODE_READY.uu`），
-  本轮**只报告不改**（`docs/REMOTE-ACCESS-OPTIONS.md:338-340`）。
+- 旧判定的残留**只剩文档，代码侧已换新**：`docs/REMOTE-ACCESS-OPTIONS.md:265` 的 §4 表格里还留着
+  `uu-unsupported` 那一行（自带「旧判定，已作废」标注）；而 `remote/probe.ts:117` 的 `MODE_READY.uu`
+  已经是「UU 远程（图形化端口映射）：入口与 WS 透传待实测」，`PROBE_CHECK_IDS` 也已经是
+  `uu-entry` / `uu-reachable` / `uu-ws-upgrade`（`probe.ts:101-103`）。本轮**只报告不改**那张表
+  （`docs/REMOTE-ACCESS-OPTIONS.md:338-340` 自己列了"下一轮修"的清单）。
 
 ## B.6 不做的事 / 失败隔离
 
