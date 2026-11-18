@@ -72,6 +72,7 @@
     'fetch',
     'pull',
     'push',
+    'commitPaths',
     'status',
     'log',
     'currentBranch',
@@ -82,6 +83,14 @@
   ];
 
   var DEVICE_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+  /**
+   * `commitPaths` 允许提交的共享文件白名单（设备登记表）。
+   *
+   * 与 `push` 的「只能写 `devices/<deviceId>/`」互补：登记表在 `devices/` 下，
+   * 它必须能被所有设备追加写入，所以单列一份白名单（仍然拒绝任意路径）。
+   */
+  var COMMIT_PATH_WHITELIST = ['devices/registry.jsonl'];
   var B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   var B64_LOOKUP = (function () {
     var table = Object.create(null);
@@ -1655,6 +1664,193 @@
     };
   }
 
+  /**
+   * 回滚「`commitPaths` 刚创建的那个提交」（push 被拒时用）。
+   *
+   * 只把分支引用退回提交前的 HEAD，并把调用方给的原文写回文件（`args.previous`），
+   * 让工作区/索引与远端保持一致 —— 否则抢占重试的下一步 `pull`（fast-forward only）
+   * 会因为本地多一个远端没有的提交而直接失败，重试永远不可能成功。
+   *
+   * 尽力而为：任何一步失败都不抛出（原始错误更重要），残留由调用方的重试与用户可见错误兜住。
+   */
+  async function rollbackRegistryCommit(git, root, branch, beforeHead, paths, args) {
+    if (beforeHead === null || beforeHead === undefined || String(beforeHead).length === 0) {
+      return;
+    }
+    try {
+      await git.writeRef({
+        fs: session.fs,
+        dir: root,
+        ref: 'refs/heads/' + branch,
+        value: String(beforeHead),
+        force: true
+      });
+    } catch (error) {
+      return;
+    }
+    if (typeof args.previous === 'string') {
+      try {
+        var target = pathJoin(root, paths[0]);
+        await session.fs.writeFile(target, utf8Encode(args.previous));
+        await git.add({ fs: session.fs, dir: root, filepath: paths[0] });
+      } catch (error) {
+        // 原文写回失败：下次 pull 可能因工作区不同步而报冲突，但错误信息仍指向真实原因
+      }
+    }
+  }
+
+  /**
+   * 共享文件提交（**只允许 `devices/registry.jsonl`**）：设备编号登记用。
+   *
+   * 为什么不复用 `push`：`push` 的范围被钉在 `devices/<deviceId>/`（不能写别人的目录），
+   * 而登记表在 `devices/` 下、与本机目录同级；首次接入时本机目录还可能不存在
+   * （用户还没存过日程）。这里用一份**显式白名单**保证它同样不能写任意路径：
+   * 除了 `devices/registry.jsonl`，任何 path 都会被拒。
+   *
+   * 语义与 `push` 一致：永不 force；提交前尽力快进拉取（降低被拒概率，失败不影响提交）；
+   * push 被拒时把桥的错误抛出去（E_GIT「推送被拒绝」），由 ArkTS 侧重拉 + 重算 + 重试。
+   */
+  async function opCommitPaths(args) {
+    var config = applyConfig(args);
+    var root = ensureRepo();
+    var git = gitApi();
+    if (!repoInitialized()) {
+      throw bridgeError('E_GIT', '本机仓库尚未初始化：请先执行「拉取」完成克隆');
+    }
+    var branch = config.branch || 'main';
+    var rawPaths = typeof args.paths === 'string' ? args.paths : '';
+    var requested = rawPaths.split(/[,\n]/);
+    var paths = [];
+    for (var p = 0; p < requested.length; p++) {
+      var candidate = normalizePath(requested[p].trim().replace(/^\.?\//, ''));
+      if (candidate.length === 0) {
+        continue;
+      }
+      if (COMMIT_PATH_WHITELIST.indexOf(candidate) < 0) {
+        throw bridgeError('E_GIT', '只允许提交 ' + COMMIT_PATH_WHITELIST.join('/') + '（拒绝：' + candidate + '）');
+      }
+      if (paths.indexOf(candidate) < 0) {
+        paths.push(candidate);
+      }
+    }
+    if (paths.length === 0) {
+      throw bridgeError('E_GIT', 'commitPaths 需要 paths 参数（允许的路径：' + COMMIT_PATH_WHITELIST.join('/') + '）');
+    }
+    for (var q = 0; q < paths.length; q++) {
+      if (hostCall('fileExists', [pathJoin(root, paths[q])]) !== true) {
+        throw bridgeError('E_FS', '待提交的文件不存在：' + paths[q]);
+      }
+    }
+    await ensureRemote(git, config);
+
+    var branchSwitch = { switched: false, createdLocalBranch: false, current: null, from: 'current' };
+    try {
+      branchSwitch = await ensureOnBranch(git, branch);
+    } catch (error) {
+      throw normalizeError(error);
+    }
+
+    // 提交前尽力快进拉取（与 push 同样的降级策略：失败只记录，不影响后面的提交）
+    var prePull = { performed: false, fastForward: false, alreadyUpToDate: false, message: '' };
+    if (args.prePull !== 'false') {
+      try {
+        var beforePull = await resolveHead(git);
+        await git.pull({
+          fs: session.fs,
+          http: session.http,
+          dir: root,
+          ref: branch,
+          singleBranch: true,
+          fastForwardOnly: true,
+          author: authorOf(config),
+          onAuth: makeOnAuth(config)
+        });
+        var afterPull = await resolveHead(git);
+        prePull.performed = true;
+        prePull.fastForward = beforePull !== afterPull;
+        prePull.alreadyUpToDate = beforePull === afterPull;
+      } catch (error) {
+        prePull.message = sanitizeMessage(error && error.message !== undefined ? error.message : error);
+      }
+    }
+
+    for (var a = 0; a < paths.length; a++) {
+      await git.add({ fs: session.fs, dir: root, filepath: paths[a] });
+    }
+
+    var commitMessage =
+      typeof args.message === 'string' && args.message.trim().length > 0
+        ? sanitizeMessage(args.message.trim())
+        : '登记设备编号 ' + new Date().toISOString();
+    // 记录提交前的 HEAD：push 被拒时要把这个「只为登记表创建的提交」回滚掉，
+    // 否则本地多出一个远端没有的提交，下一次 pull 就无法快进（分叉）。
+    var beforeHead = await resolveHead(git);
+    var commit = null;
+    try {
+      commit = await git.commit({
+        fs: session.fs,
+        dir: root,
+        message: commitMessage,
+        author: authorOf(config)
+      });
+    } catch (error) {
+      if (!isNothingToCommit(error)) {
+        throw error;
+      }
+      commit = null;
+    }
+
+    var commitOid =
+      commit === undefined || commit === null ? await resolveHead(git) : String(commit);
+    var branchCreatedLocal = branchSwitch.createdLocalBranch === true;
+    if (commitOid !== null && commitOid !== undefined && commitOid.length > 0) {
+      var branchOidBefore = await refOid(git, 'refs/heads/' + branch);
+      if (branchOidBefore === null) {
+        await git.writeRef({
+          fs: session.fs,
+          dir: root,
+          ref: 'refs/heads/' + branch,
+          value: commitOid,
+          force: true
+        });
+        branchCreatedLocal = true;
+      }
+    }
+    var remoteBranchExisted = (await refOid(git, 'refs/remotes/origin/' + branch)) !== null;
+    var plan = pushPlan(branch);
+    var pushResult = null;
+    try {
+      pushResult = await git.push({
+        fs: session.fs,
+        http: session.http,
+        dir: root,
+        remote: plan.remote,
+        ref: plan.ref,
+        force: plan.force,
+        onAuth: makeOnAuth(config)
+      });
+    } catch (error) {
+      await rollbackRegistryCommit(git, root, branch, beforeHead, paths, args);
+      throw normalizeError(error);
+    }
+    if (pushResult && pushResult.ok === false) {
+      await rollbackRegistryCommit(git, root, branch, beforeHead, paths, args);
+      throw bridgeError('E_GIT', '推送被拒绝：远端已有新提交。请先执行「拉取」，本应用不会强制覆盖远端');
+    }
+    return {
+      branch: branch,
+      paths: paths,
+      commit: commit === undefined || commit === null ? null : String(commit),
+      pushed: !(pushResult && pushResult.ok === false),
+      refspec: plan.refspec,
+      force: plan.force,
+      branchCreated: !remoteBranchExisted,
+      branchCreatedLocal: branchCreatedLocal,
+      branchSwitch: branchSwitch,
+      prePull: prePull
+    };
+  }
+
   async function opStatus(args) {
     var config = applyConfig(args);
     var root = ensureRepo();
@@ -1969,6 +2165,7 @@
     fetch: opFetch,
     pull: opPull,
     push: opPush,
+    commitPaths: opCommitPaths,
     status: opStatus,
     log: opLog,
     currentBranch: opCurrentBranch,
@@ -2036,6 +2233,9 @@
     snapshotDeviceFiles: snapshotDeviceFiles,
     restoreDeviceFiles: restoreDeviceFiles,
     listDeviceFiles: listDeviceFiles,
+    // 设备登记表（`devices/registry.jsonl`）：白名单提交 + 推送，供 Node 单测直接调
+    commitPaths: opCommitPaths,
+    commitPathWhitelist: COMMIT_PATH_WHITELIST.slice(),
     // 附件 zip（Node 单测直接调，不需要 WebView）：写/列/读 三个 op 的实现
     zipUpsert: opZipUpsert,
     zipList: opZipList,

@@ -378,3 +378,115 @@ export function authHintFor(platform: string, authMode: string): string {
   }
   return 'HTTPS 方式必须填写 token（' + findPlatformPreset(platform).tokenHint + '）';
 }
+
+// ---------------------------------------------------------------- 仓库 owner 推断（主表单只留三个控件）
+
+/** owner 允许的字符（GitHub/Gitee/自建的账号名或组织名都是这个形态）。 */
+const OWNER_RE: RegExp = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** Gitee 用户名推不出来时给用户看的一行原因（「高级」自动展开时显示）。 */
+export const GITEE_OWNER_INFER_FAILED: string =
+  '没能从仓库地址推断 Gitee 用户名，请手工填写';
+
+/**
+ * 从仓库地址推断 owner（仓库所属账号/组织）。
+ *
+ * 支持：`https://gitee.com/<owner>/<repo>[.git]`、`ssh://git@gitee.com/<owner>/<repo>.git`、
+ * scp 风格 `git@gitee.com:<owner>/<repo>.git`；容忍尾斜杠、query/hash、末尾 `.git`。
+ * 认不出（空串 / 只有一个路径段 / owner 含非法字符）返回 `null` —— 调用方据此决定
+ * 「不阻塞，用用户手填的值」。
+ */
+export function ownerFromRepoUrl(rawUrl: string): string | null {
+  const text: string = normalize(rawUrl);
+  if (text.length === 0) {
+    return null;
+  }
+  let path: string = '';
+  const scp = /^[A-Za-z0-9._-]+@([^:/\\]+):(.*)$/.exec(text);
+  if (scp !== null) {
+    path = scp[2];
+  } else {
+    const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]*)(\/[^?#]*)?/.exec(text);
+    if (scheme === null) {
+      // 无协议但形如 host/owner/repo：仍按路径取 owner（用户常省略 https://）
+      const bare = /^[A-Za-z0-9.-]+\.[A-Za-z]{2,}(\/[^?#]*)?$/.exec(text);
+      if (bare === null) {
+        return null;
+      }
+      path = bare[1] === undefined ? '' : bare[1];
+    } else {
+      path = scheme[2] === undefined ? '' : scheme[2];
+    }
+  }
+  const segments: string[] = path.split('/');
+  const cleaned: string[] = [];
+  for (let index = 0; index < segments.length; index++) {
+    const segment: string = segments[index].trim();
+    if (segment.length > 0) {
+      cleaned.push(segment);
+    }
+  }
+  if (cleaned.length < 2) {
+    return null;
+  }
+  const owner: string = cleaned[0];
+  return OWNER_RE.test(owner) ? owner : null;
+}
+
+/**
+ * 按平台给出 HTTPS 认证用户名（**主表单不再要求用户填用户名**）。
+ *
+ * - `github` → 空串（调用方回落 `x-access-token`，GitHub 对 PAT 的约定）；
+ * - `gitee` → 仓库 owner（`ownerFromRepoUrl()`）兜底手填值；
+ * - `custom` → 手填值（自建 Gitea/Forgejo 约定各不相同）。
+ */
+export function httpsUsernameFor(platform: string, rawRepoUrl: string, manual: string): string {
+  const id: string = normalizeGitPlatform(platform);
+  const filled: string = normalize(manual);
+  if (id === GITEE_PLATFORM) {
+    const owner: string | null = ownerFromRepoUrl(rawRepoUrl);
+    if (owner !== null && owner.length > 0) {
+      return owner;
+    }
+    return filled;
+  }
+  if (id === PLATFORM_GITHUB) {
+    return '';
+  }
+  return filled;
+}
+
+/**
+ * 实际用于 Basic 认证的用户名：**手填优先**，没填才按地址推断；
+ * 最后仍是空串且平台不是 Gitee 时回落 `x-access-token`。
+ *
+ * 为什么要「手填优先」：`httpsUsernameFor` 的 owner 推断对**组织仓库**会给出组织名，
+ * 而 Gitee 的 HTTPS 认证要求的是「个人登录名」。用户在「高级」里手填了，就必须用他的。
+ */
+export function httpsAuthUsername(platform: string, rawRepoUrl: string, manual: string): string {
+  const filled: string = normalize(manual);
+  if (filled.length > 0) {
+    return filled;
+  }
+  const inferred: string = httpsUsernameFor(platform, rawRepoUrl, '');
+  if (inferred.length > 0) {
+    return inferred;
+  }
+  return normalizeGitPlatform(platform) === GITEE_PLATFORM ? '' : GITHUB_TOKEN_USERNAME;
+}
+
+/**
+ * Gitee 用户名是否需要用户手工填写（推不出来且没填）。
+ *
+ * true 时设置页「高级」自动展开，并显示 `GITEE_OWNER_INFER_FAILED`；
+ * 这是**唯一**允许因为用户名而打断主表单的情况（其它情况主表单只有三个控件）。
+ */
+export function needsManualGiteeUsername(platform: string, rawRepoUrl: string, manual: string): boolean {
+  if (normalizeGitPlatform(platform) !== GITEE_PLATFORM) {
+    return false;
+  }
+  if (normalize(manual).length > 0) {
+    return false;
+  }
+  return normalize(rawRepoUrl).length > 0 && ownerFromRepoUrl(rawRepoUrl) === null;
+}

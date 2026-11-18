@@ -27,8 +27,11 @@
  *    再归一，`settingsStore.save` 落盘（含方式与各字段）后才 `router.pushUrl` 到内嵌页
  *    （`routeToRemote()` + params.url）。地址里的 token 只存本机，不进同步载荷。
  *
- * 同步组（A1/A2 之后）：
- * - 仓库地址 / 用户名 / token / **分支** / 设备标识 + 作者名；
+ * 同步组（A1/A2 之后；数据边界改动后）：
+ * - **主表单只留三个控件**：仓库地址 / 访问 token / **分支**（设备编号由仓库自动分配，
+ *   用户在「高级 ▸」里能看到只读一行「本机：device-2（自动分配）」）；
+ * - Git 用户名 / 设备标识 / 作者名收进「高级 ▸」折叠区（默认收起）：它们都有安全默认值
+ *   （用户名按仓库地址推断、编号自动分配、作者名默认「我」），不该成为同步的前置门槛；
  * - 「立即同步」（= pull）与「推送」（A2 第 3 条）是组内两个主按钮，
  *   查看状态 / 重试上次 / 测试连接 / **托管平台（GitHub、Gitee、GitLab、自建）** /
  *   认证方式在组头「更多」里；
@@ -37,6 +40,17 @@
  * - 同步状态（分支 / 领先 / 落后 / 冲突 / 本地改动）与最近一次同步时间+成败都在本页展示；
  * - **SSH 在本版本不可用**（内置内核只有 HTTP(S) 传输），选中时直接写「当前版本仅支持 HTTPS」
  *   并禁用同步按钮，不做「看起来支持」的假入口。
+ *
+ * 「高级」折叠区三个字段的**人话说明**（`FieldNote`）：
+ * - Git 用户名 = `HTTPS 认证用；GitHub 可留空（自动 x-access-token），Gitee 自动取仓库 owner`；
+ * - 设备标识 = `自动分配；仅当你要手工指定时才改`；
+ * - 作者名 = `默认「我」，只影响记录里的"谁记的"`。
+ * 「高级」默认收起，只有三种情况**自动展开并给原因**：
+ * ① 设备标识重复（`model/deviceIdentity.ts` 指纹 / registry 冲突）；
+ * ② 设备编号分配失败或仓库不可读（`E_DEVICE_ID_CONFLICT` / `E_DEVICE_ID_UNREADABLE`）；
+ * ③ Gitee 用户名从仓库地址推不出来（`GITEE_OWNER_INFER_FAILED`）。
+ * 设备标识重复（两台设备同一个 id）由 `model/deviceIdentity.ts` + `GitSyncService` 的指纹比对
+ * 识别：冲突时本页显示**常驻** warning（不是 toast），同步结果带 `identityConflict: true`。
  *
  * AI 组接 `model/aiProvider.ts`：服务=预设源表，模型随服务联动；`save()` 内部已做
  * `resolveModel` / `aiBaseURLFor` 归一，因此本页**只传原始值**，不重复归一化。
@@ -116,6 +130,7 @@ import {
   DEFAULT_BRANCH
 } from '../model/syncError';
 import type { SyncErrorInfo, SyncStatusView } from '../model/syncError';
+import { describeIdentityConflict } from '../model/deviceIdentity';
 import { testAiConnection } from '../services/deepseek';
 import type { AiTestResult } from '../services/deepseek';
 import {
@@ -146,9 +161,13 @@ import {
   repoUrlPlaceholderFor,
   resolveGitUsername,
   resolvePlatformSelection,
-  tokenPlaceholderFor
+  tokenPlaceholderFor,
+  GITEE_OWNER_INFER_FAILED,
+  httpsUsernameFor,
+  needsManualGiteeUsername
 } from '../model/gitAuth';
 import type { PlatformResolution } from '../model/gitAuth';
+import { describeClaimOutcome } from '../model/deviceRegistry';
 import { gitExtrasStore } from '../services/syncController';
 import type { GitSyncExtras } from '../services/syncController';
 import { PageLayout } from '../components/PageLayout';
@@ -291,6 +310,15 @@ struct Settings {
   @State syncBusy: boolean = false;
   /** 最近一次「查看状态」的结果（分支 / ahead / behind / 冲突 / 本地改动）。 */
   @State statusLine: string = '';
+  /**
+   * 设备标识重复的**常驻**警告（空串 = 正常）。
+   *
+   * 两台设备填了同一个设备标识时，附件 zip 会互相覆盖、历史会混在一起；
+   * 这不是一次性的同步错误，所以必须是页面状态（不是 toast），只有改成唯一值后才会消失。
+   */
+  @State identityWarning: string = '';
+  /** 本次推送被暂停的附件说明（空串 = 没有暂停；同样是 warning 档的常驻提示）。 */
+  @State attachmentWarning: string = '';
   @State webReady: boolean = false;
   @State platformText: string = '';
   @State handwritingText: string = '';
@@ -303,6 +331,25 @@ struct Settings {
   @State panel: string = PANEL_NONE;
   /** 「高级」是否展开（选自定义源时自动展开）。 */
   @State advancedOpen: boolean = false;
+  /**
+   * 同步组「高级 ▸」折叠区是否展开（**默认收起**）。
+   *
+   * 主表单只留三个控件：仓库地址 / 访问 token / 分支。Git 用户名、设备标识、作者名
+   * 全部收在这个折叠区里 —— 它们都有安全的默认值（用户名按地址推断、编号自动分配、
+   * 作者名默认「我」），用户不需要为了同步去理解它们。
+   */
+  @State syncAdvancedOpen: boolean = false;
+  /**
+   * 「高级」被**自动**展开时的一行原因（空串 = 用户自己点开的 / 没展开）。
+   *
+   * 只有三种情况会自动展开并给原因：
+   * ① 设备标识重复（指纹/registry 冲突）② 编号分配失败 / 仓库不可读 ③ Gitee 用户名推不出来。
+   */
+  @State syncAdvancedReason: string = '';
+  /** 本机设备编号是否由仓库自动分配（true = 只读展示；用户手改后置 false）。 */
+  @State deviceIdAuto: boolean = false;
+  /** 设备编号的只读一行（`本机：device-2（自动分配）`；空串 = 还没登记，不占行）。 */
+  @State deviceIdNotice: string = '';
   /** 首页是否展示其他设备的只读记录（写 AppStorage，首页读取）。 */
   @State includeOtherDevices: boolean = false;
 
@@ -445,9 +492,13 @@ struct Settings {
       }
       this.ready = true;
       this.storageHint = `日程目录：${scheduleStore.deviceRoot()}/schedules/`;
+      // 主表单没有用户名字段：进页面就按仓库地址推断一次（Gitee = owner），推不出来会展开「高级」
+      this.ensureGiteeUsernameResolved();
       this.configure();
       // 分支/平台可能已经改过：等桥就绪后补一次本地状态（不联网，只是 git.status/log）
       this.refreshStatus(true);
+      // 设备身份：只读比对工作副本里的 `.device-fingerprint`（不联网），冲突时显示常驻警告
+      this.refreshIdentityWarning();
       // Web 先于设置就绪时，自动动作排在这里补触发
       if (this.webReady && this.autoAction.length > 0) {
         const pending = this.autoAction;
@@ -466,7 +517,14 @@ struct Settings {
   /** 把存储里的设置铺到表单上（读取与保存后共用）。 */
   private applySettings(settings: ScheduleSettings): void {
     this.deviceId = settings.deviceId;
-    this.author = settings.author;
+    // 作者名默认「我」：它被收进「高级」后，默认值必须在这里兜住，
+    // 否则用户会在不展开的情况下被「作者名不能为空」拦住（幽灵报错）。
+    this.author = settings.author.trim().length > 0 ? settings.author : '我';
+    this.deviceIdAuto = settings.deviceIdAuto;
+    this.deviceIdNotice =
+      settings.deviceId.length > 0 && settings.deviceIdAuto
+        ? describeClaimOutcome(settings.deviceId, true)
+        : '';
     this.repoUrl = settings.repoUrl;
     this.token = settings.token;
     // 记住已保存的 token：输入框被清空时按「沿用旧 token」处理，不要误判为空
@@ -619,14 +677,18 @@ struct Settings {
     for (const issue of issues) {
       if (issue.field === FIELD_DEVICE_ID) {
         this.deviceIdError = issue.message;
+        // 隐藏字段的校验红字必须可见：否则用户只会看到「有 1 项需要处理」却找不到在哪
+        this.openSyncAdvanced(issue.message);
       } else if (issue.field === FIELD_AUTHOR) {
         this.authorError = issue.message;
+        this.openSyncAdvanced(issue.message);
       } else if (issue.field === FIELD_REPO_URL) {
         this.repoUrlError = issue.message;
       } else if (issue.field === FIELD_TOKEN) {
         this.tokenError = issue.message;
       } else if (issue.field === FIELD_GIT_USERNAME) {
         this.gitUsernameError = issue.message;
+        this.openSyncAdvanced(issue.message);
       } else if (issue.field === FIELD_AI_MODEL) {
         this.aiModelError = issue.message;
         this.advancedOpen = true;
@@ -669,6 +731,8 @@ struct Settings {
       },
       repoCheck
     );
+    // 主表单没有用户名：保存前先按仓库地址推断（Gitee = owner），推不出来才展开「高级」让人填
+    this.ensureGiteeUsernameResolved();
     // HTTPS 用户名（Gitee 必填）：用**纠正后**的平台判定，URL 改了平台没改也不会漏报
     const usernameIssue: SettingsFieldIssue | null = this.gitUsernameIssue(platform);
     if (usernameIssue !== null) {
@@ -690,6 +754,8 @@ struct Settings {
     try {
       const patch: SettingsPatch = {
         deviceId: normalizeDeviceId(this.deviceId),
+        // 编号来源（自动分配 / 沿用原标识）：用户没在「高级」里手改过就保持原值
+        deviceIdAuto: this.deviceIdAuto,
         // 保留用户输入的地址原文，只去掉首尾空白（末尾 .git 不擅自增删）；空地址存空串
         repoUrl: repoEmpty ? '' : repoCheck.url,
         // 输入框留空 = 沿用已保存的 token（不要把旧 token 清空）
@@ -1332,6 +1398,49 @@ struct Settings {
     return { field: FIELD_GIT_USERNAME, message: message };
   }
 
+  // ------------------------------------------------------------------ 「高级」折叠区
+
+  /** 用户手动点「高级 ▸ / ▾」：点开时清掉自动展开的原因（那是系统提示，不是用户的选择）。 */
+  private toggleSyncAdvanced(): void {
+    this.syncAdvancedOpen = !this.syncAdvancedOpen;
+    if (this.syncAdvancedOpen) {
+      this.syncAdvancedReason = '';
+    }
+  }
+
+  /**
+   * 自动展开「高级」并给一行原因。
+   *
+   * 只允许三种情况调用：① 设备标识重复 ② 编号分配失败 / 仓库不可读 ③ Gitee 用户名推不出来
+   * （外加「隐藏字段有校验红字」这一种自保：宁可展开并说清楚，也不让用户对着不可见的红字点保存）。
+   */
+  private openSyncAdvanced(reason: string): void {
+    this.syncAdvancedOpen = true;
+    const text: string = typeof reason === 'string' ? reason.trim() : '';
+    if (text.length > 0) {
+      this.syncAdvancedReason = text;
+    }
+  }
+
+  /**
+   * Gitee 用户名：能按仓库地址推断（owner）就自动填上；推不出来才展开「高级」请他手填。
+   *
+   * 主表单不再有用户名字段，所以「自动推断 + 推不出来才打断」是唯一的交互路径。
+   */
+  private ensureGiteeUsernameResolved(): void {
+    if (needsManualGiteeUsername(this.gitPlatform, this.repoUrl, this.gitUsername)) {
+      this.openSyncAdvanced(GITEE_OWNER_INFER_FAILED);
+      return;
+    }
+    if (this.gitUsername.trim().length > 0) {
+      return;
+    }
+    const inferred: string = httpsUsernameFor(this.gitPlatform, this.repoUrl, '');
+    if (inferred.length > 0) {
+      this.gitUsername = inferred;
+    }
+  }
+
   // ------------------------------------------------------------------ 同步逻辑
 
   /**
@@ -1400,6 +1509,69 @@ struct Settings {
       this.statusLine = result.message;
     } catch (error) {
       // 状态刷新失败不影响主流程（同步结果已经展示在 syncMessage 里）
+    }
+  }
+
+  /**
+   * 复查设备身份（不联网：只读工作副本里的 `devices/<id>/.device-fingerprint`）。
+   *
+   * 空串 = 正常；非空 = 两台设备用了同一个设备标识（常驻 warning 文案）。
+   */
+  private async refreshIdentityWarning(): Promise<void> {
+    if (this.disposed || !this.ready) {
+      return;
+    }
+    try {
+      const text: string = await this.sync.identityWarning();
+      if (this.disposed) {
+        return;
+      }
+      this.identityWarning = text;
+    } catch (error) {
+      // 读不到就保留上一次的结论：不因为一次读盘失败把「设备标识重复」的警告误清掉
+    }
+  }
+
+  /**
+   * 把同步结果里的「设备身份 / 附件暂停」标记铺到常驻状态上（成功与失败都要过一遍）。
+   *
+   * 冲突只在**改设备标识**后才有可能消失，因此这里不会自动清空；没有冲突标记时复查一次。
+   */
+  private applySyncFlags(result: GitSyncResult): void {
+    // 设备编号（数据边界）：同步服务登记成功会把编号带回来 → 立刻回填并推给服务（后续 push 用它）。
+    // 失败则带上原因，下面统一自动展开「高级」。
+    const claimedId: string = result.deviceId === undefined ? '' : result.deviceId.trim();
+    if (claimedId.length > 0) {
+      this.deviceId = claimedId;
+      this.deviceIdAuto = result.deviceIdAuto === true;
+      const notice: string = result.deviceIdNotice === undefined ? '' : result.deviceIdNotice.trim();
+      this.deviceIdNotice = notice.length > 0 ? notice : describeClaimOutcome(claimedId, this.deviceIdAuto);
+      this.configure();
+      this.storageHint = `日程目录：${scheduleStore.deviceRoot()}/schedules/`;
+    }
+    if (result.identityConflict === true) {
+      const warning: string =
+        result.identityWarning === undefined ? '' : result.identityWarning.trim();
+      this.identityWarning = warning.length > 0 ? warning : describeIdentityConflict(normalizeDeviceId(this.deviceId));
+      // ① 设备标识重复：这是唯一会让两台设备写进同一目录的情况，必须让用户看见并改
+      this.openSyncAdvanced(this.identityWarning);
+    } else {
+      this.refreshIdentityWarning();
+    }
+    const registrationError: string =
+      result.deviceRegistrationError === undefined ? '' : result.deviceRegistrationError.trim();
+    if (registrationError.length > 0) {
+      // ② 编号分配失败 / 仓库不可读：推送已经 fail-closed，用户需要知道为什么没同步成功
+      this.openSyncAdvanced(registrationError);
+    }
+    if (result.attachmentsBlocked !== undefined && result.attachmentsBlocked > 0) {
+      const count: string = result.attachmentsBlocked.toString();
+      const reason: string = result.attachmentWarning === undefined ? '' : result.attachmentWarning.trim();
+      this.attachmentWarning = reason.length > 0
+        ? `已暂停推送 ${count} 个附件：${reason}`
+        : `已暂停推送 ${count} 个附件（远端可能已被别的设备改过）`;
+    } else {
+      this.attachmentWarning = '';
     }
   }
 
@@ -1503,6 +1675,8 @@ struct Settings {
       if (this.disposed) {
         return;
       }
+      // 设备身份 / 附件暂停：落到常驻警告（失败结果也可能带着「附件被暂停推送」的说明）
+      this.applySyncFlags(result);
       if (!result.ok) {
         const code: string = result.code === undefined ? '' : result.code;
         await this.applySyncFailure(code, result.message);
@@ -1879,6 +2053,23 @@ struct Settings {
       .textAlign(TextAlign.Start)
   }
 
+  /**
+   * 字段语义说明（标题下一行小字，**可换行、不省略**）。
+   *
+   * 与 `HintLine` 的分工：`HintLine` 是「状态/提示」一行就够；
+   * 字段「到底影响什么」必须能完整读下去（设备标识这一条换行是必要的），
+   * 样式仍按 `docs/UI-DESIGN.md`：`FONT.caption` + `LINE_HEIGHT.caption` + `text_secondary`。
+   */
+  @Builder
+  FieldNote(text: string) {
+    Text(text)
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .fontColor($r('app.color.text_secondary'))
+      .width('100%')
+      .textAlign(TextAlign.Start)
+  }
+
   /** 组标题 + 右侧「更多」入口。 */
   @Builder
   SyncHeader() {
@@ -1905,7 +2096,93 @@ struct Settings {
     .alignItems(VerticalAlign.Center)
   }
 
-  /** 同步组：仓库地址 / token / 设备标识+作者名 / 立即同步 + 1 行状态。 */
+  /**
+   * 同步组「高级」折叠区：Git 用户名 / 设备标识 / 作者名。
+   *
+   * 这三项都有安全的默认值（用户名按仓库地址推断、编号自动分配、作者名默认「我」），
+   * 所以**默认收起**：用户要做的只有「填仓库地址 + token」。只有下面三种情况会自动展开
+   * （`openSyncAdvanced`）：① 设备标识重复 ② 编号分配失败 / 仓库不可读 ③ Gitee 用户名推不出来。
+   */
+  @Builder
+  SyncAdvancedFields() {
+    Column({ space: SPACING.md }) {
+      // HTTPS 认证必须带用户名：GitHub 可留空（默认 x-access-token），Gitee 自动取仓库 owner
+      if (this.authMode === AUTH_HTTPS) {
+        this.FieldLabel('用户名（HTTPS 认证）')
+        // 语义说明（用户最常见的困惑：GitHub 要不要填？Gitee 填什么？）
+        this.FieldNote('HTTPS 认证用；GitHub 可留空（自动 x-access-token），Gitee 自动取仓库 owner')
+        TextInput({ text: this.gitUsername, placeholder: this.gitUsernamePlaceholder() })
+          .width('100%')
+          .height(TOUCH_MIN + SPACING.xs)
+          .fontSize(FONT.body)
+          .backgroundColor($r('app.color.page_background'))
+          .borderRadius(RADIUS.none)
+          .padding({ left: 0, right: 0 })
+          .onChange((value: string) => {
+            this.gitUsername = value;
+            this.gitUsernameError = '';
+          })
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+        if (this.gitUsernameError.length > 0) {
+          this.ErrorText(this.gitUsernameError)
+        } else {
+          this.HintLine(this.gitUsernameHint())
+        }
+      }
+
+      // 设备标识：编号由仓库自动分配（`devices/registry.jsonl`），这里只是「手工指定」的逃生门
+      this.FieldLabel('设备标识')
+      this.FieldNote('自动分配；仅当你要手工指定时才改')
+      TextInput({ text: this.deviceId, placeholder: '自动分配（例如 device-2）' })
+        .width('100%')
+        .height(TOUCH_MIN + SPACING.xs)
+        .fontSize(FONT.body)
+        .backgroundColor($r('app.color.page_background'))
+        .borderRadius(RADIUS.none)
+        .padding({ left: 0, right: 0 })
+        .onChange((value: string) => {
+          this.deviceId = value;
+          this.deviceIdError = '';
+          // 用户手改了就等于「手工指定」，不再是自动分配（下次同步会重新算号）
+          this.deviceIdAuto = false;
+        })
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+      if (this.deviceIdError.length > 0) {
+        this.ErrorText(this.deviceIdError)
+      } else if (this.deviceIdNotice.length > 0) {
+        this.HintLine(this.deviceIdNotice)
+      }
+
+      // 作者名：只影响记录里的「谁记的」，与同步/认证无关
+      this.FieldLabel('作者名')
+      this.FieldNote('默认「我」，只影响记录里的"谁记的"')
+      TextInput({ text: this.author, placeholder: '我' })
+        .width('100%')
+        .height(TOUCH_MIN + SPACING.xs)
+        .fontSize(FONT.body)
+        .backgroundColor($r('app.color.page_background'))
+        .borderRadius(RADIUS.none)
+        .padding({ left: 0, right: 0 })
+        .onChange((value: string) => {
+          this.author = value;
+          this.authorError = '';
+        })
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
+      if (this.authorError.length > 0) {
+        this.ErrorText(this.authorError)
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  /** 同步组：仓库地址 / token / 分支（主表单三个控件）+「高级」折叠区 / 立即同步 + 1 行状态。 */
   @Builder
   SyncGroup() {
     Column({ space: SPACING.md }) {
@@ -1952,30 +2229,6 @@ struct Settings {
       } else if (this.platformNotice.length > 0) {
         // 平台推断/锁定的提示（「已按地址推断平台为 X」/「已保留你的手动选择」）
         this.HintLine(this.platformNotice)
-      }
-
-      // HTTPS 认证必须带用户名：GitHub 可留空（默认 x-access-token），Gitee 必填登录名，否则必 401
-      if (this.authMode === AUTH_HTTPS) {
-        this.FieldLabel('用户名（HTTPS 认证）')
-        TextInput({ text: this.gitUsername, placeholder: this.gitUsernamePlaceholder() })
-          .width('100%')
-          .height(TOUCH_MIN + SPACING.xs)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.page_background'))
-          .borderRadius(RADIUS.none)
-          .padding({ left: 0, right: 0 })
-          .onChange((value: string) => {
-            this.gitUsername = value;
-            this.gitUsernameError = '';
-          })
-        Divider()
-          .strokeWidth(DIVIDER)
-          .color($r('app.color.divider'))
-        if (this.gitUsernameError.length > 0) {
-          this.ErrorText(this.gitUsernameError)
-        } else {
-          this.HintLine(this.gitUsernameHint())
-        }
       }
 
       this.FieldLabel(this.authMode === AUTH_SSH ? '访问 token（SSH 方式可留空）' : '访问 token（仅存本机）')
@@ -2032,55 +2285,66 @@ struct Settings {
         this.HintLine('默认 main；首次推送时远端没有该分支会自动创建（永不强制覆盖远端）')
       }
 
-      Row({ space: SPACING.md }) {
-        Column({ space: SPACING.xs }) {
-          this.FieldLabel('设备标识')
-          TextInput({ text: this.deviceId, placeholder: 'phone-a' })
-            .width('100%')
-            .height(TOUCH_MIN + SPACING.xs)
-            .fontSize(FONT.body)
-            .backgroundColor($r('app.color.page_background'))
-            .borderRadius(RADIUS.none)
-            .padding({ left: 0, right: 0 })
-            .onChange((value: string) => {
-              this.deviceId = value;
-              this.deviceIdError = '';
-            })
-          Divider()
-            .strokeWidth(DIVIDER)
-            .color($r('app.color.divider'))
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
+      // ---- 主表单到此结束：只剩「仓库地址 / 访问 token / 分支」三个控件 ----
+      // 设备编号是仓库自动分配的：成功登记后这里只显示一行只读文字（用户不需要、也不应该手填）。
+      if (this.deviceIdNotice.length > 0) {
+        this.HintLine(this.deviceIdNotice)
+      }
 
-        Column({ space: SPACING.xs }) {
-          this.FieldLabel('作者名')
-          TextInput({ text: this.author, placeholder: '例如：我' })
-            .width('100%')
-            .height(TOUCH_MIN + SPACING.xs)
-            .fontSize(FONT.body)
-            .backgroundColor($r('app.color.page_background'))
-            .borderRadius(RADIUS.none)
-            .padding({ left: 0, right: 0 })
-            .onChange((value: string) => {
-              this.author = value;
-              this.authorError = '';
-            })
-          Divider()
-            .strokeWidth(DIVIDER)
-            .color($r('app.color.divider'))
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
+      // 「高级 ▸」折叠区：Git 用户名 / 设备标识 / 作者名（默认收起，见 SyncAdvancedFields）
+      Row({ space: SPACING.xs }) {
+        Text(this.syncAdvancedOpen ? '高级 ▾' : '高级 ▸')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.brand'))
+        Blank()
       }
       .width('100%')
-      .alignItems(VerticalAlign.Top)
-
-      if (this.deviceIdError.length > 0) {
-        this.ErrorText(this.deviceIdError)
+      .height(TOUCH_MIN)
+      .alignItems(VerticalAlign.Center)
+      .onClick(() => {
+        this.toggleSyncAdvanced();
+      })
+      // 自动展开时的那一行原因（只有 ① 设备标识重复 ② 分配失败/仓库不可读 ③ Gitee 用户名推不出来）
+      if (this.syncAdvancedReason.length > 0) {
+        this.HintLine(this.syncAdvancedReason)
       }
-      if (this.authorError.length > 0) {
-        this.ErrorText(this.authorError)
+      if (this.syncAdvancedOpen) {
+        this.SyncAdvancedFields()
+      }
+
+      // 设备标识重复：**常驻**警告（不是 toast）。两台设备同一个 id 时，附件 zip 互相覆盖、
+      // 历史混在一起，而且旧校验根本挡不住——所以这里必须一直红着，直到用户改成唯一值。
+      if (this.identityWarning.length > 0) {
+        Column({ space: SPACING.xs }) {
+          Text('⚠️ 设备标识重复：数据会互相覆盖')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.warning'))
+            .width('100%')
+            .textAlign(TextAlign.Start)
+          Text(this.identityWarning)
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.warning'))
+            .width('100%')
+            .textAlign(TextAlign.Start)
+        }
+        .width('100%')
+        .padding({ top: SPACING.sm, bottom: SPACING.sm, left: SPACING.md, right: SPACING.md })
+        .backgroundColor($r('app.color.brand_soft'))
+        .alignItems(HorizontalAlign.Start)
+      }
+
+      // 附件被暂停推送（其它文件照常推）：一行 warning 说明，提醒先处理再重试
+      if (this.attachmentWarning.length > 0) {
+        Text(this.attachmentWarning)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.warning'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
       }
 
       Row({ space: SPACING.md }) {
@@ -2783,6 +3047,46 @@ struct Settings {
     .alignItems(HorizontalAlign.Start)
   }
 
+  /**
+   * 「云端对话」入口（**只放一行入口**，列表与详情在独立页面）。
+   *
+   * 为什么不把会话列表塞进设置页：设置页是「改配置」的地方，会话列表是要反复来读的内容；
+   * 混在一起既撑长本页，也会让「列表 → 详情 → 返回」的路由栈压在设置页里。
+   */
+  @Builder
+  ChatEntryRow() {
+    Row({ space: SPACING.sm }) {
+      Text('云端对话')
+        .fontSize(FONT.body)
+        .lineHeight(LINE_HEIGHT.body)
+        .fontColor($r('app.color.text_primary'))
+        .layoutWeight(1)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textAlign(TextAlign.Start)
+      Text('只读 ›')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor($r('app.color.text_secondary'))
+        .flexShrink(0)
+        .maxLines(1)
+        .textAlign(TextAlign.Center)
+    }
+    .width('100%')
+    .height(TOUCH_MIN)
+    .alignItems(VerticalAlign.Center)
+    .onClick(() => {
+      this.openChats();
+    })
+  }
+
+  /** 打开云端对话列表页（失败只 toast，不影响设置页任何状态）。 */
+  private openChats(): void {
+    router.pushUrl({ url: 'pages/Chats' }).catch((error: Error) => {
+      promptAction.showToast({ message: `打开云端对话失败：${describeError(error)}` });
+    });
+  }
+
   /** 关于组：版本+上次同步 / 平台信息 / 隐私? / 权限?。 */
   @Builder
   AboutGroup() {
@@ -2927,6 +3231,10 @@ struct Settings {
           Divider()
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
+          this.ChatEntryRow()
+          Divider()
+            .strokeWidth(DIVIDER)
+            .color($r('app.color.divider'))
           this.AboutGroup()
         }
         .width('100%')
@@ -2962,6 +3270,10 @@ struct Settings {
                 .strokeWidth(DIVIDER)
                 .color($r('app.color.divider'))
               this.DataGroup()
+              Divider()
+                .strokeWidth(DIVIDER)
+                .color($r('app.color.divider'))
+              this.ChatEntryRow()
               Divider()
                 .strokeWidth(DIVIDER)
                 .color($r('app.color.divider'))

@@ -29,7 +29,7 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { checkSyncPrecondition, describeBridgeFailure } from '../model/syncGuard';
-import { assertHttpsUsername, describeAuthModeBlocker, resolveGitUsername } from '../model/gitAuth';
+import { assertHttpsUsername, describeAuthModeBlocker, httpsAuthUsername, resolveGitUsername } from '../model/gitAuth';
 import { AUTH_HTTPS } from '../model/settingsForm';
 import {
   DEFAULT_BRANCH,
@@ -46,6 +46,27 @@ import {
   filterPathsForDevice,
   normalizeDeviceId
 } from '../model/syncScope';
+import {
+  checkDeviceIdentity,
+  describeAttachmentPushBlock,
+  describeIdentityConflict,
+  deviceFingerprintPath,
+  fingerprintFileText,
+  generateFingerprint,
+  normalizeFingerprint,
+  shouldBlockAttachmentPush
+} from '../model/deviceIdentity';
+import type { AttachmentPushDecision, IdentityCheck } from '../model/deviceIdentity';
+import {
+  DEVICES_DIR,
+  REGISTRY_PATH,
+  claimDeviceId,
+  describeClaimOutcome,
+  normalizeUuid
+} from '../model/deviceRegistry';
+import type { ClaimOutcome, DeviceRegistryPort } from '../model/deviceRegistry';
+import { sha256Hex } from '../model/sha256';
+import { settingsStore } from './settingsStore';
 
 // ---------------------------------------------------------------- 对外接口
 
@@ -98,6 +119,35 @@ export interface GitSyncResult {
   initialized?: boolean;
   /** 远端是否已配置（仅 status 返回）。 */
   remoteConfigured?: boolean;
+  /**
+   * 两台设备用了同一个设备标识（`devices/<id>/.device-fingerprint` 与本机不同）。
+   *
+   * true 时设置页要显示**常驻**警告（warning 档），而不是一闪而过的 toast；
+   * 文案见 `identityWarning`（逐字文案，含设备标识）。
+   */
+  identityConflict?: boolean;
+  /** 身份冲突的中文说明（`identityConflict === true` 时给出）。 */
+  identityWarning?: string;
+  /** 本次因「附件可能被别的设备改过」而暂停推送的附件个数（不影响其它文件）。 */
+  attachmentsBlocked?: number;
+  /** 附件被暂停推送的中文原因（`attachmentsBlocked > 0` 时给出）。 */
+  attachmentWarning?: string;
+  /**
+   * 本次生效的设备编号（自动分配或沿用老标识）。
+   *
+   * 设置页拿到后回填只读的一行「本机：device-2（自动分配）」，不要求用户手填。
+   */
+  deviceId?: string;
+  /** 设备编号是否由仓库自动分配（true = 自动分配；false = 沿用原标识）。 */
+  deviceIdAuto?: boolean;
+  /** 设备编号的展示文案（`describeClaimOutcome` 的产物，空串 = 不展示）。 */
+  deviceIdNotice?: string;
+  /**
+   * 设备编号登记失败的中文原因（空串 = 成功）。
+   *
+   * 非空时设置页要把「高级」自动展开并显示这一行；**推送**不会继续（fail-closed）。
+   */
+  deviceRegistrationError?: string;
 }
 
 // ---------------------------------------------------------------- 桥协议类型
@@ -267,12 +317,47 @@ interface RemoteProbe {
   detail: string;
 }
 
+/**
+ * 附件基线文档（本机状态文件 `<filesDir>/sync-baseline.json`，**不在 git 仓库里**）。
+ *
+ * 记录「上次同步/推送后看到的附件 zip sha」：push 前用它判断远端 zip 是否被别人改过
+ * （判定在纯函数 `shouldBlockAttachmentPush`，见 `model/deviceIdentity.ts`）。
+ */
+interface AttachmentBaselineDoc {
+  /** 基线所属设备标识（换了设备标识则整份基线作废，避免拿 A 的基线去判 B 的附件）。 */
+  deviceId: string;
+  /** 仓库相对路径（`devices/<id>/attachments/<date>.zip`）→ sha256。 */
+  files: Record<string, string>;
+}
+
+/** 一个被临时挪出仓库的附件（防止被本次提交覆盖）。 */
+interface QuarantinedFile {
+  from: string;
+  to: string;
+}
+
+/** push 前附件守卫的结果。 */
+interface PushAttachmentGuard {
+  /** 被暂停推送（临时挪走）的附件个数。 */
+  blocked: number;
+  /** 第一条中文原因（空串 = 没有拦截）。 */
+  reason: string;
+  /** 非空 = 连「挪走」都失败 → 整次推送失败（fail-closed，绝不冒险覆盖）。 */
+  failure: string;
+  /** 挪走的文件（推送结束后必须在 finally 里放回）。 */
+  moved: QuarantinedFile[];
+}
+
 // ---------------------------------------------------------------- 常量
 
 const REQUEST_TIMEOUT_MS: number = 60000;
 const HTTP_CONNECT_TIMEOUT_MS: number = 15000;
 const HTTP_READ_TIMEOUT_MS: number = 45000;
 const REPO_DIR_NAME: string = 'git-repo';
+/** 附件基线文件名（本机 filesDir 下，不进仓库）。 */
+const BASELINE_FILE_NAME: string = 'sync-baseline.json';
+/** 被暂停推送的附件的临时隔离目录（本机 filesDir 下，不进仓库）。 */
+const QUARANTINE_DIR_NAME: string = 'sync-quarantine';
 const BRIDGE_PROXY_NAME: string = 'dshGitHost';
 const DEVICE_ID_PATTERN: string = '^[a-z0-9][a-z0-9-]{0,31}$';
 /** 0o100644：普通文件 */
@@ -455,6 +540,12 @@ export class GitSyncService {
   private bridgeReady: boolean = false;
   /** 桥不可用的原因（空串表示没有失败）。 */
   private bridgeError: string = '';
+  /** 本机设备指纹缓存（`settingsStore.deviceFingerprint`；空串 = 还没生成）。 */
+  private fingerprintCache: string = '';
+  /** 最近一次身份比对的结论文案（空串 = 正常；非空 = 两台设备用了同一个设备标识）。 */
+  private identityNotice: string = '';
+  /** 最近一次身份比对是否冲突（与 `identityNotice` 成对）。 */
+  private identityConflict: boolean = false;
 
   constructor(controller: webview.WebviewController) {
     this.controller = controller;
@@ -539,7 +630,30 @@ export class GitSyncService {
   async zipUpsert(archivePath: string, entries: ZipEntryInput[]): Promise<ZipUpsertResult> {
     const payload: ZipUpsertRequest = { archivePath: archivePath, entries: entries };
     const data: ZipUpsertResult = await this.callBridgeJson<ZipUpsertResult>('zipUpsert', payload);
+    // 本机刚写出的版本就是「基线」：push 前据此判断远端这个 zip 后来有没有被别人改过
+    this.rememberAttachmentBaseline(archivePath);
     return data;
+  }
+
+  /**
+   * 把本机刚写出的附件 zip 记成基线（只认仓库内 `devices/<id>/attachments/` 下的路径）。
+   *
+   * 不记的话，「本地新建的附件」会因为没有基线被 fail-closed 拒推（永远推不上去）。
+   */
+  private rememberAttachmentBaseline(archivePath: string): void {
+    try {
+      const deviceId: string = normalizeDeviceId(this.config.deviceId);
+      const root: string = normalizePath(this.getRepoRoot());
+      const path: string = normalizePath(archivePath);
+      const prefix: string = root + '/' + devicePathPrefix(deviceId) + 'attachments/';
+      if (path.indexOf(prefix) !== 0) {
+        return;
+      }
+      const relPath: string = devicePathPrefix(deviceId) + 'attachments/' + path.substring(prefix.length);
+      this.recordBaselineEntry(relPath, this.sha256OfFile(path));
+    } catch (error) {
+      // 设备标识非法 / 路径不在本设备目录：不记基线（下次推送按 fail-closed 处理）
+    }
   }
 
   /** 列出 zip 条目（包不存在 → 空数组）。 */
@@ -649,6 +763,35 @@ export class GitSyncService {
       if (head.length > 0) {
         result.commit = head;
       }
+      // 设备身份（拉取**之后**才有远端版本可读）：老仓库缺指纹 → 写入本机指纹、不报警；
+      // 远端指纹≠本机 → 两台设备用了同一个 deviceId，带上标记让设置页做常驻警告。
+      try {
+        await this.applyIdentityCheck(true);
+        if (this.identityConflict) {
+          result.identityConflict = true;
+          result.identityWarning = this.identityNotice;
+          result.message = result.message + '；' + this.identityNotice;
+        }
+        // 拉取成功后把工作副本里的附件 sha 记成基线：下次推送据此判断「是不是别人改的」
+        this.snapshotAttachmentBaselines();
+      } catch (error) {
+        // 身份比对 / 基线快照失败，不影响「已经拉取成功」这个事实（下次同步再比）
+      }
+      // 设备编号自动登记（数据边界）：拉取后 registry 才是最新的，算号/抢占都在这一步。
+      // 失败**不阻断本次拉取**（拉取本身没有写仓库），但必须把原因交回设置页（自动展开「高级」）；
+      // 推送侧则是 fail-closed（见 push 里的 ensureDeviceRegistered）。
+      const registration: GitSyncResult = await this.registerDevice(true);
+      if (registration.ok) {
+        result.deviceId = registration.deviceId;
+        result.deviceIdAuto = registration.deviceIdAuto;
+        result.deviceIdNotice = registration.deviceIdNotice;
+        if (registration.message.length > 0) {
+          result.message = result.message + '；' + registration.message;
+        }
+      } else {
+        result.deviceRegistrationError = registration.message;
+        result.message = result.message + '；' + registration.message;
+      }
       return result;
     } catch (error) {
       return failed('拉取失败', error as Object);
@@ -661,14 +804,42 @@ export class GitSyncService {
     if (!guard.ok) {
       return rejected('推送失败', guard.message);
     }
-    const problem: string = this.validateForSync();
+    const problem: string = this.validateForSync(false);
     if (problem.length > 0) {
       return rejected('推送失败', problem);
+    }
+    // 设备编号登记（数据边界，**fail-closed**）：必须先在 devices/registry.jsonl 里有本机的行，
+    // 才能写 devices/<deviceId>/。抢不到编号 → 整次推送失败，绝不用一个可能撞车的号继续写。
+    try {
+      await this.ensureDeviceRegistered(false);
+    } catch (error) {
+      const registrationFailure: GitSyncResult = failed('推送失败', error as Object);
+      if (registrationFailure.code === undefined || registrationFailure.code.length === 0) {
+        registrationFailure.code = 'E_DEVICE_ID_UNREADABLE';
+      }
+      registrationFailure.deviceRegistrationError = registrationFailure.message;
+      return registrationFailure;
+    }
+    // 编号已经就位：再跑一次完整校验（设备标识这条现在必然通过，其余检查不重复联网）
+    const deviceProblem: string = this.validateForSync();
+    if (deviceProblem.length > 0) {
+      return rejected('推送失败', deviceProblem);
     }
     // 提交范围不变量（docs/DATA-CONTRACT.md §1/§6）：待提交路径越界一律拒绝，且不触碰网络
     const scopeProblem: string = this.verifyPushScope();
     if (scopeProblem.length > 0) {
       return rejected('推送失败', scopeProblem);
+    }
+    // 设备身份比对（首次同步会写入本机指纹；冲突不阻断推送，只带标记给页面做常驻警告）
+    try {
+      await this.applyIdentityCheck(true);
+    } catch (error) {
+      // 比对失败不阻断推送：附件守卫仍按 fail-closed 处理（拿不到指纹就拒推附件）
+    }
+    // 附件守卫：远端版本可能被另一台设备改过的 zip 先挪出仓库，避免被本次提交覆盖
+    const attachmentGuard: PushAttachmentGuard = this.guardAttachmentsBeforePush();
+    if (attachmentGuard.failure.length > 0) {
+      return rejected('推送失败', attachmentGuard.failure);
     }
     try {
       const args: Record<string, string> = this.configArgs();
@@ -695,13 +866,36 @@ export class GitSyncService {
       } else if (data.branchCreatedLocal === true) {
         summary = summary + '；已在本地创建分支 ' + branch;
       }
+      if (attachmentGuard.blocked > 0) {
+        summary = summary + '；' + describeAttachmentPushBlock(attachmentGuard.blocked, attachmentGuard.reason);
+      }
+      if (this.identityConflict) {
+        summary = summary + '；' + this.identityNotice;
+      }
       const result: GitSyncResult = { ok: true, message: summary, branch: branch };
       if (commit.length > 0) {
         result.commit = commit;
       }
+      if (attachmentGuard.blocked > 0) {
+        result.attachmentsBlocked = attachmentGuard.blocked;
+        result.attachmentWarning = attachmentGuard.reason;
+      }
+      if (this.identityConflict) {
+        result.identityConflict = true;
+        result.identityWarning = this.identityNotice;
+      }
+      // 推送成功后把「本次真正推上去的附件」记成基线（被挪走的那几个不在工作副本里，不会被记）
+      try {
+        this.snapshotAttachmentBaselines();
+      } catch (error) {
+        // 基线写失败不影响已完成的推送（下次拉取会重建基线）
+      }
       return result;
     } catch (error) {
       return failed('推送失败', error as Object);
+    } finally {
+      // 无论成败都把临时挪走的附件放回（否则用户会以为附件丢了）
+      this.restoreQuarantined(attachmentGuard);
     }
   }
 
@@ -1030,6 +1224,549 @@ export class GitSyncService {
     return root;
   }
 
+  // -------------------------------------------------------------- 设备身份（指纹 / 附件基线）
+
+  /** 本机状态文件的绝对路径（`<filesDir>/<name>`，在 git 仓库**之外**，不会被提交）。 */
+  private stateFilePath(name: string): string {
+    const filesDir: string =
+      GitSyncService.filesDirOverride.length > 0
+        ? GitSyncService.filesDirOverride
+        : this.resolveFilesDir();
+    return normalizePath(filesDir) + '/' + name;
+  }
+
+  /** 字节 → ASCII 文本（指纹与基线 JSON 都是 ASCII，不引入 TextDecoder 的平台差异）。 */
+  private static asciiOf(bytes: Uint8Array): string {
+    let out: string = '';
+    for (let index = 0; index < bytes.length; index++) {
+      out += String.fromCharCode(bytes[index]);
+    }
+    return out;
+  }
+
+  /** 读一个文本文件（不存在 / 读失败 → 空串）。 */
+  private readTextFile(path: string): string {
+    if (path.length === 0 || !this.fileExists(path)) {
+      return '';
+    }
+    const encoded: string = this.readFileBase64(path);
+    if (encoded.length === 0) {
+      return '';
+    }
+    return GitSyncService.asciiOf(GitSyncService.base64().decodeSync(encoded));
+  }
+
+  /** 写一个文本文件（复用现有 base64 通道，不再引一套文件 API）。 */
+  private writeTextFile(path: string, text: string): void {
+    if (path.length === 0 || text.length === 0) {
+      return;
+    }
+    this.writeFileBase64(path, this.base64Text(text));
+  }
+
+  /**
+   * 本机指纹：内存 → settingsStore → 都没有就**生成一个随机 UUID 并落盘**。
+   *
+   * 只在这里生成（首次同步时发生），所以「旧数据没有该键」不会在只读路径写盘。
+   */
+  private async ensureLocalFingerprint(): Promise<string> {
+    const cached: string = normalizeFingerprint(this.fingerprintCache);
+    if (cached.length > 0) {
+      return cached;
+    }
+    let stored: string = '';
+    let identity: string = '';
+    try {
+      const settings = await settingsStore.load();
+      stored = normalizeFingerprint(settings.deviceFingerprint);
+      identity = normalizeUuid(settings.deviceUuid);
+    } catch (error) {
+      stored = '';
+    }
+    if (stored.length > 0) {
+      this.fingerprintCache = stored;
+      return stored;
+    }
+    // 与设备编号登记合并：身份 uuid 已存在就沿用它当指纹（两个键从此指向同一个身份，
+    // 不会因为「先有 uuid 后生成指纹」而让 `.device-fingerprint` 与 registry 对不上）
+    if (identity.length > 0) {
+      this.fingerprintCache = identity;
+      try {
+        await settingsStore.save({ deviceFingerprint: identity });
+      } catch (error) {
+        // 写盘失败：本次用内存值即可
+      }
+      return identity;
+    }
+    const fingerprint: string = generateFingerprint();
+    if (fingerprint.length === 0) {
+      return '';
+    }
+    this.fingerprintCache = fingerprint;
+    try {
+      await settingsStore.save({ deviceFingerprint: fingerprint });
+    } catch (error) {
+      // 设置存储未初始化 / 写盘失败：本次先用内存指纹，下次同步再试（不阻断同步）
+    }
+    return fingerprint;
+  }
+
+  /** 仓库里 `devices/<id>/.device-fingerprint` 的绝对路径（设备标识非法 → 空串）。 */
+  private repoFingerprintFilePath(): string {
+    let deviceId: string = '';
+    try {
+      deviceId = normalizeDeviceId(this.config.deviceId);
+    } catch (error) {
+      return '';
+    }
+    const relPath: string = deviceFingerprintPath(deviceId);
+    if (relPath.length === 0) {
+      return '';
+    }
+    return this.getRepoRoot() + '/' + relPath;
+  }
+
+  /** 仓库工作副本里的指纹（不存在 / 非法 → 空串）。 */
+  private readRepoFingerprint(): string {
+    const path: string = this.repoFingerprintFilePath();
+    if (path.length === 0) {
+      return '';
+    }
+    return normalizeFingerprint(this.readTextFile(path));
+  }
+
+  /**
+   * 首次同步：把本机指纹写进仓库工作副本（随后被 push 提交）。
+   *
+   * **已存在则绝不覆盖**：覆盖就等于掩盖「两台设备同 id」这件事。
+   */
+  private adoptRepoFingerprint(fingerprint: string): void {
+    const path: string = this.repoFingerprintFilePath();
+    if (path.length === 0 || fingerprint.length === 0) {
+      return;
+    }
+    if (this.readRepoFingerprint().length > 0) {
+      return;
+    }
+    const text: string = fingerprintFileText(fingerprint);
+    if (text.length === 0) {
+      return;
+    }
+    this.writeTextFile(path, text);
+  }
+
+  /**
+   * 身份比对（拉取后 / 推送前 / 设置页进页面时调用）。
+   *
+   * @param adopt true = 远端缺指纹时写入本机指纹（首次同步）；false = 只读比对（页面查询用）。
+   */
+  private async applyIdentityCheck(adopt: boolean): Promise<void> {
+    const local: string = await this.ensureLocalFingerprint();
+    const remote: string = this.readRepoFingerprint();
+    const check: IdentityCheck = checkDeviceIdentity(remote, local);
+    if (adopt && check.adoptFingerprint && local.length > 0) {
+      this.adoptRepoFingerprint(local);
+    }
+    this.identityConflict = check.conflict;
+    this.identityNotice = check.conflict ? describeIdentityConflict(this.config.deviceId) : '';
+  }
+
+  /**
+   * 设置页用的身份警告（空串 = 正常；非空 = 常驻 warning 文案）。
+   *
+   * 只读比对（不写文件）：页面进入 / 同步后调用，用户改成唯一设备标识后警告会立刻消失。
+   */
+  async identityWarning(): Promise<string> {
+    try {
+      await this.applyIdentityCheck(false);
+    } catch (error) {
+      return this.identityNotice;
+    }
+    return this.identityNotice;
+  }
+
+  // -------------------------------------------------------------- 设备编号自动登记（数据边界）
+
+  /** `devices/registry.jsonl` 的绝对路径（仓库工作副本内）。 */
+  private registryFilePath(): string {
+    return normalizePath(this.getRepoRoot() + '/' + REGISTRY_PATH);
+  }
+
+  /** 仓库里 `devices/` 下的**目录**名（不存在 → 空数组；只列目录，忽略 registry.jsonl 等文件）。 */
+  private listDeviceDirNames(): string[] {
+    const names: string[] = [];
+    const dir: string = normalizePath(this.getRepoRoot() + '/' + DEVICES_DIR);
+    if (!this.isDirectory(dir)) {
+      return names;
+    }
+    let listing: string[] = [];
+    try {
+      listing = JSON.parse(this.readdir(dir)) as string[];
+    } catch (error) {
+      return names;
+    }
+    if (!Array.isArray(listing)) {
+      return names;
+    }
+    for (let index = 0; index < listing.length; index++) {
+      const name: string = listing[index];
+      if (name.length === 0 || name === '.' || name === '..') {
+        continue;
+      }
+      if (this.isDirectory(dir + '/' + name)) {
+        names.push(name);
+      }
+    }
+    return names;
+  }
+
+  /**
+   * 抢占端口：把纯逻辑 `model/deviceRegistry.ts` 接到真实的 git 桥上。
+   *
+   * `commitRegistry` 只提交 `devices/registry.jsonl`（桥侧白名单，`commitPaths` op），
+   * 并把追加前的原文一起传下去：push 被拒时桥会回滚这次提交，重试的 `pull` 才能快进。
+   */
+  private registryPort(): DeviceRegistryPort {
+    const port: DeviceRegistryPort = {
+      readRegistry: (): string => this.readTextFile(this.registryFilePath()),
+      listDeviceDirs: (): string[] => this.listDeviceDirNames(),
+      pull: async (): Promise<void> => {
+        await this.callBridge('pull', this.configArgs());
+      },
+      commitRegistry: async (text: string, message: string): Promise<void> => {
+        const path: string = this.registryFilePath();
+        const previous: string = this.readTextFile(path);
+        this.writeTextFile(path, text);
+        const args: Record<string, string> = this.configArgs();
+        args['paths'] = REGISTRY_PATH;
+        args['message'] = message;
+        // 抢占循环里刚刚拉过，不必在桥里再拉一次（省一次网络往返）
+        args['prePull'] = 'false';
+        args['previous'] = previous;
+        await this.callBridge('commitPaths', args);
+      }
+    };
+    return port;
+  }
+
+  /**
+   * 本机身份 uuid：内存/设置 → 都没有就生成一个并落盘。
+   *
+   * 与既有「设备指纹」半成品**合并**：有指纹就沿用同一个值（`.device-fingerprint` 与
+   * `devices/registry.jsonl` 从此指向同一个身份，不会因为两个随机串不一致而误报冲突）。
+   */
+  private async ensureDeviceUuid(): Promise<string> {
+    let existing: string = '';
+    let fingerprint: string = '';
+    try {
+      const settings = await settingsStore.load();
+      existing = normalizeUuid(settings.deviceUuid);
+      fingerprint = normalizeFingerprint(settings.deviceFingerprint);
+    } catch (error) {
+      existing = '';
+    }
+    if (existing.length > 0) {
+      return existing;
+    }
+    const generated: string = fingerprint.length > 0 ? fingerprint : generateFingerprint();
+    const uuid: string = normalizeUuid(generated);
+    if (uuid.length === 0) {
+      throw new SyncError('E_DEVICE_ID_UNREADABLE', '无法生成设备身份串，请稍后重试');
+    }
+    try {
+      await settingsStore.save({ deviceUuid: uuid, deviceFingerprint: fingerprint.length > 0 ? fingerprint : uuid });
+    } catch (error) {
+      // 设置存储未初始化（页面还没 bootstrap）：本次先用内存值，下次接入再落盘
+    }
+    this.fingerprintCache = fingerprint.length > 0 ? fingerprint : uuid;
+    return uuid;
+  }
+
+  /**
+   * 设备编号登记（**主流程**）：拉取 → 注册/抢占 → 写回设置。失败即 fail-closed。
+   *
+   * 步骤（`docs/DATA-CONTRACT.md`「devices/registry.jsonl」）：
+   * 1. 拉取远端（fast-forward only）——`pulled` 为 true 时跳过（调用方刚拉过）；
+   * 2. registry 里有本机 uuid 的行 → 直接用该行 `deviceId`（不重复登记）；
+   * 3. 否则算下一个编号（老标识目录已在仓库则沿用）→ 追加一行 → 提交+推送；
+   * 4. push 被拒（别人抢先）→ 重新拉取 → 重算 → 重试，最多 5 次；
+   * 5. 成功后写 `{deviceId, deviceIdAuto, deviceUuid}` 到设置。
+   *
+   * @returns 本次生效的设备编号与展示文案
+   * @throws SyncError `E_DEVICE_ID_CONFLICT`（重试用尽）/ `E_DEVICE_ID_UNREADABLE`（仓库不可读）
+   */
+  async registerDevice(pulled: boolean = false): Promise<GitSyncResult> {
+    const guard: SyncPreconditionResult = this.precondition(false);
+    if (!guard.ok) {
+      return rejected('设备编号登记失败', guard.message);
+    }
+    const problem: string = this.validateForSync(false);
+    if (problem.length > 0) {
+      return rejected('设备编号登记失败', problem);
+    }
+    try {
+      const uuid: string = await this.ensureDeviceUuid();
+      const outcome: ClaimOutcome = await claimDeviceId(this.registryPort(), {
+        localDeviceId: this.config.deviceId,
+        uuid: uuid,
+        at: new Date().toISOString(),
+        // host 只写「本机接入前的原标识」，纯排查线索（不含 token / 机型等任何信息）
+        host: this.config.deviceId,
+        pulled: pulled
+      });
+      if (!outcome.ok) {
+        const failure: GitSyncResult = rejected('设备编号登记失败', outcome.message);
+        failure.code = outcome.code;
+        failure.deviceRegistrationError = outcome.message;
+        return failure;
+      }
+      this.config.deviceId = outcome.deviceId;
+      try {
+        await settingsStore.save({
+          deviceId: outcome.deviceId,
+          deviceIdAuto: outcome.auto,
+          deviceUuid: outcome.uuid
+        });
+      } catch (error) {
+        // 设置写不进去不影响本次同步（编号已在内存里生效），下次接入会再写一次
+      }
+      const notice: string = describeClaimOutcome(outcome.deviceId, outcome.auto);
+      const result: GitSyncResult = {
+        ok: true,
+        message: notice + (outcome.registered ? '（已在仓库登记）' : '（仓库里已登记）'),
+        deviceId: outcome.deviceId,
+        deviceIdAuto: outcome.auto,
+        deviceIdNotice: notice
+      };
+      return result;
+    } catch (error) {
+      const failure: GitSyncResult = failed('设备编号登记失败', error as Object);
+      failure.deviceRegistrationError = failure.message;
+      return failure;
+    }
+  }
+
+  /**
+   * 同步流程里的「确保已登记」：失败抛 `SyncError`（推送必须**停下**，不许随便用一个号继续写）。
+   *
+   * @param pulled true = 调用方刚拉取过（省一次 pull）
+   */
+  private async ensureDeviceRegistered(pulled: boolean): Promise<void> {
+    const result: GitSyncResult = await this.registerDevice(pulled);
+    if (!result.ok) {
+      const code: string = result.code === undefined || result.code.length === 0 ? 'E_DEVICE_ID_UNREADABLE' : result.code;
+      throw new SyncError(code, result.message);
+    }
+  }
+
+  /** 文件内容的 sha256（hex；读失败 → 空串）。附件 zip 的「版本指纹」。 */
+  private sha256OfFile(path: string): string {    if (!this.fileExists(path)) {
+      return '';
+    }
+    let file: fs.File | null = null;
+    try {
+      file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      const info: fs.Stat = fs.statSync(path);
+      const size: number = info.size;
+      if (size <= 0) {
+        return '';
+      }
+      const buffer: ArrayBuffer = new ArrayBuffer(size);
+      const readLength: number = fs.readSync(file.fd, buffer);
+      if (readLength <= 0) {
+        return '';
+      }
+      return sha256Hex(new Uint8Array(buffer, 0, readLength));
+    } catch (error) {
+      return '';
+    } finally {
+      if (file !== null) {
+        try {
+          fs.closeSync(file);
+        } catch (error) {
+          // 关闭失败不影响 sha 结果
+        }
+      }
+    }
+  }
+
+  /** 读本机附件基线（设备标识不匹配 / 文件坏 → 空表）。 */
+  private readBaseline(deviceId: string): AttachmentBaselineDoc {
+    const empty: AttachmentBaselineDoc = { deviceId: deviceId, files: {} };
+    const path: string = this.stateFilePath(BASELINE_FILE_NAME);
+    const text: string = this.readTextFile(path);
+    if (text.length === 0) {
+      return empty;
+    }
+    try {
+      const doc: AttachmentBaselineDoc = JSON.parse(text) as AttachmentBaselineDoc;
+      if (doc === null || doc === undefined) {
+        return empty;
+      }
+      const owner: string = typeof doc.deviceId === 'string' ? doc.deviceId : '';
+      if (owner !== deviceId) {
+        return empty;
+      }
+      const files: Record<string, string> = doc.files === undefined || doc.files === null ? {} : doc.files;
+      const result: AttachmentBaselineDoc = { deviceId: deviceId, files: files };
+      return result;
+    } catch (error) {
+      return empty;
+    }
+  }
+
+  /** 写本机附件基线（整份覆盖；调用方先读再改）。 */
+  private writeBaseline(doc: AttachmentBaselineDoc): void {
+    this.writeTextFile(this.stateFilePath(BASELINE_FILE_NAME), JSON.stringify(doc));
+  }
+
+  /** 记一个附件的基线 sha（本机写出的版本 / 推送成功后 / 拉取后看到的版本）。 */
+  private recordBaselineEntry(relPath: string, sha: string): void {
+    let deviceId: string = '';
+    try {
+      deviceId = normalizeDeviceId(this.config.deviceId);
+    } catch (error) {
+      return;
+    }
+    if (relPath.length === 0 || sha.length === 0) {
+      return;
+    }
+    const doc: AttachmentBaselineDoc = this.readBaseline(deviceId);
+    doc.files[relPath] = sha;
+    this.writeBaseline(doc);
+  }
+
+  /** 本设备目录下的附件 zip 文件名（升序；目录不存在 → 空数组）。 */
+  private listAttachmentArchives(deviceId: string): string[] {
+    const dir: string = normalizePath(this.getRepoRoot() + '/' + devicePathPrefix(deviceId) + 'attachments');
+    if (!this.fileExists(dir)) {
+      return [];
+    }
+    let names: string[] = [];
+    try {
+      names = fs.listFileSync(dir);
+    } catch (error) {
+      return [];
+    }
+    names.sort();
+    const archives: string[] = [];
+    for (let index = 0; index < names.length; index++) {
+      const name: string = names[index];
+      if (name.toLowerCase().endsWith('.zip')) {
+        archives.push(name);
+      }
+    }
+    return archives;
+  }
+
+  /** 基线快照：把工作副本里当前所有附件 zip 的 sha 记成「已知状态」（拉取/推送成功后调）。 */
+  private snapshotAttachmentBaselines(): void {
+    let deviceId: string = '';
+    try {
+      deviceId = normalizeDeviceId(this.config.deviceId);
+    } catch (error) {
+      return;
+    }
+    const prefix: string = devicePathPrefix(deviceId);
+    const dir: string = normalizePath(this.getRepoRoot() + '/' + prefix + 'attachments');
+    const names: string[] = this.listAttachmentArchives(deviceId);
+    if (names.length === 0) {
+      return;
+    }
+    const doc: AttachmentBaselineDoc = this.readBaseline(deviceId);
+    let changed: boolean = false;
+    for (let index = 0; index < names.length; index++) {
+      const name: string = names[index];
+      const sha: string = this.sha256OfFile(dir + '/' + name);
+      if (sha.length === 0) {
+        continue;
+      }
+      const relPath: string = prefix + 'attachments/' + name;
+      if (doc.files[relPath] !== sha) {
+        doc.files[relPath] = sha;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.writeBaseline(doc);
+    }
+  }
+
+  /**
+   * push 前的附件守卫（fail-closed）：把「可能被另一台设备改过」的 zip 临时挪出仓库。
+   *
+   * 为什么是「挪走」而不是「跳过提交」：桥的 push 会把 `devices/<id>/` 整个目录 add 进来，
+   * 不挪走就无法保证它不被本次提交覆盖。挪走的文件在 push 结束后由 `restoreQuarantined` 放回。
+   */
+  private guardAttachmentsBeforePush(): PushAttachmentGuard {
+    const guard: PushAttachmentGuard = { blocked: 0, reason: '', failure: '', moved: [] };
+    let deviceId: string = '';
+    try {
+      deviceId = normalizeDeviceId(this.config.deviceId);
+    } catch (error) {
+      return guard;
+    }
+    const prefix: string = devicePathPrefix(deviceId);
+    const dir: string = normalizePath(this.getRepoRoot() + '/' + prefix + 'attachments');
+    if (!this.fileExists(dir)) {
+      return guard;
+    }
+    const names: string[] = this.listAttachmentArchives(deviceId);
+    if (names.length === 0) {
+      return guard;
+    }
+    const local: string = normalizeFingerprint(this.fingerprintCache);
+    const remote: string = this.readRepoFingerprint();
+    const doc: AttachmentBaselineDoc = this.readBaseline(deviceId);
+    const quarantineDir: string = this.stateFilePath(QUARANTINE_DIR_NAME + '/' + Date.now().toString());
+    for (let index = 0; index < names.length; index++) {
+      const name: string = names[index];
+      const path: string = dir + '/' + name;
+      if (!this.fileExists(path)) {
+        continue;
+      }
+      const relPath: string = prefix + 'attachments/' + name;
+      const baseline: string | null = doc.files[relPath] === undefined ? null : doc.files[relPath];
+      const decision: AttachmentPushDecision = shouldBlockAttachmentPush({
+        remoteSha: this.sha256OfFile(path),
+        localBaselineSha: baseline,
+        remoteFingerprint: remote,
+        localFingerprint: local
+      });
+      if (!decision.block) {
+        continue;
+      }
+      const target: string = quarantineDir + '/' + name;
+      this.mkdirp(dirnameOf(target));
+      try {
+        fs.renameSync(path, target);
+      } catch (error) {
+        guard.failure = '附件守卫失败：无法暂存 ' + relPath + '，已停止推送以免覆盖（请重试）';
+        return guard;
+      }
+      guard.blocked = guard.blocked + 1;
+      if (guard.reason.length === 0) {
+        guard.reason = decision.reason;
+      }
+      const moved: QuarantinedFile = { from: path, to: target };
+      guard.moved.push(moved);
+    }
+    return guard;
+  }
+
+  /** 把 `guardAttachmentsBeforePush` 挪走的附件放回原位（push 的 finally 调用）。 */
+  private restoreQuarantined(guard: PushAttachmentGuard): void {
+    for (let index = 0; index < guard.moved.length; index++) {
+      const item: QuarantinedFile = guard.moved[index];
+      try {
+        this.mkdirp(dirnameOf(item.from));
+        fs.renameSync(item.to, item.from);
+      } catch (error) {
+        // 放回失败：文件仍在隔离目录（sync-quarantine），下次「拉取」会带回远端版本
+      }
+    }
+  }
+
   // -------------------------------------------------------------- 宿主代理：HTTP（异步）
 
   /**
@@ -1181,10 +1918,20 @@ export class GitSyncService {
 
   // -------------------------------------------------------------- 内部：配置与校验
 
-  /** 本次 HTTPS 认证使用的用户名（Gitee = 用户填的登录名；GitHub = x-access-token）。 */
+  /**
+   * 本次 HTTPS 认证使用的用户名。
+   *
+   * - 手填了用户名 → 一律用用户的（Gitee = 登录名；组织仓库时 owner 不是登录名，必须能手改）；
+   * - 没填 → 按仓库地址推断（Gitee 取 owner），GitHub 等回落 `x-access-token`。
+   */
   private authUsername(): string {
     const platform: string = this.config.platform === undefined ? '' : this.config.platform;
     const username: string = this.config.gitUsername === undefined ? '' : this.config.gitUsername;
+    const inferred: string = httpsAuthUsername(platform, this.config.repoUrl, username);
+    if (inferred.length > 0) {
+      return inferred;
+    }
+    // 推不出来（Gitee 且地址不标准）：保持旧行为，由 assertHttpsUsername 给可读错误
     return resolveGitUsername(platform, username);
   }
 
@@ -1208,7 +1955,7 @@ export class GitSyncService {
     return args;
   }
 
-  private validateForSync(): string {
+  private validateForSync(requireDeviceId: boolean = true): string {
     const config: GitSyncConfig = this.config;
     if (config.repoUrl.length === 0) {
       return '请先在设置页填写仓库地址（HTTPS）';
@@ -1228,10 +1975,10 @@ export class GitSyncService {
     if (branchProblem.length > 0) {
       return branchProblem;
     }
-    if (config.deviceId.length === 0) {
+    if (requireDeviceId && config.deviceId.length === 0) {
       return '请填写设备标识（如 phone-a）';
     }
-    if (!new RegExp(DEVICE_ID_PATTERN).test(config.deviceId)) {
+    if (requireDeviceId && !new RegExp(DEVICE_ID_PATTERN).test(config.deviceId)) {
       return '设备标识不合法：需小写字母/数字/短横线，1–32 位且以字母或数字开头';
     }
     if (config.token.length === 0) {
@@ -1239,10 +1986,11 @@ export class GitSyncService {
     }
     // P0：Gitee 的 HTTPS 用户名必须=登录名（token 只作密码），不能兜底 x-access-token，
     // 否则一定 401。这里在**发请求前**拦住，任何情况下都不打网络。
+    // 主表单不再要求手填用户名：能按仓库地址推断出 Gitee owner 时用推断值，推不出来才算问题。
     const usernameProblem: string | null = assertHttpsUsername(
       config.platform === undefined ? '' : config.platform,
       authMode,
-      config.gitUsername === undefined ? '' : config.gitUsername
+      this.authUsername()
     );
     if (usernameProblem !== null) {
       return usernameProblem;

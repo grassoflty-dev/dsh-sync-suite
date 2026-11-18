@@ -165,3 +165,38 @@ describe('cachedAiModel 与 load() 的时序：summarize 不会拿不到模型',
     assert.match(SETTINGS_PAGE, /aiModel: this\.aiModel,/);
   });
 });
+
+// ---------------------------------------------------------------- 数据边界：设备编号自动分配
+//
+// 主表单不再让用户填设备标识：编号由仓库 `devices/registry.jsonl` 分配（uuid 是身份）。
+// 这条链路要成立，两个新键必须**成对**读写，且同步服务登记成功后必须写回设置。
+
+describe('数据边界：deviceUuid / deviceIdAuto 的读写与回写', () => {
+  const GIT_SERVICE = readFileSync(new URL('services/GitSyncService.ets', ETS), 'utf8');
+
+  test('两个新键：常量 + 默认值 + load/save 成对', () => {
+    assert.match(SETTINGS_STORE, /const KEY_DEVICE_UUID: string = 'deviceUuid';/);
+    assert.match(SETTINGS_STORE, /const KEY_DEVICE_ID_AUTO: string = 'deviceIdAuto';/);
+    assert.match(LOAD_BODY, /prefs\.get\(KEY_DEVICE_UUID,\s*''\)/, 'load() 必须读 uuid');
+    assert.match(LOAD_BODY, /prefs\.get\(KEY_DEVICE_ID_AUTO,\s*false\)/, '旧数据没有该键 → false');
+    assert.match(SAVE_BODY, /prefs\.put\(KEY_DEVICE_UUID, next\.deviceUuid\)/, 'save() 必须写回 uuid');
+    assert.match(SAVE_BODY, /prefs\.put\(KEY_DEVICE_ID_AUTO, next\.deviceIdAuto\)/, 'save() 必须写回来源标记');
+  });
+
+  test('ScheduleSettings / SettingsPatch 都有这两个字段（否则保存即丢）', () => {
+    assert.match(SETTINGS_STORE, /deviceUuid: string;/);
+    assert.match(SETTINGS_STORE, /deviceIdAuto: boolean;/);
+    assert.match(SETTINGS_STORE, /deviceUuid\?: string;/);
+    assert.match(SETTINGS_STORE, /deviceIdAuto\?: boolean;/);
+    // 未传 = 不改（设置页只改设备标识时不该把身份清空）
+    assert.match(SETTINGS_STORE, /deviceUuid: patch\.deviceUuid === undefined \? current\.deviceUuid/);
+  });
+
+  test('同步服务登记成功后写回 {deviceId, deviceIdAuto, deviceUuid}', () => {
+    assert.match(GIT_SERVICE, /deviceId: outcome\.deviceId/);
+    assert.match(GIT_SERVICE, /deviceIdAuto: outcome\.auto/);
+    assert.match(GIT_SERVICE, /deviceUuid: outcome\.uuid/);
+    // 身份与既有「设备指纹」半成品合并：有指纹就沿用它当 uuid
+    assert.match(GIT_SERVICE, /fingerprint\.length > 0 \? fingerprint : generateFingerprint\(\)/);
+  });
+});

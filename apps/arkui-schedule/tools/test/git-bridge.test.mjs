@@ -908,3 +908,80 @@ describe('桥内部工具', () => {
     assert.ok(calls.some(([name]) => name === 'writeFileBase64'));
   });
 });
+
+// ------------------------------------------------------------------ 8. 设备登记表提交（commitPaths）
+//
+// 设备编号自动分配要往 `devices/registry.jsonl` 追加一行（与本机目录同级，不在
+// `devices/<deviceId>/` 内），所以桥开了一个**白名单**提交通道：只允许这一个文件。
+// 越权路径必须在**发请求前**被拒，否则「本机只写自己目录」的数据边界就破了。
+
+describe('设备登记表提交（commitPaths）：白名单 + 只动 registry.jsonl', () => {
+  test('supportedOps 暴露 commitPaths；白名单只有 devices/registry.jsonl', () => {
+    const repoRoot = toPosix(join(makeTempDir('dsh-git-cp0-'), 'git-repo'));
+    const { host } = createFakeHost(repoRoot, () => {
+      throw new Error('本用例不应发起 HTTP 请求');
+    });
+    const bridge = loadBridge(host);
+    assert.ok(bridge.supportedOps.includes('commitPaths'), '桥必须支持 commitPaths');
+    assert.deepEqual(bridge.internals.commitPathWhitelist, ['devices/registry.jsonl'], '白名单只放行登记表');
+    assert.equal(typeof bridge.internals.commitPaths, 'function', 'internals 里要能直接调到实现');
+  });
+
+  test('越权路径（别人的设备目录 / 仓库根文件 / 上级目录）一律 E_GIT 且不发请求', async () => {
+    const repoRoot = toPosix(join(makeTempDir('dsh-git-cp1-'), 'git-repo'));
+    mkdirSync(repoRoot, { recursive: true });
+    runGit(['init', '-b', 'main'], repoRoot);
+    const { host, httpRequests } = createFakeHost(repoRoot, () => {
+      throw new Error('越权路径不该发请求');
+    });
+    const bridge = loadBridge(host);
+    const badPaths = [
+      'devices/device-1/schedules/2026-11-18.jsonl',
+      'README.md',
+      '../escape.txt',
+      'devices/registry.jsonl,devices/device-2/x.jsonl'
+    ];
+    for (const paths of badPaths) {
+      const error = await expectFail(bridge, host, 'commitPaths', {
+        repoUrl: 'https://git.example.invalid/o/r.git',
+        branch: 'main',
+        paths
+      });
+      assert.equal(error.code, 'E_GIT', `路径 ${paths} 必须被拒`);
+      assert.match(error.message, /只允许提交/);
+    }
+    assert.equal(httpRequests.length, 0, '越权必须在联网前被拦住');
+  });
+
+  test('文件不存在 → E_FS（宁可不提交，也不提交半套）', async () => {
+    const repoRoot = toPosix(join(makeTempDir('dsh-git-cp2-'), 'git-repo'));
+    mkdirSync(repoRoot, { recursive: true });
+    runGit(['init', '-b', 'main'], repoRoot);
+    const { host } = createFakeHost(repoRoot, () => {
+      throw new Error('文件缺失不该发请求');
+    });
+    const bridge = loadBridge(host);
+    const error = await expectFail(bridge, host, 'commitPaths', {
+      repoUrl: 'https://git.example.invalid/o/r.git',
+      branch: 'main',
+      paths: 'devices/registry.jsonl'
+    });
+    assert.equal(error.code, 'E_FS');
+    assert.match(error.message, /待提交的文件不存在/);
+  });
+
+  test('未初始化仓库 → 中文 E_GIT（先拉取再登记，不给半成品提交）', async () => {
+    const repoRoot = toPosix(join(makeTempDir('dsh-git-cp3-'), 'git-repo'));
+    const { host } = createFakeHost(repoRoot, () => {
+      throw new Error('未初始化不该发请求');
+    });
+    const bridge = loadBridge(host);
+    const error = await expectFail(bridge, host, 'commitPaths', {
+      repoUrl: 'https://git.example.invalid/o/r.git',
+      branch: 'main',
+      paths: 'devices/registry.jsonl'
+    });
+    assert.equal(error.code, 'E_GIT');
+    assert.match(error.message, /尚未初始化/);
+  });
+});

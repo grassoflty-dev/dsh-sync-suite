@@ -354,3 +354,116 @@ describe('幽灵报错守卫：每个 issue 都必须有可见落点', () => {
     assert.equal(describeFirstIssue(issues), '');
   });
 });
+
+// ---------------------------------------------------------------- 同步组三个字段的「人话说明」
+//
+// 用户反馈：Git 用户名 / 设备标识 / 作者名 三个标题看起来都像「填个名字」，
+// 没人知道它们分别影响什么（认证？写入目录？只影响展示？）。
+// 说明文案是产品语义的一部分：重构可以挪位置、换写法，但不能整段丢掉。
+
+describe('同步组字段说明：写明「它到底影响什么」', () => {
+  const page = readSettingsPage();
+
+  test('Git 用户名：HTTPS 认证用 / GitHub 可留空（x-access-token）/ Gitee 自动取仓库 owner', () => {
+    assert.match(page, /HTTPS 认证用；GitHub 可留空（自动 x-access-token），Gitee 自动取仓库 owner/);
+  });
+
+  test('设备标识：自动分配 + 只在你手改时才需要动', () => {
+    assert.match(page, /自动分配；仅当你要手工指定时才改/);
+  });
+
+  test('作者名：默认「我」，只影响记录里的「谁记的」', () => {
+    assert.match(page, /默认「我」，只影响记录里的"谁记的"/);
+  });
+
+  test('说明用小字（FONT.caption + text_secondary），且允许多行读完（不是单行省略）', () => {
+    const builder = page.slice(page.indexOf('FieldNote(text: string)'), page.indexOf('SyncHeader()'));
+    assert.match(builder, /FONT\.caption/, '说明字号必须是 caption');
+    assert.match(builder, /text_secondary/, '说明颜色必须是 text_secondary');
+    assert.equal(/maxLines\(1\)/.test(builder), false, '字段语义说明不能被单行省略号截断');
+    const notes = [...page.matchAll(/this\.FieldNote\(/g)];
+    assert.ok(notes.length >= 3, `三个字段都要有说明，实际只有 ${notes.length} 处`);
+  });
+
+  test('说明紧跟标题（FieldLabel）之后，且在输入框之前', () => {
+    const labels = ['this.FieldLabel(\'用户名（HTTPS 认证）\')', "this.FieldLabel('设备标识')", "this.FieldLabel('作者名')"];
+    for (const label of labels) {
+      const at = page.indexOf(label);
+      assert.ok(at > 0, `页面上找不到标题：${label}`);
+      const noteAt = page.indexOf('this.FieldNote(', at);
+      assert.ok(noteAt > at, `${label} 下面必须有一行说明`);
+      assert.ok(noteAt - at < 400, `${label} 与说明之间不该隔着一大段界面`);
+      const inputAt = page.indexOf('TextInput(', at);
+      assert.ok(noteAt < inputAt, `${label} 的说明必须在输入框之前（标题下一行）`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------- 数据边界：主表单只留三个控件
+//
+// 产品决定：用户只需要填「仓库地址 + token（+ 分支）」。设备编号由仓库自动分配
+// （`devices/registry.jsonl` + uuid 抢占），用户名按地址推断、作者名默认「我」。
+// 因此那三个原字段必须**默认不可见**（收在「高级 ▸」里），而不是继续占着主表单。
+
+describe('数据边界：主表单只有三个控件，三个原字段藏在「高级」里', () => {
+  const page = readSettingsPage();
+  /** 「高级」折叠区 builder 正文。 */
+  const advanced = page.slice(page.indexOf('SyncAdvancedFields() {'), page.indexOf('SyncGroup() {'));
+  /** 主表单（SyncGroup 里、折叠区调用之前的部分）。 */
+  const mainForm = page.slice(page.indexOf('SyncGroup() {'), page.indexOf('AiGroup() {'));
+
+  test('「高级」默认收起（状态初值 false + 只有展开时才渲染折叠区）', () => {
+    assert.match(page, /@State syncAdvancedOpen: boolean = false/, '「高级」必须默认收起');
+    assert.match(page, /if \(this\.syncAdvancedOpen\) \{\s*\n\s*this\.SyncAdvancedFields\(\)/, '折叠区只在展开时渲染');
+    assert.match(page, /this\.syncAdvancedOpen \? '高级 ▾' : '高级 ▸'/, '折叠区要有可点的「高级 ▸」开关');
+    assert.match(page, /private toggleSyncAdvanced\(\): void/, '点击开关走独立方法（便于清掉自动展开原因）');
+  });
+
+  test('主表单只剩「仓库地址 / 访问 token / 分支」三个控件', () => {
+    assert.match(mainForm, /Text\('仓库地址'\)/, '仓库地址是主表单字段');
+    assert.match(mainForm, /this\.FieldLabel\(this\.authMode === AUTH_SSH \? '访问 token/, '访问 token 是主表单字段');
+    assert.match(mainForm, /Text\('分支'\)/, '分支是主表单字段');
+  });
+
+  test('三个原字段（用户名 / 设备标识 / 作者名）不在主表单里', () => {
+    for (const hidden of ['用户名（HTTPS 认证）', '设备标识', '作者名']) {
+      assert.equal(mainForm.includes(`this.FieldLabel('${hidden}')`), false, `${hidden} 不该出现在主表单`);
+    }
+    assert.equal(/this\.gitUsername\b/.test(mainForm), false, '主表单不该有用户名输入框');
+    assert.equal(/this\.deviceId\b/.test(mainForm), false, '主表单不该有设备标识输入框（只读的 deviceIdNotice 不算）');
+    assert.equal(/this\.author\b/.test(mainForm), false, '主表单不该有作者名输入框');
+  });
+
+  test('三个原字段在「高级」折叠区里（含说明与输入框）', () => {
+    for (const hidden of ['用户名（HTTPS 认证）', '设备标识', '作者名']) {
+      assert.ok(advanced.includes(`this.FieldLabel('${hidden}')`), `${hidden} 必须收在「高级」里`);
+    }
+    assert.match(advanced, /TextInput\(\{ text: this\.gitUsername/, '用户名输入框在「高级」里');
+    assert.match(advanced, /TextInput\(\{ text: this\.deviceId/, '设备标识输入框在「高级」里');
+    assert.match(advanced, /TextInput\(\{ text: this\.author/, '作者名输入框在「高级」里');
+    // 手工改设备标识 = 放弃「自动分配」（否则下次同步会把它当成沿用老标识）
+    assert.match(advanced, /this\.deviceIdAuto = false;/, '手改设备标识要标记为「非自动」');
+  });
+
+  test('设备编号是只读一行（自动分配），不是输入框', () => {
+    assert.match(mainForm, /if \(this\.deviceIdNotice\.length > 0\) \{\s*\n\s*this\.HintLine\(this\.deviceIdNotice\)/);
+    assert.match(page, /import \{ describeClaimOutcome \} from '\.\.\/model\/deviceRegistry';/);
+    assert.match(page, /describeClaimOutcome\(settings\.deviceId, true\)/, '自动分配的编号要显示成只读一行');
+  });
+
+  test('「高级」只有三种情况自动展开并给原因', () => {
+    assert.match(page, /private openSyncAdvanced\(reason: string\): void/, '自动展开必须走统一入口');
+    // ① 设备标识重复
+    assert.match(page, /result\.identityConflict === true[\s\S]{0,400}this\.openSyncAdvanced\(this\.identityWarning\)/);
+    // ② 编号分配失败 / 仓库不可读
+    assert.match(page, /result\.deviceRegistrationError[\s\S]{0,200}this\.openSyncAdvanced\(registrationError\)/);
+    // ③ Gitee 用户名推不出来
+    assert.match(page, /needsManualGiteeUsername\(this\.gitPlatform, this\.repoUrl, this\.gitUsername\)[\s\S]{0,200}this\.openSyncAdvanced\(GITEE_OWNER_INFER_FAILED\)/);
+  });
+
+  test('页面不打印凭据（新增代码也遵守）：无 console/hilog', () => {
+    assert.equal(/console\.(log|info|warn|error)/.test(page), false);
+    assert.equal(/\bHilog\./.test(page), false);
+  });
+});
+

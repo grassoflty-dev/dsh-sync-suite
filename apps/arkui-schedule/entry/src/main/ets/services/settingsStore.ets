@@ -38,6 +38,8 @@ import { AUTH_HTTPS, PLATFORM_GITHUB, normalizeAuthMode, normalizePlatform } fro
 import { normalizeSyncAction } from '../model/syncError';
 import { REMOTE_MODE_LAN, normalizeRemoteMode, normalizeRemotePort } from '../model/remoteAccess';
 import { normalizeThemeMode } from '../model/theme';
+import { normalizeFingerprint } from '../model/deviceIdentity';
+import { normalizeUuid } from '../model/deviceRegistry';
 
 /** 设备标识默认值：首次启动即 `phone-a`，可在设置页修改。 */
 export const DEFAULT_DEVICE_ID: string = 'phone-a';
@@ -49,6 +51,29 @@ export const DEVICE_ID_PATTERN: RegExp = new RegExp('^[a-z0-9][a-z0-9-]{0,31}$')
 export interface ScheduleSettings {
   /** 设备标识，决定 devices/<id>/ 目录。 */
   deviceId: string;
+  /**
+   * 本机设备指纹（首次同步时生成的随机 UUID）。
+   *
+   * 用途：识别「两台设备填了同一个 deviceId」。它会写进仓库
+   * `devices/<deviceId>/.device-fingerprint` 并随 git 提交，但**不是 secret**：
+   * 只是一个随机身份串，不含 token / 邮箱 / 机型等信息。
+   * 空串 = 还没生成（首次同步时由 `GitSyncService` 生成并落盘，见 `model/deviceIdentity.ts`）。
+   */
+  deviceFingerprint: string;
+  /**
+   * 本机身份（uuid）：首次接入时生成一次、永久复用。
+   *
+   * 仓库里的 `devices/registry.jsonl` 用它与设备编号绑定 —— **身份靠 uuid**，
+   * `deviceId` 只是目录名（可以换、可以沿用老值）。空串 = 还没生成
+   * （首次同步时由 `GitSyncService` 生成并落盘，见 `model/deviceRegistry.ts`）。
+   */
+  deviceUuid: string;
+  /**
+   * 设备编号是否由仓库**自动分配**（true = 设置页显示只读一行「本机：device-2（自动分配）」）。
+   *
+   * false = 沿用本机老标识（老用户升级）或用户在「高级」里手工指定。
+   */
+  deviceIdAuto: boolean;
   /** 远端仓库地址（https://… / ssh://… / git@host:path）。 */
   repoUrl: string;
   /** HTTPS 访问 token（仅存本机）。 */
@@ -157,6 +182,12 @@ export interface SyncStatePatch {
 /** 部分更新（未出现的字段保持原值）。 */
 export interface SettingsPatch {
   deviceId?: string;
+  /** 本机设备指纹（只有首次同步/身份校验会写；设置页保存时不传，即「不改」）。 */
+  deviceFingerprint?: string;
+  /** 本机身份 uuid（首次接入时由同步服务写入，之后不再改）。 */
+  deviceUuid?: string;
+  /** 设备编号是否自动分配（同步服务抢占成功时写 true；设置页手工改设备标识时写 false）。 */
+  deviceIdAuto?: boolean;
   repoUrl?: string;
   token?: string;
   aiKey?: string;
@@ -203,6 +234,9 @@ export interface AiFallbackSettings {
 
 const PREFERENCES_NAME: string = 'schedule_settings';
 const KEY_DEVICE_ID: string = 'deviceId';
+const KEY_DEVICE_FINGERPRINT: string = 'deviceFingerprint';
+const KEY_DEVICE_UUID: string = 'deviceUuid';
+const KEY_DEVICE_ID_AUTO: string = 'deviceIdAuto';
 const KEY_REPO_URL: string = 'repoUrl';
 const KEY_TOKEN: string = 'token';
 const KEY_AI_KEY: string = 'aiKey';
@@ -323,6 +357,12 @@ export class SettingsStore {
     }
     const prefs = this.requirePrefs();
     const deviceId = readString(await prefs.get(KEY_DEVICE_ID, DEFAULT_DEVICE_ID), DEFAULT_DEVICE_ID);
+    // 设备指纹：旧数据没有该键 → 空串（首次同步时生成；不在这里生成，避免只读路径写盘）
+    const deviceFingerprint = readString(await prefs.get(KEY_DEVICE_FINGERPRINT, ''), '');
+    // 设备身份 uuid：旧数据没有该键 → 空串（首次接入时生成并登记到 devices/registry.jsonl）
+    const deviceUuid = readString(await prefs.get(KEY_DEVICE_UUID, ''), '');
+    // 设备编号是否自动分配：旧数据没有该键 → false（老用户沿用自己填的标识）
+    const deviceIdAuto = readBoolean(await prefs.get(KEY_DEVICE_ID_AUTO, false), false);
     const repoUrl = readString(await prefs.get(KEY_REPO_URL, ''), '');
     const token = readString(await prefs.get(KEY_TOKEN, ''), '');
     const aiKey = readString(await prefs.get(KEY_AI_KEY, ''), '');
@@ -386,6 +426,11 @@ export class SettingsStore {
     const aiModelForSource: string = aiProviderId === DEFAULT_PROVIDER_ID ? normalizeAiModel(aiModel) : aiModel;
     const settings: ScheduleSettings = {
       deviceId: normalizeDeviceId(deviceId),
+      // 指纹只接受规范形态（UUID / 十六进制）；坏值当「没生成过」，下次同步重新生成
+      deviceFingerprint: normalizeFingerprint(deviceFingerprint),
+      // 身份串同一套规范（同一字符集）；坏值当「没有身份」，下次接入重新生成并登记
+      deviceUuid: normalizeUuid(deviceUuid),
+      deviceIdAuto: deviceIdAuto,
       repoUrl: repoUrl,
       token: token,
       aiKey: aiKey,
@@ -546,6 +591,14 @@ export class SettingsStore {
     );
     const next: ScheduleSettings = {
       deviceId: patch.deviceId === undefined ? current.deviceId : normalizeDeviceId(patch.deviceId),
+      // 指纹只有同步层会写（首次同步生成）；设置页保存时不传 = 保持原值，绝不能清空
+      deviceFingerprint:
+        patch.deviceFingerprint === undefined
+          ? current.deviceFingerprint
+          : normalizeFingerprint(patch.deviceFingerprint),
+      // 身份 uuid 同理：只有同步层会写；设置页不传 = 保持（手工改设备标识不该换身份）
+      deviceUuid: patch.deviceUuid === undefined ? current.deviceUuid : normalizeUuid(patch.deviceUuid),
+      deviceIdAuto: patch.deviceIdAuto === undefined ? current.deviceIdAuto : patch.deviceIdAuto === true,
       repoUrl: patch.repoUrl === undefined ? current.repoUrl : patch.repoUrl.trim(),
       token: patch.token === undefined ? current.token : patch.token.trim(),
       aiKey: patch.aiKey === undefined ? current.aiKey : patch.aiKey.trim(),
@@ -604,6 +657,9 @@ export class SettingsStore {
       lastSyncAction: current.lastSyncAction
     };
     await prefs.put(KEY_DEVICE_ID, next.deviceId);
+    await prefs.put(KEY_DEVICE_FINGERPRINT, next.deviceFingerprint);
+    await prefs.put(KEY_DEVICE_UUID, next.deviceUuid);
+    await prefs.put(KEY_DEVICE_ID_AUTO, next.deviceIdAuto);
     await prefs.put(KEY_REPO_URL, next.repoUrl);
     await prefs.put(KEY_TOKEN, next.token);
     await prefs.put(KEY_AI_KEY, next.aiKey);
@@ -659,6 +715,9 @@ export class SettingsStore {
     const current = await this.load();
     const next: ScheduleSettings = {
       deviceId: current.deviceId,
+      deviceFingerprint: current.deviceFingerprint,
+      deviceUuid: current.deviceUuid,
+      deviceIdAuto: current.deviceIdAuto,
       repoUrl: current.repoUrl,
       token: current.token,
       aiKey: current.aiKey,

@@ -18,6 +18,11 @@ const {
   resolveGitUsername,
   assertHttpsUsername,
   describeAuthForLog,
+  ownerFromRepoUrl,
+  httpsUsernameFor,
+  httpsAuthUsername,
+  needsManualGiteeUsername,
+  GITEE_OWNER_INFER_FAILED,
   GITHUB_TOKEN_USERNAME,
   GITEE_USERNAME_REQUIRED
 } = await import('../.build/model/gitAuth.js');
@@ -111,5 +116,76 @@ describe('三处硬编码是否清零（源码级断言）', () => {
     assert.match(BRIDGE, /var username = config && config\.username;/);
     assert.match(BRIDGE, /return \{ username: username, password: token \};/);
     assert.match(BRIDGE, /'username'/, 'CONFIG_KEYS 必须放行 username');
+  });
+});
+
+
+// ---------------------------------------------------------------- owner 推断（主表单只留三个控件）
+//
+// 用户只填「仓库地址 + token（+ 分支）」：Git 用户名按仓库地址自动推断（Gitee = owner），
+// 推不出来才在「高级」里请用户手填。这组用例把推断规则钉死。
+
+describe('ownerFromRepoUrl：从仓库地址推断 owner', () => {
+  test('https 形态（带 / 不带 .git、带尾斜杠）', () => {
+    assert.equal(ownerFromRepoUrl('https://gitee.com/zhangsan/schedule.git'), 'zhangsan');
+    assert.equal(ownerFromRepoUrl('https://gitee.com/zhangsan/schedule'), 'zhangsan');
+    assert.equal(ownerFromRepoUrl('https://gitee.com/zhangsan/schedule/'), 'zhangsan');
+    assert.equal(ownerFromRepoUrl('https://github.com/octocat/Hello-World.git'), 'octocat');
+    assert.equal(ownerFromRepoUrl('https://gitlab.com/group/sub/repo.git'), 'group');
+  });
+
+  test('ssh:// 与 scp 风格 git@host:owner/repo', () => {
+    assert.equal(ownerFromRepoUrl('ssh://git@gitee.com/zhangsan/schedule.git'), 'zhangsan');
+    assert.equal(ownerFromRepoUrl('git@gitee.com:zhangsan/schedule.git'), 'zhangsan');
+    assert.equal(ownerFromRepoUrl('git@github.com:octocat/Hello-World.git'), 'octocat');
+  });
+
+  test('容忍 query / hash / 大小写 / 无协议', () => {
+    assert.equal(ownerFromRepoUrl('https://gitee.com/zhangsan/schedule.git?foo=1#readme'), 'zhangsan');
+    assert.equal(ownerFromRepoUrl('gitee.com/zhangsan/schedule.git'), 'zhangsan');
+    assert.equal(ownerFromRepoUrl('  https://gitee.com/zhangsan/schedule.git  '), 'zhangsan');
+  });
+
+  test('非法 / 推不出来的地址 → null（调用方不阻塞）', () => {
+    for (const bad of ['', '   ', 'gitee', 'https://gitee.com/', 'https://gitee.com/zhangsan',
+      'https://gitee.com/zhang san/repo.git', '://gitee.com/a/b', 'git@gitee.com:']) {
+      assert.equal(ownerFromRepoUrl(bad), null, `应推不出 owner：${JSON.stringify(bad)}`);
+    }
+  });
+});
+
+describe('httpsUsernameFor / httpsAuthUsername：按平台给认证用户名', () => {
+  test('github → 空串（调用方回落 x-access-token）', () => {
+    assert.equal(httpsUsernameFor('github', 'https://github.com/octocat/r.git', ''), '');
+    assert.equal(httpsUsernameFor('github', 'https://github.com/octocat/r.git', 'someone'), '');
+    assert.equal(httpsAuthUsername('github', 'https://github.com/octocat/r.git', ''), 'x-access-token');
+    assert.equal(httpsAuthUsername('github', '', ''), 'x-access-token');
+  });
+
+  test('gitee → 仓库 owner 优先，推不出来才用手填值', () => {
+    assert.equal(httpsUsernameFor('gitee', 'https://gitee.com/zhangsan/schedule.git', ''), 'zhangsan');
+    assert.equal(httpsUsernameFor('gitee', 'https://gitee.com/zhangsan/schedule.git', 'other'), 'zhangsan');
+    assert.equal(httpsUsernameFor('gitee', 'https://gitee.com/', 'other'), 'other');
+    assert.equal(httpsUsernameFor('gitee', 'https://gitee.com/', ''), '');
+    // 认证用：手填优先（组织仓库时 owner 不是登录名，必须能手改）
+    assert.equal(httpsAuthUsername('gitee', 'https://gitee.com/org/r.git', 'zhangsan'), 'zhangsan');
+    assert.equal(httpsAuthUsername('gitee', 'https://gitee.com/org/r.git', ''), 'org');
+    assert.equal(httpsAuthUsername('gitee', 'https://gitee.com/', ''), '', 'Gitee 绝不兜底 x-access-token');
+  });
+
+  test('custom（自建）→ 只用手填值', () => {
+    assert.equal(httpsUsernameFor('custom', 'https://git.example.com/team/r.git', ''), '');
+    assert.equal(httpsUsernameFor('custom', 'https://git.example.com/team/r.git', 'team'), 'team');
+    assert.equal(httpsAuthUsername('custom', 'https://git.example.com/team/r.git', ''), 'x-access-token');
+    assert.equal(httpsAuthUsername('custom', 'https://git.example.com/team/r.git', 'team'), 'team');
+  });
+
+  test('needsManualGiteeUsername：只有 Gitee + 推不出 + 没手填才需要打断', () => {
+    assert.equal(needsManualGiteeUsername('gitee', 'https://gitee.com/', ''), true);
+    assert.equal(needsManualGiteeUsername('gitee', 'https://gitee.com/zhangsan/r.git', ''), false);
+    assert.equal(needsManualGiteeUsername('gitee', 'https://gitee.com/', 'zhangsan'), false);
+    assert.equal(needsManualGiteeUsername('github', 'https://github.com/', ''), false);
+    assert.equal(needsManualGiteeUsername('gitee', '', ''), false, '还没填地址不算「推不出来」');
+    assert.match(GITEE_OWNER_INFER_FAILED, /没能从仓库地址推断 Gitee 用户名，请手工填写/);
   });
 });
