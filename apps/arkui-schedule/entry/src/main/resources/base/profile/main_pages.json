@@ -4,6 +4,8 @@
     "pages/Edit",
     "pages/Detail",
     "pages/Settings",
-    "pages/RemoteControl"
+    "pages/RemoteControl",
+    "pages/Chats",
+    "pages/ChatDetail"
   ]
 }

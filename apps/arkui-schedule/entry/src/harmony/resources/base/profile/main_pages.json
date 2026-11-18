@@ -5,6 +5,8 @@
     "pages/Detail",
     "pages/Settings",
     "pages/Handwriting",
-    "pages/RemoteControl"
+    "pages/RemoteControl",
+    "pages/Chats",
+    "pages/ChatDetail"
   ]
 }
