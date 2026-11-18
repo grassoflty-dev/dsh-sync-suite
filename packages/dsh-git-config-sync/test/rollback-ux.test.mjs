@@ -702,6 +702,115 @@ test('客户端：新入口存在、空差异文案、hunk 展开与回滚两步
   assert.ok(treeText(mount.tree).includes('T:rollback.hint'), '成功后回到空态（可再次发起）')
 })
 
+test('rollbackPreview（M4）：文本文件给出内容级 hunk，且与 files 统计同方向（当前 → 快照）', async (t) => {
+  const { profileDir, patchFile, service } = await setup(t, { patch: PATCH_V2 })
+  const store = new SnapshotStore(service.paths.snapshotRoot)
+  const meta = store.create('pre-apply:pc-b', { 'cordis.patch.yml': PATCH_V1 })
+
+  const beforeBytes = readFileSync(patchFile)
+  const snapshotsBefore = snapshotDirCount(service.paths.snapshotRoot)
+
+  const result = await service.handleRpc({ action: 'rollbackPreview', snapshotId: meta.id })
+  assert.equal(result.ok, true)
+  assert.equal(result.data.truncated, false, '差异很小，预算充足')
+  assert.ok(Array.isArray(result.data.hunks), 'rollbackPreview 必须带 hunks 字段')
+  assert.ok(result.data.hunks.length >= 1, '文本文件必须给出可展开的内容差异')
+  assert.equal(result.data.hunks[0].path, 'cordis.patch.yml')
+  const lines = result.data.hunks[0].lines
+  assert.ok(
+    lines.some((line) => line === '-    value: 22'),
+    `当前内容（会被换掉）应标 -：${lines.join('|')}`,
+  )
+  assert.ok(
+    lines.some((line) => line === '+    value: 2'),
+    `快照内容（回滚写入）应标 +：${lines.join('|')}`,
+  )
+  const patched = result.data.files.find((file) => file.path === 'cordis.patch.yml')
+  assert.ok(patched.addedLines > 0 && patched.removedLines > 0, 'hunk 与 +X/-Y 统计必须都非零')
+
+  // 仍然只读：profile 一个字节没改，快照数不变。
+  assert.deepEqual(readFileSync(patchFile), beforeBytes, 'rollbackPreview 不得写 profile')
+  assert.equal(snapshotDirCount(service.paths.snapshotRoot), snapshotsBefore, 'rollbackPreview 不得创建快照')
+})
+
+test('rollbackPreview（M4）：hunk 预算不足（正文 > 200 行）时 truncated 为 true', async (t) => {
+  // 当前 300 行 vs 快照 300 行全不同 → 单个 hunk 600 行，超过 200 行预算。
+  const currentText = Array.from({ length: 300 }, (_, i) => `current-${i}`).join('\n') + '\n'
+  const snapshotText = Array.from({ length: 300 }, (_, i) => `snapshot-${i}`).join('\n') + '\n'
+  const { patchFile, service } = await setup(t, { patch: currentText })
+  const store = new SnapshotStore(service.paths.snapshotRoot)
+  const meta = store.create('pre-apply:pc-b', { 'cordis.patch.yml': snapshotText })
+
+  const beforeBytes = readFileSync(patchFile)
+  const result = await service.handleRpc({ action: 'rollbackPreview', snapshotId: meta.id })
+  assert.equal(result.ok, true)
+  assert.equal(result.data.truncated, true, '正文被预算裁掉 → 必须标记"还有更多"')
+  const totalLines = result.data.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0)
+  assert.ok(totalLines <= 200, `hunk 正文不得超过 200 行，实际 ${totalLines}`)
+  const last = result.data.hunks[result.data.hunks.length - 1]
+  assert.equal(last.truncated, true, '被裁的那一段自身也要带标记')
+  const patched = result.data.files.find((file) => file.path === 'cordis.patch.yml')
+  assert.equal(patched.addedLines, 300, '行数统计不截断')
+  assert.equal(patched.removedLines, 300)
+  assert.deepEqual(readFileSync(patchFile), beforeBytes, '只读：不得写 profile')
+})
+
+test('客户端（M4 + M1）：回滚第 2 步可展开内容差异，并按顶层 truncated 提示"还有更多"', async (t) => {
+  const mod = await loadClient()
+  const Panel = registerPanel(mod)
+  const plan = Object.assign({}, ROLLBACK_PLAN, {
+    hunks: [
+      {
+        path: 'cordis.patch.yml',
+        header: '@@ -1,4 +1,4 @@',
+        lines: [' # profile patch', '-    value: 22', '+    value: 2', ' # end'],
+        truncated: false,
+      },
+      { path: 'cordis.patch.yml', header: '@@ -20,2 +20,2 @@', lines: [' ctx', '-new', '+old'], truncated: true },
+    ],
+    truncated: true,
+  })
+  const routes = {
+    getState: () => ({ ok: true, data: STATE_DATA }),
+    listSnapshots: () => ({ ok: true, data: { snapshots: STATE_DATA.snapshots } }),
+    rollbackPreview: () => ({ ok: true, data: plan }),
+    rollback: () => ({ ok: true, data: { restored: ['C:\\tmp\\profile\\cordis.patch.yml'], verified: true } }),
+  }
+  const calls = makeFetch(routes)
+  const mount = mountPanel(Panel)
+  activeMount = mount
+  mount.render()
+  await tick()
+
+  click(mount.tree, 'T:actions.rollbackLatest')
+  await tick()
+  click(mount.tree, 'T:rollback.check')
+  await tick()
+
+  const step2 = treeText(mount.tree)
+  assert.ok(step2.includes('T:rollback.step2'), '预览成功后进入第 2 步')
+  assert.ok(step2.includes('T:rollback.summary'), '第 2 步仍要给文件级结论')
+  assert.ok(step2.includes('T:diff.expand'), '第 2 步必须能展开 hunk（M4）')
+  assert.ok(!step2.includes('@@ -1,4 +1,4 @@'), '默认收起，不渲染 hunk 正文')
+  assert.ok(step2.includes('T:diff.truncated'), '顶层 truncated 必须显示提示（M1）')
+  assert.match(step2, /more remain|还有更多/, '提示必须说明"还有更多、请缩小区间或直接看文件"')
+
+  click(mount.tree, 'T:diff.expand')
+  await tick()
+  const expanded = treeText(mount.tree)
+  assert.ok(expanded.includes('@@ -1,4 +1,4 @@'), '展开后必须显示 hunk header')
+  assert.ok(
+    expanded.includes('-    value: 22') && expanded.includes('+    value: 2'),
+    'hunk 正文：- 当前内容 / + 快照内容（与统计同方向）',
+  )
+  assert.ok(expanded.includes('@@ -20,2 +20,2 @@'), '第二个 hunk 也要渲染')
+  click(mount.tree, 'T:diff.collapse')
+  await tick()
+  assert.ok(!treeText(mount.tree).includes('@@ -1,4 +1,4 @@'), '收起后正文消失')
+
+  assert.equal(calls.filter((call) => call.action === 'rollback').length, 0, '只读：确认前绝不调用 rollback')
+})
+
 test('客户端：没有快照时「回滚到上次快照」给出明确提示，不发任何写请求', async (t) => {
   const mod = await loadClient()
   const Panel = registerPanel(mod)

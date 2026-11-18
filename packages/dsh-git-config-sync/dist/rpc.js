@@ -381,14 +381,18 @@ export function createRpcService(options = {}) {
         }
         const summary = diffFiles(before, after);
         const hunks = [];
+        let truncated = false;
         for (const stat of summary.files) {
+            // 二进制 / >512KB：file 级 `truncated` 已经明说"只给统计"，不产出 hunk。
             if (stat.kind === 'same' || stat.truncated === true)
                 continue;
             const result = diffText(before[stat.path] ?? '', after[stat.path] ?? '', { path: stat.path });
             for (const hunk of result.hunks)
                 hunks.push(hunk);
+            if (result.truncated)
+                truncated = true;
         }
-        return { sourceDevice: settings.deviceId, local: true, summary, hunks };
+        return { sourceDevice: settings.deviceId, local: true, summary, hunks, truncated };
     }
     /**
      * 远端设备差异：复用 `buildPreview` 的远端读取与校验路径（含 manifest sha256 校验），
@@ -423,7 +427,7 @@ export function createRpcService(options = {}) {
                 sources: built.internal.sources.filter((item) => item.deviceId === sourceDevice),
             };
             const diff = fileDiffOfPreview(filtered);
-            return { sourceDevice, local: false, summary: diff.summary, hunks: diff.hunks };
+            return { sourceDevice, local: false, summary: diff.summary, hunks: diff.hunks, truncated: diff.truncated };
         });
     }
     /** `previewDiff`：`sourceDevice` 缺省（或等于本机 deviceId）→ 本机；否则按远端设备比对。 */

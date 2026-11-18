@@ -15,8 +15,8 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { SYNC_FILE_NAMES } from './collect.js'
-import { diffFiles } from './diff.js'
-import type { DiffSummary, FileDiffStat } from './diff.js'
+import { diffFiles, diffText } from './diff.js'
+import type { DiffSummary, FileDiffStat, UnifiedHunk } from './diff.js'
 import { SyncError } from './errors.js'
 import { composePatch, findEntryByKey, parsePatch } from './patch.js'
 import type { PatchBlock } from './patch.js'
@@ -330,6 +330,9 @@ export async function rollbackSnapshot(
  *   - `deleted`  = 当前有、快照里没有 → **回滚不会删除它**（快照不含该文件），
  *                  UI 用中性文案标注，避免把"不在快照里"误读成"会被删掉"；
  *   - `same`     = 两侧一致，回滚无变化。
+ *
+ * `hunks` 的方向与 `files` **完全一致**（当前 → 快照）：`-` 行是现在会被换掉的内容，
+ * `+` 行是回滚后写入的内容。这样「文件行数统计」与「hunk 里看到的行」不会互相打脸。
  */
 export interface RollbackPreview {
   snapshotId: string
@@ -340,7 +343,18 @@ export interface RollbackPreview {
   summary: DiffSummary
   /** 回滚**实际**会写入的文件（绝对路径）。当前实现只写 profile 的 cordis.patch.yml。 */
   willRestore: string[]
+  /**
+   * 文本文件的内容级差异（M4）：`diffText(当前内容, 快照内容, { maxLines: 200 })`。
+   * 二进制（含 NUL）或 > 512KB 的文件按 diff.ts 既有规则跳过（不产出 hunk）。
+   */
+  hunks: UnifiedHunk[]
+  /** 还有 hunk 没展示（预算用尽 / 单 hunk 被裁）；UI 必须明说「仅显示前 N 行」。 */
+  truncated: boolean
 }
+
+/** 回滚预览的 hunk 正文预算：与 diff.ts 的默认值一致，避免把 RPC 响应撑大。 */
+const ROLLBACK_PREVIEW_MAX_LINES = 200
+
 
 async function readTextForPreview(file: string): Promise<string> {
   try {
@@ -383,6 +397,22 @@ export async function previewRollback(
   }
 
   const summary = diffFiles(before, after)
+
+  // 内容级差异（M4）：只有文本文件才产出 hunk；二进制/超长按 diff.ts 既有规则跳过。
+  // 方向与 `files` 一致（before = 当前 profile，after = 快照）——即"回滚会写入什么"。
+  const hunks: UnifiedHunk[] = []
+  let truncated = false
+  for (const stat of summary.files) {
+    if (stat.kind === 'same') continue
+    if (stat.truncated === true) continue
+    const result = diffText(before[stat.path] ?? '', after[stat.path] ?? '', {
+      maxLines: ROLLBACK_PREVIEW_MAX_LINES,
+      path: stat.path,
+    })
+    for (const hunk of result.hunks) hunks.push(hunk)
+    if (result.truncated) truncated = true
+  }
+
   return {
     snapshotId: snapshot.id,
     createdAt: snapshot.time,
@@ -390,5 +420,7 @@ export async function previewRollback(
     files: summary.files,
     summary,
     willRestore: [profilePatchPath(ctx.profileDir)],
+    hunks,
+    truncated,
   }
 }

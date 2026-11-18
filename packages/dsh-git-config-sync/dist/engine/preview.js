@@ -269,9 +269,11 @@ export function fileDiffOfPreview(internal, options = {}) {
     const blocks = [];
     const allFiles = [];
     const allHunks = [];
+    let truncated = false;
     for (const source of Array.isArray(internal?.sources) ? internal.sources : []) {
         const files = [];
         const hunks = [];
+        let blockTruncated = false;
         for (const entry of Array.isArray(source.entries) ? source.entries : []) {
             const path = `devices/${source.deviceId}/cordis.patch.yml#${entry.id}`;
             // added → 远端新增；same → 一致；changed / manual → 会被改写（manual 需本地补值）。
@@ -292,15 +294,26 @@ export function fileDiffOfPreview(internal, options = {}) {
                 stat.removedLines = result.removedLines;
                 for (const hunk of result.hunks)
                     hunks.push(hunk);
+                // 单条 entry 的 hunk 被预算截断 / 整段被丢弃 → 这一块就算"还有差异没展示"。
+                if (result.truncated)
+                    blockTruncated = true;
             }
             files.push(stat);
         }
-        const block = { deviceId: source.deviceId, files, summary: summarizeFiles(files), hunks };
+        const block = {
+            deviceId: source.deviceId,
+            files,
+            summary: summarizeFiles(files),
+            hunks,
+            truncated: blockTruncated,
+        };
         blocks.push(block);
         for (const file of files)
             allFiles.push(file);
         for (const hunk of hunks)
             allHunks.push(hunk);
+        if (blockTruncated)
+            truncated = true;
     }
-    return { files: allFiles, summary: summarizeFiles(allFiles), hunks: allHunks, sources: blocks };
+    return { files: allFiles, summary: summarizeFiles(allFiles), hunks: allHunks, truncated, sources: blocks };
 }

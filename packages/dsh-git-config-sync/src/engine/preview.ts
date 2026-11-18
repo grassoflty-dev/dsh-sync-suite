@@ -357,12 +357,16 @@ export interface PreviewDiffBlock {
   files: FileDiffStat[]
   summary: DiffSummary
   hunks: UnifiedHunk[]
+  /** 该设备下**还有 hunk 没展示**（预算用尽 / 单 hunk 被裁，见 diff.ts 的 M1）。 */
+  truncated: boolean
 }
 
 export interface PreviewFileDiff {
   files: FileDiffStat[]
   summary: DiffSummary
   hunks: UnifiedHunk[]
+  /** 所有设备聚合后的"还有差异没展示"标记（`previewDiff` 会原样透给 UI）。 */
+  truncated: boolean
   sources: PreviewDiffBlock[]
 }
 
@@ -383,10 +387,12 @@ export function fileDiffOfPreview(internal: InternalPreview, options: PreviewDif
   const blocks: PreviewDiffBlock[] = []
   const allFiles: FileDiffStat[] = []
   const allHunks: UnifiedHunk[] = []
+  let truncated = false
 
   for (const source of Array.isArray(internal?.sources) ? internal.sources : []) {
     const files: FileDiffStat[] = []
     const hunks: UnifiedHunk[] = []
+    let blockTruncated = false
     for (const entry of Array.isArray(source.entries) ? source.entries : []) {
       const path = `devices/${source.deviceId}/cordis.patch.yml#${entry.id}`
       // added → 远端新增；same → 一致；changed / manual → 会被改写（manual 需本地补值）。
@@ -407,14 +413,23 @@ export function fileDiffOfPreview(internal: InternalPreview, options: PreviewDif
         stat.addedLines = result.addedLines
         stat.removedLines = result.removedLines
         for (const hunk of result.hunks) hunks.push(hunk)
+        // 单条 entry 的 hunk 被预算截断 / 整段被丢弃 → 这一块就算"还有差异没展示"。
+        if (result.truncated) blockTruncated = true
       }
       files.push(stat)
     }
-    const block: PreviewDiffBlock = { deviceId: source.deviceId, files, summary: summarizeFiles(files), hunks }
+    const block: PreviewDiffBlock = {
+      deviceId: source.deviceId,
+      files,
+      summary: summarizeFiles(files),
+      hunks,
+      truncated: blockTruncated,
+    }
     blocks.push(block)
     for (const file of files) allFiles.push(file)
     for (const hunk of hunks) allHunks.push(hunk)
+    if (blockTruncated) truncated = true
   }
 
-  return { files: allFiles, summary: summarizeFiles(allFiles), hunks: allHunks, sources: blocks }
+  return { files: allFiles, summary: summarizeFiles(allFiles), hunks: allHunks, truncated, sources: blocks }
 }

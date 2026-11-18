@@ -625,6 +625,18 @@ window.__ModuleLoader__.load({
 
     const DICTS = { zh: zh, en: en }
 
+    /**
+     * 顶层 `truncated: true` 的补足文案（M1）：`diff.truncated` 只说"仅显示前 N 行"，
+     * 预算用尽时还必须告诉用户"还有更多、该怎么办"。
+     *
+     * 说明：`locale/*.json` 不在本轮可改范围（改了就与 `locale.test.mjs` 的 key 对齐断言冲突），
+     * 所以这半句以常量形式留在这里，**不加入** DICTS 的 key 集合。
+     */
+    const TRUNC_MORE = {
+      zh: '差异，还有更多（请把区间缩小或直接看文件）',
+      en: '; more remain (narrow the range or open the file)'
+    }
+
     // ------------------------------------------------------------------
     // Translation
     // ------------------------------------------------------------------
@@ -763,6 +775,12 @@ window.__ModuleLoader__.load({
       cardHead: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' },
       cardTitle: { fontSize: 13, fontWeight: 600, margin: 0, color: C.labelPrimary },
       hint: { fontSize: 11.5, margin: 0, color: C.labelTertiary, lineHeight: 1.5 },
+      hintWarn: {
+        fontSize: 11.5,
+        margin: 0,
+        color: 'var(--dsw-alias-state-warning-primary, #a76500)',
+        lineHeight: 1.5
+      },
       grid2: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 10, minWidth: 0 },
       field: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 },
       label: { fontSize: 12, color: C.labelSecondary },
@@ -1273,9 +1291,17 @@ window.__ModuleLoader__.load({
       return { text: translate('diff.group.modified'), tone: 'info' }
     }
 
+    /** 顶层 truncated 的提示文案：前缀走 locale，补足半句走 TRUNC_MORE。 */
+    function truncationHint(translate, shownLines) {
+      return translate('diff.truncated', { n: shownLines }) + (TRUNC_MORE[lang] || TRUNC_MORE.zh)
+    }
+
     /**
      * 文件级差异列表：按「新增 / 修改 / 删除」分组，每行 path + 行数 + 字节变化，
      * 有 hunk 时可展开（等宽、限高滚动，truncated 时明说只显示了前 N 行）。
+     *
+     * `props.truncated` 是**顶层** "还有差异没展示"（M1）：预算恰好用完时后续 hunk
+     * 根本没产出，每个已产出的 hunk 都是 `truncated: false`，所以不能只看 hunk 级标记。
      */
     function FileDiffList(props) {
       const translate = props.t
@@ -1285,6 +1311,13 @@ window.__ModuleLoader__.load({
       if (!files.length) return h('p', { style: S.hint }, asText(props.emptyLabel) || translate('diff.empty'))
       const groups = fileDiffGroups(files)
       const blocks = []
+      if (props.truncated === true) {
+        const shownLines = hunks.reduce(function (sum, hunk) {
+          const lines = Array.isArray(hunk && hunk.lines) ? hunk.lines : []
+          return sum + lines.length
+        }, 0)
+        blocks.push(h('p', { key: 'diff-truncated', style: S.hintWarn }, truncationHint(translate, shownLines)))
+      }
       ;['added', 'modified', 'deleted'].forEach(function (kind) {
         const list = groups[kind]
         if (!list.length) return
@@ -1780,6 +1813,8 @@ window.__ModuleLoader__.load({
       const [rollbackTarget, setRollbackTarget] = React.useState('')
       const [rollbackPlan, setRollbackPlan] = React.useState(null)
       const [rollbackError, setRollbackError] = React.useState(null)
+      // 回滚第 2 步的 hunk 展开状态（M4）：与差异卡片的 openDiffs 分开，互不影响。
+      const [rollbackOpen, setRollbackOpen] = React.useState({})
       const initialized = React.useRef(false)
 
       React.useEffect(function () {
@@ -2060,6 +2095,7 @@ window.__ModuleLoader__.load({
       function startRollback() {
         setRollbackError(null)
         setRollbackPlan(null)
+        setRollbackOpen({})
         const latest = snapshots.length ? snapshots[0] : null
         const id = latest ? asText(latest.id) : ''
         if (!id) {
@@ -2077,6 +2113,7 @@ window.__ModuleLoader__.load({
         setRollbackTarget('')
         setRollbackPlan(null)
         setRollbackError(null)
+        setRollbackOpen({})
       }
 
       function backRollback() {
@@ -2084,6 +2121,18 @@ window.__ModuleLoader__.load({
         setRollbackStep('pick')
         setRollbackPlan(null)
         setRollbackError(null)
+        setRollbackOpen({})
+      }
+
+      /** 回滚预览里展开/收起某文件的 hunk（默认收起，用户显式点开才渲染正文）。 */
+      function toggleRollbackHunk(path) {
+        const key = String(path || '')
+        if (!key) return
+        setRollbackOpen(function (prev) {
+          const next = Object.assign({}, prev)
+          next[key] = !prev[key]
+          return next
+        })
       }
 
       function doRollbackPreview() {
@@ -2100,6 +2149,7 @@ window.__ModuleLoader__.load({
             return
           }
           setRollbackPlan(result.data && typeof result.data === 'object' ? result.data : {})
+          setRollbackOpen({})
           setRollbackStep('preview')
         })
       }
@@ -2760,6 +2810,7 @@ window.__ModuleLoader__.load({
             t: tr,
             files: diffFiles,
             hunks: diffHunks,
+            truncated: diffResult.truncated === true,
             openMap: openDiffs,
             onToggle: toggleDiff
           })
@@ -2886,6 +2937,8 @@ window.__ModuleLoader__.load({
         const planTotals = diffTotals(planSummary)
         const planFiles = Array.isArray(rollbackPlan && rollbackPlan.files) ? rollbackPlan.files : []
         const willRestore = Array.isArray(rollbackPlan && rollbackPlan.willRestore) ? rollbackPlan.willRestore : []
+        // M4：第 2 步不再只有计数——hunk 与统计同方向（当前 → 快照），默认收起、可展开。
+        const planHunks = Array.isArray(rollbackPlan && rollbackPlan.hunks) ? rollbackPlan.hunks : []
 
         rollbackBody.push(
           h(
@@ -2957,8 +3010,10 @@ window.__ModuleLoader__.load({
               key: 'rb-files',
               t: tr,
               files: planFiles,
-              hunks: [],
-              openMap: {},
+              hunks: planHunks,
+              truncated: rollbackPlan.truncated === true,
+              openMap: rollbackOpen,
+              onToggle: toggleRollbackHunk,
               emptyLabel: tr('rollback.same')
             })
           )

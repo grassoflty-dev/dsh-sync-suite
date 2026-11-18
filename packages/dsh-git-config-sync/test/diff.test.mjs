@@ -144,6 +144,60 @@ test('CRLF 与末尾换行：行尾 \\r 不算变更，缺尾换行算变更', (
   assert.ok(stillNoTrailing.hunks[0].lines.includes(NO_EOL))
 })
 
+test('M1 回归：预算恰好用完时后续 hunk 被丢弃 → 顶层 truncated 必须为 true', () => {
+  // 评审 §3.2 的复现输入：4 行文本里 2 处相隔很远的改动，contextLines=0、maxLines=2。
+  // 第一个 hunk（-a/+A）正好用光 2 行预算，第二个 hunk 根本不会被产出——
+  // 此时每个已产出的 hunk 都是 truncated:false，只有顶层字段能说明"还有更多"。
+  const before = 'a\nb\nc\nd\n'
+  const after = 'A\nb\nc\nD\n'
+  const capped = diffText(before, after, { contextLines: 0, maxLines: 2 })
+  assert.equal(capped.hunks.length, 1, '预算只够第一个 hunk')
+  assert.deepEqual(capped.hunks[0].lines, ['-a', '+A'])
+  assert.equal(capped.hunks[0].truncated, false, '这个 hunk 本身是完整的（恰好用完预算，不是被裁）')
+  assert.equal(capped.truncated, true, '还有差异没展示 → 顶层 truncated 必须为 true')
+  assert.equal(capped.addedLines, 2, '行数统计仍然是完整的')
+  assert.equal(capped.removedLines, 2)
+
+  // 评审的第二组：3 处改动、maxLines=2。
+  const three = diffText('a\nb\nc\nd\ne\nf\n', 'A\nb\nc\nD\ne\nF\n', { contextLines: 0, maxLines: 2 })
+  assert.equal(three.hunks.length, 1)
+  assert.equal(three.hunks[0].truncated, false)
+  assert.equal(three.truncated, true)
+  assert.equal(three.addedLines, 3)
+
+  // 对照：预算充足 → 两个 hunk 都在，truncated 为 false。
+  const roomy = diffText(before, after, { contextLines: 0, maxLines: 10 })
+  assert.equal(roomy.hunks.length, 2)
+  assert.ok(roomy.hunks.every((hunk) => hunk.truncated === false))
+  assert.equal(roomy.truncated, false, '差异全部展示完 → truncated 必须为 false')
+
+  // 边界：预算刚好等于全部 hunk 正文、且没有后续 range → 也是 false（不能"多报"）。
+  const exact = diffText('a\nb\n', 'A\nb\n', { contextLines: 0, maxLines: 2 })
+  assert.equal(exact.hunks.length, 1)
+  assert.equal(exact.truncated, false)
+  const oneShort = diffText('a\nb\n', 'A\nb\n', { contextLines: 0, maxLines: 1 })
+  assert.equal(oneShort.truncated, true, '单 hunk 被裁 → 顶层同样为 true')
+})
+
+test('M1 回归：LCS 预算超限的占位 hunk 也算"还有差异没展示"', () => {
+  const before = Array.from({ length: 1001 }, (_, i) => `left-${i}`).join('\n') + '\n'
+  const after = Array.from({ length: 1001 }, (_, i) => `right-${i}`).join('\n') + '\n'
+  const degraded = diffText(before, after, { maxLines: 200 })
+  assert.equal(degraded.hunks.length, 1, '预算超限降级成一个占位 hunk')
+  assert.equal(degraded.hunks[0].truncated, true)
+  assert.equal(degraded.truncated, true, '占位 hunk 也表示"正文没展示"')
+  assert.equal(degraded.addedLines, 1001)
+  assert.equal(degraded.removedLines, 1001)
+})
+
+test('二进制 / 超长不算"预算截断"（顶层 truncated 为 false，文件级 truncated 另有标记）', () => {
+  const binary = diffText('a\u0000b', 'a\u0000c')
+  assert.deepEqual(binary.hunks, [])
+  assert.equal(binary.truncated, false, '按规则不产出 hunk，不是预算没放全')
+  const huge = 'x'.repeat(MAX_DIFF_BYTES + 1024)
+  assert.equal(diffText(huge, `${huge}y`).truncated, false)
+})
+
 test('diffFiles：added / modified / deleted / same 四类与字节统计', () => {
   const before = { 'a.yml': '1\n', 'b.yml': '2\n', 'd.yml': '4\n' }
   const after = { 'a.yml': '1\n', 'b.yml': '2x\n', 'c.yml': '3\n' }
@@ -212,7 +266,7 @@ test('summarizeFiles 与 diffText 的容错：异常输入绝不抛', () => {
   for (const run of cases) {
     assert.doesNotThrow(run)
   }
-  assert.deepEqual(diffText(null, undefined), { addedLines: 0, removedLines: 0, hunks: [] })
+  assert.deepEqual(diffText(null, undefined), { addedLines: 0, removedLines: 0, hunks: [], truncated: false })
   assert.deepEqual(diffFiles(null, null).files, [])
   assert.equal(summarize(null), '没有差异')
   assert.equal(summarizeFiles(null).files.length, 0)

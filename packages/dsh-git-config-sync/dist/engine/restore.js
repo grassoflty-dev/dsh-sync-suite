@@ -15,7 +15,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { SYNC_FILE_NAMES } from './collect.js';
-import { diffFiles } from './diff.js';
+import { diffFiles, diffText } from './diff.js';
 import { SyncError } from './errors.js';
 import { composePatch, findEntryByKey, parsePatch } from './patch.js';
 import { sha256Hex } from './paths.js';
@@ -229,6 +229,8 @@ export async function rollbackSnapshot(ctx, options) {
     }
     return { restored: [patchFile], verified: true };
 }
+/** 回滚预览的 hunk 正文预算：与 diff.ts 的默认值一致，避免把 RPC 响应撑大。 */
+const ROLLBACK_PREVIEW_MAX_LINES = 200;
 async function readTextForPreview(file) {
     try {
         return await readFile(file, 'utf8');
@@ -267,6 +269,24 @@ export async function previewRollback(ctx, options) {
             after[name] = snapshot.files[name] ?? '';
     }
     const summary = diffFiles(before, after);
+    // 内容级差异（M4）：只有文本文件才产出 hunk；二进制/超长按 diff.ts 既有规则跳过。
+    // 方向与 `files` 一致（before = 当前 profile，after = 快照）——即"回滚会写入什么"。
+    const hunks = [];
+    let truncated = false;
+    for (const stat of summary.files) {
+        if (stat.kind === 'same')
+            continue;
+        if (stat.truncated === true)
+            continue;
+        const result = diffText(before[stat.path] ?? '', after[stat.path] ?? '', {
+            maxLines: ROLLBACK_PREVIEW_MAX_LINES,
+            path: stat.path,
+        });
+        for (const hunk of result.hunks)
+            hunks.push(hunk);
+        if (result.truncated)
+            truncated = true;
+    }
     return {
         snapshotId: snapshot.id,
         createdAt: snapshot.time,
@@ -274,5 +294,7 @@ export async function previewRollback(ctx, options) {
         files: summary.files,
         summary,
         willRestore: [profilePatchPath(ctx.profileDir)],
+        hunks,
+        truncated,
     };
 }

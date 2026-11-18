@@ -32,7 +32,7 @@ interface DiffSummary {
 interface UnifiedHunk { path: string; header: string; lines: string[]; truncated: boolean }
 
 diffText(before, after, options?: { contextLines?: number; maxLines?: number; path?: string })
-  → { addedLines, removedLines, hunks }
+  → { addedLines, removedLines, hunks, truncated }   // truncated 是**顶层**字段（M1）
 diffFiles(before: Record<string,string>, after: Record<string,string>, options?)
   → DiffSummary
 summarize(summary: DiffSummary) → string   // 「3 个文件变更（+12 / -4 行），1 个新增，1 个删除」
@@ -52,7 +52,20 @@ summarizeFiles(files: FileDiffStat[]) → DiffSummary   // 仅供 host 侧聚合
 | 异常 | 任何异常（入参不是字符串/对象、内部断言失败）→ 空结果（`0/0` + `hunks: []`），**绝不向上抛** |
 
 `maxLines` 只截 hunk 文本，**不截行数统计**：结论（+12/-4）始终是完整语义，
-用户看到的 hunk 只是"前 N 行"。`hunks[].truncated` 表示这一段是否被裁剪过。
+用户看到的 hunk 只是"前 N 行"。
+
+两级截断标记（M1，**消费方必须看顶层那个**）：
+
+| 字段 | 语义 | 可靠性 |
+| --- | --- | --- |
+| `hunks[].truncated` | **这一段** hunk 的正文被预算裁掉了尾巴 | 只能发现"被裁一半" |
+| `diffText(...).truncated` | **还有差异没展示**：单 hunk 被裁，或预算用尽后整段 hunk 被丢弃 | 唯一可靠的"没看全"信号 |
+
+为什么需要顶层字段：预算可能在某个 hunk **末尾恰好用完**，随后的 range 直接 `break` 且**不产出**
+任何 hunk，于是每个已产出的 hunk 都是 `truncated: false`——只看 `hunks[].truncated` 会静默少显示差异。
+`truncated` 只在"hunk 文本因预算没放全"时为 true；二进制 / >512KB 的"只给统计"由
+`FileDiffStat.truncated` 表达（那种文件本来就按规则不产出 hunk，不算预算截断）。
+LCS 超预算降级成占位 hunk 时，顶层 `truncated` 同样为 true。
 
 > 与需求原文的差异：`FileDiffStat.truncated` 是**新增可选字段**。原文要求"二进制/超长只给
 > kind 与字节数、`hunks: []` 且标记 `truncated: true`"，而 `truncated` 原本只存在于 `UnifiedHunk`
@@ -69,8 +82,12 @@ interface PreviewDiffData {
   local: boolean
   summary: DiffSummary
   hunks: UnifiedHunk[]
+  truncated: boolean   // 「还有差异没展示」：任一文件的 hunk 被预算裁掉/整段丢弃
 }
 ```
+
+`truncated` 的聚合口径（M1）：本机模式对每个非 `same`、非二进制文件跑 `diffText`，任一返回
+`truncated: true` 即整体为 true；远端模式取 `fileDiffOfPreview` 的聚合值（逐 entry 相同口径）。
 
 两种模式：
 
@@ -106,8 +123,16 @@ interface RollbackPreview {
   files: FileDiffStat[]        // 「当前 profile → 快照（回滚后）」
   summary: DiffSummary
   willRestore: string[]        // 回滚**实际**会写入的绝对路径
+  hunks: UnifiedHunk[]         // 内容级差异（M4），方向与 files 一致
+  truncated: boolean           // 还有 hunk 没展示（预算用尽 / 单 hunk 被裁）
 }
 ```
+
+`hunks` 的来源与上限（M4）：对每个 `kind !== 'same'` 且**不是**二进制 / >512KB 的文件，
+用 `diffText(当前内容, 快照内容, { maxLines: 200, path })` 生成——即 `-` 行是现在会被换掉的内容，
+`+` 行是回滚后写入的内容，与 `files` 的 `+X/-Y` 统计**同方向**，不会互相矛盾。
+单文件预算 200 行；任一文件被裁或后续 hunk 被丢弃时 `truncated: true`（判定逻辑与 `diffText` 同一套）。
+二进制 / 超长文件按 `diff.ts` 既有规则跳过（不产出 hunk，UI 显示"只给统计"徽标）。
 
 方向与 kind 语义（务必按这个理解 UI 文案）：
 
@@ -144,7 +169,7 @@ fail-closed：
                                      │  点击「查看这次回滚会改什么」→ rollbackPreview()
                                      ├─ 失败：留在 'pick'，ErrorBox(code+message)，不写盘
                                      ▼
-                               'preview'（第 2 步：文件级 diff + willRestore 列表）
+                               'preview'（第 2 步：文件级 diff + 内容 hunk + willRestore 列表）
                                      │  点击「确认回滚（不可撤销）」→ rollback{confirm:true}
                                      ├─ 失败：留在 'preview'，ErrorBox(code+message)，不写盘
                                      ▼
@@ -156,6 +181,11 @@ fail-closed：
 - 差异卡片：顶部一句结论（`summarize` 同口径），按 kind 分组，每行 `path` + `+N/-M` + 字节变化
   （`before → after`）；有 hunk 的文件可展开（等宽 `<pre>`、`maxHeight` 限高滚动），
   `truncated` 时显示「仅显示前 N 行」；**空差异显示「没有差异」**，不是空白区域。
+- **顶层 `truncated` 必显示提示**（M1）：`data.truncated === true` 时列表顶部显示
+  「仅显示前 N 行差异，还有更多（请把区间缩小或直接看文件）」——不能只依赖每个 hunk 的
+  `truncated`（预算恰好用完时后续 hunk 根本不产出）。
+- 回滚第 2 步（M4）：同一套 `FileDiffList` 渲染 `hunks`（默认收起、点「展开 hunk」才显示正文），
+  `truncated` 同样显示上面那条提示，与统计结论并列。
 - 差异/回滚错误各自独立 state，互不清除对方的 ErrorBox；`diffError` 不清空上一次的成功结果
   （但会显示"失败"提示），避免"看似没有差异"的误导。
 
@@ -182,6 +212,8 @@ fail-closed：
 | 预览后文件未被改动 | 逐字节比较四个文件 | 同上 |
 | 客户端预览失败 | 停在当前步骤、ErrorBox 显示 code+message、不发 `rollback` | 同上（渲染桩） |
 | `diff.ts` 异常输入 | 返回空结果、不抛 | `diff.test.mjs` |
+| `diffText` 预算恰好用完 / 后续 hunk 被整段丢弃（M1） | 顶层 `truncated: true`（即使每个 hunk 都是 false），预算充足时 `false` | `diff.test.mjs` |
+| `rollbackPreview` 的内容级预览（M4） | `hunks` 非空且与 `files` 同方向；预算不足时 `truncated: true` | `rollback-ux.test.mjs` |
 
 ## 7. 已知限制
 

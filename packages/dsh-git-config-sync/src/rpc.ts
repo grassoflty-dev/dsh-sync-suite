@@ -79,6 +79,11 @@ export interface PreviewDiffData {
   local: boolean
   summary: DiffSummary
   hunks: UnifiedHunk[]
+  /**
+   * **还有差异没展示**（M1）：某个文件的 hunk 因预算被裁，或后续 hunk 被整段丢弃。
+   * 不能只看 `hunks[].truncated`——预算恰好用完时后续 hunk 根本没产出。
+   */
+  truncated: boolean
 }
 
 export interface ConnectionLike {
@@ -473,12 +478,15 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
 
     const summary = diffFiles(before, after)
     const hunks: UnifiedHunk[] = []
+    let truncated = false
     for (const stat of summary.files) {
+      // 二进制 / >512KB：file 级 `truncated` 已经明说"只给统计"，不产出 hunk。
       if (stat.kind === 'same' || stat.truncated === true) continue
       const result = diffText(before[stat.path] ?? '', after[stat.path] ?? '', { path: stat.path })
       for (const hunk of result.hunks) hunks.push(hunk)
+      if (result.truncated) truncated = true
     }
-    return { sourceDevice: settings.deviceId, local: true, summary, hunks }
+    return { sourceDevice: settings.deviceId, local: true, summary, hunks, truncated }
   }
 
   /**
@@ -514,7 +522,7 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
         sources: built.internal.sources.filter((item) => item.deviceId === sourceDevice),
       }
       const diff = fileDiffOfPreview(filtered)
-      return { sourceDevice, local: false, summary: diff.summary, hunks: diff.hunks }
+      return { sourceDevice, local: false, summary: diff.summary, hunks: diff.hunks, truncated: diff.truncated }
     })
   }
 

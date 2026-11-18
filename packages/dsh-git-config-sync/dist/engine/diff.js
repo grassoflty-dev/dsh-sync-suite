@@ -5,6 +5,12 @@
  * 统一 diff hunk 文本。**不产出完整 patch**——大文件把 RPC 响应撑爆的代价远大于收益，
  * 所以 hunks 有硬上限（默认 200 行），超出就置 `truncated: true` 并停止。
  *
+ * `truncated` 有两级语义（M1）：
+ *   - `UnifiedHunk.truncated`：**这一段**被裁剪过（hunk 正文没显示全）；
+ *   - `diffText(...).truncated`：**还有差异没展示**——无论是单 hunk 被裁，
+ *     还是总预算用尽后整段 hunk 被丢弃。后者不能只看每个 hunk 的标记：
+ *     预算"恰好用完"时后续 hunk 根本没被 push 出来，每个已产出的 hunk 都是 false。
+ *
  * 规则（与 docs/PLUGIN-DIFF.md 一致）：
  *   - 行按 `\n` 切；行尾 `\r` 只用于展示，不参与比较（纯 CRLF 差异不算变更）；
  *   - 末行有无换行属于**内容差异**（标准 diff 语义），hunk 里会补 `\ No newline at end of file`；
@@ -182,6 +188,7 @@ function buildHunks(ops, before, after, path, contextLines, maxLines) {
     let budget = maxLines;
     let truncated = false;
     for (const [first, last] of ranges) {
+        // 预算已经用完，但**还有 range 没放进去**：这是"静默丢弃"的源头，必须置 truncated。
         if (budget <= 0) {
             truncated = true;
             break;
@@ -240,8 +247,13 @@ function buildHunks(ops, before, after, path, contextLines, maxLines) {
 /**
  * 行级统一 diff 摘要。
  *
- * 二进制 / 超过 512KB：返回 `{addedLines: 0, removedLines: 0, hunks: []}`（不做行级猜测）。
- * 内部 DP 预算超限：把整段视为替换（`addedLines/removedLines` 为两侧行数，hunks 为一个 truncated 占位）。
+ * 二进制 / 超过 512KB：返回 `{addedLines: 0, removedLines: 0, hunks: [], truncated: false}`
+ * （不做行级猜测；这类文件的"只给统计"由 `FileDiffStat.truncated` 表达，不算"预算截断"）。
+ * 内部 DP 预算超限：把整段视为替换（`addedLines/removedLines` 为两侧行数，hunks 为一个 truncated 占位），
+ * 顶层 `truncated` 同样为 true。
+ *
+ * 顶层 `truncated` 是**唯一**可靠的"还有差异没展示"信号：预算恰好用完时后续 hunk 不会被产出，
+ * 已产出的每个 hunk 仍然都是 `truncated: false`（M1 回归）。
  */
 export function diffText(before, after, options = {}) {
     try {
@@ -250,8 +262,9 @@ export function diffText(before, after, options = {}) {
         const path = typeof options.path === 'string' ? options.path : '';
         const contextLines = toInt(options.contextLines, DEFAULT_CONTEXT_LINES, 0, 50);
         const maxLines = toInt(options.maxLines, DEFAULT_MAX_LINES, 1, 5000);
-        if (isOpaque(beforeText) || isOpaque(afterText))
-            return { addedLines: 0, removedLines: 0, hunks: [] };
+        if (isOpaque(beforeText) || isOpaque(afterText)) {
+            return { addedLines: 0, removedLines: 0, hunks: [], truncated: false };
+        }
         const beforeLines = toLines(beforeText);
         const afterLines = toLines(afterText);
         const ops = diffOps(beforeLines, afterLines);
@@ -260,6 +273,7 @@ export function diffText(before, after, options = {}) {
                 addedLines: afterLines.length,
                 removedLines: beforeLines.length,
                 hunks: [{ path, header: '@@ -1 +1 @@', lines: [], truncated: true }],
+                truncated: true,
             };
         }
         let addedLines = 0;
@@ -271,10 +285,11 @@ export function diffText(before, after, options = {}) {
                 removedLines += 1;
         }
         const built = buildHunks(ops, beforeLines, afterLines, path, contextLines, maxLines);
-        return { addedLines, removedLines, hunks: built.hunks };
+        // built.truncated 覆盖两支：单 hunk 被裁 + 后续 range 被整段丢弃。**必须**透出（M1）。
+        return { addedLines, removedLines, hunks: built.hunks, truncated: built.truncated };
     }
     catch {
-        return { addedLines: 0, removedLines: 0, hunks: [] };
+        return { addedLines: 0, removedLines: 0, hunks: [], truncated: false };
     }
 }
 function toTextMap(value) {
