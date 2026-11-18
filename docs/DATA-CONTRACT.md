@@ -273,3 +273,35 @@
 
 与本机设置的关系：`aiFallbackEnabled` / `aiFallbackMaxAttempts` / `aiFallbackOrder` 三个键
 存在 `preferences`（本机，不进 Git），形态见 `docs/AI-FALLBACK.md` §4；诊断**不**存在那里。
+
+## 10. chats/（云端对话，跨设备共享）
+
+> 完整并发语义（续接流程、状态机、失败语义、隐私、分期）见 `docs/CHAT-SYNC.md`；本节只钉**数据形状**。
+> 与 §1–§4 的根本区别：`chats/` 是**接管制**（同一会话同时只有一个写者），不是并写制。
+
+```
+<repo>/
+  chats/                      # 跨设备共享命名空间（不是 devices/<deviceId>/）
+    <sessionId>/
+      meta.json               # 元信息 + 租约（小、常变，不值得塞进 JSONL）
+      session.jsonl           # 明文 JSONL，只追加，行序即事件序
+    index.jsonl               # 只追加的列表页投影
+```
+
+- **为什么共享命名空间**：会话要能被另一台设备**续接**，写者身份会变；放 `devices/<id>/` 等于把
+  「谁写的」钉进路径，接管就得跨目录搬文件、历史随之断。`devices/` 的语义是「一机一目录、只写自己」
+  （§1），与接管制冲突。
+- **为什么明文 JSONL**：可 diff / 可评审、App 无需 zstd 解帧即可读、故障可 `git log -p` 直接定位；
+  压缩交给 Git 的 zlib 与打包层。会话格式事实（header `version=4`、事件 `seq`）见
+  `docs/RESEARCH-session-import.md` §3。
+- **`meta.json` 字段**：`schemaVersion` / `sessionId` / `title` / `createdAt` / `updatedAt` / `model` /
+  `messageCount` / `sha256`（明文 `session.jsonl` 整文件字节的 sha256）/ `deviceId` /
+  `workspaceName`（**仅 workspace 末段名**）/ `lease`。**禁止** `cwd` 等绝对路径与任何凭据。
+- **租约字段**：`lease: { owner, since, exp, beatAt }`（ISO 8601）。TTL **10 分钟**、心跳建议 **60s**，
+  `exp = beatAt + 10min`，不变式 `since ≤ beatAt < exp`；只做区间比较，故跨机时钟偏差只会让判定偏保守。
+  仅 `owner == 本机 deviceId` 时可写；过期不清视为「可接管」，不视为错误。
+- **`index.jsonl`**：一行 `{id,title,updatedAt,messageCount,sha256}`，只追加；读侧**按 id 取最新一行**
+  ——这是唯一允许「取最新」的地方（展示投影，不是事件流）；缺失时可退化为扫描 `chats/*/meta.json`。
+- **与 `devices/` 的区别（一句话）**：`devices/` 是**单写者快照**（缺失视为空、sha256 只做传输校验、
+  内容不合并，§1–§2）；`chats/` 是**共享事件流**（多端先后接管、同 id 同时只允许一个写者、
+  冲突一律 fail-closed、**永不**按 `ts` 折叠）。日程的 `foldById` 折叠语义（§3）**不适用于** `session.jsonl`。
