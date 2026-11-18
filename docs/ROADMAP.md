@@ -122,12 +122,13 @@
 
 | 任务 | 负责人 | 状态 | ETA | 阻塞 |
 | --- | --- | --- | --- | --- |
-| A. 导出/导入（Markdown + JSON 导出、append-only 导入、dry-run） | pm/exec-export-import | 进行中 | - | 无（不依赖真机） |
-| B. 深色模式 + 大字号（`model/theme.ts` 统一 token、静态色值校验、×1.5 布局断言） | pm/exec-theme-dark | 进行中 | - | 无 |
-| C. AI 多源 fallback（`model/aiFallback.ts` 决策表、默认关、诊断脱敏） | pm/exec-ai-fallback | 进行中 | - | 无 |
-| D. 插件差异预览 + 回滚两步确认（`engine/diff.ts`、`previewDiff`/`rollbackPreview`、客户端入口） | pm/exec-plugin-diff | 进行中 | - | 无 |
-| 挂载 A/C 面板到 `Settings.ets` + 全量回归 + 分批提交 | pm | 排队 | - | 等 A/B/C 落地 |
-| 只读评审：导入去重语义 / fallback 决策表 / 回滚写盘 | 待派 reviewer | 排队 | - | 等实现落地 |
+| A. 导出/导入（Markdown + JSON 导出、append-only 导入、dry-run） | pm/exec-export-import | ✅ 完成（69 例） | - | 见下「第 4 轮交付」 |
+| B. 深色模式 + 大字号（`model/theme.ts` 统一 token、静态色值校验、×1.5 布局断言） | pm/exec-theme-dark | ✅ 完成（54 例 / 173 断言；色值 77→8） | - | 见下 |
+| C. AI 多源 fallback（决策表、默认关、诊断脱敏） | pm/exec-ai-fallback | ✅ 完成（61 例 / 175 断言） | - | 见下 |
+| D. 插件差异预览 + 回滚两步确认 | pm/exec-plugin-diff | ✅ 完成（45 例；插件全量 377 例 0 fail） | - | 见下 |
+| 挂载 A/C 面板到 `Settings.ets` | pm/exec-settings-mount | ✅ 完成（+473/−4；HAP 里已含两个面板的字符串） | - | 见下 |
+| 独立只读评审（导入去重 / fallback / 回滚写盘 / 主题门闸） | pm/review-round4 | ✅ 完成：有条件通过，P0×2 / P1×4，全修 | - | `docs/REVIEW-round4.md` |
+| 评审修复 M1–M6 | pm/exec-fix-plugin, exec-fix-app | ✅ 完成（M1/M4 插件侧；M2/M3/M5/M6 App 侧） | - | 见下 |
 | 真机：装最新 HAP + 竖↔横旋转往返 | —— | **阻塞** | - | 平板 `[Empty]`，需用户接回 USB 或开无线调试 |
 | 重启后复测（插件进链路 / 设置页两 section / 内嵌 Web WS） | —— | **待用户重启 DSH** | - | 脚本就绪：`tools/post-restart-check.mjs`；清单 `docs/RESTART-CHECKLIST.md` |
 
