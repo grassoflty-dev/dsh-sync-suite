@@ -13,7 +13,7 @@
 ```
 
 两边 `deviceId` **必须不同**（`^[a-z0-9][a-z0-9-]{0,31}$`，默认取主机名），App 侧同步组填**同一仓库地址 + 同一 token**。
-工作副本复用配置同步的 `~/.dsh/git-config-sync/work/<repoHash>/`：同一 `repoUrl` → 同一份 clone，不需要第二份配置。
+工作副本复用配置同步的 `~/.dsh/dots/work/<repoHash>/`：同一 `repoUrl` → 同一份 clone，不需要第二份配置。
 
 ## 1. JSONL 契约（不新造格式）
 
@@ -37,7 +37,7 @@
 | `schedule_add` | `date?`、`title`（必填）、`body?`、`author?`（缺省「我」） | `{id, ts, date, deviceId, path, commit, pushed, rebased, files}` |
 | `schedule_summary` | `date?`、`deviceId?` | `{date, deviceIds, count, refreshed, note?, aiNote?, summary, prompt, payload}` |
 
-- 注册位置：`packages/dsh-git-config-sync/src/index.ts` 的 `mountScheduleTools()`；
+- 注册位置：`packages/dsh-dots/src/index.ts` 的 `mountScheduleTools()`；
   定义在 `src/schedule/tools.ts`（`registerScheduleTools(ctx, {paths})` → `ctx.tools.register(...)`，逐个挂在 `ctx.effect` 上）。
   `tools` 是**可选**依赖（`ctx.inject(['tools'], …)`），宿主没有 tools 服务时插件照常挂载、配置同步 RPC 不受影响。
 - 每次执行都重新读 `settings.json`：设置页换仓库/设备标识后下一次调用立即生效。
@@ -106,4 +106,4 @@ schedule_summary {date: "2026-11-15"} → payload + prompt（配了 key 则直�
 | `src/schedule/tools.ts` | 三个工具的定义与注册 |
 | `test/schedule-jsonl.test.mjs` / `test/schedule-bridge.test.mjs` | 纯逻辑 + 真实临时仓库集成测试 |
 
-跑测试：`node --test "packages/dsh-git-config-sync/test/*.test.mjs"`（当前 98 例全绿）。
+跑测试：`node --test "packages/dsh-dots/test/*.test.mjs"`（当前 98 例全绿）。

@@ -34,7 +34,7 @@
 | # | 前提 | 现状 |
 |---|---|---|
 | A1 | DSH 只监听回环（本机 Web GUI `http://127.0.0.1:37510`） | **已验证**：`dsh-host-webserver` 有 `isLoopbackHost()` 与可配置 `host`；本实例按回环使用 |
-| A2 | 插件可通过 `ctx.connection.requestRejection(req)` 复用 DSH 登录态 | **已验证**：`dsh-git-config-sync` 即此用法，401/403 由 connection 判定 |
+| A2 | 插件可通过 `ctx.connection.requestRejection(req)` 复用 DSH 登录态 | **已验证**：`dsh-dots` 即此用法，401/403 由 connection 判定 |
 | A3 | 手机与 DSH 之间**不存在**可信网络 | 设计前提 |
 | A4 | 密钥只存在于手机与本机两侧 | 需实现保证；手机侧现为 `preferences` 明文（§10 决策 5） |
 | A5 | 中继只做转发，可能记录元数据、可能被攻破 | 因此 E2E 加密为硬要求 |
@@ -375,7 +375,7 @@ dshremote://pair?ch=ch_7k3m9q2v4x8b1n6t5r0y2w4c&relay=wss%3A%2F%2Frelay.example.
 | 路径 | 读到了什么 |
 |---|---|
 | `dsh-sync-suite/docs/ARCHITECTURE.md`、`CONTRACT.md`、`DATA-CONTRACT.md` | 单写者/密钥不出设备/fail-closed 约定；插件 RPC 契约与 `inject:['webServer','connection']`；`devices/<id>/` 与 JSONL 契约；DSH 版本 0.2.2-rc.3 |
-| `packages/dsh-git-config-sync/README.md`、`src/index.ts`、`src/rpc.ts` | 仅注册一条 exact 路由 `/dsh-git-config-sync/rpc`，handler 首行 `ctx.connection.requestRejection(req)`；串行队列、10 MB body 上限、`E_CONFIRM_REQUIRED` 门禁、401/403 处理 |
+| `packages/dsh-dots/README.md`、`src/index.ts`、`src/rpc.ts` | 仅注册一条 exact 路由 `/dsh-dots/rpc`，handler 首行 `ctx.connection.requestRejection(req)`；串行队列、10 MB body 上限、`E_CONFIRM_REQUIRED` 门禁、401/403 处理 |
 | `apps/arkui-schedule/entry/src/main/ets/services/GitSyncService.ets` | App 网络风格：Web 组件 + `@ohos.net.http`（connect 15s/read 45s）+ base64 桥；**无 WS** |
 | `apps/arkui-schedule/entry/src/main/ets/services/settingsStore.ets` | 配置存 `preferences`（全字符串），token/AI key 明文存本机 |
 | `…\resources\app.asar`（归档，非目录）内 `@deepseek-ai/dsh-api-gateway/src/stream-protocol.ts` | `REMOTE_STREAM_MUX_PATH='/api/remote.mux'`、`$events`/`$events/result`、帧 `open/item/end/cancel` 与 `item/error/end` |

@@ -33,7 +33,7 @@ const errors = []
 
 // 1) 插件
 if (!checkOnly) {
-  run(process.execPath, [path.join(root, 'packages/dsh-git-config-sync/scripts/build.mjs')], 'plugin build')
+  run(process.execPath, [path.join(root, 'packages/dsh-dots/scripts/build.mjs')], 'plugin build')
 }
 
 // 2) 应用纯逻辑（应用骨架由执行者创建；缺失时给出明确告警而不是静默跳过）
@@ -46,9 +46,9 @@ if (existsSync(appToolsTsconfig)) {
 
 // 3) 产物语法检查
 const artifacts = [
-  path.join(root, 'packages/dsh-git-config-sync/dist/index.js'),
+  path.join(root, 'packages/dsh-dots/dist/index.js'),
 ]
-const clientDist = path.join(root, 'packages/dsh-git-config-sync/dist/client.js')
+const clientDist = path.join(root, 'packages/dsh-dots/dist/client.js')
 if (existsSync(clientDist)) artifacts.push(clientDist)
 else console.warn(`[build] 警告：缺少 ${clientDist}（客户端模块尚未产出）`)
 const appBuild = path.join(root, 'apps/arkui-schedule/tools/.build')

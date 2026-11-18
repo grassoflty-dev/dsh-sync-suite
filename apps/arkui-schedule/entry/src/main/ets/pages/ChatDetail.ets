@@ -315,30 +315,36 @@ struct ChatDetail {
   }
 
   build() {
-    PageLayout({
-      title: this.chatTitle,
-      subtitle: this.subtitle,
-      onBack: () => {
-        router.back();
-      }
-    }) {
-      Column({ space: SPACING.md }) {
-        // 只读提示固定在顶部：无论列表滚到哪里都在
-        this.ReadOnlyNotice()
-        if (this.errorText.length > 0) {
-          this.ErrorBlock()
-        } else if (this.loading) {
-          this.LoadingHint()
-        } else if (this.messages.length === 0) {
-          this.EmptyMessages()
-        } else {
-          this.MessageList()
+    // 根节点必须是**容器组件**（同 Chats.ets：10905210 实测），与 Detail/Edit/Index/Settings 同形：
+    // Stack 兜底 + PageLayout 作为其唯一子节点。
+    Stack({ alignContent: Alignment.TopStart }) {
+      PageLayout({
+        title: this.chatTitle,
+        subtitle: this.subtitle,
+        onBack: () => {
+          router.back();
         }
+      }) {
+        Column({ space: SPACING.md }) {
+          // 只读提示固定在顶部：无论列表滚到哪里都在
+          this.ReadOnlyNotice()
+          if (this.errorText.length > 0) {
+            this.ErrorBlock()
+          } else if (this.loading) {
+            this.LoadingHint()
+          } else if (this.messages.length === 0) {
+            this.EmptyMessages()
+          } else {
+            this.MessageList()
+          }
+        }
+        .width('100%')
+        .height('100%')
+        .constraintSize({ maxWidth: CONTENT_MAX_WIDTH })
+        .alignItems(HorizontalAlign.Start)
       }
-      .width('100%')
-      .height('100%')
-      .constraintSize({ maxWidth: CONTENT_MAX_WIDTH })
-      .alignItems(HorizontalAlign.Start)
     }
+    .width('100%')
+    .height('100%')
   }
 }

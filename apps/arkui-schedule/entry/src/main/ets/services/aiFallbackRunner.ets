@@ -68,7 +68,7 @@ const MAX_SAME_SOURCE_RETRIES: number = 1;
  * 两条路径（单源 / 多源 fallback）产出的汇总口径不同会让人误以为换了模型。
  */
 const SYSTEM_PROMPT: string =
-  '你是日程助手的整理助手。只依据用户提供的记录归纳，用中文 Markdown 输出，不编造人名、时间或数字。';
+  '你是DSH-Dots的整理助手。只依据用户提供的记录归纳，用中文 Markdown 输出，不编造人名、时间或数字。';
 
 /** 一次 HTTP 尝试的原始结果（网络层失败/超时也在这里表达，不抛异常）。 */
 interface HttpOutcome {

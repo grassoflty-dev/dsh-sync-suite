@@ -76,7 +76,7 @@ function clipText(text: string): string {
  */
 export function buildAiPrompt(payload: AiPayload, nowIso: string, timeZone: string): string {
   const lines: string[] = [];
-  lines.push('你是日程助手的整理助手。请把用户当天的手写日程记录整理成结构化摘要。');
+  lines.push('你是DSH-Dots的整理助手。请把用户当天的手写日程记录整理成结构化摘要。');
   lines.push('');
   lines.push(`当前时间：${nowIso}`);
   lines.push(`时区：${timeZone}`);

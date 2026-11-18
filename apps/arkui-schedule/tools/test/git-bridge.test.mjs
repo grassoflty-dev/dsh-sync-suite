@@ -789,7 +789,7 @@ describe('桥内部工具', () => {
     const bridge = loadBridge(host);
     const { utf8Encode, utf8Decode } = bridge.internals;
 
-    for (const text of ['', 'hello', '日程助手', '周会 09:30 🚀', '混合 mixed 中文 \n\t']) {
+    for (const text of ['', 'hello', 'DSH-Dots', '周会 09:30 🚀', '混合 mixed 中文 \n\t']) {
       const encoded = utf8Encode(text);
       assert.deepEqual(Buffer.from(encoded), Buffer.from(text, 'utf8'));
       assert.equal(utf8Decode(encoded), text);

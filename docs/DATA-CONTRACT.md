@@ -1,7 +1,7 @@
 # 数据契约（DATA-CONTRACT）
 
 本文件定义三处持久化契约：**Git 仓库目录结构**、**日程 JSONL**、**插件 RPC**。
-跨设备互通以本文件为准；实现见 `packages/dsh-git-config-sync` 与 `apps/arkui-schedule`。
+跨设备互通以本文件为准；实现见 `packages/dsh-dots` 与 `apps/arkui-schedule`。
 
 ## 1. Git 仓库目录结构
 
@@ -78,7 +78,7 @@
   `云端对话模式没能隔离工具：多出 a, b, c`），`details.extra` / `details.missing` 给出逐名清单。
 - `E_CHAT_DENY_FAILED`（宿主没有 `tools.restrict` / `restrict` 抛错）是**内部防御性错误**，
   只用于定位，**不进本表**；对外表现同样是"拒绝创建会话"。
-- 两者都不会被 RPC 层改写成别的 code（`POST /dsh-git-config-sync/rpc` 原样透传），
+- 两者都不会被 RPC 层改写成别的 code（`POST /dsh-dots/rpc` 原样透传），
   也**不**作为 `chatPresetInfo` 的返回值——该 action 只返回
   `{presetId, allow, rationale, registeredCount?, denyCount?}`。
 
@@ -114,7 +114,7 @@
 
 ## 4. 插件 RPC 契约
 
-`POST /dsh-git-config-sync/rpc`，请求 `{action, ...}`，响应恒 HTTP 200：
+`POST /dsh-dots/rpc`，请求 `{action, ...}`，响应恒 HTTP 200：
 
 ```json
 {"ok":true,"data":{...}}
@@ -181,7 +181,7 @@
 ## 5. 状态目录（本机，不进 repo）
 
 ```
-%USERPROFILE%\.dsh\git-config-sync\
+%USERPROFILE%\.dsh\dots\
   settings.json        # 同步设置（无 token）
   credentials.json     # { token }，0600
   work\<repoHash>\     # 工作副本（repoUrl 的 sha256 前 16 位）
@@ -195,7 +195,7 @@
 
 手机只写 `devices/<自己>/schedules/*.jsonl`、`summaries/*.json`、`open.jsonl` 与 `attachments/<date>.zip`，提交推送到同一远端；
 其它设备目录只读。冲突策略：设备目录互不重叠，不需要 merge；同 id 记录按 ts 折叠；同日汇总按 `generatedAt` 取新。
-电脑端由 `dsh-git-config-sync` 的 `schedule_*` 工具只写 `devices/<pcId>/schedules/`（见 `docs/SCHEDULE-BRIDGE.md`）。
+电脑端由 `dsh-dots` 的 `schedule_*` 工具只写 `devices/<pcId>/schedules/`（见 `docs/SCHEDULE-BRIDGE.md`）。
 
 ### 6.1 设备指纹 `devices/<deviceId>/.device-fingerprint`（App 写，**不是 secret**）
 
@@ -225,7 +225,7 @@ devices/phone-a/
 - **不是 secret**：内容只是一个随机身份串，不含 token / 邮箱 / 机型等任何信息，泄露它没有凭据价值。
 - **随 git 提交是刻意的**：它必须跟着仓库走，否则换机/清数据后无法再判断「这个目录之前是谁在写」。
 - **不进同步载荷**：它不是 `ScheduleRecord` 字段，不进 `schedules/*.jsonl`、不进 `summaries/`；
-  只是设备目录里的一个旁挂文件，插件侧（`packages/dsh-git-config-sync`）忽略它。
+  只是设备目录里的一个旁挂文件，插件侧（`packages/dsh-dots`）忽略它。
 - **改了 `deviceId` 等于换写入目录**：本机指纹不变，但新目录下没有指纹 → 下次同步写入并视为首次；
   旧目录数据仍保留（其它设备目录只读）。
 
@@ -235,7 +235,7 @@ devices/phone-a/
 它只碰本机状态目录下的两个**新增**文件：
 
 ```
-%USERPROFILE%\.dsh\git-config-sync\
+%USERPROFILE%\.dsh\dots\
   remote.json          # 远程访问设置（8 字段，无 secret），0600
   remote-token.json    # { token, createdAt }，0600
 ```

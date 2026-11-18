@@ -73,7 +73,7 @@ const MODELS_READ_TIMEOUT_MS: number = 15000;
 
 /** system 角色：只约束输出形态，不承载记录内容。 */
 const SYSTEM_PROMPT: string =
-  '你是日程助手的整理助手。只依据用户提供的记录归纳，用中文 Markdown 输出，不编造人名、时间或数字。';
+  '你是DSH-Dots的整理助手。只依据用户提供的记录归纳，用中文 Markdown 输出，不编造人名、时间或数字。';
 
 /** 一次尝试的结果（网络层失败/超时也在这里表达，不抛异常）。 */
 interface AiHttpOutcome {

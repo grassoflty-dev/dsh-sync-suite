@@ -11,17 +11,17 @@ pnpm build                                    # 全部构建步骤完成
 pnpm test                                     # tests 217 / pass 217 / fail 0（18 suites）
 node apps/arkui-schedule/tools/validate-app.mjs   # ✅ 8/8（JSON5 12、import 78、main 静态 import 86、页面 4、rawfile 2）
 .\node_modules\.bin\tsc -p apps/arkui-schedule/tools/tsconfig.json --noEmit   # exit 0
-node --check packages/dsh-git-config-sync/dist/index.js    # exit 0
-node --check packages/dsh-git-config-sync/dist/client.js   # exit 0
+node --check packages/dsh-dots/dist/index.js    # exit 0
+node --check packages/dsh-dots/dist/client.js   # exit 0
 ```
 
 ## 2. 插件形态冒烟（不启动 DSH，用假 ctx 加载 dist/index.js）
 
 `15/15 通过`。覆盖：`inject = ['webServer','connection']`、`ctx.effect` 使用、只注册一条
-`exact /dsh-git-config-sync/rpc`、真实 HTTP `getState`（三态 `reachable`、未配置不报错）、
+`exact /dsh-dots/rpc`、真实 HTTP `getState`（三态 `reachable`、未配置不报错）、
 未知 action、`apply` 无 confirm → `E_CONFIRM_REQUIRED`、`GET → 405`、
 `requestRejection → 401` 且空 body、客户端模块在伪 `__ModuleLoader__` 下加载、
-`factory` 返回 `{inject:['slots','locale'],apply}`、注册 `settings.section / id=git-config-sync / order=70`、
+`factory` 返回 `{inject:['slots','locale'],apply}`、注册 `settings.section / id=dots / order=70`、
 en/zh 字典 key 完全一致。
 
 ## 3. 端到端（真实 git 裸仓库 + 真实 RPC 面，两台设备各自 HOME）

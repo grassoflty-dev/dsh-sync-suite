@@ -205,16 +205,16 @@ export interface DotsSnapshot {
 
 | 动作 | 文件 | 内容 |
 | --- | --- | --- |
-| 新增 | `packages/dsh-git-config-sync/src/schedule/dots.ts` | 纯逻辑：日期窗口、日聚合、合计、top 标题、快照序列化与去重哈希 |
-| 新增 | `packages/dsh-git-config-sync/src/schedule/dshStatus.ts` | 进程内读 DSH 状态（**只用 `ctx.get()` 可选服务**，缺一个不影响其它字段） |
-| 新增 | `packages/dsh-git-config-sync/src/schedule/dotsPublish.ts` | 快照发布：读旧文件 → 去重 → 写 → `commitAll({onlyPath})` → `pushWithRebase` |
-| 改 | `packages/dsh-git-config-sync/src/schedule/paths.ts` | 新增 `dotsStatusRelPath(deviceId)` 与 `assertDotsStatusScope(deviceId, relPath)`（现有 `assertSchedulesScope` 是**白名单，会把 `dsh-status/` 挡掉**：`paths.ts:90-105`） |
-| 改 | `packages/dsh-git-config-sync/src/schedule/tools.ts` | 新增 `dshDotsTool()`，并加进 `buildScheduleTools()`（`tools.ts:308-310`）与 `registerScheduleTools()`（`:318-334` 自动覆盖） |
-| 改 | `packages/dsh-git-config-sync/src/index.ts` | 新配置项 `config.dotsTool`（默认 true，与 `scheduleTools` 并列，`:33-35,110-115`），把 `ctx.get` 转发给状态读取 |
-| 改 | `packages/dsh-git-config-sync/src/schedule/index.ts` | `export * from './dots.js'` 等三行（现有出口 `index.ts:14-21`） |
-| 新增 | `packages/dsh-git-config-sync/test/schedule-dots.test.mjs` | 纯函数：窗口、口径、去重哈希 |
-| 新增 | `packages/dsh-git-config-sync/test/schedule-dots-status.test.mjs` | 注入假 host（`{ get: (n) => … }`）验证 4 种降级：服务缺失 / 抛错 / 超时 / 正常 |
-| 新增 | `packages/dsh-git-config-sync/test/schedule-dots-publish.test.mjs` | 临时裸仓库：只提交 `dsh-status/`、内容不变不提交、push 失败不抛 |
+| 新增 | `packages/dsh-dots/src/schedule/dots.ts` | 纯逻辑：日期窗口、日聚合、合计、top 标题、快照序列化与去重哈希 |
+| 新增 | `packages/dsh-dots/src/schedule/dshStatus.ts` | 进程内读 DSH 状态（**只用 `ctx.get()` 可选服务**，缺一个不影响其它字段） |
+| 新增 | `packages/dsh-dots/src/schedule/dotsPublish.ts` | 快照发布：读旧文件 → 去重 → 写 → `commitAll({onlyPath})` → `pushWithRebase` |
+| 改 | `packages/dsh-dots/src/schedule/paths.ts` | 新增 `dotsStatusRelPath(deviceId)` 与 `assertDotsStatusScope(deviceId, relPath)`（现有 `assertSchedulesScope` 是**白名单，会把 `dsh-status/` 挡掉**：`paths.ts:90-105`） |
+| 改 | `packages/dsh-dots/src/schedule/tools.ts` | 新增 `dshDotsTool()`，并加进 `buildScheduleTools()`（`tools.ts:308-310`）与 `registerScheduleTools()`（`:318-334` 自动覆盖） |
+| 改 | `packages/dsh-dots/src/index.ts` | 新配置项 `config.dotsTool`（默认 true，与 `scheduleTools` 并列，`:33-35,110-115`），把 `ctx.get` 转发给状态读取 |
+| 改 | `packages/dsh-dots/src/schedule/index.ts` | `export * from './dots.js'` 等三行（现有出口 `index.ts:14-21`） |
+| 新增 | `packages/dsh-dots/test/schedule-dots.test.mjs` | 纯函数：窗口、口径、去重哈希 |
+| 新增 | `packages/dsh-dots/test/schedule-dots-status.test.mjs` | 注入假 host（`{ get: (n) => … }`）验证 4 种降级：服务缺失 / 抛错 / 超时 / 正常 |
+| 新增 | `packages/dsh-dots/test/schedule-dots-publish.test.mjs` | 临时裸仓库：只提交 `dsh-status/`、内容不变不提交、push 失败不抛 |
 
 #### 函数签名
 
@@ -454,7 +454,7 @@ RD §2.1 A1 说 DSH 只监听回环——而本机 profile 已被 mobile-remote 
 | 凭据 | 位置 | 证据 |
 | --- | --- | --- |
 | Git token（平板） | App `preferences`，**明文** | `settingsStore.ets`（M1 §3 已列风险）；CONTRACT §3.3 口径 |
-| Git token（PC） | `~/.dsh/git-config-sync/credentials.json`，0600 | CT:54-55、DC §5 |
+| Git token（PC） | `~/.dsh/dots/credentials.json`，0600 | CT:54-55、DC §5 |
 | AI key | 平板 `preferences` / PC 环境变量 `DSH_SCHEDULE_AI_KEY` | SB §2 末、`bridge.ts:73-82` |
 | DSH 远程访问密码 | **不经过 DSH-dots**，由 mobile-remote 自己管（`~/.dsh/plugins/dsh-mobile-remote/config.json`，scrypt 哈希） | `README.zh.md:43` |
 
@@ -481,7 +481,7 @@ RD §2.1 A1 说 DSH 只监听回环——而本机 profile 已被 mobile-remote 
 
 ### 提交 1：契约 + 纯聚合（零 DSH、零 UI、可完全单测）
 
-> **注**：本轮并行工作区里已经出现 `packages/dsh-git-config-sync/src/schedule/dots.ts`（只读聚合 + 保守状态，
+> **注**：本轮并行工作区里已经出现 `packages/dsh-dots/src/schedule/dots.ts`（只读聚合 + 保守状态，
 > 本文未修改它）。提交 1 的实际内容是**把它与本文契约对齐并补齐 App 侧**，不是从零写；差异清单见 §8。
 
 - 改/增：`src/schedule/dots.ts`（对齐 §2.1/§2.2，见 §8）、`src/schedule/index.ts`、`test/dots.test.mjs`；
@@ -491,7 +491,7 @@ RD §2.1 A1 说 DSH 只监听回环——而本机 profile 已被 mobile-remote 
 
   ```powershell
   pnpm build
-  node --test "packages/dsh-git-config-sync/test/*.test.mjs"
+  node --test "packages/dsh-dots/test/*.test.mjs"
   node --test "apps/arkui-schedule/tools/test/*.test.mjs"
   node apps/arkui-schedule/tools/validate-app.mjs
   node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json --noEmit
@@ -507,7 +507,7 @@ RD §2.1 A1 说 DSH 只监听回环——而本机 profile 已被 mobile-remote 
 - 验收（追加）：
 
   ```powershell
-  node --test "packages/dsh-git-config-sync/test/*.test.mjs"
+  node --test "packages/dsh-dots/test/*.test.mjs"
   # 手工：DSH 里让模型调 dsh_dots {publish:true}
   git -C <工作副本> log --oneline -3 -- devices/desktop-*/dsh-status
   git -C <工作副本> show --stat HEAD      # 必须只有 dsh-status/latest.json 一个文件

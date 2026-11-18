@@ -6,4 +6,4 @@ phone-a/
   attachments/<sha256>.png       # 手写分页截图，按 sha256 去重
 ```
 
-由 ArkUI-X 日程助手写入，只写本设备目录，永不 merge 其他设备。
+由 ArkUI-X DSH-Dots写入，只写本设备目录，永不 merge 其他设备。

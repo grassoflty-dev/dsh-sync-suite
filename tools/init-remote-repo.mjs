@@ -47,7 +47,7 @@ writeFileSync(
   [
     '# DSH 配置同步仓库',
     '',
-    '由 `dsh-git-config-sync` 插件与 ArkUI-X 日程助手使用。',
+    '由 `dsh-dots` 插件与 ArkUI-X DSH-Dots使用。',
     '',
     '- 每台设备只写 `devices/<deviceId>/`，不要手动合并其他设备目录。',
     '- `devices/<deviceId>/cordis.patch.yml` 为脱敏后的 DSH profile patch；密钥以 `__SECRET__` 占位，恢复时由本地回填。',

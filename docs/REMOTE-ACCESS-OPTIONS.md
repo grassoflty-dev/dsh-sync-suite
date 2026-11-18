@@ -2,7 +2,7 @@
 
 > 状态：**设计 + 落地口径已定**。本文是两端（DSH 插件 `src/remote/**` 与平板 App
 > `entry/src/main/ets/model/remoteAccess.ts`）共用的**唯一语义表**，字段名与枚举值以
-> `packages/dsh-git-config-sync/src/remote/types.ts` 为准。
+> `packages/dsh-dots/src/remote/types.ts` 为准。
 > 调研依据：`docs/RESEARCH-A-mobile-remote.md`（成熟插件源码对照）、`RESEARCH-B-uu-remote.md`、
 > `RESEARCH-C-tailscale-harmony.md`、`RESEARCH-D-ipv6.md`、`RESEARCH-E-zero-infra.md`。
 > 官网页面的抓取时间：2026-11-17。
@@ -210,7 +210,7 @@ VPN，beta），或自己构建（Go 核心能在鸿蒙上加载，已有人验�
 
 ## 3. 字段语义对照表（两端共用）
 
-`RemoteSettings`（插件，`~/.dsh/git-config-sync/remote.json`）与 App preferences 键一一对应。
+`RemoteSettings`（插件，`~/.dsh/dots/remote.json`）与 App preferences 键一一对应。
 **改这张表必须同时改两端 + `types.ts`。**
 
 | 字段 | 类型 | 默认 | 出现于 | UI 标签 | 校验 / 拒绝什么 | App 侧键名 |
@@ -231,7 +231,7 @@ VPN，beta），或自己构建（Go 核心能在鸿蒙上加载，已有人验�
   打开 80，等于给一个注定打不开的地址，所以 `port: 0` 直接给「请先填端口」的失败结论，
   `missingFields` 也会把 `port` 报成缺失（`cloudflare` / `manual` 不看端口）；
 - App 侧多一个 `remoteUrl` 键，是「最终打开的地址」缓存（历史字段，保留）；
-- **自动生成的**令牌**不在**上表里：它不属于配置，存在 `~/.dsh/git-config-sync/remote-token.json`（0600），
+- **自动生成的**令牌**不在**上表里：它不属于配置，存在 `~/.dsh/dots/remote-token.json`（0600），
   只经二维码 / 「显示链接」出口给本机用户。上表的 `token` 是用户在 `lan` / `ipv6` / `tailscale`
   下**手填**的可选令牌（与自动令牌同一出口规则）；它**不进** `remoteGetState`，状态里只给
   `tokenSet` / `tokenMasked`。
@@ -335,9 +335,9 @@ VPN，beta），或自己构建（Go 核心能在鸿蒙上加载，已有人验�
 - **仍然待实测（不许当成已确认）**：① 映射生成的对外入口形态（域名还是 `host:port`）；
   ② UU 的端口映射是否透传 WebSocket Upgrade（DSH 的 `/api/remote.mux` 需要 101）。
 - **本轮未改、仍留旧判定的地方**（文件不在本轮改动范围内，下一轮修）：
-  - `packages/dsh-git-config-sync/src/remote/probe.ts` 里的 `uu-unsupported` 检查与
+  - `packages/dsh-dots/src/remote/probe.ts` 里的 `uu-unsupported` 检查与
     `MODE_READY.uu = '不可用：UU 是画面串流，不能当隧道'`，以及 §4 表格中对应的那一行；
-  - `packages/dsh-git-config-sync/test/remote-probe.test.mjs` 里针对该检查的断言；
+  - `packages/dsh-dots/test/remote-probe.test.mjs` 里针对该检查的断言；
   - `docs/RESEARCH-B-uu-remote.md`（保留原文以留痕，只在其文件头与文末加了勘误指针）；
   - `docs/ROADMAP.md` §3 第 3 条、`docs/RESTART-CHECKLIST.md` 远程 section 那条
     「网易 UU 远程是 disabled」的验收项、`docs/VERIFICATION.md` 里两处历史真机记录（旧文案），

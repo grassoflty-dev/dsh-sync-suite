@@ -28,7 +28,7 @@
 | 侧 | 位置 | 硬编码了什么 | 缺口 |
 | --- | --- | --- | --- |
 | App | `apps/arkui-schedule/entry/src/main/ets/model/syncScope.ts:16`（`DEVICE_ID_PATTERN`）、`:94-107`（`filterPathsForDevice`）、`:113-122`（`assertWithinDevice`） | 只校验「提交路径落在 `devices/<self>/` 内」，**不校验类型**；`devices/<self>/` 下任何东西都自动在范围内 | 没有"类型"概念，`summaries/`、`open.jsonl`、`attachments/` 全靠"递归 add 整个设备目录"顺带同步（`docs/ROADMAP.md:13` 记明这一点） |
-| 插件 | `packages/dsh-git-config-sync/src/engine/types.ts:9`（`SyncFileName` 四文件）、`:17-22`（`SyncScope` 四布尔）、`engine/collect.ts:28`（`SYNC_FILE_NAMES`） | 只认 `cordis.patch.yml` / `providers.json` / `plugins.json` / `mcp.json` | 新增一类数据要同时改类型、collect、preview、restore 四处 |
+| 插件 | `packages/dsh-dots/src/engine/types.ts:9`（`SyncFileName` 四文件）、`:17-22`（`SyncScope` 四布尔）、`engine/collect.ts:28`（`SYNC_FILE_NAMES`） | 只认 `cordis.patch.yml` / `providers.json` / `plugins.json` / `mcp.json` | 新增一类数据要同时改类型、collect、preview、restore 四处 |
 | 仓库 | `chats/`（`docs/DATA-CONTRACT.md:328-358`） | 完全绕开上面两套：不走 `devices/<id>/`，也不是 `SyncScope` 的成员 | 合并语义（接管 / 租约）只写在散文里，代码里没有单一判据 |
 
 后果三条：
@@ -76,7 +76,7 @@
 | --- | --- |
 | `id` / 显示名 | `schedules` / 日程 |
 | 仓库路径 | 目录、按设备分目录：`devices/<deviceId>/schedules/YYYY-MM-DD.jsonl`（`docs/DATA-CONTRACT.md:19`、`:22`、`:87`）；`kind: 'dir'`、`perDevice: true`；分片名由记录 `ts` 的**设备本地日期**决定（`:87`） |
-| 合并策略 | `per-device-union`：各设备只写自己目录（`docs/DATA-CONTRACT.md:28`、`:31`）；读侧 `parseJsonl` + `foldById`，同 `id` 取较晚 `ts`（`:108`；`packages/dsh-git-config-sync/src/schedule/jsonl.ts:183`）；更新事件追加同 `id` 新行、`ts` 保留原记录日期（`docs/DATA-CONTRACT.md:111-113`） |
+| 合并策略 | `per-device-union`：各设备只写自己目录（`docs/DATA-CONTRACT.md:28`、`:31`）；读侧 `parseJsonl` + `foldById`，同 `id` 取较晚 `ts`（`:108`；`packages/dsh-dots/src/schedule/jsonl.ts:183`）；更新事件追加同 `id` 新行、`ts` 保留原记录日期（`docs/DATA-CONTRACT.md:111-113`） |
 | 脱敏 | `redactSecrets: true`（文本片段级，规则同 `apps/arkui-schedule/entry/src/main/ets/model/syncError.ts:61-98`，与 `docs/CHAT-SYNC.md:228-231` 同一套）；`absolutePathReplace: true`（`C:\...`、`/home/<user>/` → `<WORKSPACE>`，同 `docs/CHAT-SYNC.md:244-245`）；`neverOut` 见 §3.3 |
 | 体积上限 | 单条 ≤ 16 KiB（`body`+`ocr_text`+`ai_structured` 合计）；单类型 ≤ 2 MiB / 日分片、64 MiB / 设备总量；`onExceed: 'reject'`（`E_RECORD_TOO_LARGE`）——**不截断**，理由见 §3.4 |
 | 失败隔离 | `isolatesFailures: true`；`fallback: '本类型失败不影响 summaries / open-index / attachments'`（先例：索引写失败不影响日程保存，`docs/DATA-CONTRACT.md:168`） |
@@ -198,7 +198,7 @@ sha256 只作传输校验不做内容合并，`docs/DATA-CONTRACT.md:29`）就�
 - 半段上传会让 `meta.sha256` 与内容的关系更难排查（`docs/CHAT-SYNC.md:445-447`）；
 - 尾行撕裂已明确"整会话 fail-closed"而不是"截掉坏尾巴"（`:445-447`）。
 
-另注意展示层的独立上限：超过 512 KiB 的文件 `diff.ts` 不产出 hunk（`packages/dsh-git-config-sync/src/engine/diff.ts:84` `MAX_DIFF_BYTES`），
+另注意展示层的独立上限：超过 512 KiB 的文件 `diff.ts` 不产出 hunk（`packages/dsh-dots/src/engine/diff.ts:84` `MAX_DIFF_BYTES`），
 所以 UI 侧"能不能逐行看差异"与"能不能上传"是**两个不同阈值**，别混用。
 
 ### 4.5 失败隔离
@@ -207,7 +207,7 @@ sha256 只作传输校验不做内容合并，`docs/DATA-CONTRACT.md:29`）就�
 
 1. **单会话失败不影响其它会话**（`docs/CHAT-SYNC.md:421`）；
 2. **远程域与同步域互不影响**的反面同样成立：`chats` 走 ff-only 通道（`docs/CHAT-SYNC.md:200-206`），
-   与 `devices/` 的 `pushWithRebase()`（`packages/dsh-git-config-sync/src/engine/git.ts:643`）不是同一条路，
+   与 `devices/` 的 `pushWithRebase()`（`packages/dsh-dots/src/engine/git.ts:643`）不是同一条路，
    一条路坏了不能连累另一条。
 
 ## 5. 候选新类型：优先级与逐类型判定
@@ -236,7 +236,7 @@ sha256 只作传输校验不做内容合并，`docs/DATA-CONTRACT.md:29`）就�
 ### 5.2 插件清单与版本（`plugins.json`，已在跑）
 
 - **现状**：`devices/<pcId>/plugins.json`，内容 `{plugins:[{name,version,source,enabled}]}`
-  （`docs/DATA-CONTRACT.md:16`、`packages/dsh-git-config-sync/src/engine/types.ts:65-70`）；
+  （`docs/DATA-CONTRACT.md:16`、`packages/dsh-dots/src/engine/types.ts:65-70`）；
   合并是 **MERGE-only 计划**，只写 `plugins.to-install.json`，**不执行 pnpm、不改 profile package.json**
   （`docs/DATA-CONTRACT.md:39`、`engine/restore.ts:254-270`）。
 - **问 1：互相覆盖？** 文件层不会（各写自己目录）。但"装哪个版本"是**全局决定**，今天靠"计划 + 用户手动装"

@@ -40,7 +40,7 @@ const REASON_BAD_ID: string = '会话 ID 不合法';
 /**
  * 会话 id 白名单：`^[A-Za-z0-9._-]+$`，长度 ≤ 200，且不能是 `.` / `..`。
  *
- * 与插件侧写盘时的校验（`packages/dsh-git-config-sync/src/chats/exportChats.ts`
+ * 与插件侧写盘时的校验（`packages/dsh-dots/src/chats/exportChats.ts`
  * 的 `assertSafeSessionId`：`^[A-Za-z0-9._-]+$`、≤200、非 `.`/`..`）**完全一致**——
  * 读侧比写侧更严会让「列表里有、点开说 ID 不合法」。正则里没有 `/` 与 `\`，
  * 所以拼出来的路径永远落在 `chats/` 下（不越界）。

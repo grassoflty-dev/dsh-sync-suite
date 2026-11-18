@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
   Offline-sign a HarmonyOS HAP with the SDK hap-sign-tool (no DevEco needed).

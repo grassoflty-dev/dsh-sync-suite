@@ -49,7 +49,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 用户看到 | 标题「把你的日程同步到自己的仓库」；两个输入框：`仓库地址`、`token（密码框）`；底部唯一主操作 `下一步`。**没有**平台选择、分支、设备标识 |
-| 校验 | 地址走 `validateRepoUrl`（`apps/arkui-schedule/entry/src/main/ets/model/repoUrl.ts:93`，逐条中文失败文案在 `:96-137`，直接复用，不另写）；token 非空、无内部空白（地址里带凭据一律拒绝，`packages/dsh-git-config-sync/src/engine/git.ts:186-189`） |
+| 校验 | 地址走 `validateRepoUrl`（`apps/arkui-schedule/entry/src/main/ets/model/repoUrl.ts:93`，逐条中文失败文案在 `:96-137`，直接复用，不另写）；token 非空、无内部空白（地址里带凭据一律拒绝，`packages/dsh-dots/src/engine/git.ts:186-189`） |
 | 系统做什么 | 只存内存；**不落盘**。落盘发生在 Step 5（`saveSettings`，`docs/DATA-CONTRACT.md:130`；token 单独进 `credentials.json` 0600，`:185`） |
 | 失败停在哪 | 停在 Step 1，就地红字 |
 
@@ -58,7 +58,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 用户看到 | 一行"识别结果"（`GitHub · octocat/dsh-data · 分支 main`）+ 一张"仓库里已有什么"的卡片（设备数 / chats 数 / 是否有 DSH 配置快照）+ `继续` |
-| 识别规则（本地，零网络） | **platform**：host 是 `github.com` → `github`，`gitee.com` → `gitee`，其它 → `custom`（枚举只有这三值，`packages/dsh-git-config-sync/src/engine/types.ts:12`）。**owner**：`repoUrl` 解析出的 `repoPath` 第一段（`repoUrl.ts:36-37` 已去掉 `.git`，`:164-168` 已保证非空）。**默认分支**：见下 |
+| 识别规则（本地，零网络） | **platform**：host 是 `github.com` → `github`，`gitee.com` → `gitee`，其它 → `custom`（枚举只有这三值，`packages/dsh-dots/src/engine/types.ts:12`）。**owner**：`repoUrl` 解析出的 `repoPath` 第一段（`repoUrl.ts:36-37` 已去掉 `.git`，`:164-168` 已保证非空）。**默认分支**：见下 |
 | 默认分支的三级推导 | ① 远端 `refs/heads` 里有 `main` → `main`；② 否则有 `master` → `master`；③ 只有一个 head → 用它；④ 空仓库（refs 为空）→ `main`（`docs/DATA-CONTRACT.md:8` 约定唯一远端、main 分支） |
 | 试连 | `lsRemote()`（`engine/git.ts:452-477`）：`git ls-remote --heads <url>`，超时 `NETWORK_TIMEOUT_MS = 8000`（`:55`；外部配置会被夹到该值，`:265-269`）。**只读、不动工作树** |
 | 展示现有内容 | `lsRemote` 只给 refs，不给文件列表；要"现有内容"必须 `listTree`（`engine/git.ts:673-679`），而它需要一个 rev → 首次接入要 `ensureWorkTree`（clone）后再 `listTree`。既有先例的顺序就是 `ensureWorkTree → fetch → listTree`（`engine/preview.ts:261-266`），**照抄这个顺序**，全程只读 |
@@ -169,7 +169,7 @@
 
 ## B.1 「收敛」的确切含义：改呈现，不改存储
 
-**现状**：6 种方式（`lan` / `tailscale` / `ipv6` / `cloudflare` / `manual` / `uu`，`packages/dsh-git-config-sync/src/remote/types.ts:21`），
+**现状**：6 种方式（`lan` / `tailscale` / `ipv6` / `cloudflare` / `manual` / `uu`，`packages/dsh-dots/src/remote/types.ts:21`），
 每种方式 1–3 个字段，用户必须先自己判断"我是哪种情况"再看字段
 （`apps/arkui-schedule/entry/src/main/ets/model/remoteAccess.ts:155-314` 的 `REMOTE_MODES` 表）。
 
@@ -192,7 +192,7 @@
 
 | 档 | 何时算可用 | 探测在哪一侧 | 依据 |
 | --- | --- | --- | --- |
-| 1. 局域网 | 平板与电脑同子网，且平板能打开 `http://<lan>:<port>/__dsh_remote/health` 拿到 200 | **平板侧** | health 端点免令牌（`packages/dsh-git-config-sync/src/remote/routes.ts:162-173`）；PC 侧自检的 `dsh-loopback-reachable` 只能证明"本机能连本机"（`docs/REMOTE-ACCESS-OPTIONS.md:248`），**对这台平板不构成证据** |
+| 1. 局域网 | 平板与电脑同子网，且平板能打开 `http://<lan>:<port>/__dsh_remote/health` 拿到 200 | **平板侧** | health 端点免令牌（`packages/dsh-dots/src/remote/routes.ts:162-173`）；PC 侧自检的 `dsh-loopback-reachable` 只能证明"本机能连本机"（`docs/REMOTE-ACCESS-OPTIONS.md:248`），**对这台平板不构成证据** |
 | 2. 公网 IPv6 | 平板所在网络有 v6、够到该地址、端口放行 | **平板侧** | 前置条件 1–4 与"最常见失败"见 `docs/REMOTE-ACCESS-OPTIONS.md:84-99`；外网可达性只能人验（§6 第 4、5 条，`:297-298`） |
 | 3. 已配置隧道 | `cloudflareHost` 或 `tailscaleHost` 非空，且该档"最近成功时间"最新 | **平板侧**（PC 侧只能判"装了 cloudflared"/"有 `100.64/10` 地址"） | PC 侧检查项：`cloudflared-installed`、`tunnel-host`、`tailnet-address`、`tailscale-host-match`（`docs/REMOTE-ACCESS-OPTIONS.md:257-260`） |
 | 4. 手动 | 上面都不通，且 `manualUrl` 非空 | 平板侧，或用户点「就用这个」 | `docs/REMOTE-ACCESS-OPTIONS.md:150-156` |
@@ -252,7 +252,7 @@
 **出码（PC 侧）**：
 
 - 唯一允许明文 token 的出口是 `remoteShowLink`（`remote/types.ts:185-193`），返回 `{url, qr:{size, modules}}`；
-- 二维码生成已存在、纯 TS 零依赖：`encodeQr`（`packages/dsh-git-config-sync/src/remote/qr.ts:508`）、
+- 二维码生成已存在、纯 TS 零依赖：`encodeQr`（`packages/dsh-dots/src/remote/qr.ts:508`）、
   `qrToSvg`（`:529`）。**不需要新依赖**；
 - 纪律：明文只经"用户显式点显示链接/二维码"这一个动作出去（`docs/DATA-CONTRACT.md:250-252`）。
 

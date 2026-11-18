@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { readSettingsSources } from './settingsSources.mjs';
 
 const APP = fileURLToPath(new URL('../../entry/src/main/ets/', import.meta.url));
-const REPO_SRC = fileURLToPath(new URL('../../../../packages/dsh-git-config-sync/src/', import.meta.url));
+const REPO_SRC = fileURLToPath(new URL('../../../../packages/dsh-dots/src/', import.meta.url));
 
 // 因 A2 拆分移动：设置页界面现在在 `pages/Settings.ets` + `components/settings/*.ets`。
 // 凭据卫生的审计对象是「设置页整体」，所以锚点改成合并源码（页面 + 五个 section + bits）；
@@ -171,7 +171,7 @@ describe('同步载荷（jsonl）里没有凭据字段', () => {
   });
 });
 
-describe('插件侧（packages/dsh-git-config-sync）凭据处理', () => {
+describe('插件侧（packages/dsh-dots）凭据处理', () => {
   const engineFiles = collectFiles(REPO_SRC, '.ts');
 
   test('插件源码不往控制台打印（引擎与 RPC 都靠返回结构化错误）', () => {

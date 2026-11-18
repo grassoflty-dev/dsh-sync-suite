@@ -2,8 +2,8 @@
 
 本仓库包含两条独立工程线，共用一个“设备只写自己目录”的数据契约：
 
-1. `packages/dsh-git-config-sync` —— DSH（DeepSeek Harness）Web 配置同步插件。
-2. `apps/arkui-schedule` —— ArkUI-X 跨平台日程助手（HarmonyOS + Android）。
+1. `packages/dsh-dots` —— DSH（DeepSeek Harness）Web 配置同步插件。
+2. `apps/arkui-schedule` —— ArkUI-X 跨平台 DSH-Dots（HarmonyOS + Android）。
 
 ## 1. 总体数据流
 
@@ -27,7 +27,7 @@
 - **密钥不出设备**：所有载荷在采集阶段脱敏，`__SECRET__` 占位；恢复时用本地同名值回填，本地没有则不覆盖并标记“需本地填写”。
 - **fail-closed 恢复**：必须 `confirm:true` + 有效 previewId；逐条勾选；写前快照；写后 SHA-256 校验；异常回滚。
 
-## 2. 插件 A：dsh-git-config-sync
+## 2. 插件 A：dsh-dots
 
 ```
 src/index.ts          Cordis 函数插件入口（inject: webServer, connection）
@@ -49,11 +49,11 @@ src/client.js         Web GUI 设置分区（纯 JS，ModuleLoader 加载）
 
 - 插件运行时**零 npm 依赖**，只用 `node:` 内置模块；`dist/` 提交进仓库，安装后无需构建。
 - 不使用 `ctx.settings.installSection` / `settings.plugin.item`（当前 DSH 0.2.2-rc.3 不存在）。
-- 配置存在插件自有状态目录 `~/.dsh/git-config-sync/`，不依赖 schemastery。
+- 配置存在插件自有状态目录 `~/.dsh/dots/`，不依赖 schemastery。
 - Token 只存 `credentials.json`；HTTPS 认证用临时 `GIT_ASKPASS`（0600，token 走环境变量），不进 argv。
 - 非 fast-forward：`pull --rebase` 后重试 push，最多 2 次，**永不 force**。
 - 插件安装（pnpm/profile 变更）不由插件执行：MERGE-only 计划写入
-  `~/.dsh/git-config-sync/plugins.to-install.json` 交用户/Lead 用安全启动器安装。
+  `~/.dsh/dots/plugins.to-install.json` 交用户/Lead 用安全启动器安装。
 
 ## 3. 应用 B：arkui-schedule
 

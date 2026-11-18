@@ -20,16 +20,16 @@
 | 范围 | 所有者 | 文件 |
 | --- | --- | --- |
 | 根 | Planner | `package.json`、`.gitignore`、`.gitattributes`、`tools/build.mjs`、`tools/init-remote-repo.mjs`、`README.md`、`docs/**`、`devices/**`、`pnpm-lock.yaml` |
-| 插件骨架 | Planner | `packages/dsh-git-config-sync/{package.json,tsconfig.json,cordis.patch.yml,scripts/build.mjs}` |
-| 插件 host | 执行者 H | `packages/dsh-git-config-sync/src/{index.ts,rpc.ts,engine/**}`、`packages/dsh-git-config-sync/test/**` |
-| 插件 client | 执行者 C | `packages/dsh-git-config-sync/src/client.js`、`locale/en.json`、`locale/zh.json`、`icon.svg`、`README.md`、`docs/DETAIL.md`（插件内） |
+| 插件骨架 | Planner | `packages/dsh-dots/{package.json,tsconfig.json,cordis.patch.yml,scripts/build.mjs}` |
+| 插件 host | 执行者 H | `packages/dsh-dots/src/{index.ts,rpc.ts,engine/**}`、`packages/dsh-dots/test/**` |
+| 插件 client | 执行者 C | `packages/dsh-dots/src/client.js`、`locale/en.json`、`locale/zh.json`、`icon.svg`、`README.md`、`docs/DETAIL.md`（插件内） |
 | 应用骨架+模型 | 执行者 A | `apps/arkui-schedule/{AppScope/**,build-profile.json5,hvigorfile.ts,oh-package.json5,entry/{build-profile.json5,hvigorfile.ts,oh-package.json5,src/main/module.json5,src/main/resources/**}}`、`entry/src/main/ets/model/**`、`entry/src/main/ets/common/**`、`apps/arkui-schedule/tools/**` |
 | 应用 UI | 执行者 U（第二批） | `entry/src/main/ets/pages/**`、`entry/src/main/ets/components/**`、`entry/src/main/ets/entryability/**`、`entry/src/main/ets/platform/**` 覆盖文件、`entry/src/harmony/ets/**`、`entry/src/android/ets/**` |
 | 应用 Git 桥 | 执行者 G（第二批） | `entry/src/main/resources/rawfile/git/**`、`entry/src/main/ets/services/GitSyncService.ets` |
 
 执行者只能写自己表格里的文件；需要别的文件改动时在报告里写给 Planner。
 
-## 2. 交付物 A：`dsh-git-config-sync`
+## 2. 交付物 A：`dsh-dots`
 
 ### 2.1 状态与路径（全部可注入，便于测试）
 
@@ -37,7 +37,7 @@
 
 ```ts
 export interface StatePaths {
-  root: string            // %USERPROFILE%\.dsh\git-config-sync
+  root: string            // %USERPROFILE%\.dsh\dots
   settingsFile: string    // ...\settings.json
   credentialsFile: string // ...\credentials.json
   workRoot: string        // ...\work
@@ -163,7 +163,7 @@ export class GitRepo {
 ```
 
 - 全部用 `node:child_process.execFile('git', args, { cwd, env })`；禁止 shell 拼接。
-- 提交身份用 `-c user.name=dsh-git-config-sync -c user.email=sync@localhost`，不依赖全局配置。
+- 提交身份用 `-c user.name=dsh-dots -c user.email=sync@localhost`，不依赖全局配置。
 - HTTPS token：创建临时 `GIT_ASKPASS` 脚本（0600，`#!/bin/sh` + `printf`，token 走环境变量
   `DSH_GIT_SYNC_TOKEN`），`GIT_TERMINAL_PROMPT=0`；token **不得**出现在 argv/配置文件/日志。
   SSH 直接用系统 ssh-agent（不写私钥）。
@@ -226,13 +226,13 @@ export function createHttpHandler(service: RpcService, connection?: { requestRej
 - HTTP 层：读 body（上限 10 MB）→ JSON.parse → handleRpc → 200 + `{ok,...}`；鉴权拒绝由
   `connection.requestRejection(req)` 返回状态码处理（401/403 直接 end）。
 - `index.ts`：`export const inject = ['webServer', 'connection']`；
-  `export function apply(ctx, config = {})`：`ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/dsh-git-config-sync/rpc', handler }))`，
+  `export function apply(ctx, config = {})`：`ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/dsh-dots/rpc', handler }))`，
   handler 开头执行 `const rej = ctx.connection.requestRejection(req); if (rej) { res.statusCode = rej; res.end(); return }`。
   用 `config` 支持注入 `homeDir/profileDir/dshVersion`；dispose 时清理 preview 缓存与临时 askpass 文件。
 
 ### 2.3 RPC 契约（A/B 两侧必须完全一致）
 
-`POST /dsh-git-config-sync/rpc`，body `{ action, ... }`，响应 HTTP 200 + `{ok:true,data}` 或
+`POST /dsh-dots/rpc`，body `{ action, ... }`，响应 HTTP 200 + `{ok:true,data}` 或
 `{ok:false,error:{code,message,details?}}`；仅鉴权失败用 401/403。
 
 | action | 请求 | data |
@@ -260,16 +260,16 @@ branch 非空；token 空字符串表示保留现有 token，`null` 表示清除
 
 ### 2.4 客户端 UI（`src/client.js`，纯 JS，不需要构建）
 
-严格按 BRIEF §2.2 的 `window.__ModuleLoader__.load({ id:'dsh-git-config-sync', factory(require){...} })`
-形态；`inject: ['slots','locale']`；注册 locale（NS=`git-config-sync`）与 `settings.section`
-（`id:'git-config-sync'`, `order:70`）。组件 props 含 `t`、`close`。
+严格按 BRIEF §2.2 的 `window.__ModuleLoader__.load({ id:'dots', factory(require){...} })`
+形态；`inject: ['slots','locale']`；注册 locale（NS=`dots`）与 `settings.section`
+（`id:'dots'`, `order:70`）。组件 props 含 `t`、`close`。
 
 内容（BRIEF §2.5 全部覆盖）：仓库配置（平台 GitHub/Gitee/custom、仓库地址、认证方式 HTTPS/SSH、设备标识、
 分支）、同步范围四项默认全选、状态徽标（本地/仓库/待上传/待下载/冲突 + 分支 + 最近提交）、按钮
 （保存设置/测试连接/推送/拉取预览/执行覆盖（未预览不可点）/历史回滚）、逐条差异勾选（采纳远端/保留本地）、
 插件 MERGE-only 展示、快照列表与回滚、内联错误；Token `type=password`。
 
-- 所有 fetch 用同源 `/dsh-git-config-sync/rpc`；错误展示 `error.code + message`。
+- 所有 fetch 用同源 `/dsh-dots/rpc`；错误展示 `error.code + message`。
 - 样式只用 `--dsw-alias-*` 变量与内联样式，不引第三方 UI 库。
 - 组件卸载时取消异步 setState（用 disposed 标志）。
 - locale：`locale/en.json`、`locale/zh.json` 顶层含 `meta.title`/`meta.description`/`meta.detail`
@@ -290,7 +290,7 @@ branch 非空；token 空字符串表示保留现有 token，`null` 表示清除
   push → 另一设备 pull → preview → apply → rollback；断言 profile 只有被勾选条目变化、注释保留。
 - `test/locale.test.mjs`：en/zh key 集合一致且含 `meta.*`。
 
-测试只 import `../dist/**`（构建后运行）。CI 命令：`pnpm build && node --test "packages/dsh-git-config-sync/test/*.test.mjs"`（Node 24 的 `--test` 目录参数会报 MODULE_NOT_FOUND，必须用 glob）。
+测试只 import `../dist/**`（构建后运行）。CI 命令：`pnpm build && node --test "packages/dsh-dots/test/*.test.mjs"`（Node 24 的 `--test` 目录参数会报 MODULE_NOT_FOUND，必须用 glob）。
 
 ### 2.6 交付资源
 
@@ -465,11 +465,11 @@ export function isHarmonyOS(): boolean
 
 ```powershell
 pnpm build
-node --test "packages/dsh-git-config-sync/test/*.test.mjs"
+node --test "packages/dsh-dots/test/*.test.mjs"
 node --test "apps/arkui-schedule/tools/test/*.test.mjs"
 node apps/arkui-schedule/tools/validate-app.mjs
-node --check packages/dsh-git-config-sync/dist/index.js
-node --check packages/dsh-git-config-sync/dist/client.js
+node --check packages/dsh-dots/dist/index.js
+node --check packages/dsh-dots/dist/client.js
 # 应用纯逻辑 tsc 类型检查（tools/tsconfig.json 的 noEmit 等价）
 node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json --noEmit
 git add -A && git commit -m "..." && git log --oneline -1 && git status --short

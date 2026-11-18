@@ -13,7 +13,7 @@
 | 每日 AI 汇总 · 纯逻辑 + 存储 + 冲突策略（执行代理 C2 / aiprovider） | ✅ 完成（Index 展示由 D 接；真机同步与真机生成未验证） | 2026-11-15 | 新增纯逻辑 `model/dailySummary.ts`（零 SDK import）：落盘 `devices/<deviceId>/summaries/YYYY-MM-DD.json`（与日程同目录树、随 git 同步，**不写进 schedules JSONL**）；`summariesPath` / `summaryFilePath` / `serializeSummary` / `parseSummary`（`ok`\|`empty`\|`corrupt`，坏文件与读失败**不抛**）/ `sanitizeSummary`（要点 ≤3、headline 与要点压单行、`YYYY-MM-DD` 真日历校验、计数非负且 `doneCount ≤ recordCount`）/ `mergeSummary`（同日取 `generatedAt` 较新，相等保留现有，返回 `replaced`）/ `truncateSummaryForDisplay`（默认 3）/ `buildSummaryPayload`（复用 `aiPayload.buildDaySummaryPayload`，与增量载荷唯一差别是不过滤已处理记录）/ `summaryFromReply`（Markdown → headline + ≤3 要点）/ `SummaryIO` 端口的 `readDailySummary`、`writeDailySummary`（旧文件读失败拒绝写 `read-failed`、陈旧回复 `stale` 不覆盖、损坏文件 `repaired` 重写、写失败 `write-failed` 旧文件保留）；新增 `services/summaryStore.ets`（真实 fs 端口的 `RepoSummaryIO` + `read(date)` / `generate(...)`：**先 AI 后写盘**，AI 失败一个字节都不写）；`model/aiPayload.ts` 抽 `selectPayload` 并新增 `buildDaySummaryPayload`（`buildAiPayload` 行为不变）。**同步范围结论**：`git-bridge` push 递归 add 整个 `devices/<deviceId>/`，`summaries/` **自动在范围内**，`syncScope` 无需改动（已用 `assertWithinDevice`/`filterPathsForDevice` 实测断言）。新增 `tools/test/dailySummary.test.mjs` 33 例（含真实临时目录落盘的覆盖/不覆盖口径）。**未验证**：真机 Index 渲染与「今日第一项」位置（D 的 UI）、真机 git 同步能把 `summaries/` 带出、真实 AI 回复的 headline/要点质量。**待办**：`docs/DATA-CONTRACT.md` §1 补 `summaries/` 目录说明 |
 | 收口批次：笔迹设置菜单 / 主从布局 / 附件 zip / 未完成索引 / 电脑端日程桥（执行代理 A/C2/D/F/G + planner） | ✅ 代码与产物验收完成（部分真机项待解锁补验，见 VERIFICATION §13.3） | 2026-11-15 | 笔迹设置三段面板（笔形/粗细/颜色，选中即生效不关面板）；分页三单元格；草稿；竖屏单列（<840vp）/横屏主从（≥840vp）；附件 JPEG q60 + 按天 zip（JSZip，两端通用）；open.jsonl 未完成索引（30 天自愈）；GitBridgeHost + 启动 pull + 下拉刷新；插件 schedule_list/add/summary。App 704 例 / 插件 98 例全绿，validate 8/8，HAP 2,133,649 B、APK 53,628,063 B 均过产物校验 |
 
-## P4 明细（dsh-git-config-sync）
+## P4 明细（dsh-dots）
 
 - **渲染**：`Card`/`Field` 过去用 `arguments` 取 children（React 只走 `props.children`），
   导致所有卡片内容与表单控件不渲染；已改为 `React.Children.toArray(props.children)`，
@@ -31,7 +31,7 @@
 - **全仓 `node --test` 的外部阻塞**：复查时 `apps/arkui-schedule/tools/test/platformDetect.test.mjs`
   仍读取已被并行迁移删除的 `entry/src/{main,harmony}/ets/common/platformFeatures.ts`
   （现为同目录 `.ets`），导致 363 项中 2 项失败（361 pass）；属 apps 并行改造，未在本阶段修改。
-  插件自身 `node --test "packages/dsh-git-config-sync/test/*.test.mjs"` 为 74/74 全绿。
+  插件自身 `node --test "packages/dsh-dots/test/*.test.mjs"` 为 74/74 全绿。
 
 ### P4 真实 GUI 验证（2026-11-15 补充）
 
@@ -159,7 +159,7 @@
 - **UU 远程两个实测点（等用户用 UU 客户端验，别自己去测）**：
   1. 映射后它给的到底是 `域名`、`host:port`，还是仅 `127.0.0.1:端口`？（决定 `normalizeUuEntry` 的默认协议怎么定）
   2. 用 `curl -i <入口>` 能否拿到 200；以及 `Upgrade: websocket` 是否被放行（决定内嵌 Web 能否用 `/api/remote.mux`）。
-  验收后只改 `packages/dsh-git-config-sync/src/remote/urls.ts` 的 `normalizeUuEntry` 一处 + 一条文案。
+  验收后只改 `packages/dsh-dots/src/remote/urls.ts` 的 `normalizeUuEntry` 一处 + 一条文案。
 - **手写板 5 项真机验证（平板一接回就做，第一件事装最新 HAP）**：penOnly 挡手掌（含笔迹面板切开关即时生效）、
   笔迹面板二级菜单、工具条两行折行（且折叠后画布高度够写）、撤销/重做可点、横竖屏往返。
 - **日程"并写制"两个候选方案（等用户点头，先不实现）**：
@@ -225,7 +225,7 @@
 | 评审修复 M1（ipv6 方式起不来）/ M2（上游 cookie 过期不 fail-closed）/ M3（manualUrl token 进 DOM）/ M4（`?k=` 与 `?token=` 不一致） | pm | ✅ 全部已修 + 补测试（见下「评审修复」） | - | 无 |
 | 真机验收（平板已切回家中 WiFi，`192.168.1.10` / USB `6MFBB25C27205131`） | pm/qa-remote-device | ✅ 完成（**3 通过 / 1 不通过 / 1 未执行**） | - | 见下「真机验收结论」 |
 | 真机：装最新 HAP（含访问令牌字段）+ 竖↔横旋转往返 | —— | **阻塞** | - | 平板当前 `hdc list targets` = `[Empty]`（USB 断开 / 无线调试未开）；需用户接回后我立刻装机 + 截两张图 |
-| 重启后复测（插件是否进链路 / 设置页两 section 真实渲染 / 内嵌 Web WS 是否仍 -173） | —— | **待用户重启 DSH** | - | 一键脚本已就绪：`node packages/dsh-git-config-sync/tools/post-restart-check.mjs --token <token> --lan 192.168.1.6`；清单见 `docs/RESTART-CHECKLIST.md` |
+| 重启后复测（插件是否进链路 / 设置页两 section 真实渲染 / 内嵌 Web WS 是否仍 -173） | —— | **待用户重启 DSH** | - | 一键脚本已就绪：`node packages/dsh-dots/tools/post-restart-check.mjs --token <token> --lan 192.168.1.6`；清单见 `docs/RESTART-CHECKLIST.md` |
 
 ### 端到端证据（`192.168.1.6:3099` → 真实 DSH `127.0.0.1:3080`）
 
@@ -250,7 +250,7 @@ PASS  bad-token-not-echoed
 结论：**局域网直连（不需要 IPv6）+ 令牌门 + HTTP/WS 反代 + 二维码**这条主链已在真实 DSH 上打通；
 上游 `dsh-auth-*` 会话 cookie 未下发给客户端；错误令牌不回显。
 
-复现：`DSH_UPSTREAM_TOKEN=<launch token> node packages/dsh-git-config-sync/tools/e2e-remote.mjs`
+复现：`DSH_UPSTREAM_TOKEN=<launch token> node packages/dsh-dots/tools/e2e-remote.mjs`
 （脚本在包内 `tools/`，读 env 里的 token，不落盘）。
 
 **收尾全量验证（2026-11-17 22:1x）**：`node --test "packages/*/test/*.test.mjs"
@@ -260,7 +260,7 @@ PASS  bad-token-not-echoed
 
 ### IPv6 真绑定端到端（`[2409:8a20:4cad:ba20:d2c0:3d53:7540:763c]:3098`）
 
-`node packages/dsh-git-config-sync/tools/e2e-ipv6.mjs`（env: `DSH_UPSTREAM_TOKEN` + `V6`）：
+`node packages/dsh-dots/tools/e2e-ipv6.mjs`（env: `DSH_UPSTREAM_TOKEN` + `V6`）：
 
 ```
 start: {"running":true,"listen":"2409:8a20:4cad:ba20:d2c0:3d53:7540:763c:3098","err":null}
@@ -306,7 +306,7 @@ probe: unknown 本机检查通过，但公网可达性必须从外网确认
 - 插件：6 种访问方式（`lan` / `ipv6` / `cloudflare` / `tailscale` / `manual` / `uu`）的配置模型与可用性标注；
   旁挂监听（绑具体 IPv4/IPv6，**绝不 0.0.0.0**）+ HTTP/WS 反代；令牌门（`randomBytes(32)`、`?token=`/`?k=`/cookie、
   常量时间比较、同 IP 失败限速、上游 `dsh-auth-*` 只注入不下发）；零依赖二维码；17 项连通性自检；
-  设置页独立 section「远程访问」（id `git-config-sync-remote`、order 71，与同步 section 状态隔离）；8 个 RPC action。
+  设置页独立 section「远程访问」（id `dots-remote`、order 71，与同步 section 状态隔离）；8 个 RPC action。
 - App：`model/remoteAccess.ts`（与插件同一套字段语义）、`remoteUrl` 支持 IPv6 字面量、设置页按方式渲染字段、
   端口在 `lan/ipv6/tailscale` 下必填（用户拍板维持）。
 - 文档：`docs/REMOTE-ACCESS-OPTIONS.md`（可行性矩阵 / 字段表 / 自检表 / 安全边界 / 未验证清单）、
@@ -329,7 +329,7 @@ probe: unknown 本机检查通过，但公网可达性必须从外网确认
   | 文件 | 字节 | SHA256 |
   | --- | --- | --- |
   | `arkui-schedule-harmony-debug-signed.hap` | 2,897,035 | `84903ff223f71d3495473824bc8d7369e4af8b0b1ab5af06f8fea5b4f1311721` |
-  | `dsh-git-config-sync-1.0.0.tgz` | 192,132 | `4457796b1dfb7cbfd89e5f6b61d9dd73c0d4a760fadde6ce3cc87c022c22a031` |
+  | `dsh-dots-1.0.0.tgz` | 192,132 | `4457796b1dfb7cbfd89e5f6b61d9dd73c0d4a760fadde6ce3cc87c022c22a031` |
   | `REMOTE-ACCESS-OPTIONS.md` | 22,112 | `4452b9b90098d682170893ed2e7cd3a2038d11ebb2bad508e29c83b51ee02e26` |
   | `REVIEW-remote-security.md` | 28,337 | `6379bc12be9ad43ee1cb63b286e9c12bf1bd9a5ac4231406a7a1527110176be3` |
 

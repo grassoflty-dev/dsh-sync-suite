@@ -33,7 +33,7 @@ function legalFiles() {
       },
     }`,
     'AppScope/resources/base/element/string.json': `{
-  "string": [{ "name": "app_name", "value": "日程助手" }]
+  "string": [{ "name": "app_name", "value": "DSH-Dots" }]
 }`,
     'build-profile.json5': `{
   "app": {
@@ -78,7 +78,7 @@ export default { system: hapTasks, plugins: [] }`,
   }
 }`,
     'entry/src/main/resources/base/element/string.json': `{
-  "string": [{ "name": "EntryAbility_label", "value": "日程助手" }]
+  "string": [{ "name": "EntryAbility_label", "value": "DSH-Dots" }]
 }`,
     'entry/src/main/resources/base/element/color.json': `{
   "color": [{ "name": "start_window_background", "value": "#FFFFFF" }]

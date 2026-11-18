@@ -3,10 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "DSH 跨设备配置同步插件 + ArkUI-X 日程助手",
+  "description": "DSH 跨设备配置同步插件 + ArkUI-X DSH-Dots",
   "scripts": {
     "build": "node tools/build.mjs",
-    "test": "node --test \"packages/dsh-git-config-sync/test/*.test.mjs\" \"apps/arkui-schedule/tools/test/*.test.mjs\"",
+    "test": "node --test \"packages/dsh-dots/test/*.test.mjs\" \"apps/arkui-schedule/tools/test/*.test.mjs\"",
     "validate": "node apps/arkui-schedule/tools/validate-app.mjs",
     "typecheck": "node tools/build.mjs --check",
     "verify": "pnpm build && pnpm test && pnpm validate"

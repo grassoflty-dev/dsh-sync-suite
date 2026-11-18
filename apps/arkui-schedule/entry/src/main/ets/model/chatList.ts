@@ -481,7 +481,7 @@ export function toMessages(jsonlText: string): ChatMessageParse {
 /**
  * 时间展示：`YYYY-MM-DD HH:MM`。
  *
- * 两种输入形态（插件侧 `packages/dsh-git-config-sync/src/chats/exportChats.ts` 用
+ * 两种输入形态（插件侧 `packages/dsh-dots/src/chats/exportChats.ts` 用
  * `new Date().toISOString()` 写 `updatedAt`，所以线上数据几乎都是第一种）：
  * - **带时区标记**（`Z` 或 `±HH:MM`）→ 这是一个真实时刻，**换算到本机时区**再展示。
  *   不换算的话东八区用户会看到比实际早 8 小时的时间（会话是「刚导出的」，一眼就错）；

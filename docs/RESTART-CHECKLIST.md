@@ -1,14 +1,14 @@
 # DSH 重启后复测清单（远程访问域）
 
 > 背景：桌面 profile 的插件是 **junction 链接**（`~/.dsh/profiles/desktop/package.json` 里
-> `"dsh-git-config-sync": "link:C:/Users/GWL/Desktop/itwillclaude/dsh-sync-suite/packages/dsh-git-config-sync"`），
+> `"dsh-dots": "link:C:/Users/GWL/Desktop/itwillclaude/dsh-sync-suite/packages/dsh-dots"`），
 > 改 `dist/` 后**必须重启 DSH** 才会加载，因此本轮最后两步（真实 GUI 渲染、内嵌 Web 的 WS）
 > 只能等重启后验证。重启会杀掉当前会话，**由用户触发**，不要自己重启。
 
 ## 0. 重启前（在旧会话里做完）
 
 - [ ] `git status` 干净；`git log -1` 记下 commit（写进交付面）
-- [ ] `packages/dsh-git-config-sync` 已 `node scripts/build.mjs`（dist 与 src 同步）
+- [ ] `packages/dsh-dots` 已 `node scripts/build.mjs`（dist 与 src 同步）
 - [ ] 全仓测试绿：`node --test "packages/*/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"`
 - [ ] `node apps/arkui-schedule/tools/validate-app.mjs` → 8/8
 - [ ] HAP 已构建 + 签名 + 校验（`dist-harmony/arkui-schedule-harmony-debug-signed.hap`）
@@ -18,7 +18,7 @@
 
 ```powershell
 # token = `dsh web` 打印的地址里那个 ?token= 的值（桌面版从窗口/日志里拿；脚本不会打印它）
-node packages\dsh-git-config-sync\tools\post-restart-check.mjs --token <token> --lan 192.168.1.6
+node packages\dsh-dots\tools\post-restart-check.mjs --token <token> --lan 192.168.1.6
 ```
 
 它能自动发现 DSH 端口（扫本机监听 + `dsh web authentication required` 指纹），然后逐项判定：
@@ -61,12 +61,12 @@ node packages\dsh-git-config-sync\tools\post-restart-check.mjs --token <token> -
 | 现象 | 结论 | 下一步 |
 | --- | --- | --- |
 | `sidecar-ws-101` PASS，App 仍 `-173` | **ArkWeb 侧问题**（WS 握手不带会话 cookie） | 在 App 里用 `@ohos.web.webview` 的 `WebCookieManager.fetchCookieSync(url)` 打印是否存到 cookie；若没有 → 走「令牌门接受 WS URL 里的 `?k=`」+ 让页面 WS URL 带令牌（需评估注入） |
-| `sidecar-ws-101` FAIL | **我们的代理回归** | 用 `node packages/dsh-git-config-sync/tools/e2e-remote.mjs` 在 PC 上复现并看 listener 日志 |
+| `sidecar-ws-101` FAIL | **我们的代理回归** | 用 `node packages/dsh-dots/tools/e2e-remote.mjs` 在 PC 上复现并看 listener 日志 |
 | App 显示 401/登录页（而非 DSH UI） | 令牌没进到页面 | 检查 App 侧是否把令牌拼进 URL（`?token=`），以及插件是否把它当会话令牌而非上游身份 |
 
 ## 4. 回滚
 
-- 插件加载失败导致 DSH 起不来：`dsh plugin remove dsh-git-config-sync`（或从 profile 的
+- 插件加载失败导致 DSH 起不来：`dsh plugin remove dsh-dots`（或从 profile 的
   `package.json` 移除该依赖），**不要**动 `~/.dsh/safe-launch/last-good.json`。
 - 远程访问自身起不来不会影响插件激活（已 fail-isolated），状态里看 `status.lastError`。
 

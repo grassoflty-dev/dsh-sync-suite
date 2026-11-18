@@ -4,8 +4,8 @@
 
 | 交付物 | 路径 | 说明 |
 | --- | --- | --- |
-| DSH 配置同步插件 | `packages/dsh-git-config-sync/` | 把 DSH profile 配置打成设备快照推到自建 Git 仓库，支持跨设备 fail-closed 恢复 |
-| ArkUI-X 日程助手 | `apps/arkui-schedule/` | HarmonyOS + Android 同一份 ArkTS；四字段日程、分页手写 + 串行 OCR、AI 汇总、Git 同步 |
+| DSH 配置同步插件 | `packages/dsh-dots/` | 把 DSH profile 配置打成设备快照推到自建 Git 仓库，支持跨设备 fail-closed 恢复 |
+| ArkUI-X DSH-Dots | `apps/arkui-schedule/` | HarmonyOS + Android 同一份 ArkTS；四字段日程、分页手写 + 串行 OCR、AI 汇总、Git 同步 |
 
 需求基准：[`BRIEF.md`](BRIEF.md)。接口与数据契约：[`docs/DATA-CONTRACT.md`](docs/DATA-CONTRACT.md)；
 架构与安全边界：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)；验收证据：[`docs/VERIFICATION.md`](docs/VERIFICATION.md)。
@@ -20,7 +20,7 @@ pnpm install
 pnpm build
 
 # 测试（Node 24 的 --test 需要 glob，目录形式会报 MODULE_NOT_FOUND）
-node --test "packages/dsh-git-config-sync/test/*.test.mjs"
+node --test "packages/dsh-dots/test/*.test.mjs"
 node --test "apps/arkui-schedule/tools/test/*.test.mjs"
 # 或一次跑全部（217 项）
 pnpm test
@@ -31,7 +31,7 @@ node apps/arkui-schedule/tools/validate-app.mjs
 
 ## 插件安装（两条路径，由用户/Lead 执行）
 
-> 前置：`packages/dsh-git-config-sync/dist/` **必须已在仓库里**（本仓库已提交）。链接安装不会执行构建，
+> 前置：`packages/dsh-dots/dist/` **必须已在仓库里**（本仓库已提交）。链接安装不会执行构建，
 > 若 `dist/` 缺失，设置页不会出现（`exports["./client"]` 指向空文件）。
 
 **① GUI「Plugins → Add plugin」选本地目录（推荐，链接安装）**
@@ -39,13 +39,13 @@ node apps/arkui-schedule/tools/validate-app.mjs
 在 DSH Web GUI 的插件管理里添加插件并选择目录：
 
 ```
-C:\Users\GWL\Desktop\itwillclaude\dsh-sync-suite\packages\dsh-git-config-sync
+C:\Users\GWL\Desktop\itwillclaude\dsh-sync-suite\packages\dsh-dots
 ```
 
 等价 CLI（若你的环境允许）：
 
 ```powershell
-dsh plugin --profile web add link:C:\Users\GWL\Desktop\itwillclaude\dsh-sync-suite\packages\dsh-git-config-sync
+dsh plugin --profile web add link:C:\Users\GWL\Desktop\itwillclaude\dsh-sync-suite\packages\dsh-dots
 ```
 
 **② 发布到 GitHub 后走安全启动器（npm/GitHub 来源）**
@@ -67,7 +67,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:3080/dsh-safe-launch/job `
 安装后在 Web GUI「设置 → 配置同步（Git）」中填写仓库地址、设备标识与 token（HTTPS）。
 安全说明：
 
-- token 只存 `%USERPROFILE%\.dsh\git-config-sync\credentials.json`（0600），不进同步载荷；
+- token 只存 `%USERPROFILE%\.dsh\dots\credentials.json`（0600），不进同步载荷；
 - 所有 provider/MCP/patch 载荷在采集阶段脱敏为 `__SECRET__`，恢复时用本地同名值回填；
 - 恢复必须 `confirm:true` + 逐条勾选，写前自动快照（保留 10 份），写后 SHA-256 校验，失败回滚；
 - 永不 force push；非 fast-forward 先 `pull --rebase` 最多重试 2 次。
@@ -173,7 +173,7 @@ hdc -t 6MFBB25C27205131 shell hilog -x
 
 ```
 docs/            ARCHITECTURE / DATA-CONTRACT / CONTRACT / VERIFICATION
-packages/dsh-git-config-sync/
+packages/dsh-dots/
   src/           host（TypeScript）+ client.js（ModuleLoader 纯 JS）
   dist/          构建产物（提交进仓库，安装后无需构建）
   locale/        en.json / zh.json

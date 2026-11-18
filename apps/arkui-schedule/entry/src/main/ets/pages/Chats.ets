@@ -428,14 +428,21 @@ struct Chats {
   }
 
   build() {
-    PageLayout({
-      title: '云端对话',
-      subtitle: this.subtitleText(),
-      onBack: () => {
-        router.back();
+    // 根节点必须是**容器组件**：`PageLayout(...) { ... }` 尾随闭包形式只能出现在容器内部，
+    // 直接当 @Entry 的 build() 根节点会被 ArkTS 拒绝（10905210，2026-11-18 构建实测）。
+    // 与 Detail/Edit/Index/Settings 保持同一形态：Stack 兜底，PageLayout 作为其唯一子节点。
+    Stack({ alignContent: Alignment.TopStart }) {
+      PageLayout({
+        title: '云端对话',
+        subtitle: this.subtitleText(),
+        onBack: () => {
+          router.back();
+        }
+      }) {
+        this.Body()
       }
-    }) {
-      this.Body()
     }
+    .width('100%')
+    .height('100%')
   }
 }

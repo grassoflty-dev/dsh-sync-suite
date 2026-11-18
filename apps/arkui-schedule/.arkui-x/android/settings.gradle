@@ -1,2 +1,2 @@
 include ':app'
-rootProject.name = "日程助手"
+rootProject.name = "DSH-Dots"

@@ -4,7 +4,7 @@
 > 评审范围：A 导出/导入、C AI fallback、D 差异与回滚、B 主题（按任务书第 4 轮四条线的**关键实现**）。
 > 证据基线：`main` @ `634a763`（工作区干净，`git status --short` 为空）。
 > 实跑（只读性质）：`theme.test.mjs` 54 pass / `exportImport.test.mjs` 56 pass / `aiFallback.test.mjs` 60 pass / `diff.test.mjs` 10 pass / `rollback-ux.test.mjs` 11 pass。
-> 行号全部取自本次实际读取（`docs/PLUGIN-DIFF.md` 实际位于 `packages/dsh-git-config-sync/docs/PLUGIN-DIFF.md`，仓库根 `docs/` 下**没有**该文件——任务书里的路径不存在，见 §6 附注）。
+> 行号全部取自本次实际读取（`docs/PLUGIN-DIFF.md` 实际位于 `packages/dsh-dots/docs/PLUGIN-DIFF.md`，仓库根 `docs/` 下**没有**该文件——任务书里的路径不存在，见 §6 附注）。
 
 ---
 
@@ -158,7 +158,7 @@
 
 ### 3.1 `diffText` 健壮性 —— **不抛，但截断标记有洞（M1）**
 
-输入健壮性（`packages/dsh-git-config-sync/src/engine/diff.ts`）：
+输入健壮性（`packages/dsh-dots/src/engine/diff.ts`）：
 
 | 输入 | 行为 | 证据 |
 | --- | --- | --- |
@@ -335,7 +335,7 @@ LCS 预算：中间段超过 `MAX_DP_CELLS = 1_000_000` → 降级为"整段替�
 | 深色/浅色对比度数字（`UI-DESIGN.md` §8.4） | ⚠️ `danger` 浅色实为 5.44（文档写 5.04），其余一致 | `theme.ts:262-314` 实算 |
 | 纸面/二维码两档恒白（`UI-DESIGN.md` §8.4） | ✅ 并有测试 | `theme.test.mjs:248-260` |
 
-**附注（文件名/路径）**：任务书列的 `docs/PLUGIN-DIFF.md` 在仓库里不存在；实际文件是 `packages/dsh-git-config-sync/docs/PLUGIN-DIFF.md`（192 行，随 `2004237` 提交）。评审按实际路径阅读。
+**附注（文件名/路径）**：任务书列的 `docs/PLUGIN-DIFF.md` 在仓库里不存在；实际文件是 `packages/dsh-dots/docs/PLUGIN-DIFF.md`（192 行，随 `2004237` 提交）。评审按实际路径阅读。
 
 ---
 
@@ -354,15 +354,15 @@ LCS 预算：中间段超过 `MAX_DP_CELLS = 1_000_000` → 降级为"整段替�
 | `apps/arkui-schedule/entry/src/main/ets/services/aiFallbackRunner.ets` | 1-516（全文） | C 运行器/隐私 |
 | `apps/arkui-schedule/tools/test/aiFallback.test.mjs` | 1-615（全文） | C 覆盖判定 |
 | `docs/AI-FALLBACK.md` | 1-147（全文） | C 契约对照 |
-| `packages/dsh-git-config-sync/src/engine/diff.ts` | 1-465（全文） | D diff |
-| `packages/dsh-git-config-sync/src/engine/preview.ts` | 1-420（全文） | D `fileDiffOfPreview` / 只读 |
-| `packages/dsh-git-config-sync/src/engine/restore.ts` | 1-394（全文） | D 门禁 / 回滚 / `previewRollback` |
-| `packages/dsh-git-config-sync/src/rpc.ts` | 380-539（+ grep 全量） | D action 门禁与只读 |
-| `packages/dsh-git-config-sync/src/engine/snapshot.ts` | 100-193 | `get`（校验/只读）/ `prune` |
-| `packages/dsh-git-config-sync/src/client.js` | 1270-1369、2860-3004（+ grep 全量） | D 状态机 / FileDiffList / 回滚预览渲染 |
-| `packages/dsh-git-config-sync/test/diff.test.mjs` | 1-221（全文） | D 覆盖判定 |
-| `packages/dsh-git-config-sync/test/rollback-ux.test.mjs` | 测试名清单（46-705） | D 覆盖判定 |
-| `packages/dsh-git-config-sync/docs/PLUGIN-DIFF.md` | 1-192（全文） | D 契约对照 |
+| `packages/dsh-dots/src/engine/diff.ts` | 1-465（全文） | D diff |
+| `packages/dsh-dots/src/engine/preview.ts` | 1-420（全文） | D `fileDiffOfPreview` / 只读 |
+| `packages/dsh-dots/src/engine/restore.ts` | 1-394（全文） | D 门禁 / 回滚 / `previewRollback` |
+| `packages/dsh-dots/src/rpc.ts` | 380-539（+ grep 全量） | D action 门禁与只读 |
+| `packages/dsh-dots/src/engine/snapshot.ts` | 100-193 | `get`（校验/只读）/ `prune` |
+| `packages/dsh-dots/src/client.js` | 1270-1369、2860-3004（+ grep 全量） | D 状态机 / FileDiffList / 回滚预览渲染 |
+| `packages/dsh-dots/test/diff.test.mjs` | 1-221（全文） | D 覆盖判定 |
+| `packages/dsh-dots/test/rollback-ux.test.mjs` | 测试名清单（46-705） | D 覆盖判定 |
+| `packages/dsh-dots/docs/PLUGIN-DIFF.md` | 1-192（全文） | D 契约对照 |
 | `apps/arkui-schedule/entry/src/main/ets/model/theme.ts` | 1-497（全文） | B 模型 |
 | `apps/arkui-schedule/entry/src/main/ets/common/themeApply.ets` | 1-79（全文） | B 落地 |
 | `apps/arkui-schedule/tools/test/theme.test.mjs` | 1-624（全文） | B 静态门闸 |

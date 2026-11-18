@@ -1,5 +1,5 @@
 /**
- * GitSyncService — ArkUI-X 日程助手的 Git 同步服务（ArkTS 侧）
+ * GitSyncService — ArkUI-X DSH-Dots的 Git 同步服务（ArkTS 侧）
  * ============================================================================
  * 结构：
  *   `Web` 组件加载 `rawfile/git/index.html`（内含 isomorphic-git 1.25.3 + git-bridge.js），
@@ -69,7 +69,7 @@ import {
   describeClaimOutcome,
   parseRegistry
 } from '../model/deviceRegistry';
-import type { ClaimOutcome, DeviceRegistryPort, RegistryEntry, RegistryParseResult } from '../model/deviceRegistry';
+import type { ClaimFailure, ClaimOutcome, DeviceRegistryPort, RegistryEntry, RegistryParseResult } from '../model/deviceRegistry';
 import { sha256Hex } from '../model/sha256';
 import { settingsStore } from './settingsStore';
 
@@ -557,7 +557,7 @@ export class GitSyncService {
     branch: 'main',
     deviceId: '',
     token: '',
-    authorName: '日程助手',
+    authorName: 'DSH-Dots',
     authorEmail: 'schedule@localhost'
   };
   private pending: Map<string, PendingRequest> = new Map<string, PendingRequest>();
@@ -1699,10 +1699,12 @@ export class GitSyncService {
         // 循环前已经拉过（见步骤 2），不再多拉一次
         pulled: true
       });
-      if (!outcome.ok) {
-        const failure: GitSyncResult = rejected('设备编号登记失败', outcome.message);
-        failure.code = outcome.code;
-        failure.deviceRegistrationError = outcome.message;
+      // ArkTS 不对 `!x.ok` 做可辨识联合窄化；必须用 `=== false` 才能拿到 ClaimFailure 的字段。
+      if (outcome.ok === false) {
+        const failed: ClaimFailure = outcome;
+        const failure: GitSyncResult = rejected('设备编号登记失败', failed.message);
+        failure.code = failed.code;
+        failure.deviceRegistrationError = failed.message;
         return failure;
       }
       this.config.deviceId = outcome.deviceId;

@@ -21,7 +21,7 @@ pnpm build
 # node --check: dist/index.js / dist/client.js / .build/model/jsonl.js 全部通过
 # [build] 全部构建步骤完成
 
-node --test "packages/dsh-git-config-sync/test/*.test.mjs"
+node --test "packages/dsh-dots/test/*.test.mjs"
 # ℹ tests 62  ℹ pass 62  ℹ fail 0
 
 node --test "apps/arkui-schedule/tools/test/*.test.mjs"
@@ -33,22 +33,22 @@ pnpm test
 node apps/arkui-schedule/tools/validate-app.mjs
 # ✅ 全部通过：8/8 条规则（JSON5/JSON 12 个、相对 import 78 条、main 静态 import 86 条、页面 4 个、rawfile/git 2 个文件）
 
-node --check packages/dsh-git-config-sync/dist/index.js    # exit 0
-node --check packages/dsh-git-config-sync/dist/client.js   # exit 0
+node --check packages/dsh-dots/dist/index.js    # exit 0
+node --check packages/dsh-dots/dist/client.js   # exit 0
 node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json --noEmit   # exit 0
 ```
 
 > 注意：Node 24.14 的 `node --test <目录>` 会把位置参数当 glob 并报 `MODULE_NOT_FOUND`（空目录同样复现）。
 > 仓库脚本与文档统一改用 glob：`node --test "…/test/*.test.mjs"`。
 
-## 1. 交付物 A：dsh-git-config-sync
+## 1. 交付物 A：dsh-dots
 
 ### 1.1 清单与构建（BRIEF §2.1）
 
 | 验收项 | 证据 |
 | --- | --- |
 | Cordis 函数插件 `apply(ctx, config)`，注册全走 `ctx.effect` | `src/index.ts:43-61`；构建 + `node --check dist/index.js` |
-| `package.json` 字段（name/type/exports/dsh.bundle.patch/dsh.client/files） | `packages/dsh-git-config-sync/package.json`；`npm pack --dry-run` → **22 个文件，含 `dist/client.js`** |
+| `package.json` 字段（name/type/exports/dsh.bundle.patch/dsh.client/files） | `packages/dsh-dots/package.json`；`npm pack --dry-run` → **22 个文件，含 `dist/client.js`** |
 | TS → dist，dist 提交、安装免构建 | `pnpm build` 实测；`dist/**` 已生成并纳入提交 |
 | 运行时零 npm 依赖 | 源码非相对 import 全部为 `node:child_process|crypto|fs|fs/promises|http|os|path` |
 | 不导出 `Config`、无 schemastery | `src/` 无 `schemastery`；`dist` 无该依赖 |
@@ -64,7 +64,7 @@ node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json 
 | 白名单 5 类文件与 `devices/<deviceId>/` 布局 | `engine/collect.ts` + `test/integration-git.test.mjs` |
 | secret 脱敏为 `__SECRET__`，restore 用本地同名字段回填 | `test/secrets.test.mjs`、`test/audit-fixes.test.mjs`；真实 profile 只读探针：`{bytes:871, stripped:0, placeholders:0, maxTokensKept:true, apiKeyEnvKept:true, roundTripIdentical:true, needsLocal:[]}` |
 | 推送 = 写快照→add→commit→push；非 FF 先 `pull --rebase` ≤2 次、永不 force | `engine/git.ts`；`integration-git.test.mjs`（两设备分叉场景：B 的提交保留、rebase 后 push 成功）；`--force` 检索无命中 |
-| 工作副本 `~\.dsh\git-config-sync\work\<repoHash>\` | `engine/paths.ts` |
+| 工作副本 `~\.dsh\dots\work\<repoHash>\` | `engine/paths.ts` |
 | restore fail-closed 四层：confirm → 逐条勾选 → 写前快照（留 10 份）→ 写后 SHA-256 | `test/confirm-gate.test.mjs`（无 confirm 文件字节不变）、`test/sha-verify.test.mjs`（注入校验失败 → 快照回滚 + `E_SHA_MISMATCH`）、`test/audit-fixes.test.mjs`（未知/非法 entry 整单拒绝） |
 | HTTPS token 用临时 GIT_ASKPASS（0600，不进 argv）；SSH 用系统 agent | `engine/git.ts`（`ASKPASS_SH/CMD/MJS`，token 只经 `DSH_GIT_SYNC_TOKEN` 环境变量）；审计修复测试验证含 `&|<>%^` 的 token 原样输出且 askpass 文件不含 token |
 | 状态文件 `settings.json` / `credentials.json` | `engine/settings.ts`（0600 创建；审计探针确认响应/日志无 token） |
@@ -94,7 +94,7 @@ node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json 
 ### 1.4 设置页 UI 与资源（BRIEF §2.2/§2.5/§2.6）
 
 - `src/client.js`：`window.__ModuleLoader__.load` + `factory(require)`；`inject:['slots','locale']`；
-  `settings.section`（id `git-config-sync`，order 70）；`ctx.effect` 注册 locale；RPC 同源 fetch。
+  `settings.section`（id `dots`，order 70）；`ctx.effect` 注册 locale；RPC 同源 fetch。
 - 覆盖 BRIEF §2.5 全部 25 项（仓库配置/范围勾选/状态徽标/按钮/逐条差异勾选/插件 MERGE-only/快照回滚/内联错误/
   密码型 token）；独立审计核对 **25/25**，`client-module.test.mjs` 另有 5 项静态断言。
 - 资源：`locale/en.json` + `zh.json` 各 148 key（集合一致，含 `meta.title/description/detail`）；
@@ -213,7 +213,7 @@ push → 另一设备 pull → preview → apply → rollback 全链路，不依
 | 命令 | 结果 |
 | --- | --- |
 | `pnpm build` | exit 0；dist/index.js + dist/client.js + 应用 `.build/**` 生成；3 个产物 `node --check` 通过 |
-| `node --test "packages/dsh-git-config-sync/test/*.test.mjs"` | 62 pass / 0 fail |
+| `node --test "packages/dsh-dots/test/*.test.mjs"` | 62 pass / 0 fail |
 | `node --test "apps/arkui-schedule/tools/test/*.test.mjs"` | 155 pass / 0 fail |
 | `pnpm test` | 217 pass / 0 fail |
 | `node apps/arkui-schedule/tools/validate-app.mjs` | ✅ 8/8 规则；JSON5/JSON 12、import 78、main 静态 import 86、页面 4、rawfile/git 2 |
@@ -229,7 +229,7 @@ push → 另一设备 pull → preview → apply → rollback 全链路，不依
 | reminderAgentManager / 通知降级 / AGC 权限 | 需 AGC 申请（约 8 工作日）+ 手动签名 | 申请 `PUBLISH_AGENT_REMINDER` 开放能力后真机创建 ≤30 条提醒并验证未授权降级 |
 | Android 设备运行 | 无 Android 设备 | 用 Android 构建产物安装，确认手写入口隐藏、纯键盘输入、Git 同步可用 |
 | 真实 GitHub/Gitee HTTPS/SSH 认证 | 本机无远端仓库凭据 | 建私有仓库，用 HTTPS PAT 执行 testConnection/push/pull；SSH 用 ssh-agent |
-| 插件在 DSH Web GUI 的挂载与视觉 | 安装/GUI 验证由 Lead 负责（本任务禁止改 profile） | `dsh plugin --profile web add link:<repo>/packages/dsh-git-config-sync`，打开设置页确认分区与 RPC |
+| 插件在 DSH Web GUI 的挂载与视觉 | 安装/GUI 验证由 Lead 负责（本任务禁止改 profile） | `dsh plugin --profile web add link:<repo>/packages/dsh-dots`，打开设置页确认分区与 RPC |
 | `ctx.locale.t(ns,key)` 精确签名 | DSH 版本 API 细节 | 安装后观察 locale 文案；client 已做 inline 字典回退 |
 | 大 base64 经 `runJavaScript` / `@ohos.net.http` 二进制与 gzip | 无真机 | 真机同步一个含二进制的私有仓库，观察 clone/push |
 | rebase 冲突（同设备并发） | 集成测试只覆盖分叉非冲突 | 两设备同改同一 entry 后 push，确认 `E_CONFLICT` 提示且不丢本地文件 |
@@ -237,7 +237,7 @@ push → 另一设备 pull → preview → apply → rollback 全链路，不依
 ## 7. 需求 ↔ 证据映射备注
 
 - BRIEF §3.6 列的「插件清单 MERGE-only」属于插件同步引擎语义（应用不处理 DSH 插件清单），
-  由 `packages/dsh-git-config-sync/test/plugin-merge.test.mjs` 覆盖；应用侧只同步日程 JSONL 与附件。
+  由 `packages/dsh-dots/test/plugin-merge.test.mjs` 覆盖；应用侧只同步日程 JSONL 与附件。
 - 应用 `.ets` **已在本机真实编译通过**（见 §8）；纯逻辑 tsc+node 测试（155 项）与静态规则校验（8 条）
   继续作为回归保障，运行时不依赖设备。
 - `reports/`（执行者报告）被 `.gitignore` 忽略，属工作过程记录；本文件为对外验收证据。
@@ -822,7 +822,7 @@ hiai.vision/OCR_LIB_MSG: InitLibrary::ocr finish : 205.51 ms
 
 - `@ohos.zlib` 在 ArkUI-X 安卓侧不可用 → zip 统一走 WebView 里的 **JSZip 3.10.1**（MIT，`rawfile/git/jszip.min.js`）。
 - zip 用 STORE（不二次压缩 JPEG）：体积≈原图之和，一天 10 页 ≈1.5MB 以内。
-- 电脑端工具依赖 `dsh-git-config-sync` 的 `tools` 服务（可选注入，`config.scheduleTools:false` 可关）。
+- 电脑端工具依赖 `dsh-dots` 的 `tools` 服务（可选注入，`config.scheduleTools:false` 可关）。
 - 跨设备「全部未完成」仍走全量扫描（索引只覆盖本机设备目录）。
 - 手写板旋转坐标系、压感体感、多分辨率适配仍属未量化验证项。
 - 本轮修掉的真编译坑：`Web.darkMode` 在 ArkUI-X 不支持（`11706007`）、ArkTS 禁止对象字面量作类型、`failure.code` 需显式收窄。

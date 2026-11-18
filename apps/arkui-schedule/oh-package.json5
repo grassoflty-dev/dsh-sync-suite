@@ -2,7 +2,7 @@
   "modelVersion": "26.0.0",
   "name": "arkui-schedule",
   "version": "1.0.0",
-  "description": "ArkUI-X 跨平台日程助手（HarmonyOS + Android）",
+  "description": "ArkUI-X 跨平台DSH-Dots（HarmonyOS + Android）",
   "main": "",
   "author": "itwill",
   "license": "Apache-2.0",

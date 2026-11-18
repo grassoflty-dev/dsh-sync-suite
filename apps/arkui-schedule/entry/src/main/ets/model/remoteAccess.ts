@@ -1,7 +1,7 @@
 /**
  * 「远程访问方式」配置模型 —— 纯逻辑，零 SDK import，Node 可直接单测。
  *
- * 与插件侧 `packages/dsh-git-config-sync/src/remote/accessMode.ts` **共用同一套字段语义**
+ * 与插件侧 `packages/dsh-dots/src/remote/accessMode.ts` **共用同一套字段语义**
  * （`docs/REMOTE-ACCESS-OPTIONS.md` §3 是唯一事实来源）：方式枚举值、字段名、
  * 可用性判定（`ready` / `needs-setup` / `unsupported`）、字段标签 / 占位符 / 提示逐字对齐。
  * 改这里必须同时看那张表，别在页面里另写一份同义文案。

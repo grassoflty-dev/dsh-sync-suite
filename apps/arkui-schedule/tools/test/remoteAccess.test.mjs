@@ -3,7 +3,7 @@
 // 前置：先构建纯逻辑层
 //   node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json
 //
-// 这个文件与插件侧 `packages/dsh-git-config-sync/src/remote/accessMode.ts` / `urls.ts`
+// 这个文件与插件侧 `packages/dsh-dots/src/remote/accessMode.ts` / `urls.ts`
 // 共用同一套字段语义（`docs/REMOTE-ACCESS-OPTIONS.md` §3 是唯一事实来源），因此断言里有
 // 不少「逐字文案」：方式可用性、uu 的「图形化端口映射」准备项、tailscale 的卓易通提醒、
 // 字段键名与顺序。

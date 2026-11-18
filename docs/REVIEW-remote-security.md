@@ -1,6 +1,6 @@
 # 远程访问域独立评审（只读）
 
-> 评审对象：`packages/dsh-git-config-sync/src/remote/**`、`src/index.ts`、`src/rpc.ts` 的 `remote*` 面、
+> 评审对象：`packages/dsh-dots/src/remote/**`、`src/index.ts`、`src/rpc.ts` 的 `remote*` 面、
 > `test/remote-*.test.mjs`、`test/client-remote-render.test.mjs`。
 > 基线：分支 `main`，`git log -1` = `94d19d9`。对照口径：`docs/REMOTE-ACCESS-OPTIONS.md` §5、
 > `docs/RESEARCH-A-mobile-remote.md` §7、本轮任务书里的五条硬约束。

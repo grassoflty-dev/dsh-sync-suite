@@ -17,19 +17,19 @@
 - 工作区根目录有大量历史垃圾文件，忽略，只在 `dsh-sync-suite` 内工作。
 - 核心原则：每台设备只写自己的目录；跨设备通过追加事件/按 entry id 合并完成；不做 YAML 反序列化再序列化；密钥永不进入同步载荷。
 
-## 2. 交付物 A：DSH 配置同步插件 `packages/dsh-git-config-sync`
+## 2. 交付物 A：DSH 配置同步插件 `packages/dsh-dots`
 ### 2.1 清单与构建
 - Cordis 函数插件 `export function apply(ctx, config)`，所有注册走 `ctx.effect(...)`。
-- `package.json`：`name: dsh-git-config-sync`、`type: module`、`exports {".":"./dist/index.js","./client":"./dist/client.js","./locale/*.json":"./locale/*.json","./icon":"./icon.svg"}`、`dsh.bundle.patch: ./cordis.patch.yml`、`dsh.client {platform:"web", immediately:true, inject:["@deepseek-ai/dsh-client-ui-settings"]}`、`files` 覆盖全部运行时文件。
+- `package.json`：`name: dsh-dots`、`type: module`、`exports {".":"./dist/index.js","./client":"./dist/client.js","./locale/*.json":"./locale/*.json","./icon":"./icon.svg"}`、`dsh.bundle.patch: ./cordis.patch.yml`、`dsh.client {platform:"web", immediately:true, inject:["@deepseek-ai/dsh-client-ui-settings"]}`、`files` 覆盖全部运行时文件。
 - TypeScript 源码 `src/` → tsc 编译 `dist/`（dist 提交进仓库，安装时无需构建）。`pnpm build` 可重跑。禁止运行时 npm 依赖（只用 `node:` 内置模块）。不导出 `Config`（无 schemastery 依赖可解析），配置存插件自有状态目录。
 - 不使用 `settings.plugin.item` / `ctx.settings.installSection`（当前 DSH 0.2.2-rc.3 不存在）。
 
 ### 2.2 已核实的 DSH API（照此实现）
-- 设置分区：`ctx.slots.inject('settings.section', () => ctx.slots.register({ name:'settings.section', id:'git-config-sync', order:70, label:()=>t('nav'), locale:NS }, Component))`；组件 props 含 `t`、`close`。
+- 设置分区：`ctx.slots.inject('settings.section', () => ctx.slots.register({ name:'settings.section', id:'dots', order:70, label:()=>t('nav'), locale:NS }, Component))`；组件 props 含 `t`、`close`。
 - 客户端模块（纯 JS，无需构建）：
 ```js
 window.__ModuleLoader__.load({
-  id: 'dsh-git-config-sync',
+  id: 'dots',
   factory(require) {
     const React = require('react')
     const h = React.createElement
@@ -41,19 +41,19 @@ window.__ModuleLoader__.load({
   },
 })
 ```
-- Host RPC：`export const inject = ['webServer','connection']`；`ctx.effect(() => ctx.webServer.register({ kind:'exact', path:'/dsh-git-config-sync/rpc', handler }))`；handler 开头 `const rej = ctx.connection.requestRejection(req); if (rej) { res.statusCode = rej; res.end(); return }`。Client 用同源 `fetch('/dsh-git-config-sync/rpc', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({action, ...})})`。
+- Host RPC：`export const inject = ['webServer','connection']`；`ctx.effect(() => ctx.webServer.register({ kind:'exact', path:'/dsh-dots/rpc', handler }))`；handler 开头 `const rej = ctx.connection.requestRejection(req); if (rej) { res.statusCode = rej; res.end(); return }`。Client 用同源 `fetch('/dsh-dots/rpc', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({action, ...})})`。
 - 样式用 `--dsw-alias-*` 主题变量，自写控件，不引第三方 UI 库。
 
 ### 2.3 同步引擎
 - 白名单：`cordis.patch.yml`（按 entry id 逐条合并，保留注释与 `!!js`）、provider 定义、插件清单（包名/版本/来源/启用状态，不同步代码与 node_modules）、MCP 定义、插件自身配置（剔除 secret 字段）。
 - 敏感值（key 匹配 `token|secret|password|apikey|api_key|authorization|bearer`）不写入载荷，快照里替换为 `__SECRET__`；restore 时保留本地同名字段值，本地没有则跳过并标注“需本地填写”。
 - 设备快照目录 `devices/<deviceId>/`：`cordis.patch.yml`、`providers.json`、`plugins.json`、`mcp.json`、`manifest.json`（deviceId/time/scopes/dsh 版本/各文件 sha256）。
-- 推送：写快照 → `git add` → `commit` → `push`；非 fast-forward 先 `pull --rebase` 再 push（≤2 次），**永不 force**。git 用 `node:child_process.execFile` 调系统 git。工作副本在 `%USERPROFILE%\.dsh\git-config-sync\work\<repoHash>\`。
+- 推送：写快照 → `git add` → `commit` → `push`；非 fast-forward 先 `pull --rebase` 再 push（≤2 次），**永不 force**。git 用 `node:child_process.execFile` 调系统 git。工作副本在 `%USERPROFILE%\.dsh\dots\work\<repoHash>\`。
 - restore fail-closed 四层：① 必须 `confirm:true`，否则只 dry-run 预览（覆盖/新增/本地独有（不删）/需本地填写）；② 逐 entry 勾选；插件清单 MERGE-only（远端有本地无可安装、本地有远端无永不删、本地版本高不降级）；③ 写前快照到 `%USERPROFILE%\.dsh\vet\restore-snapshots\<timestamp>\` 保留最近 10 份；④ 写后 SHA-256 校验，不一致报错并可回滚。
-- 认证：HTTPS token 用临时 `GIT_ASKPASS`（0600 文件，不进 argv）；SSH 用系统 ssh-agent。状态文件 `%USERPROFILE%\.dsh\git-config-sync\{settings.json,credentials.json}`，权限仅当前用户。repoUrl 仅 https/ssh/git@；deviceId 匹配 `^[a-z0-9][a-z0-9-]{0,31}$`。
+- 认证：HTTPS token 用临时 `GIT_ASKPASS`（0600 文件，不进 argv）；SSH 用系统 ssh-agent。状态文件 `%USERPROFILE%\.dsh\dots\{settings.json,credentials.json}`，权限仅当前用户。repoUrl 仅 https/ssh/git@；deviceId 匹配 `^[a-z0-9][a-z0-9-]{0,31}$`。
 
 ### 2.4 RPC 契约（A/B 并行必须一致）
-POST `/dsh-git-config-sync/rpc`，body `{action, ...}`，响应恒 `{ok:true,data}` 或 `{ok:false,error:{code,message,details?}}`（HTTP 200；仅鉴权失败 401/403）。action：
+POST `/dsh-dots/rpc`，body `{action, ...}`，响应恒 `{ok:true,data}` 或 `{ok:false,error:{code,message,details?}}`（HTTP 200；仅鉴权失败 401/403）。action：
 - `getState` → `{settings:{repoUrl,platform:'github'|'gitee'|'custom',authMode:'https'|'ssh',deviceId,branch,scope:{config,providers,plugins,mcp},hasToken}, status:{reachable,branch,headSha,headMessage,headTime,localPending,remotePending,conflict,lastSyncAt,error?}, snapshots:[{id,time,reason,bytes}]}`
 - `saveSettings` `{settings, token?}` → `{settings, hasToken}`
 - `testConnection` → `{reachable, branch, headSha, message}`
@@ -71,7 +71,7 @@ POST `/dsh-git-config-sync/rpc`，body `{action, ...}`，响应恒 `{ok:true,dat
 - 真实测试（`node --test`，不依赖网络）：patch 逐条合并保留注释/!!js/本地独有；secret 脱敏与 `__SECRET__` 保留；`confirm:true` 门禁；SHA 校验失败可回滚；插件清单 MERGE-only 不降级。集成测试用临时裸仓库 + 真实 git：push → 另一设备目录 pull → preview → apply → rollback 全链路。
 - `pnpm build` 后 `node --check dist/index.js`、`node --check dist/client.js` 通过。
 
-## 3. 交付物 B：ArkUI-X 日程助手 `apps/arkui-schedule`
+## 3. 交付物 B：ArkUI-X DSH-Dots `apps/arkui-schedule`
 ### 3.1 跨平台
 - 用 **ArkUI-X**：同一份 ArkTS 支持 HarmonyOS 与 Android。页面/组件加 `@crossplatform`；页面清单 `entry/src/main/resources/base/profile/main_pages.json`。
 - 工程骨架：DevEco Studio 5（API 12+）Empty Ability，`AppScope/app.json5`、根 `build-profile.json5`、`hvigorfile.ts`、`oh-package.json5`、`entry/{build-profile.json5,hvigorfile.ts,oh-package.json5}`、`entry/src/main/{module.json5,resources/...}`。

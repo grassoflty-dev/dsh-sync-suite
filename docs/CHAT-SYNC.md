@@ -25,7 +25,7 @@
 | 09:05 | 恢复网络并上传 | 同时上传 |
 
 两端都声明自己拥有 `seq 41`。按日程那套「同 id 取较晚 `ts`」折叠（`docs/DATA-CONTRACT.md:89`、
-`packages/dsh-git-config-sync/src/schedule/jsonl.ts:183` `foldById`），`seq 41` 只能留一条：
+`packages/dsh-dots/src/schedule/jsonl.ts:183` `foldById`），`seq 41` 只能留一条：
 
 - 留 B 的 → A 的 `tc1` **结果消失**，调用永久悬空（工具卡片一直转圈）；
 - 留 A 的 → B 的 `tc2` 调用被吞，只剩一个找不到调用的结果；
@@ -200,7 +200,7 @@
 - **只用快进 + 重试**：上传前 `git fetch` + `git pull --ff-only`（等价 `merge --ff-only`）；失败即 abort，
   不做 `rebase`、不做 `merge` 提交、永不 `--force`。理由：rebase 会把本机提交改写到别人提交之上，
   失败后 `--abort` 会让本机这段事件流「消失」在用户视角；而对事件流，「消失」等于数据丢失。
-- **不要复用既有插件路径**：`packages/dsh-git-config-sync/src/engine/git.ts:643 pushWithRebase()`
+- **不要复用既有插件路径**：`packages/dsh-dots/src/engine/git.ts:643 pushWithRebase()`
   内部调 `pullRebase()`（同文件 `:548`，出错 `rebase --abort`）。该策略服务于 `devices/` 快照，
   `chats/` 必须走独立的 ff-only 通道，并复用其错误分类（`:207 isNonFastForward`）。
   App 侧已有同向先例：`apps/arkui-schedule/entry/src/main/resources/rawfile/git/git-bridge.js` 的
@@ -217,7 +217,7 @@
   *.json  text eol=lf
   ```
   CRLF 会改变 `sha256` 与 diff 行为（`discardChangesOutside` 已吃过一次 clone 换行的亏，
-  `packages/dsh-git-config-sync/src/engine/git.ts:573-577` 注释），`chats/` 下必须是 LF 字节。
+  `packages/dsh-dots/src/engine/git.ts:573-577` 注释），`chats/` 下必须是 LF 字节。
 
 ## 7. 隐私
 
@@ -227,7 +227,7 @@
    `apps/arkui-schedule/entry/src/main/ets/model/syncError.ts:84`），命中 `sk-`/`Bearer`/`Basic`/`token=`
    `/`api_key=`/`apiKey:"` 的片段整体替换为 `***`；
 2. **写 `meta.json` 前**：只按 §2.1 白名单挑字段（结构化脱敏，递归 key 版本见
-   `packages/dsh-git-config-sync/src/engine/secrets.ts:226 stripSecretsDeep`，词边界判定
+   `packages/dsh-dots/src/engine/secrets.ts:226 stripSecretsDeep`，词边界判定
    `:20 SECRET_KEY_RE`，避免把 `maxTokens` 误伤，见 `docs/DATA-CONTRACT.md:43-44`）；
 3. **提交前静态扫描**（fail-closed，命中即拒传并报行号）：
 
@@ -272,7 +272,7 @@ RSI §5.3）；P3 只改 preset，不动存储格式。
 
 ---
 
-*本文件只写设计，不含实现；实现落点预计为插件侧 `packages/dsh-git-config-sync/src/chats/`（P1）与
+*本文件只写设计，不含实现；实现落点预计为插件侧 `packages/dsh-dots/src/chats/`（P1）与
 App 侧 `entry/src/main/ets/model/chats/`（P1 只读）。*
 
 ---
@@ -280,8 +280,8 @@ App 侧 `entry/src/main/ets/model/chats/`（P1 只读）。*
 ## 安全边界：chat preset 与工具隔离
 
 > 本节补在 P3（纯对话 preset）实现之后，2026-11-18。代码落点
-> `packages/dsh-git-config-sync/src/chatPreset/**`，声明落点
-> `packages/dsh-git-config-sync/cordis.patch.yml`（第二个 `insert:` 块）。
+> `packages/dsh-dots/src/chatPreset/**`，声明落点
+> `packages/dsh-dots/cordis.patch.yml`（第二个 `insert:` 块）。
 >
 > **同日二次裁决（Lead）**：旧版「58 项手写 deny 名单」**已删除**，改为
 > **运行期反算 + 白名单断言（fail-closed）**。理由是"把黑名单写死"在插件生态里必然失败：
@@ -362,7 +362,7 @@ App 侧 `entry/src/main/ets/model/chats/`（P1 只读）。*
   chat 会话（不是"降级运行"）。
 - `E_CHAT_DENY_FAILED` 是**内部防御性错误**（宿主契约不满足 / `restrict` 抛错），只用于定位，
   **不进公共错误码表**。
-- RPC `chatPresetInfo`（`POST /dsh-git-config-sync/rpc`，`{action:"chatPresetInfo"}`）返回
+- RPC `chatPresetInfo`（`POST /dsh-dots/rpc`，`{action:"chatPresetInfo"}`）返回
   `{presetId, allow, rationale, registeredCount?, denyCount?}`——**不再返回静态名单**；`registeredCount`/
   `denyCount` 只在调用方带注册表时出现（RPC 侧没有运行期注册表，故省略）。设置页拿它展示白名单与
   逐条理由，诊断脚本可以带上本机注册表算出"这次会 deny 多少条"。
@@ -399,9 +399,9 @@ Select-String -Path C:\Users\GWL\.dsh\profiles\desktop\node_modules\dsh-browser-
 ## 实现注记（P1）
 
 > 2026-11-18 补记。本节只记**已落地的事实**与真实偏差，不改前面任何设计条款；行文中的「本轮」= P1 插件侧。
-> 代码落点 `packages/dsh-git-config-sync/src/chats/`（`types.ts` / `readSessions.ts` / `exportChats.ts` / `index.ts`），
-> RPC 三个 action 追加在 `packages/dsh-git-config-sync/src/rpc.ts`（只加，未改既有 action 一行），
-> 测试 `packages/dsh-git-config-sync/test/chats-export.test.mjs`（33 个用例 / 178 条断言，全部用临时目录 + 现造 zstd 帧）。
+> 代码落点 `packages/dsh-dots/src/chats/`（`types.ts` / `readSessions.ts` / `exportChats.ts` / `index.ts`），
+> RPC 三个 action 追加在 `packages/dsh-dots/src/rpc.ts`（只加，未改既有 action 一行），
+> 测试 `packages/dsh-dots/test/chats-export.test.mjs`（33 个用例 / 178 条断言，全部用临时目录 + 现造 zstd 帧）。
 
 ### 1. 真实 API（这些是**现在存在**的导出，不是设想）
 

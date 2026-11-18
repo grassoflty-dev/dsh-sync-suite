@@ -5,7 +5,7 @@
  * 产出：
  *   dist-YYYYMMDD-HHmm/
  *     <hap 文件名>.hap                 —— 平板安装包（已签名）
- *     dsh-git-config-sync-<ver>.tgz    —— 插件分发包（dist/locale/docs/package.json/...）
+ *     dsh-dots-<ver>.tgz    —— 插件分发包（dist/locale/docs/package.json/...）
  *     SHA256SUMS.txt                  —— `<sha256>  <bytes>  <mtime ISO>  <path>`
  *     MANIFEST.md                     —— commit / 构建时间 / 文件表 / 测试数字 / "非 Release" 声明
  *
@@ -57,9 +57,9 @@ for (const name of haps) copyFileSync(path.join(hapDir, name), path.join(outDir,
 
 /* ------------------------------------------------------------------ 插件 tgz */
 
-const pkgDir = path.join(repo, 'packages', 'dsh-git-config-sync')
+const pkgDir = path.join(repo, 'packages', 'dsh-dots')
 const pkgJson = JSON.parse(readFileSync(path.join(pkgDir, 'package.json'), 'utf8'))
-const tgzName = `dsh-git-config-sync-${pkgJson.version}.tgz`
+const tgzName = `dsh-dots-${pkgJson.version}.tgz`
 const tgzPath = path.join(outDir, tgzName)
 const members = ['dist', 'locale', 'docs', 'package.json', 'README.md', 'cordis.patch.yml', 'icon.svg'].filter((member) =>
   existsSync(path.join(pkgDir, member)),

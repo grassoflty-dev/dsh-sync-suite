@@ -502,7 +502,7 @@
 
   function authorOf(config) {
     return {
-      name: (config && config.authorName) || '日程助手',
+      name: (config && config.authorName) || 'DSH-Dots',
       email: (config && config.authorEmail) || 'schedule@localhost'
     };
   }
