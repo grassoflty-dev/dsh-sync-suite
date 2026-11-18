@@ -1197,6 +1197,77 @@ export function todayText(now: Date = new Date()): string {
   return localDateKey(now);
 }
 
+// ---------------------------------------------------------------- 导出区间快捷 chip（D4）
+
+/** 导出区间快捷：今天。 */
+export const QUICK_RANGE_TODAY: string = 'today';
+/** 导出区间快捷：本周（周一为首日，见 model/calendar.ts 的 WeekStart）。 */
+export const QUICK_RANGE_WEEK: string = 'week';
+/** 导出区间快捷：近 7 天。 */
+export const QUICK_RANGE_LAST7: string = 'last7';
+
+/** 一个快捷区间 chip 的定义（kind + 中文标签；界面按数组顺序渲染）。 */
+export interface QuickRangeOption {
+  kind: string;
+  label: string;
+}
+
+const QUICK_TODAY_OPTION: QuickRangeOption = { kind: QUICK_RANGE_TODAY, label: '今天' };
+const QUICK_WEEK_OPTION: QuickRangeOption = { kind: QUICK_RANGE_WEEK, label: '本周' };
+const QUICK_LAST7_OPTION: QuickRangeOption = { kind: QUICK_RANGE_LAST7, label: '近 7 天' };
+
+/** 三个 chip 的定义（顺序 = 界面顺序，标签逐字）。 */
+export const QUICK_RANGE_OPTIONS: QuickRangeOption[] = [
+  QUICK_TODAY_OPTION,
+  QUICK_WEEK_OPTION,
+  QUICK_LAST7_OPTION
+];
+
+/**
+ * 按**本机时区**算快捷区间（含首尾）：
+ * - 'today'：今天~今天；
+ * - 'week' ：本周一~今天（周一为首日，沿用 model/calendar.ts 的 WeekStart=1 中文习惯）；
+ * - 'last7'：今天-6 天~今天（含今天共 7 天）。
+ * 未知 kind / 非法 Date → ok:false + 中文 reason，绝不抛异常。
+ */
+export function quickRange(kind: string, now: Date = new Date()): DateRangeResult {
+  if (now === null || now === undefined || typeof now.getTime !== 'function' || Number.isNaN(now.getTime())) {
+    return dateRangeFailure('当前时间无效，无法计算快捷区间');
+  }
+  const today: string = localDateKey(now);
+  if (kind === QUICK_RANGE_TODAY) {
+    // 再走一遍 parseDateRange 当自检：保证返回的是用户手打同格式的规范形态。
+    return parseDateRange(today, today);
+  }
+  if (kind === QUICK_RANGE_WEEK) {
+    // 周一为首日：周日(0)回退 6 天落到上一个周一，周一(1)回退 0 天，周二(2)回退 1 天……
+    const weekday: number = now.getDay();
+    const backDays: number = (weekday + 6) % 7;
+    const monday: Date = new Date(now.getFullYear(), now.getMonth(), now.getDate() - backDays);
+    return parseDateRange(localDateKey(monday), today);
+  }
+  if (kind === QUICK_RANGE_LAST7) {
+    const start: Date = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
+    return parseDateRange(localDateKey(start), today);
+  }
+  return dateRangeFailure(`未知的快捷区间：${clip(kind)}`);
+}
+
+/**
+ * 当前 from/to 是否**正好**等于该快捷区间（chip 高亮用；用户手改后自动失配 → false）。
+ */
+export function isQuickRangeActive(kind: string, fromText: string, toText: string, now: Date = new Date()): boolean {
+  const current: DateRangeResult = parseDateRange(fromText, toText);
+  if (!current.ok) {
+    return false;
+  }
+  const quick: DateRangeResult = quickRange(kind, now);
+  if (!quick.ok) {
+    return false;
+  }
+  return current.from === quick.from && current.to === quick.to;
+}
+
 /** 把 dry-run 计划写进展示状态（返回**新对象**，不改入参）。 */
 export function applyPlan(state: ExportImportState, plan: ImportPlan): ExportImportState {
   const next = copyExportImportState(state);

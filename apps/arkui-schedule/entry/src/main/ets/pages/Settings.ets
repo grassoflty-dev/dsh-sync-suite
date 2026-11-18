@@ -226,6 +226,9 @@ const PROBE_TIMEOUT_MS: number = 10000;
 /** 底部弹层的单行高度。 */
 const SHEET_ROW: number = 48;
 
+/** 锚点还没测到位置时的提示（点了不能静默，见 docs/STATE-UI.md §3）。 */
+const ANCHOR_NOT_READY: string = '页面还在排版，稍后再点一次';
+
 /**
  * 本页会话内最多保留几条 fallback 诊断。
  *
@@ -430,6 +433,12 @@ struct Settings {
   private lastStatusResult: GitSyncResult | null = null;
   /** 页面主滚动容器：校验失败时滚回顶部，让红色汇总与第一个错误字段进入视野。 */
   private pageScroller: Scroller = new Scroller();
+  /**
+   * 紧凑屏各组在滚动内容里的 y 偏移（vp；-1 = 还没测到）。
+   * 刻意**不是** @State：它只在点击时读一次、不参与渲染；ArkUI V1 对「数组下标赋值」不触发刷新，
+   * 若写成 @State 反而会给人「已经会刷新」的错觉。
+   */
+  private groupOffsets: number[] = [-1, -1, -1, -1, -1];
   /** 远程控制的「旧数据 → manual」迁移是否已经做过（只做一次，见 `applySettings`）。 */
   private remoteMigrated: boolean = false;
   /**
@@ -2122,6 +2131,50 @@ struct Settings {
   }
 
   /**
+   * `Area.position.y` 的 Length → vp 数字（口径与 `components/PageLayout.ets` 的 toVp 一致）。
+   * 无法换算时返回 **-1**（而不是 0）：0 是合法的内容偏移（例如某组正好是内容第一个元素），
+   * 用 0 当「未测量」哨兵会把「测不到」误当成「在顶部」，跳转会落错位置。
+   */
+  private lengthToVp(value: Length | undefined): number {
+    if (typeof value === 'number') {
+      return Number.isFinite(value) && value >= 0 ? value : -1;
+    }
+    if (typeof value === 'string') {
+      const parsed: number = Number(value);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : -1;
+    }
+    return -1;
+  }
+
+  /**
+   * 记录第 index 组在滚动内容里的 y 偏移（同一 Column 内的相对位置 = 内容偏移，滚动时不变）。
+   * 等值不重写、越界/无法换算（-1）忽略；`IssuesBanner` 出现/消失导致整体位移时会再次触发。
+   */
+  private measureGroup(index: number, area: Area): void {
+    if (index < 0 || index >= this.groupOffsets.length) {
+      return;
+    }
+    const y: number = this.lengthToVp(area.position.y);
+    if (y < 0 || this.groupOffsets[index] === y) {
+      return;
+    }
+    this.groupOffsets[index] = y;
+  }
+
+  /** 真跳转：用页面已有的 pageScroller 滚到该组；还没测到位置就 toast 原因（不静默、不假跳）。 */
+  private jumpToGroup(index: number): void {
+    if (index < 0 || index >= this.groupOffsets.length) {
+      return;
+    }
+    const offset: number = this.groupOffsets[index];
+    if (offset < 0) {
+      promptAction.showToast({ message: ANCHOR_NOT_READY });
+      return;
+    }
+    this.pageScroller.scrollTo({ xOffset: 0, yOffset: offset, animation: { duration: 250 } });
+  }
+
+  /**
    * 深色模式那行说明：跟随系统时补一句「系统当前为深/浅」，让用户知道实际生效的是哪一档。
    *
    * 判定一律走纯函数（`resolveTheme` + `isSystemDark`），页面不自己拼字符串规则。
@@ -2190,6 +2243,46 @@ struct Settings {
       .onClick(() => {
         this.saveSettings();
       })
+  }
+
+  /** 一个组锚点（等宽 1/5，命中区 TOUCH_MIN）：点一下真滚到对应组。 */
+  @Builder
+  GroupAnchorChip(label: string, index: number) {
+    Button(label)
+      .fontSize(FONT.caption)
+      .lineHeight(LINE_HEIGHT.caption)
+      .fontColor($r('app.color.brand'))
+      .backgroundColor($r('app.color.control_fill'))
+      .height(TOUCH_MIN)
+      .borderRadius(RADIUS.sm)
+      .padding({ left: 0, right: 0 })
+      .layoutWeight(1)
+      .onClick(() => {
+        this.jumpToGroup(index);
+      })
+  }
+
+  /**
+   * 紧凑屏组锚点行：同步 / AI / 远程 / 数据 / 关于（顺序 = 组顺序）。
+   *
+   * 位置：`Scroll` 内容的最上面、`IssuesBanner` 与第一个组头之前 —— 随内容一起滚走，
+   * **不悬浮**，因此不会遮住首屏表单；进页面时就在视野内，点一下直达目标组。
+   *
+   * 为什么不用 `ActionButton`：它的左右内边距是 `SPACING.lg`，5 个塞进 360vp 宽会溢出/裁字；
+   * 锚点也没有「禁用」语义（未测量时点击会 toast 原因），因此用原生 `Button` + 令牌尺寸。
+   * 宽屏两列已短，不做锚点（见 docs/UX-STEPS.md §4.2）。
+   */
+  @Builder
+  GroupAnchorBar() {
+    Row({ space: SPACING.sm }) {
+      this.GroupAnchorChip('同步', 0)
+      this.GroupAnchorChip('AI', 1)
+      this.GroupAnchorChip('远程', 2)
+      this.GroupAnchorChip('数据', 3)
+      this.GroupAnchorChip('关于', 4)
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Center)
   }
 
   // ------------------------------------------------------------------ 装配（A2 拆分）
@@ -2489,26 +2582,39 @@ struct Settings {
     })
   }
 
-  /** 紧凑屏：五组自上而下。 */
+  /** 紧凑屏：五组自上而下；滚动内容顶部一行组锚点（随内容滚走，非悬浮）直达目标组。 */
   @Builder
   CompactBody() {
     Column({ space: SPACING.md }) {
       Scroll(this.pageScroller) {
         Column({ space: SPACING.xl }) {
+          this.GroupAnchorBar()
           this.IssuesBanner()
-          this.SyncGroup()
+          Column() { this.SyncGroup() }
+            .width('100%')
+            .alignItems(HorizontalAlign.Start)
+            .onAreaChange((_oldValue: Area, newValue: Area) => { this.measureGroup(0, newValue); })
           Divider()
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
-          this.AiGroup()
+          Column() { this.AiGroup() }
+            .width('100%')
+            .alignItems(HorizontalAlign.Start)
+            .onAreaChange((_oldValue: Area, newValue: Area) => { this.measureGroup(1, newValue); })
           Divider()
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
-          this.RemoteGroup()
+          Column() { this.RemoteGroup() }
+            .width('100%')
+            .alignItems(HorizontalAlign.Start)
+            .onAreaChange((_oldValue: Area, newValue: Area) => { this.measureGroup(2, newValue); })
           Divider()
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
-          this.DataGroup()
+          Column() { this.DataGroup() }
+            .width('100%')
+            .alignItems(HorizontalAlign.Start)
+            .onAreaChange((_oldValue: Area, newValue: Area) => { this.measureGroup(3, newValue); })
           Divider()
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
@@ -2516,7 +2622,10 @@ struct Settings {
           Divider()
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
-          this.AboutGroup()
+          Column() { this.AboutGroup() }
+            .width('100%')
+            .alignItems(HorizontalAlign.Start)
+            .onAreaChange((_oldValue: Area, newValue: Area) => { this.measureGroup(4, newValue); })
         }
         .width('100%')
         .alignItems(HorizontalAlign.Start)

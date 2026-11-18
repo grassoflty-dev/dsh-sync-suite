@@ -455,14 +455,24 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
   其余任务在后台跑，等独占方结束再入场。
 - 规划子代理每轮向主会话汇报三行：完成 / 进行中含 owner / 阻塞或需决策。
 
-## 交接：当前状态与下一步（2026-11-18 22:00 起笔，23:10 收口 B 批）
+## 交接：当前状态与下一步（2026-11-18 22:00 起笔，23:10 收口 B 批；2026-11-19 追加 B2 批）
 
 > 用途：换会话/重启后**先读这一节**，不用问人。
-> **HEAD = main 顶端**（B 批代码提交 = `8f34418`，紧随其后的 docs 提交即本节所在提交）；
-> 工作树**干净**（`git status --short` 为空）。B 批那个提交 = 11 个文件 /
-> `+1122 −45`：6 个 `.ets`/`.ts` 源码 + `tools/test/remoteUrl.test.mjs` + `docs/UX-STEPS.md`
-> + `docs/ROADMAP.md` + 新增 `tools/test/bBatch.test.mjs`、`docs/REVIEW-b-batch.md`。
+> **HEAD = main 顶端 = `22acdb8`**（B 批代码提交 = `8f34418`，其后是两笔 docs 提交）。
+> **工作树不干净**：B2 批（D4 + D6）的 5 个源码/测试文件 + 3 个 docs 尚未提交，清单见下；
 > **提交由 Lead 统一做**，规划者/执行子代理都不 commit。
+>
+> B2 批待提交清单（`git status --short`，源码 + 测试 = 5 个文件 / 约 **+675 −7**）：
+> ```
+>  M apps/arkui-schedule/entry/src/main/ets/components/ExportImportPanel.ets   (+47 −1)
+>  M apps/arkui-schedule/entry/src/main/ets/model/exportImport.ts              (+71)
+>  M apps/arkui-schedule/entry/src/main/ets/pages/Settings.ets                 (+115 −6)
+>  M apps/arkui-schedule/tools/test/exportImport.test.mjs                      (+148，只在末尾追加)
+> ?? apps/arkui-schedule/tools/test/b2Batch.test.mjs                           (新增 294 行)
+>  M docs/UX-STEPS.md                                                          (+57，新增 §4.2)
+>  M docs/ROADMAP.md                                                           (本节)
+> ?? docs/REVIEW-b2-batch.md                                                   (新增，独立评审)
+> ```
 
 ### 已交付（本轮及之前）
 
@@ -474,18 +484,22 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 | 稳定性（C 批） | 同步重入、拉取去重、超时、草稿崩溃恢复 | 同上；`docs/FAILURE-MODES.md` |
 | 工具链 | `device-accept.mjs` 退出码分级与 pre-flight、`preflight.mjs`、手写板两行工具条断言 | `docs/PREFLIGHT.md`、`docs/REVIEW-device-accept.md` |
 | 便捷性（B 批，**部分**） | D1 远程地址归一 + **一键重连**（`settingsStore.remoteLastOk` + `RemoteControl.onPageEnd` 记「最近成功」→ 设置页 `重新连接 <host:port>`）；D2 P1 **chat 详情页「在电脑上继续」**跳转出口（只读纪律不变，无输入框） | 提交 `8f34418`（11 文件 / **+1122 −45**）；全量 **2179 例 / 2178 pass / 0 fail / 1 skip**；`validate-app` **8/8**；独立评审 `docs/REVIEW-b-batch.md`（P0 0 / P1 1 / P2 2）+ Lead 复审追加 P2-3，四条 P1/P2 已修、P2-2 列为已知限制；`docs/UX-STEPS.md` §4.1（N→M） |
+| 便捷性（B2 批，**待提交**） | **D4 导出区间快捷 chip**（今天 / 本周 / 近 7 天；「本周」周一为首日、手改后以手改为准、不新增 @State）；**D6 设置页紧凑屏组锚点**（同步 / AI / 远程 / 数据 / 关于；`pageScroller.scrollTo` 真跳转，未测量时 toast 原因，宽屏不做） | 工作树未提交（见上「待提交清单」）；全量 **2204 例 / 2203 pass / 0 fail / 1 skip**（B2 新增 25 例）；`validate-app` **8/8**；独立评审 `docs/REVIEW-b2-batch.md`（P0 0 / P1 1 / P2 4，不阻塞；P1-1 与 P2-1/P2-3 已补钉，见该文 §6 复审）；`docs/UX-STEPS.md` §4.2（路径 3 10→7、路径 4 8→7 / 7→6、路径 5 10→8 / 5′ 12→10；合计 43→37，承接 §4.1 口径 42→36） |
 
 **当前基线**：全量 `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"`
-**2179 例 / 2178 pass / 0 fail / 1 skip**（B 批新增 34 例：`remoteUrl.test.mjs` +10、`bBatch.test.mjs` +24；
-skip 数未增加，仍是既有那条 fetch 直连用例）；`validate-app` **8/8**；`overlay applied=false`。
+**2204 例 / 2203 pass / 0 fail / 1 skip**（B2 批新增 25 例：`exportImport.test.mjs` +12、新增
+`b2Batch.test.mjs` +13；skip 数未增加，仍是既有那条 fetch 直连用例）；`validate-app` **8/8**；
+`overlay applied=false`；`node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json` exit 0。
+（B 批基线 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
 
 ### 未完成（按优先级）
 
-1. **便捷性（B 批）**：D1-b（一键重连）与 D2 P1（「在电脑上继续」跳转出口）**已落地并提交**
-   （`8f34418`，见上表与 `docs/UX-STEPS.md` §4.1：路径 4 **8→7**、路径 5 到详情页仍 **10**、到电脑端可用 **17→12**；
-   合计 43→42）。**未完成**：D1 的 P2（输入框失焦即归一）、D2 的 P2（真接管，要等 `CHAT-SYNC` §1/§5
-   的租约 + sha 校验）、D4 导出快捷 chip、D6 设置页锚点、D7 `CalendarPicker` 接线；
-   路径 1/2 的落盘改造也未做——原 §4「P1 目标 26」**未达成**（差 16 步，全在上述未做项）。
+1. **便捷性（B 批 / B2 批）**：D1-b（一键重连）与 D2 P1（「在电脑上继续」跳转出口）已在 `8f34418` 落地；
+   **B2 批的 D4（导出快捷 chip）与 D6（设置页组锚点）已写完、待 Lead 提交**（见上表与 `docs/UX-STEPS.md` §4.2：
+   路径 3 **10→7**、路径 4 **8→7**（首次）/ **7→6**（二次）、路径 5 **10→8**、路径 5′ **12→10**；
+   合计 **43→37**，承接 §4.1 口径 **42→36**）。
+   **仍未完成**：D1 的 P2（输入框失焦即归一）、D2 的 P2（真接管，要等 `CHAT-SYNC` §1/§5 的租约 + sha
+   校验）、D7 `CalendarPicker` 接线、路径 1/2 的落盘改造；原 §4「P1 目标 26」**仍未达成**（当前 37 步，差 11 步）。
 2. **真机验收（全部挂起，`hdc list targets` = `[Empty]`）**：手写板 5 项（penOnly 挡手指、笔迹面板二级菜单、工具条两行、撤销重做可点、折叠布局画布高度）、chat 内嵌 Web 的 `ERR_WS_UPGRADE(-173)`、UU 两个实测点（入口形态 / WS 透传）。**设备没连上不许报“已验证”。**
 3. **模型路由**：`dsh-opencode-go/hy4-flash-free` 的允许清单是**会话启动快照**，改配置后需**重启 DSH + 新会话**才生效；当前会话只能用继承的 `deepseek-v4.1-flash`。重启后再验 `list_subagent_models(provider: "dsh-opencode-go")`。
 4. **后续排队**：类型注册表（`docs/SYNC-SCOPES.md`：6 项声明，无合并策略即拒绝接入）→ Git 接入向导（`docs/CONFIG-UX.md`）→ 远程连接收敛（`auto` 优先级 + 一键自检 + 二维码）；F 测试套件卫生；G 吞错审计；H 契约静态测试；E APK 收尾。
@@ -499,6 +513,10 @@ skip 数未增加，仍是既有那条 fetch 直连用例）；`validate-app` **
 - 验收标准写进**初始 prompt**；交付带**证据三段式**（命令原文 / 原样输出 / 结论）。
 - 关键改动要独立只读评审，结论落 `docs/REVIEW-*.md`。
 - 跑测试前先 `overlay.mjs status`；构建期不跑全量测试。
+- **「真跳转」类锚点的写法**（B2 批沉淀）：用页面已有的 `Scroller.scrollTo({ yOffset })` +
+  每组 `Column().onAreaChange()` 取 `Area.position.y`（相对父内容 Column ⇒ 内容偏移）；
+  未测量时 toast 原因，**不要用 `scrollEdge(Edge.Top)` 冒充目标跳转**；源码文本断言要同时钉
+  「yOffset 来自测量缓存（`this.groupOffsets[index]`）」，只钉「调了 scrollTo」挡不住硬编码假跳转。
 - 静态断言现在盯的是 `ActionButton({ label: … })` 与 `ErrorState({…})`，**不再是** `Button('…')` / `Text('…')`——改 UI 时同步改断言并注明原因。
 
 

@@ -1271,3 +1271,151 @@ describe('exportService.ets 接线：复核顺序 + 并发闸（源码级契约�
     assert.match(SERVICE_SOURCE, /reconfirmed: counts/, '返回值必须带复核后的计数');
   });
 });
+
+// ---- 导出区间快捷 chip（D4）
+
+/**
+ * D4 段钉的是「导出区间快捷」的纯函数口径：三个 chip 的顺序/标签逐字固定，`quickRange` 只按
+ * 本机时区算 YYYY-MM-DD、`isQuickRangeActive` 只做等值比对。它们全部是只读派生——不写任何
+ * 源文件、不触发 IO，所以能在 Node 里直接跑。
+ *
+ * 只 import 本段新增的导出；解析规则沿用文件头的 `registerHooks`（给无扩展名的相对 import 补 .js）。
+ * 日期一律用 `new Date(2026, 10, 3, ...)` 这类**本地构造**，避免运行时时区把「今天」挪一天。
+ */
+const {
+  QUICK_RANGE_LAST7,
+  QUICK_RANGE_OPTIONS,
+  QUICK_RANGE_TODAY,
+  QUICK_RANGE_WEEK,
+  isQuickRangeActive,
+  quickRange
+} = await import('../.build/model/exportImport.js');
+
+/** 本地构造某一天的正午（month 传人类习惯的 1-12，内部转成 JS 的 0 基）。 */
+function localDay(year, month, day) {
+  return new Date(year, month - 1, day, 10, 0, 0);
+}
+
+/** 两个 YYYY-MM-DD 之间含首尾的天数（走 UTC 消除夏令时影响）。 */
+function inclusiveDays(from, to) {
+  const [fy, fm, fd] = from.split('-').map(Number);
+  const [ty, tm, td] = to.split('-').map(Number);
+  return Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd)) / 86400000) + 1;
+}
+
+describe('导出区间快捷 chip（D4）：QUICK_RANGE_* 定义 + quickRange / isQuickRangeActive 纯函数', () => {
+  test('D4-1 三个 kind 常量取值与 QUICK_RANGE_OPTIONS 顺序、标签逐字固定', () => {
+    assert.equal(QUICK_RANGE_TODAY, 'today');
+    assert.equal(QUICK_RANGE_WEEK, 'week');
+    assert.equal(QUICK_RANGE_LAST7, 'last7');
+    assert.equal(QUICK_RANGE_OPTIONS.length, 3);
+    assert.deepEqual(
+      QUICK_RANGE_OPTIONS.map((option) => option.kind),
+      ['today', 'week', 'last7']
+    );
+    assert.deepEqual(
+      QUICK_RANGE_OPTIONS.map((option) => option.label),
+      ['今天', '本周', '近 7 天']
+    );
+  });
+
+  test('D4-2 quickRange(today) 在周二 2026-11-03 → 今天..今天', () => {
+    const result = quickRange(QUICK_RANGE_TODAY, localDay(2026, 11, 3));
+    assert.equal(result.ok, true);
+    assert.equal(result.from, '2026-11-03');
+    assert.equal(result.to, '2026-11-03');
+  });
+
+  test('D4-3 周二的 week → 本周一..今天（周一为首日）', () => {
+    const result = quickRange(QUICK_RANGE_WEEK, localDay(2026, 11, 3));
+    assert.equal(result.ok, true);
+    assert.equal(result.from, '2026-11-02');
+    assert.equal(result.to, '2026-11-03');
+  });
+
+  test('D4-4 周一的 week → 当天..当天（不回退到上一周）', () => {
+    const result = quickRange(QUICK_RANGE_WEEK, localDay(2026, 11, 2));
+    assert.equal(result.ok, true);
+    assert.equal(result.from, '2026-11-02');
+    assert.equal(result.to, '2026-11-02');
+  });
+
+  test('D4-5 周日的 week → 归前一个周一开头的一周（2026-11-02..2026-11-08）', () => {
+    const result = quickRange(QUICK_RANGE_WEEK, localDay(2026, 11, 8));
+    assert.equal(result.ok, true);
+    assert.equal(result.from, '2026-11-02');
+    assert.equal(result.to, '2026-11-08');
+  });
+
+  test('D4-6 last7 → 今天-6 天..今天，窗口长度恒为 7 天（含首尾）', () => {
+    const result = quickRange(QUICK_RANGE_LAST7, localDay(2026, 11, 3));
+    assert.equal(result.ok, true);
+    assert.equal(result.from, '2026-10-28');
+    assert.equal(result.to, '2026-11-03');
+    assert.equal(inclusiveDays(result.from, result.to), 7);
+  });
+
+  test('D4-7 跨月/跨年：last7 在 2026-01-02 → 2025-12-27；week 在周四 2026-01-01 → 2025-12-29', () => {
+    const last7 = quickRange(QUICK_RANGE_LAST7, localDay(2026, 1, 2));
+    assert.equal(last7.ok, true);
+    assert.equal(last7.from, '2025-12-27');
+    assert.equal(last7.to, '2026-01-02');
+    assert.equal(inclusiveDays(last7.from, last7.to), 7);
+
+    const week = quickRange(QUICK_RANGE_WEEK, localDay(2026, 1, 1));
+    assert.equal(week.ok, true);
+    assert.equal(week.from, '2025-12-29');
+    assert.equal(week.to, '2026-01-01');
+  });
+
+  test('D4-8 三个 kind 的结果都能过 parseDateRange（ok:true 且 from/to 未被改写）', () => {
+    for (const kind of ['today', 'week', 'last7']) {
+      const result = quickRange(kind, localDay(2026, 11, 3));
+      assert.equal(result.ok, true, `${kind} 的快捷区间必须合法`);
+      const parsed = parseDateRange(result.from, result.to);
+      assert.equal(parsed.ok, true, `${kind} 的区间必须能被 parseDateRange 接受`);
+      assert.equal(parsed.from, result.from, `${kind} 的 from 不能被规范化改写`);
+      assert.equal(parsed.to, result.to, `${kind} 的 to 不能被规范化改写`);
+    }
+  });
+
+  test('D4-9 未知 kind（month / 空串）→ ok:false、两端空串、中文 reason，且不抛异常', () => {
+    for (const kind of ['month', '']) {
+      const result = quickRange(kind, localDay(2026, 11, 3));
+      assert.equal(result.ok, false);
+      assert.equal(result.from, '');
+      assert.equal(result.to, '');
+      assert.equal(typeof result.reason, 'string');
+      assert.ok(result.reason.length > 0, `${kind} 必须给出非空原因`);
+      assert.match(result.reason, /[\u4e00-\u9fa5]/, `${kind} 的原因必须是中文`);
+    }
+  });
+
+  test('D4-10 非法 now（Invalid Date）→ ok:false、中文 reason，且不抛异常', () => {
+    const result = quickRange(QUICK_RANGE_TODAY, new Date(Number.NaN));
+    assert.equal(result.ok, false);
+    assert.equal(result.from, '');
+    assert.equal(result.to, '');
+    assert.match(result.reason, /[\u4e00-\u9fa5]/);
+  });
+
+  test('D4-11 isQuickRangeActive：严格等值才高亮（trim 后比对，手改/空串/未知 kind 均 false）', () => {
+    const now = localDay(2026, 11, 3);
+    assert.equal(isQuickRangeActive('today', '2026-11-03', '2026-11-03', now), true);
+    assert.equal(isQuickRangeActive('week', '2026-11-03', '2026-11-03', now), false);
+    assert.equal(isQuickRangeActive('last7', '2026-11-03', '2026-11-03', now), false);
+    assert.equal(isQuickRangeActive('week', ' 2026-11-02 ', ' 2026-11-03 ', now), true);
+    assert.equal(isQuickRangeActive('week', '2026-11-02', '2026-11-04', now), false);
+    assert.equal(isQuickRangeActive('today', '', '', now), false);
+    assert.equal(isQuickRangeActive('month', '2026-11-03', '2026-11-03', now), false);
+  });
+
+  test('D4-12 quickRange 不修改入参 now（纯函数：调用前后 getTime 一致）', () => {
+    const now = localDay(2026, 11, 3);
+    const before = now.getTime();
+    quickRange('today', now);
+    quickRange('week', now);
+    quickRange('last7', now);
+    assert.equal(now.getTime(), before);
+  });
+});

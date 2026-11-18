@@ -33,14 +33,17 @@ import {
   EXPORT_FORMAT_JSON,
   EXPORT_FORMAT_MARKDOWN,
   EMPTY_EXPORT_IMPORT_STATE,
+  QUICK_RANGE_OPTIONS,
   canConfirmImport,
   dryRunSummary,
   importBlockedTip,
   isDryRunEmpty,
+  isQuickRangeActive,
   parseDateRange,
+  quickRange,
   todayText
 } from '../model/exportImport';
-import type { DateRangeResult, ExportImportState, ExportRequest } from '../model/exportImport';
+import type { DateRangeResult, ExportImportState, ExportRequest, QuickRangeOption } from '../model/exportImport';
 import { formatDiagnostics } from '../model/stateView';
 import type { DiagnosticsInput } from '../model/stateView';
 import { ActionButton } from './ActionButton';
@@ -283,6 +286,21 @@ export struct ExportImportPanel {
     this.toText = today;
   }
 
+  /** 应用快捷区间：只写本地输入态；手改后以手改为准（本组件不记住任何 chip 选择）。 */
+  private applyQuickRange(kind: string): void {
+    const range: DateRangeResult = quickRange(kind);
+    if (!range.ok) {
+      return;
+    }
+    this.fromText = range.from;
+    this.toText = range.to;
+  }
+
+  /** chip 是否处于高亮（现算，不存状态）。 */
+  private isQuickActive(kind: string): boolean {
+    return isQuickRangeActive(kind, this.fromText, this.toText);
+  }
+
   /** 提示文案：dry-run 的阻塞提示优先于普通 message（阻塞提示更「近」，不能被别的话盖掉）。 */
   private tipText(): string {
     const blocked: string = importBlockedTip(this.state);
@@ -399,6 +417,33 @@ export struct ExportImportPanel {
     .alignItems(VerticalAlign.Center)
   }
 
+  /** 三个快捷 chip：点一下把 from/to 写成对应区间（不触发导出、不碰 IO）。 */
+  @Builder
+  QuickRangeRow() {
+    Row({ space: SPACING.sm }) {
+      ForEach(
+        QUICK_RANGE_OPTIONS,
+        (option: QuickRangeOption) => {
+          ActionButton({
+            label: option.label,
+            enabled: true,
+            disabledReason: '',
+            busy: false,
+            variant: this.isQuickActive(option.kind) ? 'primary' : 'ghost',
+            block: false,
+            onTap: (): void => {
+              this.applyQuickRange(option.kind);
+            },
+            onBlockedTap: null
+          })
+        },
+        (option: QuickRangeOption) => option.kind
+      )
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Center)
+  }
+
   /** 最近一次导出的可读路径（长按复制）+ 可选的显式按钮。 */
   @Builder
   ExportPathLine() {
@@ -467,6 +512,7 @@ export struct ExportImportPanel {
     Column({ space: SPACING.md }) {
       this.GroupTitle('导出')
       this.HintLine('按日期区间导出本机记录（只读派生，不改任何源文件）')
+      this.QuickRangeRow()
 
       // 空态：还没导出过 → 「填今天」一键把区间填成本机今天（空态永远有出路）
       if (this.showEmptyExport()) {
