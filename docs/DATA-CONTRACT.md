@@ -205,3 +205,71 @@
   这类纯工具除外）与 `src/schedule/**` 的实现；反向同样不许。
 - **失败隔离**：远程监听起不来（端口占用/地址不可用/拿不到上游身份）只写
   `status.lastError`，绝不让插件激活失败或影响同步 RPC。
+
+## 8. 导出 / 导入视图（设置页，本机，**不改上面任何契约**）
+
+设置页的「导出 / 导入」是**派生视图**：读的是 §3 的日程记录，写的是**本机沙箱**里的导出文件，
+导回时只往 `<本机>/schedules/*.jsonl` **追加**。因此本节不新增记录字段、不改字段语义、不改
+§4bis 的 `open.jsonl`，也不写 `summaries/` 与 `attachments/`。完整规格见 `docs/EXPORT-IMPORT.md`。
+
+```
+<filesDir>/
+  exports/                              # 导出目录（不进 repo，push 不会带走）
+    schedule-20261115-2305.md           # 时间戳来自记录（最新 ts），同名按 -2/-3 递增
+    schedule-20261115-2305.json
+  git-repo/devices/<self>/schedules/    # 导入只追加到这里（别的设备目录只读，永不写）
+```
+
+- **导出（只读派生）**：Markdown 按日期区间渲染人读版；JSON 固定
+  `{version:1, exportedAt, range:{from,to}, deviceId, records}`，`records` 按 `(date, ts)` 升序、
+  **字段原样保留**（不裁剪、不改名）。空区间也产出文件。
+- **导入（append-only）**：只认 `version=1` 的 JSON；先 dry-run 出
+  `added / skipped / conflict / invalid` 四类，**只有 `added>0 且 invalid===0` 才能确认**；
+  按 `id` 去重，同 id 且导入记录**更新**只计入 `conflict`（**绝不覆盖**），更旧或相同计入 `skipped`；
+  落盘时同一天多条按 `ts` 排序后一次物理追加，历史行一个字节都不改。
+- **失败即整批不写**：文件不是合法 JSON / 版本不认识 / 任意一条记录字段非法 → 一个字节都不写
+  （非法条目带 index + 中文原因给用户修正），不会出现「写了一半」的分片。
+- **权限**：选文件用系统 picker、复制路径用 `Text.copyOption`，**不新增任何权限**。
+
+> 与 §1 的关系：`exports/` 在 `git-repo/` 之外，因此**不属于**设备快照；导入不产生新的跨设备通道，
+> 跨设备仍只靠 Git 同步（`devices/<deviceId>/`）。
+
+## 9. AI fallback 诊断记录（内存，**不落盘**）
+
+多源 fallback（`docs/AI-FALLBACK.md`）每次尝试都会产出一条诊断，用于设置页显示
+「源名 / 原因 / 耗时」。它与本文件其它契约的关键区别：**永不持久化**。
+
+- **不写** `preferences`、`devices/<deviceId>/`、`summaries/`、任何 JSONL；
+- **不进** Git 同步载荷（因此不会跨设备、也不会被 pull 回来）；
+- 只存在于内存：运行器返回的 `diagnostics` 数组 + 组件 `@Prop`，重启即失。
+
+结构（`model/aiFallback.ts` 的 `FallbackDiagnostic`，字段全部必填）：
+
+```ts
+{ attempt: number,        // 第几次尝试（1 起）
+  providerId: string,     // 源 id（预设表里的 id）
+  modelId: string,        // 模型名
+  outcome: 'success' | 'retry-same' | 'next-source' | 'abort',
+  elapsedMs: number,      // 本次耗时（毫秒，非负整数）
+  category: string,       // 'ok' | 'timeout' | 'network' | 'parse' | 'config'
+                          // | 'auth' | 'rate-limit' | 'server' | 'bad-request' | 'unknown'
+  message: string }       // 中文原因（已脱敏、≤200 字符）
+```
+
+写入前必经 `sanitizeDiagnostic`：
+
+| 规则 | 处理 |
+| --- | --- |
+| `sk-…` | 整段替换成 `***` |
+| `Bearer <凭据>` / `Basic <凭据>` | 整个「方案 + 凭据」替换成 `***` |
+| `token=…` / `api_key=…` / `apiKey: "…"` | 含键名整段替换成 `***` |
+| message 里残留的 `key` / `token` / `secret` 单词 | 替换成 `***` |
+| message 长度 | 截断到 200 字符 |
+| `elapsedMs` / `attempt` | 归一到非负整数；`outcome` 未知值归一成 `abort` |
+
+**为什么不像日程那样落盘**：诊断的唯一用途是「这一次为什么换源」，事后复盘价值低，但一旦落盘就会
+成为第二事实来源（还要处理同步冲突、跨设备 id、体积增长），并且更容易夹带 provider 错误体里的
+凭据碎片。需要长期排障请用设置页的「测试连通性」（同样不落盘）与 `[ai] provider=… ok=…` 行为日志。
+
+与本机设置的关系：`aiFallbackEnabled` / `aiFallbackMaxAttempts` / `aiFallbackOrder` 三个键
+存在 `preferences`（本机，不进 Git），形态见 `docs/AI-FALLBACK.md` §4；诊断**不**存在那里。
