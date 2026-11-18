@@ -4,3 +4,54 @@
 - insert:
     - id: git-config-sync
       name: 'dsh-git-config-sync'
+
+# ── 云端对话模式（P3）：随插件分发 chat preset ──────────────────────────────
+#
+# 隔离**不依赖**默认 preset 的变更：`agent-preset-registry` 的 `config.default` 仍是
+# `standard`（Lead 决定不动它），本 preset 只作用于**显式** `agentPreset: 'chat'` 的会话
+# （会话 header 首行的 `agentPreset` 字段）。也就是说：新建会话时没有显式选 chat，
+# 就还是 standard——这是有意的取舍，不是缺口（见 docs/CHAT-SYNC.md「安全边界」）。
+#
+# 为什么 deny 是必需的（不是冗余）：preset 的 `plugins` 只决定它**自己挂载**什么，
+# 摘不掉第三方 Host 插件注册的**全局**工具（bcdp_* / codex_* / 本插件的 schedule_* 等）——
+# 那些工具在全局层注册，任何 preset 的 agent 都继承可见。唯一的遮蔽手段是 agent 作用域的
+# `ctx.tools.restrict({ deny })`，名单与校验见 src/chatPreset/deny.ts。
+#
+# 注意 README 2.2：一个 `insert:` 块只放一行插件（块级文本替换的合并单位），
+# 所以这里是**独立的第二个 insert 块**，不与上面的 git-config-sync 行同块。
+#
+# plugins 只列纯对话相关（persona + compaction）：不列任何 `tool-*` 插件，
+# 模型就看不到 read/write/edit/glob/grep/bash/pwsh/job_*/skill/present/subagent 等能力。
+# 模型/provider 的选择不在 preset 里，由 Host 面的 `@deepseek-ai/dsh-agent-default-model`
+# 提供并继承，所以这里也不列。
+- insert:
+    - id: preset-chat
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: chat
+        name: Chat
+        description: 纯对话模式：只有对话与上下文压缩，无文件读写、无 shell、无搜索、无第三方工具。
+        order: 4
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                You are a helpful conversational assistant powered by the {{model}} model.
+                You have no filesystem, shell, search, browser, schedule, job, or delegation
+                tools in this conversation. Never claim to have read, written, edited, listed,
+                or searched a local file, and never claim to have run a command or visited a
+                web page.
+              includeRuntimeContext: false
+          # 上下文压缩不碰文件系统，长对话需要它；组合方式与随 DSH 发布的 minimal preset
+          # 一致（<ASAR>/dsh-web-app/presets/minimal.patch.yml:24-33）。
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'

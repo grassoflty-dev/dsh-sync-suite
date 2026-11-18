@@ -274,3 +274,185 @@ RSI §5.3）；P3 只改 preset，不动存储格式。
 
 *本文件只写设计，不含实现；实现落点预计为插件侧 `packages/dsh-git-config-sync/src/chats/`（P1）与
 App 侧 `entry/src/main/ets/model/chats/`（P1 只读）。*
+
+---
+
+## 安全边界：chat preset 与工具隔离
+
+> 本节补在 P3（纯对话 preset）实现之后，2026-11-18。代码落点
+> `packages/dsh-git-config-sync/src/chatPreset/**`，声明落点
+> `packages/dsh-git-config-sync/cordis.patch.yml`（第二个 `insert:` 块）。
+>
+> **同日二次裁决（Lead）**：旧版「58 项手写 deny 名单」**已删除**，改为
+> **运行期反算 + 白名单断言（fail-closed）**。理由是"把黑名单写死"在插件生态里必然失败：
+> 工具在运行期注册，数量与名字都不稳定（详见 §4）。本节已按新实现改写；旧版里
+> "接线前必须解决的两个 deny 时序问题"随之一并消解（不再是待决策项）。
+
+### 1. 「云端对话模式」的定义
+
+**云端对话模式 = 显式 `agentPreset: 'chat'` 的会话**，不是"把全局默认 preset 改成 chat"。
+
+- preset 定义 id `chat`，Loader 行 id `preset-chat`（`src/chatPreset/ids.ts`）；
+- 会话身份记在 header 首行的 `agentPreset` 字段（`docs/RESEARCH-chat-preset.md` §5.1），
+  恢复时读 `agentPreset` 投影，所以"这条会话是不是纯对话模式"永远可以从会话本身查证；
+- `agent-preset-registry` 的 `config.default` **保持 `standard` 不变**（Lead 决策）：
+  新建会话没显式选 chat，就仍然是带 `pwsh`/`read`/`write` 的 standard。这是**有意的取舍**，
+  不是缺口；配套约束在出口侧——只有显式 chat 的会话才允许被上传进 `chats/`（导出准入，P3 二期接线）。
+
+### 2. 隔离的语义（Lead 原话，评审时不要改写）
+
+> **chat 模式不接触本机文件系统 / 不执行本机命令 / 不读取本机环境。**
+
+注意这条判据是"能不能碰本机"，**不是**"有没有副作用"：`todo_write` 有副作用（写计划），但它只写
+**会话内**的计划（会话本来就要上传 `chats/`），既不碰本机文件系统、也不执行本机命令、更不读本机
+环境；`ask_user_question` 只向用户提问，连持久化都没有。所以这两个留在白名单里。
+反过来，`bcdp_screenshot` 看着"只是截图"，但它把文件落盘、还能借浏览器读登录态——按判据必须禁。
+**不要把这条边界简化成"零副作用"或"没有任何工具"**，那会把两个真正安全的工具误杀，
+也会让评审以为我们在做一件做不到的事。
+
+### 3. 隔离靠两件事，缺一不可
+
+| 层 | 手段 | 覆盖 | 证据 |
+| --- | --- | --- | --- |
+| **结构性缺席** | chat preset 的 `plugins` 只列 persona + compaction，**不列任何 `tool-*`** | Web 面内置工具（read/write/edit/glob/grep/bash/pwsh/job_*/skill/present/subagent/office…） | `<ASAR>/dsh-web-app/cordis.patch.yml:497-611` 已把内置工具行在 Host 层 `disabled: true`，"由每个会话自己挂 preset"；不列 = 不注册 = schema 不存在 |
+| **运行期反算 + 白名单断言** | agent 作用域 `ctx.tools.restrict({ deny })`，`deny = 当前已注册的全部工具 − 纯对话白名单`，遮蔽后**再枚举可见集**做断言 | **第三方 Host 插件注册的全局工具**（`bcdp_*` 35 个、`codex_*`/`chatgpt_connectors_*` 7 个、本插件的 `schedule_*`/`dsh_dots` 4 个）以及**将来任何新插件** | 这些工具在全局层注册，任何 preset 的 agent 都继承，preset 摘不掉（`docs/RESEARCH-chat-preset.md` §3.2）；`restrict` 是唯一遮蔽手段（`<ASAR>/dsh-tools/src/index.ts:162-189`） |
+
+**为什么 deny 是必需的**：如果只做第一层，chat 会话的模型依然能调 `schedule_add`（写本机日程并 push）、
+`dsh_dots`（读本机状态）、`bcdp_navigate`/`bcdp_cdp`（完全控制真实浏览器）、`bcdp_download`（下载落盘）——
+"纯对话"不成立。deny 不再是源码里的名单，而是运行期反算出来的：**白名单是输入**
+（`src/chatPreset/allow.ts` 的 `CHAT_ALLOW_TOOLS`），**deny 是输出**（`src/chatPreset/isolate.ts` 的
+`computeDeny`）。
+
+### 4. 为什么"把黑名单写死"必然失败（这一版改掉的东西）
+
+旧实现是 58 项手写 deny，真接线会当场炸，三条事实同时成立：
+
+1. **这些名字在 chat 会话里根本没注册**：chat preset 不挂 `tool-*`，所以 `read`/`write`/`edit`/
+   `glob`/`grep`/`bash`/`pwsh`/`job_*` 从来不存在 → `restrict` 判 unknown 并抛错；
+2. **名字是否注册不稳定**：`bcdp_*` 除 `bcdp_status` 外按分级 + 活动闸**惰性注册**（`NM/dsh-browser-cdp/lib/index.js:6518-6562`），
+   `codex_*`/`chatgpt_connectors_*`/`codex_sketch`/`end_voice_call` 按设置/模型/连接器/通话状态开关
+   （`NM/dsh-codex-subscription/lib/index.js`）→ 同一份名单在不同机器、不同时刻的"合法与否"都不一样；
+3. **新装插件必然漏**：任何人装一个新插件注册一个新工具，旧名单都不知道它 → 隔离静默失效，
+   而用户以为"我开了纯对话模式"。
+
+`restrict` 的硬约束（`<ASAR>/dsh-tools/src/index.ts:179-183`）是"只认**当前已注册**的名字，写错就抛"，
+所以"名单"这条路在插件生态里没有解：写全了会炸，写不全就漏。**唯一正确的方向是反算**——
+`deny = 已注册 − 白名单`，新工具默认落 deny，未注册的名字不可能进 deny。
+
+### 5. 三步流程与失败语义（fail-closed，一律拒绝创建会话）
+
+`installChatToolDeny(ctx, options?)`（`src/chatPreset/isolate.ts`）按顺序做三件事：
+
+| 步 | 动作 | 失败时 |
+| --- | --- | --- |
+| 1 | **取注册表**（当前已注册工具名）：`options.listRegistered` → `tools.listRegistered()` → agent 作用域的 `definitions`/`schemas` → 全局视图兜底 | 取不到 / 读取抛错 / 形态不对 → `E_CHAT_TOOLS_NOT_ISOLATED`，**绝不**退化成静态名单（把"未知"当成"安全"是最坏的 fail-open） |
+| 2 | **反算并遮蔽**：`computeDeny(registered, allow)` → `ctx.tools.restrict({ deny })` | 宿主没有 `restrict`、或 `restrict` 抛错 → 内部错误 `E_CHAT_DENY_FAILED` + 打日志，按 fail-closed 拒绝 |
+| 3 | **再枚举 + 白名单断言**：重新取 agent 作用域的可见集 → `assertIsolated(visible, allow)` | 可见集多出任何非白名单工具 → `E_CHAT_TOOLS_NOT_ISOLATED`，message 形如 `云端对话模式没能隔离工具：多出 a, b, c` |
+
+两条补充语义：
+
+- **第 3 步不可省**：`restrict` 调用成功 ≠ 遮蔽生效（可能算 deny 时与调用时注册表变了，也可能可见视图
+  不认这层掩码）。只信"事后看见什么"，这一步才叫 fail-closed。
+- **白名单未注册不算失败**：`ask_user_question`/`todo_write` 在当前 preset 里没挂载时，它们只是
+  `missing`（能力少了，方向安全），不抛错。`assertIsolated` 的 `ok` **只看 `extra`**。
+
+### 6. 错误码与 RPC 自检
+
+- `E_CHAT_TOOLS_NOT_ISOLATED` 是**正式安全边界错误码**，已进 `docs/DATA-CONTRACT.md` §2.3；语义 = 拒绝创建
+  chat 会话（不是"降级运行"）。
+- `E_CHAT_DENY_FAILED` 是**内部防御性错误**（宿主契约不满足 / `restrict` 抛错），只用于定位，
+  **不进公共错误码表**。
+- RPC `chatPresetInfo`（`POST /dsh-git-config-sync/rpc`，`{action:"chatPresetInfo"}`）返回
+  `{presetId, allow, rationale, registeredCount?, denyCount?}`——**不再返回静态名单**；`registeredCount`/
+  `denyCount` 只在调用方带注册表时出现（RPC 侧没有运行期注册表，故省略）。设置页拿它展示白名单与
+  逐条理由，诊断脚本可以带上本机注册表算出"这次会 deny 多少条"。
+- 证据表 `src/chatPreset/deny.ts` 的 `KNOWN_*` / `*_TOOL_SOURCES` **仍然保留**，但只作**说明用**
+  （解释"哪些工具、为什么碰本机"，供评审与升级核对）；**任何代码都不得把它们当 deny 输入**，
+  测试也不再用它们参与反算。
+
+### 7. 现状与接线（P3 一期 / 二期）
+
+| 项 | 一期（本轮，已完成） | 二期（未做） |
+| --- | --- | --- |
+| preset 声明 | `cordis.patch.yml` 第二个 `insert:` 块（`preset-chat`），**保持不变** | — |
+| 白名单 + 反算 + 断言 | `src/chatPreset/allow.ts` + `src/chatPreset/isolate.ts`（`computeDeny`/`assertIsolated`/`installChatToolDeny`） | 按产品语义增删白名单（改动只碰 `allow.ts` 与理由） |
+| 安装函数 | `installChatToolDeny(ctx, options?)` 存在且单测覆盖（假 `ctx.tools`，5 类失败情形） | 在 chat 会话的 agent 装配路径里调用（**不在 `src/index.ts` 自动安装**，否则会关掉标准会话的工具）；调用点必须能给出 agent 作用域对象 |
+| 自检 | RPC `chatPresetInfo`（白名单 + 理由 + 可选计数） | UI 上展示白名单与理由；诊断脚本带注册表算 deny 条数 |
+
+### 8. 复核方法（升级 DSH 或插件后照做）
+
+```powershell
+# 1) 第三方全局工具：谁在 Host 层注册工具
+Select-String -Path C:\Users\GWL\.dsh\profiles\desktop\node_modules\dsh-*\lib\index.js -Pattern 'tools\.register'
+# 2) 逐名核对（bcdp_ 分级表 / codex_ 工具名常量）——只用于更新"仅说明用"的证据表
+Select-String -Path C:\Users\GWL\.dsh\profiles\desktop\node_modules\dsh-browser-cdp\lib\index.js -Pattern 'bcdp_[a-z_]+'
+# 3) 内置工具名（asar 内只能用 Host 的 read 工具读）
+#    <ASAR>/dsh-tool-fs/src/index.ts:2,28-37 / dsh-tool-fs-search:2-3 / dsh-tool-jobs:2 / dsh-tool-bash:2 / dsh-tool-pwsh:2
+# 4) 改完跑：node --test test\chat-preset.test.mjs（反算/断言/五类失败语义）
+```
+
+复核重点变了：**不再核对"名单对不对"，而是核对反算与断言有没有被绕过**（例如有人把
+`installChatToolDeny` 的失败 catch 掉、或把可见集断言删了）。证据表只用来解释"为什么禁"。
+
+---
+
+## 实现注记（P1）
+
+> 2026-11-18 补记。本节只记**已落地的事实**与真实偏差，不改前面任何设计条款；行文中的「本轮」= P1 插件侧。
+> 代码落点 `packages/dsh-git-config-sync/src/chats/`（`types.ts` / `readSessions.ts` / `exportChats.ts` / `index.ts`），
+> RPC 三个 action 追加在 `packages/dsh-git-config-sync/src/rpc.ts`（只加，未改既有 action 一行），
+> 测试 `packages/dsh-git-config-sync/test/chats-export.test.mjs`（33 个用例 / 178 条断言，全部用临时目录 + 现造 zstd 帧）。
+
+### 1. 真实 API（这些是**现在存在**的导出，不是设想）
+
+| 文件 | 导出 | 契约 |
+| --- | --- | --- |
+| `readSessions.ts` | `splitZstdFrames(buffer)` | 纯函数。`{frames:[{offset,length,end}], truncated, garbageBytes, remainderBytes}` |
+| | `frameByteLength(buffer, at)` | 按 RFC 8878 走完一帧的字节数；截断/非法（reserved bit、Block_Type=3）返回 `null` |
+| | `classifyEvents(lines)` | 纯函数。`{header, headerLine, events, badLines, badLineNumbers, types}` |
+| | `listLocalSessions({sessionsRoot?, homeDir?})` | 扫 `<root>/<slug>/<id>/session.v4.jsonl.zstd` 两层，按 mtime 降序 |
+| | `readSessionEvents(file)` | `{header, events, rawJsonl, lines, badLines, badLineNumbers, truncated, frameCount}`，**不抛** |
+| | `latestTitleOf` / `firstUserTextOf` / `modelOf` / `countMessages` / `eventText` | 事件级派生（meta 用） |
+| `exportChats.ts` | `buildChatExport(info, session, {deviceId, now?, title?})` | 纯函数。`{dir, id, meta, jsonl}`；不合规一律抛 `ChatExportError(code)` |
+| | `uploadChats(repo, exports, {now?, push?})` | `repo` 是 `ChatGitRepoLike`（`dir` / `ensureWorkTree?` / `commitAll` / `pushWithRebase`），真实 `GitRepo` 结构上满足它 |
+| | `readChatIndex(workDir)` | `{entries, exported, lastExportAt, badLines}`，按 id 取最新一行（§2.4 唯一允许"取最新"的地方） |
+| | `redactSecrets` / `scrubAbsolutePaths(Deep)` / `scanForLeaks` / `sanitizeChatReason` | 三层隐私 + 原因清洗 |
+| `index.ts` | `readChatExportStatus({workDir?, homeDir?, sessionsRoot?})` | status（不联网） |
+| | `exportChatsToRepo({repo, deviceId, limit?, sessionIds?, ...})` | 编排：逐会话结果 + 汇总；单会话失败**不抛** |
+| `src/rpc.ts` | `chatExportStatus` / `chatExportAll` / `chatExportOne` | 全部走既有 `enqueue` 串行队列 |
+
+**一处必须记下的偏差**：`redactSecrets()` 在**本插件里原本不存在**。本轮禁止修改 `src/engine/**`，
+而 `src/engine/secrets.ts` 只有结构化的 `stripSecretsDeep`（按 **key** 脱敏，不是按文本片段）。
+因此 `exportChats.ts` 里**逐字复刻**了 App 侧 `apps/arkui-schedule/entry/src/main/ets/model/syncError.ts:61-98`
+的 `SECRET_PATTERNS` 与替换语义（无捕获组的规则如 `sk-…` / `ghp_…` 整体替换成 `***`）。两份规则集必须同步演进。
+
+### 2. 具体写法（只记 §2 没规定的细节）
+
+| 项 | 实现 |
+| --- | --- |
+| `chats/<id>/session.jsonl` | 每行 `JSON.stringify` 的紧凑单行（**键序不变**）+ 末尾 `\n`（LF）。这是路径递归替换必须 `parse` 一次的代价，也是与"字节级原样搬运"的唯一差异 |
+| `chats/<id>/meta.json` | 2 空格缩进 + 结尾 `\n`；字段顺序按 §2.1 表；`model` 解不出时**整个省略**；同 id 二次导出**保留旧 `createdAt`** |
+| `chats/index.jsonl` | `appendFile` 真追加，**从不重写**；上一行没有 `\n` 时才先补一个。一行固定 5 个字段（`id/title/updatedAt/messageCount/sha256`） |
+| commit | 每个会话一个 commit，message = `chats: export <id> (n msgs)`（n = user+assistant）；`onlyPath: 'chats'` |
+| push | 写完本批全部会话后调用一次 `pushWithRebase()`（复用既有实现：非快进先 fetch+rebase，永不 force）。失败 → `{ok:false, reason}`，**已写文件与本地提交一律保留**，下次重试 |
+| 租约 | P1 恒为 `lease: null`：不写心跳、不抢租约、不做 `expectedPrevSha`（§3 全套留到 P2/P3） |
+| `limit` | `chatExportAll` 默认 50、硬上限 200（`normalizeLimit`：非正数/非数字 → 50） |
+| 状态 | `chatExportStatus` 只扫本机目录 + 读工作副本 `chats/index.jsonl`；未配置仓库时 `exported=0 / lastExportAt=''`，**不报错** |
+| 日志/错误 | 逐会话原因只用码：`bad-jsonl` / `truncated-session` / `missing-header` / `empty-session` / `bad-session-id` / `path-leak` / `not-found` / `write-failed: …` / `push-failed: …`；跨层的 `sanitizeChatReason()` 统一打码 + 路径替换 + 截断 200 字，**永不出现正文** |
+
+### 3. 已知限制（P1 明确的取舍，不是 bug）
+
+1. **整会话跳过，不做"截掉坏尾巴再传"**：§4 表格对"尾行撕裂"的处置是"丢弃未完整行后重试"，P1 选择更保守的
+   整会话 fail-closed（`truncated-session`）。原因：无法区分"尾巴还没写完"和"尾巴被截断"，
+   传一半的事件流比不传更难排查。将来可加显式参数 `allowTornTail`。
+2. **路径替换是文本级的、不可逆**：会话正文里**讨论** `C:\…` 也会变成 `<redacted-path>`；
+   P2 导入时不可能还原原 `cwd`——这本来也是 §2.1 的硬要求（禁 `cwd`），但会让"跨机续聊"需要用户重选 workspace。
+3. **复用 `pushWithRebase()` 而非 §6 要求的独立 ff-only 通道**：与 `devices/` 共用一个工作副本，多一条通道对同一个
+   `.git` 无并发收益；代价是 push 非快进时可能已发生一次 `pull --rebase`，把**未推送**的 `chats/` 本地提交改写成新 sha。
+   文件内容（含 `sha256`）不变，但 `git revert` 要按 commit message 而不是 sha 定位。
+4. **`meta.messageCount` 按本轮规格是 user+assistant 计数**，与 §2.1 表格写的"事件行数（不含 header）"**不一致**。
+   当前实现 = `countMessages()`（user+assistant）。若坚持 §2.1 的定义，改成 `事件行数` 即可，但列表页摘要语义会变。
+5. **只认 `session.v4.jsonl.zstd`**：旧版 `session.jsonl.zstd` / `session.v3.jsonl.zstd` 不会被扫到（P1 不做历史格式迁移）。
+6. **没有 UI**：本轮只交付 RPC；App 侧列表/详情并行开发中。`chats/` 的租约/乐观锁/只读浏览标记全部未实现。
+7. **`chatExportStatus` 的 `pending` 用目录名比 id**：本机会话 id 取自目录名，与 header 的 `id` 在合法文件上相等；
+   若某文件 header id 与目录名不一致，`pending` 可能误记（导出时以 header id 为准，`buildChatExport` 内已断言路径安全）。

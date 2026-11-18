@@ -63,6 +63,25 @@
   相同 → `same`；远端含 `__SECRET__` 且不同 → `manual`（需本地填写，不自动覆盖）。
 - 输出保证：文件头/前置注释、条目内 `!!js`、缩进、键顺序不变；末尾恰好一个换行。
 
+### 2.3 错误码（chat 工具隔离）
+
+> 2026-11-18 追加（编号沿用 Lead 指令，便于与 `docs/CONTRACT.md` §2.3 的错误码集合对照；
+> 本节此前无 2.2）。本条**只增不改**：不触碰上面任何字段与 RPC 契约。
+
+| 错误码 | 级别 | 语义 | 触发点 |
+| --- | --- | --- | --- |
+| `E_CHAT_TOOLS_NOT_ISOLATED` | **正式安全边界错误码** | 云端对话模式（`agentPreset: 'chat'`）**没能证明工具已隔离** → **拒绝创建会话**（不是降级运行） | `src/chatPreset/isolate.ts`：读不到已注册工具表 / 读不到 agent 可见集 / 白名单断言发现多出的工具 |
+
+- 判据是"能不能读写本机文件 / 执行本机命令 / 读取本机环境"，实现形态是**运行期反算**
+  （`deny = 当前已注册的全部工具 − 纯对话白名单`）+ **遮蔽后再枚举可见集做白名单断言**；
+  该错误码不携带任何静态名单，`message` 会点名多出来的工具（形如
+  `云端对话模式没能隔离工具：多出 a, b, c`），`details.extra` / `details.missing` 给出逐名清单。
+- `E_CHAT_DENY_FAILED`（宿主没有 `tools.restrict` / `restrict` 抛错）是**内部防御性错误**，
+  只用于定位，**不进本表**；对外表现同样是"拒绝创建会话"。
+- 两者都不会被 RPC 层改写成别的 code（`POST /dsh-git-config-sync/rpc` 原样透传），
+  也**不**作为 `chatPresetInfo` 的返回值——该 action 只返回
+  `{presetId, allow, rationale, registeredCount?, denyCount?}`。
+
 ## 3. 日程 JSONL
 
 路径：`devices/<deviceId>/schedules/YYYY-MM-DD.jsonl`（设备本地时间日期）。
@@ -177,6 +196,38 @@
 手机只写 `devices/<自己>/schedules/*.jsonl`、`summaries/*.json`、`open.jsonl` 与 `attachments/<date>.zip`，提交推送到同一远端；
 其它设备目录只读。冲突策略：设备目录互不重叠，不需要 merge；同 id 记录按 ts 折叠；同日汇总按 `generatedAt` 取新。
 电脑端由 `dsh-git-config-sync` 的 `schedule_*` 工具只写 `devices/<pcId>/schedules/`（见 `docs/SCHEDULE-BRIDGE.md`）。
+
+### 6.1 设备指纹 `devices/<deviceId>/.device-fingerprint`（App 写，**不是 secret**）
+
+```
+devices/phone-a/
+  .device-fingerprint          # 单行：本机随机 UUID（首次同步时生成）
+  schedules/2026-11-15.jsonl
+  attachments/2026-11-15.zip
+```
+
+- **是什么**：App 首次同步（拉取或推送）时生成的一个随机 UUID v4，写进本机
+  `settingsStore.deviceFingerprint`（本机 preferences），**同时**写进仓库
+  `devices/<deviceId>/.device-fingerprint`（单行、末尾一个换行）。已有内容时**绝不覆盖**。
+- **为什么需要它**：`deviceId` 只决定写入目录 `devices/<id>/`，而校验只看「非空 + 格式合法」，
+  **两台设备填同一个 id 时校验会通过**——后果是附件 zip
+  `devices/<id>/attachments/<date>.zip` 互相覆盖、日程历史混在一起，而同步本身不报错。
+- **判定规则**（`apps/arkui-schedule/entry/src/main/ets/model/deviceIdentity.ts`，纯函数、可单测）：
+  - 远端没有该文件（老仓库 / 首次同步）→ 写入本机指纹，视为首次，**不报警**；
+  - 远端指纹 == 本机指纹 → 正常；
+  - 远端指纹 ≠ 本机指纹 → 「两台设备用了同一个设备标识」：设置页显示**常驻**警告（不是 toast），
+    同步结果带 `identityConflict: true`，文案逐字为
+    `这台设备和另一台设备用了同一个设备标识（<id>），附件 zip 会互相覆盖、历史会混在一起。请改成唯一值。`
+- **推送前的附件保护（fail-closed）**：某个 `attachments/<date>.zip` 的远端版本与本机记录的基线 sha
+  不一致、且远端指纹 ≠ 本机指纹时，**暂停推送该附件**（原因：
+  `附件已被另一台设备更新，已停止推送以免覆盖（请先改一个唯一的设备标识）`），其余文件照常推；
+  拿不到基线时同样保守拒推该附件。基线保存在本机 `<filesDir>/sync-baseline.json`，**不进 repo**。
+- **不是 secret**：内容只是一个随机身份串，不含 token / 邮箱 / 机型等任何信息，泄露它没有凭据价值。
+- **随 git 提交是刻意的**：它必须跟着仓库走，否则换机/清数据后无法再判断「这个目录之前是谁在写」。
+- **不进同步载荷**：它不是 `ScheduleRecord` 字段，不进 `schedules/*.jsonl`、不进 `summaries/`；
+  只是设备目录里的一个旁挂文件，插件侧（`packages/dsh-git-config-sync`）忽略它。
+- **改了 `deviceId` 等于换写入目录**：本机指纹不变，但新目录下没有指纹 → 下次同步写入并视为首次；
+  旧目录数据仍保留（其它设备目录只读）。
 
 ## 7. 远程访问域（`src/remote/**`，本机，不进 repo）
 
@@ -305,3 +356,50 @@
 - **与 `devices/` 的区别（一句话）**：`devices/` 是**单写者快照**（缺失视为空、sha256 只做传输校验、
   内容不合并，§1–§2）；`chats/` 是**共享事件流**（多端先后接管、同 id 同时只允许一个写者、
   冲突一律 fail-closed、**永不**按 `ts` 折叠）。日程的 `foldById` 折叠语义（§3）**不适用于** `session.jsonl`。
+
+## 11. `devices/registry.jsonl`（设备编号登记表，App 写，跨设备共享）
+
+> 目的：**用户不再填设备标识**（设置页主表单只留「仓库地址 + token + 分支」）。编号由仓库侧
+> 自动分配，并发接入靠 push 抢占 + 重试。纯逻辑在
+> `apps/arkui-schedule/entry/src/main/ets/model/deviceRegistry.ts`（Node 可直测）。
+
+```
+<repo>/
+  devices/
+    registry.jsonl                 # 只追加；每行一个 JSON；**不是** devices/<id>/ 里的文件
+    device-1/
+    device-2/
+```
+
+- **数据形状**：一行 `{"deviceId":"device-2","uuid":"<uuid>","at":"<ISO8601>","host":"<可选>"}`。
+  `host` 只是排查线索（接入前的原标识），不含 token / 邮箱 / 机型等任何信息；为空时**不写该键**。
+  一行内不嵌套、不带换行（`toRegistryLine` 逐字保证），因此可 `git diff` 逐行审阅。
+- **身份 = `uuid`，`deviceId` 只是目录名**。`uuid` 由本机首次接入时生成一次
+  （`settingsStore.deviceUuid`，与 §6.1 的 `.device-fingerprint` **同值**，二者指向同一个身份），
+  之后永久复用。读表时**按 uuid 找自己的行**：命中即沿用那行的 `deviceId`，**不重复登记**。
+  换机/清数据丢了 `uuid` 才会登记新行（老行保留，目录不删）。
+- **只追加**：任何一方都不重写已有行。坏行（非 JSON / 缺字段 / 形态不合法）读侧**丢弃并计数**
+  （`parseRegistry().errors`），不影响其它行；写侧永远只 append。
+- **编号算法**：`nextDeviceId(devices/ 目录名 ∪ registry 里的 deviceId)` = **最大 `device-N` + 1**
+  （不是「个数 + 1」）。空 → `device-1`；`['device-1','device-3']` → `device-4`。
+  **空洞不回填**：编号不重排，`device-3` 删了也不会被新设备复用（外部脚本按「编号=设备数」推断会出错，
+  回填还会和残留目录/旧 registry 行撞车）。
+- **老设备不重编号**：本机已有 `deviceId` 且其 `devices/<id>/` 目录**已在仓库里**、registry 里也
+  没有别的 uuid 占着 → 原样沿用（包括 `phone-a` 这种非 `device-N` 值，`deviceIdAuto=false`）。
+  只有「目录不在仓库」（多半是默认值 `phone-a`）才走自动分配——否则新装的设备会抢同一个目录名。
+- **并发接入 = push 抢占 + 重试**（`claimDeviceId`，fail-closed）：
+  1. 先 `pull`（fast-forward only），registry 与目录名以远端为准；
+  2. registry 有本机 `uuid` 的行 → 直接用（不写）；
+  3. 否则算号 → 追加一行 → **只提交并推送 `devices/registry.jsonl`**（桥 op `commitPaths`，
+     白名单只放行这一个路径；push 恒 `force:false`）；
+  4. push 被拒（非快进 / 别人抢先）→ 桥**回滚**这次提交 → 重新 `pull` → 重算 → 重试，
+     上限 **5 次**；仍失败 → `SyncError('E_DEVICE_ID_CONFLICT', '没能抢到设备编号，请稍后重试（已重试 5 次）')`，
+     **不许**随便用一个号继续写（`push` 整体失败，不产生任何 `devices/<id>/` 提交）。
+  5. 成功后写本机设置 `{deviceId, deviceIdAuto:true, deviceUuid}`，设置页显示只读一行
+     「本机：device-2（自动分配）」。
+- **为什么回滚提交**：只有 `registry.jsonl` 一个文件、且是「抢占失败」这一种情况才回滚；不回滚会让本地
+  多出一个远端没有的提交，之后 `pull`（fast-forward）永远失败，重试失去意义。
+- **失败可见**：仓库不可读 / 拉取失败给 `E_DEVICE_ID_UNREADABLE`；两种情况设置页都会**自动展开**
+  「高级 ▸」并显示原因（另外两种自动展开：设备标识重复、Gitee 用户名推不出来）。
+- **与 `devices/<id>/` 的关系**：登记表是**唯一**允许写 `devices/` 顶层（非自己的 `<id>/`）的文件；
+  其它文件仍然只写本机目录（§6 的提交范围不变量不变）。

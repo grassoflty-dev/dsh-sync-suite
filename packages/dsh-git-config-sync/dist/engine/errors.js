@@ -10,6 +10,17 @@ export const ERROR_CODES = {
     IO: 'E_IO',
     INTERNAL: 'E_INTERNAL',
 };
+/**
+ * chat 域（云端对话模式工具隔离）的错误码。
+ *
+ * - `TOOLS_NOT_ISOLATED` 是**正式安全边界错误码**，已进 `docs/DATA-CONTRACT.md` §2.3 的公共表；
+ * - `DENY_FAILED` 是**内部防御性错误**（宿主契约不满足 / `restrict` 抛错），只用于定位，
+ *   **不进公共错误码表**——对外仍应表现为"拒绝创建会话"。
+ */
+export const CHAT_ERROR_CODES = {
+    TOOLS_NOT_ISOLATED: 'E_CHAT_TOOLS_NOT_ISOLATED',
+    DENY_FAILED: 'E_CHAT_DENY_FAILED',
+};
 export class SyncError extends Error {
     code;
     details;

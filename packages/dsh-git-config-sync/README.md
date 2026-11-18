@@ -161,6 +161,40 @@ RPC（与同步共用 `/dsh-git-config-sync/rpc`）：`remoteGetState` / `remote
 `apply` / `rollback` 的 `confirm:true` 门禁与校验规则**完全没变**（新入口只是把 `rollback`
 拆成"先预览、再确认"两步）。契约、方向语义与 fail-closed 清单见 `docs/PLUGIN-DIFF.md`。
 
+### 2.4 云端对话上传（P1：把本机会话导成明文 JSONL 进 `chats/`）
+
+把 `~/.dsh/sessions/<slug>/<id>/session.v4.jsonl.zstd`（裸 zstd 帧串联，`zstdDecompressSync` 只能解第一帧，
+必须自己按帧切）解成**明文 JSONL**，连同 `meta.json` 写进同步仓库的 `chats/` 共享命名空间
+（不是 `devices/<id>/`），让平板只读就能看历史——不需要在 App 侧解 zstd 帧。
+存储布局、`meta` 字段表、租约与续接语义见 `docs/CHAT-SYNC.md`（**含「实现注记（P1）」一节**：真实 API、
+文件命名、已知限制）。
+
+| RPC | 请求 | 响应 `data` |
+| --- | --- | --- |
+| `chatExportStatus` | `{}` | `{localSessions, exported, lastExportAt, pending}`（只读、不联网；未配置仓库也不报错） |
+| `chatExportAll` | `{limit?}`（默认 50，硬上限 200） | `{results:[{id,ok,reason?}], summary:{total,ok,failed,limit}, pushed, reason?}` |
+| `chatExportOne` | `{sessionId}` | 同上（一条结果）；本机没有该 id → `E_NOT_FOUND` |
+
+写出来的东西（每个会话一个 commit，message `chats: export <id> (n msgs)`，`onlyPath: 'chats'`）：
+
+```
+<repo>/chats/<sessionId>/session.jsonl   # 明文、LF 结尾、行序即事件序
+<repo>/chats/<sessionId>/meta.json       # 白名单字段；workspaceName 只有末段名；lease: null（P1 不租约）
+<repo>/chats/index.jsonl                 # 只追加的展示投影，一行 5 个字段，首行字节永不变
+```
+
+隐私三层（缺一不可）：① `redactSecrets()` 打码 `sk-…`/`Bearer …`/`Basic …`/`token=…`/`ghp_…`；
+② 递归把 **string 值**里的 `C:\…`、`/Users/…`、`/home/…`、UNC、`file://` 整段换成 `<redacted-path>`
+（替换次数记进 `meta.redactions`）；③ 写盘前对最终文本做静态扫描，命中即 fail-closed 跳过整个会话。
+`meta.json` 里**永不出现 `cwd`**或任何绝对路径。
+
+失败语义：`push` 失败 → `ok:false` + `reason`，**本地已写文件与本地提交一律保留**，再点一次就是重试；
+`bad-jsonl` / `truncated-session` / `missing-header` / `empty-session` / `bad-session-id` / `path-leak`
+这类会话整份跳过（`results[].reason` 给码，不含正文），不影响同批其它会话。
+错误与日志永不出现会话正文、token 或绝对路径（统一走 `sanitizeChatReason()`）。
+
+注意：本轮**只交付 RPC**，设置页还没有对应 UI；租约、`expectedPrevSha` 乐观锁、只读浏览标记都留到 P2/P3。
+
 ---
 
 ## 3. RPC 契约

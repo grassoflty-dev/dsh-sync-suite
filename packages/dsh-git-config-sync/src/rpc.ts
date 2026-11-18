@@ -9,6 +9,9 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import path from 'node:path'
+import { chatPresetInfo } from './chatPreset/index.js'
+import type { ChatExportOutcome, ChatExportStatus } from './chats/index.js'
+import { exportChatsToRepo, normalizeLimit, readChatExportStatus } from './chats/index.js'
 import { collectLocal, isFileInScope, pluginsOf, serializeManifest, SYNC_FILE_NAMES } from './engine/collect.js'
 import type { CollectResult } from './engine/collect.js'
 import { diffFiles, diffText } from './engine/diff.js'
@@ -612,6 +615,59 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
     return { candidates: requireRemote().detectLan() }
   }
 
+  /* ------------------------------------------------------------------ */
+  /* 云端对话模式 P1：会话导出（chats/ 共享命名空间）                      */
+  /*                                                                    */
+  /* 三个 action 只读/写 `chats/`，不碰 `devices/`、不碰 `~/.dsh/sessions`   */
+  /* 本身（只读那层）。日志与错误里永不出现会话正文、token 或绝对路径：     */
+  /* 逐会话原因统一走 `sanitizeChatReason()`（打码 + 路径替换 + 截断）。    */
+  /* ------------------------------------------------------------------ */
+
+  /** 会话根 `<.dsh>/sessions`（RPC 内部用；`homeDir` 注入时指向测试目录）。 */
+  async function chatExportStatus(): Promise<ChatExportStatus> {
+    const settings = store.readSettings()
+    // 未配置仓库时不给空工作副本路径（否则会去读一个不存在的目录），只报本机事实。
+    const workDir = settings.repoUrl === '' ? '' : workDirOf(settings)
+    return await readChatExportStatus({
+      workDir,
+      ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
+    })
+  }
+
+  /** 导出全部（按 mtime 降序取最近 `limit` 个；默认 50，硬上限 200）。 */
+  async function chatExportAll(payload: Record<string, unknown>): Promise<ChatExportOutcome> {
+    const settings = requireConfigured()
+    const limit = normalizeLimit(payload.limit)
+    return await withRepo(settings, async (repo) =>
+      exportChatsToRepo({
+        repo,
+        deviceId: settings.deviceId,
+        limit,
+        ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
+      }),
+    )
+  }
+
+  /** 导出单个会话；本机没有这个 id 一律 E_NOT_FOUND（不回显任何路径）。 */
+  async function chatExportOne(payload: Record<string, unknown>): Promise<ChatExportOutcome> {
+    const settings = requireConfigured()
+    const sessionId = asString(payload.sessionId).trim()
+    if (sessionId === '') throw new SyncError('E_VALIDATION', 'sessionId 不能为空')
+    const outcome = await withRepo(settings, async (repo) =>
+      exportChatsToRepo({
+        repo,
+        deviceId: settings.deviceId,
+        sessionIds: [sessionId],
+        ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
+      }),
+    )
+    const item = outcome.results[0]
+    if (item !== undefined && !item.ok && item.reason === 'not-found') {
+      throw new SyncError('E_NOT_FOUND', '本机没有这个会话（可能已被删除或不在当前会话目录）', { sessionId })
+    }
+    return outcome
+  }
+
   async function handleRpc(body: unknown): Promise<RpcResponse> {
     try {
       if (disposed) throw new SyncError('E_INTERNAL', 'RPC 服务已释放')
@@ -640,6 +696,11 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
           return ok(await enqueue(() => previewDiff(payload)))
         case 'rollbackPreview':
           return ok(await enqueue(() => rollbackPreview(payload)))
+        // ---- 云端对话模式（P3）：只读自检，不需要鉴权之外的额外权限 ----
+        // 返回 { presetId, allow, rationale }（运行期不传注册表，故不带 registeredCount/denyCount）。
+        // **不再**返回静态 deny 名单：deny 是 `已注册工具 − 白名单` 的运行期反算结果。
+        case 'chatPresetInfo':
+          return ok(await enqueue(async () => chatPresetInfo()))
         // ---- 远程访问：与同步动作同一条串行队列（start/stop 不许并发） ----
         case 'remoteGetState':
           return ok(await enqueue(remoteGetState))
@@ -657,6 +718,13 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
           return ok(await enqueue(() => remoteShowLink(payload)))
         case 'remoteDetectLan':
           return ok(await enqueue(remoteDetectLan))
+        // ---- 云端对话模式 P1：会话导出（chats/ 共享命名空间，与同步动作同一条串行队列） ----
+        case 'chatExportStatus':
+          return ok(await enqueue(chatExportStatus))
+        case 'chatExportAll':
+          return ok(await enqueue(() => chatExportAll(payload)))
+        case 'chatExportOne':
+          return ok(await enqueue(() => chatExportOne(payload)))
         default:
           throw new SyncError('E_UNKNOWN_ACTION', `未知 action：${action}`, { action })
       }
