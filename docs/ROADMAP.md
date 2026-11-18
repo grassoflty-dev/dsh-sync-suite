@@ -458,10 +458,10 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 ## 交接：当前状态与下一步（2026-11-18 22:00 起笔，23:10 收口 B 批）
 
 > 用途：换会话/重启后**先读这一节**，不用问人。
-> **HEAD = `6ecec62`**；工作树**不干净**：待提交 **11 个文件** = 改动 9（6 个 `.ets`/`.ts` 源码 + 
-> `tools/test/remoteUrl.test.mjs` + `docs/UX-STEPS.md` + `docs/ROADMAP.md`）+ 新增 2
-> （`tools/test/bBatch.test.mjs`、`docs/REVIEW-b-batch.md`）。**提交由 Lead 统一做**，
-> 规划者/执行子代理都不 commit。
+> **HEAD = `8f34418`**（B 批已提交；`git status --short` 为空）。B 批那个提交 = 11 个文件 /
+> `+1122 −45`：6 个 `.ets`/`.ts` 源码 + `tools/test/remoteUrl.test.mjs` + `docs/UX-STEPS.md`
+> + `docs/ROADMAP.md` + 新增 `tools/test/bBatch.test.mjs`、`docs/REVIEW-b-batch.md`。
+> **提交由 Lead 统一做**，规划者/执行子代理都不 commit。
 
 ### 已交付（本轮及之前）
 
@@ -472,7 +472,7 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 | 交互一致性（A 批） | `components/state/*` 三态（加载可取消 / 空态带下一步 / 错误态三段式 + 诊断）、`ActionButton`（禁用可见且点击给原因）铺到同步/导出/AI/远程/chat | 提交 `0ba8150`；`docs/STATE-UI.md` |
 | 稳定性（C 批） | 同步重入、拉取去重、超时、草稿崩溃恢复 | 同上；`docs/FAILURE-MODES.md` |
 | 工具链 | `device-accept.mjs` 退出码分级与 pre-flight、`preflight.mjs`、手写板两行工具条断言 | `docs/PREFLIGHT.md`、`docs/REVIEW-device-accept.md` |
-| 便捷性（B 批，**部分**） | D1 远程地址归一 + **一键重连**（`settingsStore.remoteLastOk` + `RemoteControl.onPageEnd` 记「最近成功」→ 设置页 `重新连接 <host:port>`）；D2 P1 **chat 详情页「在电脑上继续」**跳转出口（只读纪律不变，无输入框） | 工作树 9 改动 + 2 新增未提交（`git diff --stat` = 9 files / **+429 −45**）；全量 **2179 例 / 2178 pass / 0 fail / 1 skip**；`validate-app` **8/8**；独立评审 `docs/REVIEW-b-batch.md`（P0 0 / P1 1 / P2 2）+ Lead 复审追加 P2-3，四条 P1/P2 已修、P2-2 列为已知限制；`docs/UX-STEPS.md` §4.1（N→M） |
+| 便捷性（B 批，**部分**） | D1 远程地址归一 + **一键重连**（`settingsStore.remoteLastOk` + `RemoteControl.onPageEnd` 记「最近成功」→ 设置页 `重新连接 <host:port>`）；D2 P1 **chat 详情页「在电脑上继续」**跳转出口（只读纪律不变，无输入框） | 提交 `8f34418`（11 文件 / **+1122 −45**）；全量 **2179 例 / 2178 pass / 0 fail / 1 skip**；`validate-app` **8/8**；独立评审 `docs/REVIEW-b-batch.md`（P0 0 / P1 1 / P2 2）+ Lead 复审追加 P2-3，四条 P1/P2 已修、P2-2 列为已知限制；`docs/UX-STEPS.md` §4.1（N→M） |
 
 **当前基线**：全量 `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"`
 **2179 例 / 2178 pass / 0 fail / 1 skip**（B 批新增 34 例：`remoteUrl.test.mjs` +10、`bBatch.test.mjs` +24；
@@ -480,8 +480,8 @@ skip 数未增加，仍是既有那条 fetch 直连用例）；`validate-app` **
 
 ### 未完成（按优先级）
 
-1. **便捷性（B 批）**：D1-b（一键重连）与 D2 P1（「在电脑上继续」跳转出口）**已落地、待 Lead 提交**
-   （见上表与 `docs/UX-STEPS.md` §4.1：路径 4 **8→7**、路径 5 到详情页仍 **10**、到电脑端可用 **17→12**；
+1. **便捷性（B 批）**：D1-b（一键重连）与 D2 P1（「在电脑上继续」跳转出口）**已落地并提交**
+   （`8f34418`，见上表与 `docs/UX-STEPS.md` §4.1：路径 4 **8→7**、路径 5 到详情页仍 **10**、到电脑端可用 **17→12**；
    合计 43→42）。**未完成**：D1 的 P2（输入框失焦即归一）、D2 的 P2（真接管，要等 `CHAT-SYNC` §1/§5
    的租约 + sha 校验）、D4 导出快捷 chip、D6 设置页锚点、D7 `CalendarPicker` 接线；
    路径 1/2 的落盘改造也未做——原 §4「P1 目标 26」**未达成**（差 16 步，全在上述未做项）。
