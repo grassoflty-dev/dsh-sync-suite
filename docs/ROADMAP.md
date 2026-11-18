@@ -454,6 +454,38 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
   其余任务在后台跑，等独占方结束再入场。
 - 规划子代理每轮向主会话汇报三行：完成 / 进行中含 owner / 阻塞或需决策。
 
+## 交接：当前状态与下一步（2026-11-18 22:00，写于 DSH 重启后）
+
+> 用途：换会话/重启后**先读这一节**，不用问人。HEAD = `0ba8150`，工作树干净。
+
+### 已交付（本轮及之前）
+
+| 块 | 内容 | 证据 |
+| --- | --- | --- |
+| 改名 | 插件与 App 统一 **DSH-Dots**；包名/目录/RPC = `dsh-dots`，section id / locale NS / 配置目录 = `dots`；旧 RPC 路径兼容；`~/.dsh/git-config-sync/` → `~/.dsh/dots/` 迁移（先搬→校验→后标记 + 中断补齐） | 提交 `bc04a37`；`PAIRS=114 MISMATCH=0` |
+| 移除社区版 | `@feiyang666/dsh-mobile-remote` 从 web profile 移除；三件套 grep 零命中；`node_modules` 空目录为生成物残留（不手删、不入库） | 提交 `177b22a` |
+| 交互一致性（A 批） | `components/state/*` 三态（加载可取消 / 空态带下一步 / 错误态三段式 + 诊断）、`ActionButton`（禁用可见且点击给原因）铺到同步/导出/AI/远程/chat | 提交 `0ba8150`；`docs/STATE-UI.md` |
+| 稳定性（C 批） | 同步重入、拉取去重、超时、草稿崩溃恢复 | 同上；`docs/FAILURE-MODES.md` |
+| 工具链 | `device-accept.mjs` 退出码分级与 pre-flight、`preflight.mjs`、手写板两行工具条断言 | `docs/PREFLIGHT.md`、`docs/REVIEW-device-accept.md` |
+
+**当前基线**：全量 `node --test` **2145 例 / 2144 pass / 0 fail / 1 skip**；`validate-app` **8/8**；`overlay applied=false`。
+
+### 未完成（按优先级）
+
+1. **便捷性（B 批）**：`docs/UX-STEPS.md` 的改前步数基准表已出，**改造与「N→M」对比未做**；远程 token 归一化 + 一键重连；chat「接管此会话」入口（只到入口与原因，写入待 P2）。
+2. **真机验收（全部挂起，`hdc list targets` = `[Empty]`）**：手写板 5 项（penOnly 挡手指、笔迹面板二级菜单、工具条两行、撤销重做可点、折叠布局画布高度）、chat 内嵌 Web 的 `ERR_WS_UPGRADE(-173)`、UU 两个实测点（入口形态 / WS 透传）。**设备没连上不许报“已验证”。**
+3. **模型路由**：`dsh-opencode-go/hy4-flash-free` 的允许清单是**会话启动快照**，改配置后需**重启 DSH + 新会话**才生效；当前会话只能用继承的 `deepseek-v4.1-flash`。重启后再验 `list_subagent_models(provider: "dsh-opencode-go")`。
+4. **后续排队**：类型注册表（`docs/SYNC-SCOPES.md`：6 项声明，无合并策略即拒绝接入）→ Git 接入向导（`docs/CONFIG-UX.md`）→ 远程连接收敛（`auto` 优先级 + 一键自检 + 二维码）；F 测试套件卫生；G 吞错审计；H 契约静态测试；E APK 收尾。
+
+### 派活模板要点（别漏）
+
+- 显式模型大概率被拒 → **不传 provider/model，让子代理继承**；被拒不要重试轰炸，也不要改 profile。
+- 并行 ≤5 个执行子代理（软约定）。
+- 验收标准写进**初始 prompt**；交付带**证据三段式**（命令原文 / 原样输出 / 结论）。
+- 关键改动要独立只读评审，结论落 `docs/REVIEW-*.md`。
+- 跑测试前先 `overlay.mjs status`；构建期不跑全量测试。
+- 静态断言现在盯的是 `ActionButton({ label: … })` 与 `ErrorState({…})`，**不再是** `Button('…')` / `Text('…')`——改 UI 时同步改断言并注明原因。
+
 
 > **提交标签事故记录**：`55c9303` 提交信息写的是 docs，实际混入了 `apps/arkui-schedule/entry/src/main/ets/components/settings/SyncSection.ets`
 > 的一处并行改动（内容正确、标签错误）。不改写历史（已推送纪律），仅在此登记，便于将来查历史的人定位。
