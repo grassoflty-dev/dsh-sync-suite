@@ -551,7 +551,8 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 | 便捷性（B4 收窄，待提交） | 用户 2026-11-19 拍板「日期只在新建时选一次」：**B4 已提交的改期机制（跨日 live + 旧日清理、更早日期拒绝）全部删除**，新增纯逻辑 `model/recordSaveTs.ts`（`tsForDate` / `resolveSaveTs`），编辑器日期行对已有记录只读并显示「创建时选定，不可改」，仅新建时弹 `CalendarPicker`；已有记录保存只在原日期追加更晚版本 | 工作树未提交（见上「待提交清单（B4 收窄）」，6 路径 = 2 改 + 2 删 + 2 新增）；全量 **2306 例 / 2305 pass / 0 fail / 1 skip**（相对 2309 的 −3 是刻意删除测被移除功能的用例；新基线 `b4SaveTs` 20 + `b4DateUi` 21 + `b4CalendarWiring` 18 + `b4SavedRow` 14 = 73）；`validate-app` **8/8**；`tsc` exit 0；删除 diff 的独立只读评审 `docs/REVIEW-b4-narrow.md` |
 
 **当前基线**：全量 `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"`
-**2348 例 / 2347 pass / 0 fail / 1 skip**（相对 2306 基线的 **+40**：`mod-v2-migration` 的
+**2390 例 / 2389 pass / 0 fail / 1 skip**（相对 2348 基线的 **+42**：`mod-v2-read-timeline` 的
+`timelineRead.test.mjs` **+42**；再往前相对 2306 基线的 **+40**：`mod-v2-migration` 的
 `v2Migration.test.mjs` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` 的 `handwritingToolbar.test.mjs` **+1**；
 skip 数未变，仍是既有那条 fetch 直连用例；数字随模块加入而变动。再往前，B4 批 **2309 / 2308 / 0 / 1**，收窄时 **−3**
 是**刻意删除**测被移除功能的用例——`b4DateMove.test.mjs` 整文件 −19、`b4DateUi` 25→21 −4、
@@ -578,10 +579,11 @@ B 批 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
 3. **模型路由**：`dsh-opencode-go/hy4-flash-free` 的允许清单是**会话启动快照**，改配置后需**重启 DSH + 新会话**才生效；当前会话只能用继承的 `deepseek-v4.1-flash`。重启后再验 `list_subagent_models(provider: "dsh-opencode-go")`。
 4. **后续排队**：类型注册表（`docs/SYNC-SCOPES.md`：6 项声明，无合并策略即拒绝接入）→ Git 接入向导（`docs/CONFIG-UX.md`）→ 远程连接收敛（`auto` 优先级 + 一键自检 + 二维码）；F 测试套件卫生；G 吞错审计；H 契约静态测试；E APK 收尾。
 
-- **v2 契约**：`docs/DATA-CONTRACT-v2.md`（v2-draft-2，359 行，15 节）已写完**待提交**；评审 `docs/REVIEW-v2-contract.md`（183 行，P0 2 / P1 7 / P2 11 已全部在 draft-2 处理）。
-- **迁移工具**：`tools/migrate-v1-to-v2.mjs`（804 行）+ `apps/arkui-schedule/tools/test/v2Migration.test.mjs`（41 例，30→39；评审 `docs/REVIEW-v2-migration-and-insert-page.md`，P0 1 / P1 4 / P2 3 已全部修复）已写完（含评审修复）**待提交**（只读 v1、不删 v1；本仓 `devices/` dry-run `days=0 records=0`，fixture dry-run `days=1 records=2 deletes=1 summaries=1 skipped=1`）。
+- **v2 契约**：`docs/DATA-CONTRACT-v2.md`（v2-draft-2，359 行，15 节）已提交；评审 `docs/REVIEW-v2-contract.md`（183 行，P0 2 / P1 7 / P2 11 已全部在 draft-2 处理）。
+- **迁移工具**：`tools/migrate-v1-to-v2.mjs`（804 行）+ `apps/arkui-schedule/tools/test/v2Migration.test.mjs`（41 例，30→39；评审 `docs/REVIEW-v2-migration-and-insert-page.md`，P0 1 / P1 4 / P2 3 已全部修复）已提交（含评审修复）（只读 v1、不删 v1；本仓 `devices/` dry-run `days=0 records=0`，fixture dry-run `days=1 records=2 deletes=1 summaries=1 skipped=1`）。
 - **插入页真机缺陷**：`mod-insert-page-count` 已修复并复验（15 PASS / 0 FAIL / 6 SKIP，exit 3；真机 dump 进入 1/1、点 `+` 后 2/2，见 `docs/VERIFICATION.md` §14.10），**待提交**。
-- **待 Lead 提交（已就绪）**：`mod-v2-contract`（draft-2）、`mod-v2-migration`（含评审修复，41 例）、`mod-insert-page-count`（真机已复验）三者均**未提交、已就绪待 Lead 提交**；按 `docs/MODULES.md` 每个模块各自一笔独立提交，不混批，提交哈希由 Lead 提交后回填 `docs/MODULES.md` §1/§5。
+- **已提交（Lead 已提交并打标签）**：`mod-v2-contract`（draft-2）、`mod-v2-migration`（含评审修复，41 例）、`mod-insert-page-count`（真机已复验）三者均**未提交、已就绪待 Lead 提交**；按 `docs/MODULES.md` 每个模块各自一笔独立提交，不混批，提交哈希由 Lead 提交后回填 `docs/MODULES.md` §1/§5。
+- `mod-v2-read-timeline` 已写完（纯模型，未接线，42 例），待提交；下一模块是把它接进只读服务（`timelineStore`），之后再谈写切换
 
 ### 派活模板要点（别漏）
 

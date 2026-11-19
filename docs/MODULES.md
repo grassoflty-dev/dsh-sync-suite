@@ -23,9 +23,10 @@
 | `mod-d7-month-calendar` | 首页日期条改用月视图日历并与编辑器复用同一组件 | 已交付（`14b181a`；组件名 `MonthCalendar` 由 `cec3c93` 改名） | `14b181a` | `git revert 14b181a` 会同时回滚 D5/B3-P2-1，故**不单独回滚**；如需只回滚 D7，须手工改回 `Index.DateBlock` | 依赖 `mod-arkts-first-build` | `docs/UX-STEPS.md` §4.4 |
 | `mod-b3-saved-row-relax` | 首页保存行对账判据放宽为「同 id 且 ts 不早于标记」 | 已交付（`14b181a`） | `14b181a` | 同 D7：与 D5 同提交，**不单独回滚** | — | `docs/REVIEW-b4-batch.md` §4 |
 | `mod-arkts-first-build` | 首次真实 ArkTS 编译修复（ActionButton 属性重名、`CalendarPicker` 撞内置→`MonthCalendar`、非法 `lineHeight`） | 已交付 `cec3c93` | `cec3c93` | **不可单独回滚**（回滚后无法编译）；如确需回滚，必须同时给出替代修法 | 被所有 app 模块依赖 | `docs/VERIFICATION.md` |
-| `mod-v2-contract` | 单时间线数据契约 v2 草案（两轮：初稿 + 按评审 P0/P1 修订） | 已写完，**待提交** | 77df67a | 未提交前回滚 = 删除该文件；提交后 `git revert <hash>`（纯文档） | 被 `mod-v2-migration`/`mod-v2-media-migration`/`mod-v2-dual-write-off` 依赖 | `docs/DATA-CONTRACT-v2.md`（359 行，v2-draft-2）、评审 `docs/REVIEW-v2-contract.md`（276 行，P0 2 / P1 7 / P2 11；draft-2 已全部解决 P0/P1） |
-| `mod-v2-migration` | v1→v2 迁移工具（记录/摘要/删除账本；媒体另立模块） | 已写完（含评审修复），**待提交** | 28b8592 | `git revert <hash>`；工具只读 v1、不删 v1 | 依赖 `mod-v2-contract`；被 `mod-v2-dual-write-off` 依赖 | `tools/migrate-v1-to-v2.mjs`（804 行）、测试 `apps/arkui-schedule/tools/test/v2Migration.test.mjs`（41 例，30→39→41）；评审 `docs/REVIEW-v2-migration-and-insert-page.md`（P0 1 / P1 4 / P2 3 已全部修复）；revert path 不变 |
-| `mod-insert-page-count` | 修复真机「插入页 2/3 而非 2/2」：新建记录手写板草稿键串号 | 已写完，**待提交**（真机已验证 PASS） | 96d4435 | `git revert <hash>`（仅 `RecordEditorView.ets` + 1 个测试） | 跨模块触碰 `RecordEditorView.ets`（见 §2） | `docs/VERIFICATION.md` §14 更新段；真机 `device-accept` **15 PASS / 0 FAIL / 6 SKIP（exit 3 = 仅未覆盖）**；回归测试 `apps/arkui-schedule/tools/test/handwritingToolbar.test.mjs` |
+| `mod-v2-contract` | 单时间线数据契约 v2 草案（两轮：初稿 + 按评审 P0/P1 修订） | 已提交 | 77df67a | 未提交前回滚 = 删除该文件；提交后 `git revert <hash>`（纯文档） | 被 `mod-v2-migration`/`mod-v2-media-migration`/`mod-v2-dual-write-off` 依赖 | `docs/DATA-CONTRACT-v2.md`（359 行，v2-draft-2）、评审 `docs/REVIEW-v2-contract.md`（276 行，P0 2 / P1 7 / P2 11；draft-2 已全部解决 P0/P1） |
+| `mod-v2-migration` | v1→v2 迁移工具（记录/摘要/删除账本；媒体另立模块） | 已提交（含评审修复） | 28b8592 | `git revert <hash>`；工具只读 v1、不删 v1 | 依赖 `mod-v2-contract`；被 `mod-v2-dual-write-off` 依赖 | `tools/migrate-v1-to-v2.mjs`（804 行）、测试 `apps/arkui-schedule/tools/test/v2Migration.test.mjs`（41 例，30→39→41）；评审 `docs/REVIEW-v2-migration-and-insert-page.md`（P0 1 / P1 4 / P2 3 已全部修复）；revert path 不变 |
+| `mod-v2-read-timeline` | v2 单时间线只读解析核心（纯模型，未接线） | 已写完，待提交 | （Lead 填） | `git revert <hash>`（仅 2 个新文件，未接线，零运行时影响） | 依赖 `mod-v2-contract`；被下一模块（v2 读服务接线）依赖 | `apps/arkui-schedule/entry/src/main/ets/model/timeline.ts`（779 行）、测试 `timelineRead.test.mjs`（42 例）；模块规格写在该文件头注释 |
+| `mod-insert-page-count` | 修复真机「插入页 2/3 而非 2/2」：新建记录手写板草稿键串号 | 已提交（真机已验证 PASS） | 96d4435 | `git revert <hash>`（仅 `RecordEditorView.ets` + 1 个测试） | 跨模块触碰 `RecordEditorView.ets`（见 §2） | `docs/VERIFICATION.md` §14 更新段；真机 `device-accept` **15 PASS / 0 FAIL / 6 SKIP（exit 3 = 仅未覆盖）**；回归测试 `apps/arkui-schedule/tools/test/handwritingToolbar.test.mjs` |
 | `mod-v2-media-migration` | v1 按天 zip → v2 `timeline/<date>/media/` 松散压缩图（尚未开始） | 待开始 | — | — | 依赖 `mod-v2-contract`、`mod-v2-migration` | 待建 |
 | `mod-v2-dual-write-off` | 停止写 v1、保留一个 release 的只读回退（由 `mod-v2-dual-read` 改名而来） | 待开始 | — | — | 依赖 `mod-v2-contract`、`mod-v2-migration` | `docs/DATA-CONTRACT-v2.md` §10/§13 |
 | `mod-settings-lean` | 设置只留仓库地址 + 令牌 | 待开始 | — | `git revert <hash>` | 独立 | 待建 |
@@ -46,6 +47,7 @@
 | `mod-arkts-first-build`（`cec3c93`） | 21 个 `.ets` + 6 个测试文件 | 首次真实 ArkTS 编译暴露的硬错误是全仓性的：ActionButton 属性重名、`CalendarPicker` 撞内置类型（改为 `MonthCalendar`）、非法 `lineHeight` 调用；只能通过属性/方法/结构名的全局改名与调用点修正解决 | 跨全仓改名，任何一处漏改都会再次编译失败；这些文件被所有 app 模块共用，并行改动必须串行并在提交后重跑全量门闸 |
 | `mod-d5-create-date`（`d6a6b69`） | `components/RecordEditorView.ets` | 收窄后编辑器保存路径改走 `resolveSaveTs`，日期行对已有记录只读且仅在新建时展开 `CalendarPicker`，必须改这个共享组件本身 | 同一文件还承载 D7 的日历接线与 B3 的一次性保存标记；与 `mod-d7-month-calendar` 共写，撞文件必须串行、不可双人同时改 |
 | `mod-insert-page-count` | `components/RecordEditorView.ets` | 修复真机插入页串号：新增 `writingDraftKey()`（新建记录按编辑器实例生成 `new-<timestamp>` 草稿键）并新增路由参数 `draftKey`，必须改这个共享组件本身 | 同一文件也被 `mod-d5-create-date`/`mod-d7-month-calendar` 触碰，必须串行、不可双人同时改 |
+| `mod-v2-read-timeline` | 无共享文件（全部新增） | 纯模型 `model/timeline.ts` 与测试 `tools/test/timelineRead.test.mjs` 均为新增，未改 `.ets`/service/UI/写路径，未触碰任何被其他模块共用的文件 | 无跨模块撞文件风险；未接线、零运行时影响；回滚 = 提交后 `git revert <hash>`（未提交前删除这两个新增文件） |
 | `mod-v2-migration`（含评审修复） | 无共享文件（全部新增） | 迁移工具 `tools/migrate-v1-to-v2.mjs` 与测试 `apps/arkui-schedule/tools/test/v2Migration.test.mjs` 均为新增文件，评审修复也只改这两个文件，未触碰任何被其他模块共用的文件 | 无跨模块撞文件风险；回滚 = 提交后 `git revert <hash>`（未提交前删除这两个新增文件），不影响其他模块 |
 
 ## 3 提交与标签约定
@@ -64,7 +66,7 @@
 2. **执行 revert**：一次只回滚一个模块；同一提交捆绑多个模块时，按登记的补救方案处理，不拿 `git revert <hash>` 一把梭。
 3. **跑门闸并记录原始输出**（工作目录 `dsh-sync-suite`）：
    - `node tools/overlay.mjs status` → 期望 `applied=false`；
-   - `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"` → 当前基线 **2348 例 / 2347 pass / 0 fail / 1 skip**（相对 2306 基线：`mod-v2-migration` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` **+1**；`cec3c93` 之后；数字随模块加入而变动；回滚 D5 相关模块时，因删除的旧用例被恢复，数字会变化，须在批次记录里写明变化原因）；
+   - `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"` → 当前基线 **2390 例 / 2389 pass / 0 fail / 1 skip**（相对 2348 基线：`mod-v2-read-timeline` **+42**；再往前相对 2306 基线：`mod-v2-migration` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` **+1**；`cec3c93` 之后；数字随模块加入而变动；回滚 D5 相关模块时，因删除的旧用例被恢复，数字会变化，须在批次记录里写明变化原因）；
    - `node apps/arkui-schedule/tools/validate-app.mjs` → **8/8**；
    - `node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json` → **exit 0**。
 4. **判定「回滚干净」**：0 fail、skip 数未异常增加、8/8、tsc exit 0、`overlay applied=false` 五项同时成立；任何一项不满足即为未回滚干净，不许在 §1 把状态改回「已回滚」。
@@ -79,7 +81,8 @@
 
 | 日期 | 模块 | 结果 | 门闸 | 评审 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| 2026-11-19 | `mod-doc-verify` | 已完成，待提交 | 首次真机全链路：编译 / 签名 / 安装 / 启动 / `device-accept`（详见 `docs/VERIFICATION.md` §14） | — | `docs/VERIFICATION.md` §14（首次真机全链路）；提交：5a1cd91 |
-| 2026-11-19 | `mod-module-doctrine` | 已完成，待提交 | 文档一致性回读（无代码门闸） | — | `docs/MODULES.md` + `docs/ROADMAP.md` + `项目理解.md` §7；提交：a95ecaa |
-| 2026-11-19 | `mod-v2-contract` | 已完成（draft-2），待提交 | 文档门闸（无代码门闸；359 行） | `docs/REVIEW-v2-contract.md`（276 行，P0 2 / P1 7 / P2 11；draft-2 已全部解决 P0/P1） | `docs/DATA-CONTRACT-v2.md`（359 行，v2-draft-2）；提交：77df67a |
-| 2026-11-19 | `mod-v2-migration` + `mod-insert-page-count` | 已完成（含评审修复），待提交 | 全量 **2348 / 2347 / 0 / 1**；`validate-app` 8/8；`tsc` exit 0；`overlay applied=false`；真机 `device-accept` **15 PASS / 0 FAIL / 6 SKIP（exit 3 = 仅未覆盖）** | `docs/REVIEW-v2-migration-and-insert-page.md`（304 行，P0 1 / P1 4 / P2 3 已全部修复） | 迁移 **41 例**（30→39，含 +9 评审修复）/ 真机 **15P0F6S**；两个模块各自一笔提交，提交：28b8592 / 96d4435 |
+| 2026-11-19 | `mod-doc-verify` | 已提交 | 首次真机全链路：编译 / 签名 / 安装 / 启动 / `device-accept`（详见 `docs/VERIFICATION.md` §14） | — | `docs/VERIFICATION.md` §14（首次真机全链路）；提交：5a1cd91 |
+| 2026-11-19 | `mod-module-doctrine` | 已提交 | 文档一致性回读（无代码门闸） | — | `docs/MODULES.md` + `docs/ROADMAP.md` + `项目理解.md` §7；提交：a95ecaa |
+| 2026-11-19 | `mod-v2-contract` | 已提交（draft-2） | 文档门闸（无代码门闸；359 行） | `docs/REVIEW-v2-contract.md`（276 行，P0 2 / P1 7 / P2 11；draft-2 已全部解决 P0/P1） | `docs/DATA-CONTRACT-v2.md`（359 行，v2-draft-2）；提交：77df67a |
+| 2026-11-19 | `mod-v2-migration` + `mod-insert-page-count` | 已提交（含评审修复） | 全量 **2348 / 2347 / 0 / 1**；`validate-app` 8/8；`tsc` exit 0；`overlay applied=false`；真机 `device-accept` **15 PASS / 0 FAIL / 6 SKIP（exit 3 = 仅未覆盖）** | `docs/REVIEW-v2-migration-and-insert-page.md`（304 行，P0 1 / P1 4 / P2 3 已全部修复） | 迁移 **41 例**（30→39，含 +9 评审修复）/ 真机 **15P0F6S**；两个模块各自一笔提交，提交：28b8592 / 96d4435 |
+| 2026-11-19 | `mod-v2-read-timeline` | 已完成，待提交 | 全量 2386/2385/0/1；validate 8/8；tsc 0 | （评审后填） | 未接线，零运行时影响 |
