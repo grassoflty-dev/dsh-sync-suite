@@ -45,7 +45,7 @@ import { draftStore } from '../services/draftStore';
 import { loadingText, toastMsFor } from '../common/copy';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
 import { ActionButton } from './ActionButton';
-import { CalendarPicker } from './CalendarPicker';
+import { MonthCalendar } from './MonthCalendar';
 import { StateView } from './StateView';
 
 const INPUT_HEIGHT: number = 44;
@@ -120,7 +120,7 @@ export struct RecordEditorView {
   @State author: string = '';
   /** 本条记录要保存到的日期 `YYYY-MM-DD`（仅新建可选：决定 ts 落在哪个日片；已有记录只读）。 */
   @State formDate: string = '';
-  /** 是否展开日历选择器（复用 `CalendarPicker`，不另造一套日期 UI）。 */
+  /** 是否展开日历选择器（复用 `MonthCalendar`，不另造一套日期 UI）。 */
   @State showDatePicker: boolean = false;
   @State done: boolean = false;
   @State ocrText: string = '';
@@ -867,7 +867,7 @@ export struct RecordEditorView {
             }
 
             if (this.dateEditable() && this.showDatePicker) {
-              CalendarPicker({
+              MonthCalendar({
                 value: this.formDate,
                 todayKey: localDateKey(new Date()),
                 onPick: (dateKey: string): void => this.applyPickedDate(dateKey),

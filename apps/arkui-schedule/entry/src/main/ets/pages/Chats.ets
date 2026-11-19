@@ -215,7 +215,7 @@ struct Chats {
       if (this.queryText.length > 0) {
         ActionButton({
           label: '清空',
-          enabled: true,
+          actionEnabled: true,
           disabledReason: '',
           busy: false,
           variant: 'ghost',
@@ -346,7 +346,7 @@ struct Chats {
         .textAlign(TextAlign.Start)
       ActionButton({
         label: '清空搜索',
-        enabled: true,
+        actionEnabled: true,
         disabledReason: '',
         busy: false,
         variant: 'secondary',

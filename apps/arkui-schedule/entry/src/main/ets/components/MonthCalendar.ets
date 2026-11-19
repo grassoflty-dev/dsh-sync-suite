@@ -1,5 +1,6 @@
 /**
- * 日历选择器：月视图 + 6×7 网格，替代系统 `DatePicker` 的「三列滚轮」交互。
+ * 月视图日历面板：月视图 + 6×7 网格，替代系统 `DatePicker` 的「三列滚轮」交互。
+ * 名字避开 ArkUI 内置日历组件（struct 与内置组件同名会编译失败）。
  *
  * 为什么不用 `DatePicker`：滚轮一次只能改一列，且要滚好几圈才能跳到「三个月前的某天」；
  * 月视图 + 固定 6×7 网格能一眼看到整月、点一下就跳过去，跨月补位格也是真实日期（直接可点）。
@@ -33,7 +34,7 @@ const MIN_YEAR: number = 1;
 const MAX_YEAR: number = 9999;
 
 @Component
-export struct CalendarPicker {
+export struct MonthCalendar {
   /** 当前选中的日期键 `YYYY-MM-DD`（空串 = 不画选中态）。 */
   @Prop @Watch('onValueChange') value: string = '';
   /** 今天的日期键，由页面用 `localDateKey(new Date())` 传入（空串 = 不标今天）。 */

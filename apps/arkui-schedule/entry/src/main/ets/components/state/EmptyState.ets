@@ -73,7 +73,7 @@ export struct EmptyState {
       this.DetailLine()
       ActionButton({
         label: this.actionText(),
-        enabled: true,
+        actionEnabled: true,
         disabledReason: '',
         busy: false,
         variant: 'primary',

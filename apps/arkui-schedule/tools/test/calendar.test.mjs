@@ -29,7 +29,7 @@ const CALENDAR_TS = readFileSync(
   'utf8'
 )
 const PICKER_ETS = readFileSync(
-  new URL('../../entry/src/main/ets/components/CalendarPicker.ets', import.meta.url),
+  new URL('../../entry/src/main/ets/components/MonthCalendar.ets', import.meta.url),
   'utf8'
 )
 
@@ -395,7 +395,7 @@ test('model/calendar.ts 是纯逻辑：零 SDK import、无 $r() 资源、无 Ar
   assert.match(code, /export function clampDateKey/)
 })
 
-test('CalendarPicker.ets：结构/令牌/回调齐全，且符合 ArkTS 严格模式约定', () => {
+test('MonthCalendar.ets：结构/令牌/回调齐全，且符合 ArkTS 严格模式约定', () => {
   const code = stripComments(PICKER_ETS)
 
   // 契约：@Prop value / todayKey + 两个回调（页面接线只依赖这四个）

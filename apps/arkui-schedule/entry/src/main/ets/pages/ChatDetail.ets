@@ -346,7 +346,7 @@ struct ChatDetail {
       Row() {
         ActionButton({
           label: BACK_LABEL,
-          enabled: true,
+          actionEnabled: true,
           disabledReason: '',
           busy: false,
           variant: 'secondary',
@@ -393,7 +393,7 @@ struct ChatDetail {
     Column({ space: SPACING.xs }) {
       ActionButton({
         label: '在电脑上继续',
-        enabled: this.remoteUrl.length > 0,
+        actionEnabled: this.remoteUrl.length > 0,
         disabledReason: '先在设置里填写电脑上的 DSH 地址',
         busy: false,
         variant: 'secondary',

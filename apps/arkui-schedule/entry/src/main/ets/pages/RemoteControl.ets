@@ -322,7 +322,7 @@ struct RemoteControl {
         .textAlign(TextAlign.Start)
       ActionButton({
         label: REFRESH_LABEL,
-        enabled: this.url.length > 0,
+        actionEnabled: this.url.length > 0,
         disabledReason: REFRESH_BLOCKED_REASON,
         busy: false,
         variant: 'ghost',
@@ -395,7 +395,7 @@ struct RemoteControl {
       Row() {
         ActionButton({
           label: OPEN_BROWSER_LABEL,
-          enabled: true,
+          actionEnabled: true,
           disabledReason: '',
           busy: false,
           variant: 'secondary',

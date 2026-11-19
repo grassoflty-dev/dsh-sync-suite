@@ -2302,7 +2302,6 @@ struct Settings {
   GroupAnchorChip(label: string, index: number) {
     Button(label)
       .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
       .fontColor($r('app.color.brand'))
       .backgroundColor($r('app.color.control_fill'))
       .height(TOUCH_MIN)

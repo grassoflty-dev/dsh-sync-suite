@@ -1,6 +1,6 @@
 /**
- * D7（P2）首页日期选择接线回归断言：DateBlock 用 CalendarPicker 替换系统三列滚轮 DatePicker，
- * 且首页与记录编辑页的「日期」入口复用同一个 CalendarPicker 组件（同源，不是各造一套日期网格）。
+ * D7（P2）首页日期选择接线回归断言：DateBlock 用 MonthCalendar 替换系统三列滚轮 DatePicker，
+ * 且首页与记录编辑页的「日期」入口复用同一个 MonthCalendar 组件（同源，不是各造一套日期网格）。
  *
  * ArkTS（.ets）依赖 @kit.* 运行时，Node 里跑不起来；但「滚轮调用是否清除」「组件是否在 DateBlock 内实例化」
  * 「回调链是否保留 reload/汇总」「reconcileSavedRow 文档是否还写死同 ts」等都是纯文本可判定的事实，
@@ -16,7 +16,7 @@ import { describe, test } from 'node:test';
 const ETS = new URL('../../entry/src/main/ets/', import.meta.url);
 const INDEX = readFileSync(new URL('pages/Index.ets', ETS), 'utf8');
 const EDITOR = readFileSync(new URL('components/RecordEditorView.ets', ETS), 'utf8');
-const PICKER = readFileSync(new URL('components/CalendarPicker.ets', ETS), 'utf8');
+const PICKER = readFileSync(new URL('components/MonthCalendar.ets', ETS), 'utf8');
 
 /** 从 `signature` 起按大括号配平截取方法 / Builder 体（含签名自身，避免相邻方法互相污染）。 */
 function bodyFrom(source, signature) {
@@ -38,7 +38,7 @@ function bodyFrom(source, signature) {
   assert.fail(`${signature} 的大括号不配平`);
 }
 
-/** 从 `marker` 起按大括号配平截取一个块（如 `CalendarPicker({`）。 */
+/** 从 `marker` 起按大括号配平截取一个块（如 `MonthCalendar({`）。 */
 function braceBlockFrom(source, marker) {
   const start = source.indexOf(marker);
   assert.ok(start >= 0, `找不到块：${marker}`);
@@ -128,12 +128,12 @@ const DATE_BLOCK_CODE = stripComments(DATE_BLOCK);
 const PICK_DATE = bodyFrom(INDEX, 'private pickDate(dateKey: string): void {');
 const PICK_DATE_CODE = stripComments(PICK_DATE);
 const RECONCILE = bodyFrom(INDEX, 'private reconcileSavedRow(saved: SavedMarker): void {');
-const CALENDAR_INSTANTIATION = braceBlockFrom(DATE_BLOCK_CODE, 'CalendarPicker({');
+const CALENDAR_INSTANTIATION = braceBlockFrom(DATE_BLOCK_CODE, 'MonthCalendar({');
 
 // ---------------------------------------------------------------------------
-// A. 首页：系统滚轮 DatePicker 已清除，改为 CalendarPicker 月视图
+// A. 首页：系统滚轮 DatePicker 已清除，改为 MonthCalendar 月视图
 // ---------------------------------------------------------------------------
-describe('D7-A 首页用 CalendarPicker 替换系统三列滚轮 DatePicker', () => {
+describe('D7-A 首页用 MonthCalendar 替换系统三列滚轮 DatePicker', () => {
   test('D7-01 Index 可执行代码里没有任何 DatePicker( 调用（注释提及不算）', () => {
     assert.equal(INDEX_CODE.includes('DatePicker('), false, '首页仍残留 DatePicker( 调用');
   });
@@ -143,23 +143,23 @@ describe('D7-A 首页用 CalendarPicker 替换系统三列滚轮 DatePicker', ()
     assert.equal(INDEX.includes('new Date(2035, 11, 31)'), false, '残留滚轮终点边界');
   });
 
-  test('D7-03 从 ../components/CalendarPicker 导入 CalendarPicker', () => {
+  test('D7-03 从 ../components/MonthCalendar 导入 MonthCalendar', () => {
     assert.match(
       INDEX,
-      /import \{ CalendarPicker \} from '\.\.\/components\/CalendarPicker';/,
-      '缺 CalendarPicker 的组件导入'
+      /import \{ MonthCalendar \} from '\.\.\/components\/MonthCalendar';/,
+      '缺 MonthCalendar 的组件导入'
     );
   });
 
-  test('D7-04 CalendarPicker 在 DateBlock() 体内实例化（不是别处假挂）', () => {
-    assert.match(DATE_BLOCK_CODE, /CalendarPicker\(\{/, 'DateBlock 未实例化 CalendarPicker');
+  test('D7-04 MonthCalendar 在 DateBlock() 体内实例化（不是别处假挂）', () => {
+    assert.match(DATE_BLOCK_CODE, /MonthCalendar\(\{/, 'DateBlock 未实例化 MonthCalendar');
   });
 
-  test('D7-05 CalendarPicker 收到 value: this.selectedDate', () => {
+  test('D7-05 MonthCalendar 收到 value: this.selectedDate', () => {
     assert.match(CALENDAR_INSTANTIATION, /value: this\.selectedDate/, 'value 未绑定选中日期');
   });
 
-  test('D7-06 CalendarPicker 收到 todayKey: localDateKey(new Date())', () => {
+  test('D7-06 MonthCalendar 收到 todayKey: localDateKey(new Date())', () => {
     assert.match(
       CALENDAR_INSTANTIATION,
       /todayKey: localDateKey\(new Date\(\)\)/,
@@ -183,16 +183,16 @@ describe('D7-A 首页用 CalendarPicker 替换系统三列滚轮 DatePicker', ()
     );
   });
 
-  test('D7-09 不新增 weekStart / closeOnBlank 实参（保留 CalendarPicker 默认值）', () => {
+  test('D7-09 不新增 weekStart / closeOnBlank 实参（保留 MonthCalendar 默认值）', () => {
     assert.equal(CALENDAR_INSTANTIATION.includes('weekStart'), false, '不应显式传 weekStart');
     assert.equal(CALENDAR_INSTANTIATION.includes('closeOnBlank'), false, '不应显式传 closeOnBlank');
   });
 
-  test('D7-10 DateBlock 文档注释声明展开区是 CalendarPicker 月视图（替代系统滚轮）', () => {
+  test('D7-10 DateBlock 文档注释声明展开区是 MonthCalendar 月视图（替代系统滚轮）', () => {
     const builderAt = INDEX.indexOf('DateBlock() {');
     const docStart = INDEX.lastIndexOf('/**', builderAt);
     const doc = INDEX.slice(docStart, builderAt);
-    assert.match(doc, /CalendarPicker/, 'DateBlock 文档未提 CalendarPicker');
+    assert.match(doc, /MonthCalendar/, 'DateBlock 文档未提 MonthCalendar');
     assert.match(doc, /月视图/, 'DateBlock 文档未提月视图');
   });
 });
@@ -231,22 +231,22 @@ describe('D7-B 行为等价、防假入口、两处日期入口复用同一组�
     assert.equal((PICK_DATE_CODE.match(/this\.loadSummary\(\)/g) ?? []).length, 1, 'loadSummary 只能一次');
   });
 
-  test('D7-13 首页没有自定义日期网格 Builder（只复用 CalendarPicker）', () => {
+  test('D7-13 首页没有自定义日期网格 Builder（只复用 MonthCalendar）', () => {
     assert.equal(/\bdayCell\s*\(/.test(INDEX_CODE), false, '首页不得自建 dayCell 网格');
     assert.equal(/\bMonthGrid\s*\(/.test(INDEX_CODE), false, '首页不得自建 MonthGrid 网格');
     assert.equal(/\bWeekdayHeader\s*\(/.test(INDEX_CODE), false, '首页不得自建星期表头');
   });
 
-  test('D7-14 记录编辑页也导入并实例化 CalendarPicker（两个日期入口同源）', () => {
+  test('D7-14 记录编辑页也导入并实例化 MonthCalendar（两个日期入口同源）', () => {
     assert.match(
       EDITOR,
-      /import \{ CalendarPicker \} from '\.\/CalendarPicker';/,
-      'RecordEditorView 未导入 CalendarPicker'
+      /import \{ MonthCalendar \} from '\.\/MonthCalendar';/,
+      'RecordEditorView 未导入 MonthCalendar'
     );
-    assert.match(EDITOR_CODE, /CalendarPicker\(\{/, 'RecordEditorView 未实例化 CalendarPicker');
+    assert.match(EDITOR_CODE, /MonthCalendar\(\{/, 'RecordEditorView 未实例化 MonthCalendar');
   });
 
-  test('D7-15 CalendarPicker 仍导出 value/todayKey/onPick/onClose 四个 props', () => {
+  test('D7-15 MonthCalendar 仍导出 value/todayKey/onPick/onClose 四个 props', () => {
     assert.match(PICKER_CODE, /@Prop @Watch\('onValueChange'\) value: string/, '缺 value prop');
     assert.match(PICKER_CODE, /@Prop todayKey: string/, '缺 todayKey prop');
     assert.match(PICKER_CODE, /onPick: \(dateKey: string\) => void/, '缺 onPick prop');
@@ -259,11 +259,11 @@ describe('D7-B 行为等价、防假入口、两处日期入口复用同一组�
     assert.match(DATE_BLOCK_CODE, /this\.shiftDate\(1\)/, '› 入口丢失');
   });
 
-  test('D7-17 假入口守卫：存在 if(showDatePicker)+CalendarPicker 渲染分支，且无 showDatePicker = true', () => {
+  test('D7-17 假入口守卫：存在 if(showDatePicker)+MonthCalendar 渲染分支，且无 showDatePicker = true', () => {
     assert.match(
       DATE_BLOCK_CODE,
-      /if \(this\.showDatePicker\) \{\s*CalendarPicker\(\{/,
-      'showDatePicker 展开分支未挂 CalendarPicker 渲染'
+      /if \(this\.showDatePicker\) \{\s*MonthCalendar\(\{/,
+      'showDatePicker 展开分支未挂 MonthCalendar 渲染'
     );
     assert.equal(INDEX_CODE.includes('showDatePicker = true'), false, '不得有脱离渲染分支的 showDatePicker=true');
   });

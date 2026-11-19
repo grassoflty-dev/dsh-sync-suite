@@ -110,8 +110,8 @@ describe('设置页：远程控制组（DSH 地址 → 打开远程控制）', (
   });
 
   test('地址为空时按钮禁用，并在按钮下方给出「先填写…」提示', () => {
-    // A 批：可用性从 `.enabled(...)` 改成 ActionButton 的 `enabled:` 字段
-    assert.match(REMOTE_GROUP, /enabled: this\.remoteUrl\.trim\(\)\.length > 0/, '空地址必须禁用主按钮（ActionButton.enabled=false）');
+    // A 批：可用性从 `.enabled(...)` 改成 ActionButton 的 `actionEnabled:` 字段
+    assert.match(REMOTE_GROUP, /actionEnabled: this\.remoteUrl\.trim\(\)\.length > 0/, '空地址必须禁用主按钮（ActionButton.actionEnabled=false）');
     assert.match(REMOTE_GROUP, /Text\('先填写电脑上的 DSH 地址'\)/);
     // 提示必须在按钮之后（按钮下方），不是按钮之前
     const buttonIndex = REMOTE_GROUP.indexOf("label: '打开远程控制'");

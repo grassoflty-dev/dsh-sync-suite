@@ -69,7 +69,7 @@ import { RecordDetailView } from '../components/RecordDetailView';
 import { RecordEditorView } from '../components/RecordEditorView';
 import { RecordRow } from '../components/RecordRow';
 import { ActionButton } from '../components/ActionButton';
-import { CalendarPicker } from '../components/CalendarPicker';
+import { MonthCalendar } from '../components/MonthCalendar';
 import { LoadingState } from '../components/state/LoadingState';
 import { EmptyState } from '../components/state/EmptyState';
 import { ErrorState } from '../components/state/ErrorState';
@@ -456,7 +456,7 @@ struct Index {
   }
 
   /**
-   * 日历选中日期：复用 `CalendarPicker.onPick` 回传的 `YYYY-MM-DD` 键（选择器只发合法键），
+   * 日历选中日期：复用 `MonthCalendar.onPick` 回传的 `YYYY-MM-DD` 键（选择器只发合法键），
    * 行为与原 `DatePicker.onDateChange` 完全一致，仅换控件。
    */
   private pickDate(dateKey: string): void {
@@ -1033,14 +1033,14 @@ struct Index {
 
   // ------------------------------------------------------------------ UI
 
-  /** 日期条：‹ 日期/星期 › + 今天（三处点击区都 ≥ 40vp）；展开时内嵌 CalendarPicker（月视图，替代系统三列滚轮 DatePicker）。 */
+  /** 日期条：‹ 日期/星期 › + 今天（三处点击区都 ≥ 40vp）；展开时内嵌 MonthCalendar（月视图，替代系统三列滚轮 DatePicker）。 */
   @Builder
   DateBlock() {
     Column({ space: SPACING.sm }) {
       Row({ space: SPACING.sm }) {
         ActionButton({
           label: '‹',
-          enabled: true,
+          actionEnabled: true,
           disabledReason: '',
           busy: false,
           variant: 'ghost',
@@ -1077,7 +1077,7 @@ struct Index {
 
         ActionButton({
           label: '今天',
-          enabled: true,
+          actionEnabled: true,
           disabledReason: '',
           busy: false,
           variant: 'ghost',
@@ -1089,7 +1089,7 @@ struct Index {
 
         ActionButton({
           label: '›',
-          enabled: true,
+          actionEnabled: true,
           disabledReason: '',
           busy: false,
           variant: 'ghost',
@@ -1103,7 +1103,7 @@ struct Index {
       .alignItems(VerticalAlign.Center)
 
       if (this.showDatePicker) {
-        CalendarPicker({
+        MonthCalendar({
           value: this.selectedDate,
           todayKey: localDateKey(new Date()),
           onPick: (dateKey: string): void => { this.pickDate(dateKey); },
@@ -1122,7 +1122,7 @@ struct Index {
       Column() {
         ActionButton({
           label: '今日待办',
-          enabled: true,
+          actionEnabled: true,
           disabledReason: '',
           busy: false,
           variant: this.showAllPending ? 'ghost' : 'primary',
@@ -1138,7 +1138,7 @@ struct Index {
       Column() {
         ActionButton({
           label: '全部未完成',
-          enabled: true,
+          actionEnabled: true,
           disabledReason: '',
           busy: false,
           variant: this.showAllPending ? 'primary' : 'ghost',
@@ -1204,7 +1204,7 @@ struct Index {
         if (this.hasSummary() && this.summaryPointTotal > 3) {
           ActionButton({
             label: '查看全部',
-            enabled: true,
+            actionEnabled: true,
             disabledReason: '',
             busy: false,
             variant: 'ghost',
@@ -1305,7 +1305,7 @@ struct Index {
             .textAlign(TextAlign.End)
           ActionButton({
             label: '重新生成',
-            enabled: !this.aiBusy,
+            actionEnabled: !this.aiBusy,
             disabledReason: 'AI 汇总正在生成，请稍候',
             busy: this.aiBusy,
             variant: 'ghost',
@@ -1352,7 +1352,7 @@ struct Index {
         if (this.queryText.length > 0) {
           ActionButton({
             label: '清空',
-            enabled: true,
+            actionEnabled: true,
             disabledReason: '',
             busy: false,
             variant: 'ghost',
@@ -1383,7 +1383,7 @@ struct Index {
                 Row() {
                   ActionButton({
                     label: author,
-                    enabled: true,
+                    actionEnabled: true,
                     disabledReason: '',
                     busy: false,
                     variant: this.authorFilter === author ? 'primary' : 'ghost',
@@ -1415,7 +1415,7 @@ struct Index {
   StatusChip(label: string, value: string) {
     ActionButton({
       label: label,
-      enabled: true,
+      actionEnabled: true,
       disabledReason: '',
       busy: false,
       variant: this.statusFilter === value ? 'primary' : 'ghost',
@@ -1444,7 +1444,7 @@ struct Index {
           .textAlign(TextAlign.Start)
         ActionButton({
           label: '清空',
-          enabled: true,
+          actionEnabled: true,
           disabledReason: '',
           busy: false,
           variant: 'ghost',
@@ -1467,7 +1467,7 @@ struct Index {
           .textAlign(TextAlign.Start)
         ActionButton({
           label: '清空筛选',
-          enabled: true,
+          actionEnabled: true,
           disabledReason: '',
           busy: false,
           variant: 'ghost',
@@ -1501,7 +1501,7 @@ struct Index {
         .textAlign(TextAlign.Start)
       ActionButton({
         label: `撤销（${this.undoSeconds()}s）`,
-        enabled: this.undoId.length > 0,
+        actionEnabled: this.undoId.length > 0,
         disabledReason: '没有可撤销的删除',
         busy: false,
         variant: 'secondary',
@@ -1719,7 +1719,7 @@ struct Index {
         Blank()
         ActionButton({
           label: this.aiSelected.length === this.aiCandidates.length ? '全不选' : '全选',
-          enabled: this.aiCandidates.length > 0,
+          actionEnabled: this.aiCandidates.length > 0,
           disabledReason: '没有可勾选的记录',
           busy: false,
           variant: 'ghost',
@@ -1829,7 +1829,7 @@ struct Index {
         Column() {
           ActionButton({
             label: '开始汇总',
-            enabled: this.aiSelected.length > 0,
+            actionEnabled: this.aiSelected.length > 0,
             disabledReason: '请至少选择一条记录',
             busy: this.aiBusy,
             variant: 'primary',
@@ -1870,7 +1870,7 @@ struct Index {
         Blank()
         ActionButton({
           label: '重选',
-          enabled: true,
+          actionEnabled: true,
           disabledReason: '',
           busy: false,
           variant: 'ghost',
@@ -1883,7 +1883,7 @@ struct Index {
         })
         ActionButton({
           label: '关闭',
-          enabled: true,
+          actionEnabled: true,
           disabledReason: '',
           busy: false,
           variant: 'ghost',

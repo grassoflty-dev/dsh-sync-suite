@@ -201,7 +201,7 @@ export struct ErrorState {
         if (this.onRetry !== null) {
           ActionButton({
             label: RETRY_LABEL,
-            enabled: true,
+            actionEnabled: true,
             disabledReason: '',
             busy: false,
             variant: 'primary',
@@ -215,7 +215,7 @@ export struct ErrorState {
         if (this.onOpenSettings !== null) {
           ActionButton({
             label: SETTINGS_LABEL,
-            enabled: true,
+            actionEnabled: true,
             disabledReason: '',
             busy: false,
             variant: 'secondary',

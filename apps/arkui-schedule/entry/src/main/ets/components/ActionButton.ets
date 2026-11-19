@@ -39,7 +39,7 @@ export struct ActionButton {
   /** 按钮文字（忙碌时组件自动加「…」）。 */
   @Prop label: string = '';
   /** 业务上是否可用；`false` 时仍可点，点击给出 `disabledReason`。 */
-  @Prop enabled: boolean = true;
+  @Prop actionEnabled: boolean = true;
   /** 不可用原因（`enabled=false` 时显示；空则回落「当前不可用，请稍后再试」）。 */
   @Prop disabledReason: string = '';
   /** 是否忙碌（标签加「…」并忽略重复点击）。 */
@@ -57,7 +57,7 @@ export struct ActionButton {
 
   /** 解析后的按钮状态：唯一一处同时决定「能不能点 / 多透明 / 说什么」。 */
   private buttonState(): ButtonState {
-    return resolveButton(this.enabled, this.busy, this.disabledReason);
+    return resolveButton(this.actionEnabled, this.busy, this.disabledReason);
   }
 
   /** 显示文案：忙碌时加「…」（已带省略号则不重复叠加）。 */
@@ -70,7 +70,7 @@ export struct ActionButton {
   }
 
   /** 背景色：`primary` 不可用时降 `brand_soft`（视觉上必须明显不同）；忙碌保持本色靠透明度区分。 */
-  private background(): Resource {
+  private buttonBackground(): Resource {
     if (this.variant === VARIANT_SECONDARY) {
       return $r('app.color.control_fill');
     }
@@ -80,7 +80,7 @@ export struct ActionButton {
     if (this.variant === VARIANT_GHOST) {
       return $r('app.color.surface');
     }
-    return this.enabled ? $r('app.color.brand') : $r('app.color.brand_soft');
+    return this.actionEnabled ? $r('app.color.brand') : $r('app.color.brand_soft');
   }
 
   /** 文字色：与背景配对（品牌底/危险底用反白字；`brand_soft` 底用 `brand`）。 */
@@ -94,7 +94,7 @@ export struct ActionButton {
     if (this.variant === VARIANT_GHOST) {
       return $r('app.color.brand');
     }
-    return this.enabled ? $r('app.color.text_inverse') : $r('app.color.brand');
+    return this.actionEnabled ? $r('app.color.text_inverse') : $r('app.color.brand');
   }
 
   /** 点击统一入口：先判状态，再决定「执行 / 忽略 / 说原因」。 */
@@ -126,7 +126,7 @@ export struct ActionButton {
       .height(TOUCH_MIN)
       .fontSize(FONT.body)
       .fontColor(this.fontColor())
-      .backgroundColor(this.background())
+      .backgroundColor(this.buttonBackground())
       .borderRadius(RADIUS.sm)
       .padding({ left: SPACING.lg, right: SPACING.lg })
       .opacity(this.buttonState().opacity)
@@ -141,7 +141,7 @@ export struct ActionButton {
         .height(TOUCH_MIN)
         .fontSize(FONT.body)
         .fontColor(this.fontColor())
-        .backgroundColor(this.background())
+        .backgroundColor(this.buttonBackground())
         .borderRadius(RADIUS.sm)
         .padding({ left: SPACING.lg, right: SPACING.lg })
         .opacity(this.buttonState().opacity)

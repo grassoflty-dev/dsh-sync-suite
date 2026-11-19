@@ -308,7 +308,7 @@ export struct RemoteSection {
         if (this.hasSavedRemoteToken()) {
           ActionButton({
             label: '清除令牌',
-            enabled: true,
+            actionEnabled: true,
             disabledReason: '',
             busy: false,
             variant: 'ghost',
@@ -363,7 +363,7 @@ export struct RemoteSection {
       if (this.reconnectText.length > 0) {
         ActionButton({
           label: this.reconnectText,
-          enabled: true,
+          actionEnabled: true,
           disabledReason: '',
           busy: false,
           variant: 'secondary',
@@ -377,7 +377,7 @@ export struct RemoteSection {
 
       ActionButton({
         label: '打开远程控制',
-        enabled: this.remoteUrl.trim().length > 0,
+        actionEnabled: this.remoteUrl.trim().length > 0,
         disabledReason: '先填写电脑上的 DSH 地址',
         busy: false,
         variant: 'primary',

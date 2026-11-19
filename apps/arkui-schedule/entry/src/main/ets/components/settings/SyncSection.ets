@@ -180,7 +180,7 @@ export struct SyncSection {
         .textAlign(TextAlign.Start)
       ActionButton({
         label: '更多',
-        enabled: true,
+        actionEnabled: true,
         disabledReason: '',
         busy: false,
         variant: 'ghost',
@@ -382,7 +382,7 @@ export struct SyncSection {
         Blank()
         ActionButton({
           label: '?',
-          enabled: true,
+          actionEnabled: true,
           disabledReason: '',
           busy: false,
           variant: 'ghost',
@@ -548,7 +548,7 @@ export struct SyncSection {
         // 「立即同步」（= pull）：未就绪 / 认证不可用 / 忙碌时**仍可点**，点了给具体原因
         ActionButton({
           label: '立即同步',
-          enabled: this.canPull(),
+          actionEnabled: this.canPull(),
           disabledReason: this.pullBlockedReason(),
           busy: this.syncBusy,
           variant: 'secondary',
@@ -561,7 +561,7 @@ export struct SyncSection {
         // 手动推送（A2 第 3 条）：未就绪 / SSH / 无地址 / 分支非法时给出原因
         ActionButton({
           label: '推送',
-          enabled: this.canPush(),
+          actionEnabled: this.canPush(),
           disabledReason: this.pushBlockedText(),
           busy: this.syncBusy,
           variant: 'secondary',

@@ -390,7 +390,7 @@ export struct ExportImportPanel {
     Row({ space: SPACING.sm }) {
       ActionButton({
         label: 'Markdown',
-        enabled: true,
+        actionEnabled: true,
         disabledReason: '',
         busy: false,
         variant: this.format === EXPORT_FORMAT_MARKDOWN ? 'primary' : 'ghost',
@@ -402,7 +402,7 @@ export struct ExportImportPanel {
       })
       ActionButton({
         label: 'JSON',
-        enabled: true,
+        actionEnabled: true,
         disabledReason: '',
         busy: false,
         variant: this.format === EXPORT_FORMAT_JSON ? 'primary' : 'ghost',
@@ -426,7 +426,7 @@ export struct ExportImportPanel {
         (option: QuickRangeOption) => {
           ActionButton({
             label: option.label,
-            enabled: true,
+            actionEnabled: true,
             disabledReason: '',
             busy: false,
             variant: this.isQuickActive(option.kind) ? 'primary' : 'ghost',
@@ -465,7 +465,7 @@ export struct ExportImportPanel {
         if (this.onCopyPath !== null) {
           ActionButton({
             label: '复制路径',
-            enabled: true,
+            actionEnabled: true,
             disabledReason: '',
             busy: false,
             variant: 'ghost',
@@ -581,7 +581,7 @@ export struct ExportImportPanel {
 
       ActionButton({
         label: '导出',
-        enabled: this.exportBlockedReason().length === 0,
+        actionEnabled: this.exportBlockedReason().length === 0,
         disabledReason: this.exportBlockedReason(),
         busy: this.state.busy,
         variant: 'primary',
@@ -617,7 +617,7 @@ export struct ExportImportPanel {
 
       ActionButton({
         label: this.pickLabel(),
-        enabled: !this.state.busy,
+        actionEnabled: !this.state.busy,
         disabledReason: this.busyReason(IMPORT_BUSY_REASON),
         busy: false,
         variant: 'secondary',
@@ -666,7 +666,7 @@ export struct ExportImportPanel {
         Column() {
           ActionButton({
             label: this.confirmLabel(),
-            enabled: canConfirmImport(this.state),
+            actionEnabled: canConfirmImport(this.state),
             disabledReason: this.confirmBlockedReason(),
             busy: this.state.busy,
             variant: 'primary',
@@ -682,7 +682,7 @@ export struct ExportImportPanel {
         Column() {
           ActionButton({
             label: '取消',
-            enabled: !this.state.busy,
+            actionEnabled: !this.state.busy,
             disabledReason: this.busyReason(CANCEL_BUSY_REASON),
             busy: false,
             variant: 'secondary',

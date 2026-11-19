@@ -129,19 +129,19 @@ describe('B2 面板 ExportImportPanel.ets：快捷 chip 的源码级契约', () 
     );
   });
 
-  test('B2-14 QuickRangeRow 用 ForEach(QUICK_RANGE_OPTIONS) 渲染 ActionButton，且 chip 始终 enabled: true', () => {
+  test('B2-14 QuickRangeRow 用 ForEach(QUICK_RANGE_OPTIONS) 渲染 ActionButton，且 chip 始终 actionEnabled: true', () => {
     assert.match(QUICK_ROW, /ForEach\(\s*QUICK_RANGE_OPTIONS/, '契约丢了：QuickRangeRow 没有遍历 QUICK_RANGE_OPTIONS');
     assert.match(QUICK_ROW, /ActionButton\(\{/, '契约丢了：chip 必须用 ActionButton 而不是裸 Text 点击');
     assert.match(QUICK_ROW, /=>\s*option\.kind/, '契约丢了：ForEach 缺少按 option.kind 的 key 生成函数');
-    const enabledTokens = QUICK_ROW.match(/enabled:\s*[^,\n]+/g) ?? [];
-    assert.ok(enabledTokens.length > 0, '契约丢了：chip 没有 enabled 字段');
+    const enabledTokens = QUICK_ROW.match(/actionEnabled:\s*[^,\n]+/g) ?? [];
+    assert.ok(enabledTokens.length > 0, '契约丢了：chip 没有 actionEnabled 字段');
     for (const token of enabledTokens) {
-      // 评审 P2-2：按整个 token 锚定，`enabled: true && !this.state.busy` 这种「看着是 true 其实可禁用」也要红。
-      assert.match(token.trim(), /^enabled:\s*true\s*$/, `契约丢了：chip 必须恒为 enabled: true（实际 ${token}）`);
+      // 评审 P2-2：按整个 token 锚定，`actionEnabled: true && !this.state.busy` 这种「看着是 true 其实可禁用」也要红。
+      assert.match(token.trim(), /^actionEnabled:\s*true\s*$/, `契约丢了：chip 必须恒为 actionEnabled: true（实际 ${token}）`);
     }
     assert.doesNotMatch(
       QUICK_ROW,
-      /enabled:\s*!this\.state\.busy/,
+      /actionEnabled:\s*!this\.state\.busy/,
       '契约丢了：chip 不应随导出忙碌静默禁用（要能在忙碌中改区间）'
     );
   });
@@ -168,12 +168,12 @@ describe('B2 面板 ExportImportPanel.ets：快捷 chip 的源码级契约', () 
     assert.equal(stateCount, 5, '契约丢了：面板不得新增 @State（chip 高亮现算、选择只写本地输入态）');
   });
 
-  test('B2-17 QuickRangeRow 内每个 ActionButton 调用点都带 label / enabled / disabledReason / onTap', () => {
+  test('B2-17 QuickRangeRow 内每个 ActionButton 调用点都带 label / actionEnabled / disabledReason / onTap', () => {
     const buttons = QUICK_ROW.split('ActionButton({').slice(1);
     assert.equal(buttons.length, 1, 'QuickRangeRow 里应恰好有一个 ActionButton 调用点（ForEach 模板）');
     for (const body of buttons) {
       assert.match(body, /label:/, '契约丢了：chip 缺 label');
-      assert.match(body, /enabled:/, '契约丢了：chip 缺 enabled');
+      assert.match(body, /actionEnabled:/, '契约丢了：chip 缺 actionEnabled');
       assert.match(body, /disabledReason:/, '契约丢了：chip 缺 disabledReason');
       assert.match(body, /onTap:/, '契约丢了：chip 缺 onTap');
     }

@@ -116,7 +116,7 @@ const EDIT_VIEW = braceBlockFrom(EDIT, 'RecordEditorView({');
 const RECORD_LITERAL = braceBlockFrom(SAVE_CODE, 'const record: ScheduleRecord = {');
 const PLAN_GUARD = braceBlockFrom(SAVE_CODE, 'if (!plan.ok) {');
 const PICKER_IF = braceBlockFrom(BUILD, 'if (this.dateEditable() && this.showDatePicker) {');
-const PICKER = braceBlockFrom(BUILD, 'CalendarPicker({');
+const PICKER = braceBlockFrom(BUILD, 'MonthCalendar({');
 
 /** 日期表单段：从注释起到下一个字段的 Column 之前，避免别处的提示/按钮混进来。 */
 const dateAt = BUILD.indexOf('// 日期');
@@ -131,14 +131,14 @@ const DATE_ON_CLICK = braceBlockFrom(DATE_SECTION, '.onClick(() => {');
 // ---------------------------------------------------------------------------
 // A. 日期行与日历组件接线
 // ---------------------------------------------------------------------------
-describe('B4 收窄：编辑页日期入口复用 CalendarPicker（仅新建可选）', () => {
-  test('B4-01 只 import 一次 CalendarPicker，且全文只实例化一次', () => {
+describe('B4 收窄：编辑页日期入口复用 MonthCalendar（仅新建可选）', () => {
+  test('B4-01 只 import 一次 MonthCalendar，且全文只实例化一次', () => {
     assert.equal(
-      (EDITOR.match(/import \{ CalendarPicker \} from '\.\/CalendarPicker';/g) ?? []).length,
+      (EDITOR.match(/import \{ MonthCalendar \} from '\.\/MonthCalendar';/g) ?? []).length,
       1,
-      '必须从 ./CalendarPicker 导入且恰好一次'
+      '必须从 ./MonthCalendar 导入且恰好一次'
     );
-    assert.equal((EDITOR.match(/CalendarPicker\(\{/g) ?? []).length, 1, '编辑器只能实例化一个日历组件');
+    assert.equal((EDITOR.match(/MonthCalendar\(\{/g) ?? []).length, 1, '编辑器只能实例化一个日历组件');
   });
 
   test('B4-02 日历实例四个入参齐全（value / todayKey / onPick / onClose）', () => {
@@ -153,7 +153,7 @@ describe('B4 收窄：编辑页日期入口复用 CalendarPicker（仅新建可�
   });
 
   test('B4-03 编辑器里不许出现系统 DatePicker(（禁止两套日期 UI）', () => {
-    assert.equal(EDITOR.includes('DatePicker('), false, '日期只能走 CalendarPicker，不许系统滚轮兜底');
+    assert.equal(EDITOR.includes('DatePicker('), false, '日期只能走 MonthCalendar，不许系统滚轮兜底');
   });
 
   test('B4-04 日期行：标签 / 当前日期 / 收起-选择提示齐全，触控高用 TOUCH_MIN', () => {
@@ -175,7 +175,7 @@ describe('B4 收窄：编辑页日期入口复用 CalendarPicker（仅新建可�
   test('B4-06 日历只在 if (this.dateEditable() && this.showDatePicker) 里渲染，条件恰好一处', () => {
     assert.equal((BUILD.match(/if \(this\.dateEditable\(\) && this\.showDatePicker\) \{/g) ?? []).length, 1);
     assert.equal((BUILD.match(/if \(this\.showDatePicker\) \{/g) ?? []).length, 0, '不许无条件展开日历');
-    assert.ok(PICKER_IF.includes('CalendarPicker({'), '日历必须同时受 dateEditable 与 showDatePicker 控制');
+    assert.ok(PICKER_IF.includes('MonthCalendar({'), '日历必须同时受 dateEditable 与 showDatePicker 控制');
   });
 
   test('B4-07 选中日期写 formDate、收面板、同步脏状态', () => {
@@ -302,7 +302,7 @@ describe('B4 收窄：脏判定、日期只读行与禁止回归', () => {
     assert.match(EDITABLE_HINT, /FONT\.caption/);
     // 点行早退；日历渲染受双重条件门控
     assert.match(DATE_ON_CLICK, /if \(!this\.dateEditable\(\)\) \{\s*return;\s*\}/);
-    assert.match(BUILD, /if \(this\.dateEditable\(\) && this\.showDatePicker\) \{\s*CalendarPicker\(\{/);
+    assert.match(BUILD, /if \(this\.dateEditable\(\) && this\.showDatePicker\) \{\s*MonthCalendar\(\{/);
     // 只读提示：灰字一行，无 danger 色
     assert.match(DATE_SECTION, /if \(!this\.dateEditable\(\)\) \{\s*Text\('创建时选定，不可改'\)/);
     const readonlyTail = DATE_SECTION.slice(DATE_SECTION.indexOf("Text('创建时选定，不可改')"));
@@ -326,10 +326,10 @@ describe('B4 收窄：脏判定、日期只读行与禁止回归', () => {
     }
   });
 
-  test('B4-28 新建记录仍可点行展开日历：唯一 CalendarPicker 实例受双重条件门控', () => {
-    assert.equal((EDITOR.match(/CalendarPicker\(\{/g) ?? []).length, 1);
+  test('B4-28 新建记录仍可点行展开日历：唯一 MonthCalendar 实例受双重条件门控', () => {
+    assert.equal((EDITOR.match(/MonthCalendar\(\{/g) ?? []).length, 1);
     assert.equal((BUILD.match(/if \(this\.dateEditable\(\) && this\.showDatePicker\) \{/g) ?? []).length, 1);
-    assert.ok(PICKER_IF.includes('CalendarPicker({'), '新建时日历必须仍可展开');
+    assert.ok(PICKER_IF.includes('MonthCalendar({'), '新建时日历必须仍可展开');
     assert.match(DATE_EDITABLE, /return this\.recordId\.length === 0;/);
     assert.match(EDITABLE_HINT, /Text\(this\.showDatePicker \? '收起' : '选择'\)/);
   });
