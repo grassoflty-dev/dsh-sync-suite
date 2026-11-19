@@ -23,9 +23,9 @@
 | `mod-d7-month-calendar` | 首页日期条改用月视图日历并与编辑器复用同一组件 | 已交付（`14b181a`；组件名 `MonthCalendar` 由 `cec3c93` 改名） | `14b181a` | `git revert 14b181a` 会同时回滚 D5/B3-P2-1，故**不单独回滚**；如需只回滚 D7，须手工改回 `Index.DateBlock` | 依赖 `mod-arkts-first-build` | `docs/UX-STEPS.md` §4.4 |
 | `mod-b3-saved-row-relax` | 首页保存行对账判据放宽为「同 id 且 ts 不早于标记」 | 已交付（`14b181a`） | `14b181a` | 同 D7：与 D5 同提交，**不单独回滚** | — | `docs/REVIEW-b4-batch.md` §4 |
 | `mod-arkts-first-build` | 首次真实 ArkTS 编译修复（ActionButton 属性重名、`CalendarPicker` 撞内置→`MonthCalendar`、非法 `lineHeight`） | 已交付 `cec3c93` | `cec3c93` | **不可单独回滚**（回滚后无法编译）；如确需回滚，必须同时给出替代修法 | 被所有 app 模块依赖 | `docs/VERIFICATION.md` |
-| `mod-v2-contract` | 单时间线数据契约 v2 草案（两轮：初稿 + 按评审 P0/P1 修订） | 已写完，**待提交** | （Lead 填） | 未提交前回滚 = 删除该文件；提交后 `git revert <hash>`（纯文档） | 被 `mod-v2-migration`/`mod-v2-media-migration`/`mod-v2-dual-write-off` 依赖 | `docs/DATA-CONTRACT-v2.md`（359 行，v2-draft-2）、评审 `docs/REVIEW-v2-contract.md`（276 行，P0 2 / P1 7 / P2 11；draft-2 已全部解决 P0/P1） |
-| `mod-v2-migration` | v1→v2 迁移工具（记录/摘要/删除账本；媒体另立模块） | 已写完（含评审修复），**待提交** | （Lead 填） | `git revert <hash>`；工具只读 v1、不删 v1 | 依赖 `mod-v2-contract`；被 `mod-v2-dual-write-off` 依赖 | `tools/migrate-v1-to-v2.mjs`（804 行）、测试 `apps/arkui-schedule/tools/test/v2Migration.test.mjs`（41 例，30→39→41）；评审 `docs/REVIEW-v2-migration-and-insert-page.md`（P0 1 / P1 4 / P2 3 已全部修复）；revert path 不变 |
-| `mod-insert-page-count` | 修复真机「插入页 2/3 而非 2/2」：新建记录手写板草稿键串号 | 已写完，**待提交**（真机已验证 PASS） | （Lead 填） | `git revert <hash>`（仅 `RecordEditorView.ets` + 1 个测试） | 跨模块触碰 `RecordEditorView.ets`（见 §2） | `docs/VERIFICATION.md` §14 更新段；真机 `device-accept` **15 PASS / 0 FAIL / 6 SKIP（exit 3 = 仅未覆盖）**；回归测试 `apps/arkui-schedule/tools/test/handwritingToolbar.test.mjs` |
+| `mod-v2-contract` | 单时间线数据契约 v2 草案（两轮：初稿 + 按评审 P0/P1 修订） | 已写完，**待提交** | 77df67a | 未提交前回滚 = 删除该文件；提交后 `git revert <hash>`（纯文档） | 被 `mod-v2-migration`/`mod-v2-media-migration`/`mod-v2-dual-write-off` 依赖 | `docs/DATA-CONTRACT-v2.md`（359 行，v2-draft-2）、评审 `docs/REVIEW-v2-contract.md`（276 行，P0 2 / P1 7 / P2 11；draft-2 已全部解决 P0/P1） |
+| `mod-v2-migration` | v1→v2 迁移工具（记录/摘要/删除账本；媒体另立模块） | 已写完（含评审修复），**待提交** | 28b8592 | `git revert <hash>`；工具只读 v1、不删 v1 | 依赖 `mod-v2-contract`；被 `mod-v2-dual-write-off` 依赖 | `tools/migrate-v1-to-v2.mjs`（804 行）、测试 `apps/arkui-schedule/tools/test/v2Migration.test.mjs`（41 例，30→39→41）；评审 `docs/REVIEW-v2-migration-and-insert-page.md`（P0 1 / P1 4 / P2 3 已全部修复）；revert path 不变 |
+| `mod-insert-page-count` | 修复真机「插入页 2/3 而非 2/2」：新建记录手写板草稿键串号 | 已写完，**待提交**（真机已验证 PASS） | 96d4435 | `git revert <hash>`（仅 `RecordEditorView.ets` + 1 个测试） | 跨模块触碰 `RecordEditorView.ets`（见 §2） | `docs/VERIFICATION.md` §14 更新段；真机 `device-accept` **15 PASS / 0 FAIL / 6 SKIP（exit 3 = 仅未覆盖）**；回归测试 `apps/arkui-schedule/tools/test/handwritingToolbar.test.mjs` |
 | `mod-v2-media-migration` | v1 按天 zip → v2 `timeline/<date>/media/` 松散压缩图（尚未开始） | 待开始 | — | — | 依赖 `mod-v2-contract`、`mod-v2-migration` | 待建 |
 | `mod-v2-dual-write-off` | 停止写 v1、保留一个 release 的只读回退（由 `mod-v2-dual-read` 改名而来） | 待开始 | — | — | 依赖 `mod-v2-contract`、`mod-v2-migration` | `docs/DATA-CONTRACT-v2.md` §10/§13 |
 | `mod-settings-lean` | 设置只留仓库地址 + 令牌 | 待开始 | — | `git revert <hash>` | 独立 | 待建 |
@@ -34,7 +34,7 @@
 `mod-v2-dual-read` 已被 `mod-v2-dual-write-off` 取代，见契约 §13。
 
 说明：「提交」列记的是该模块**最后一个**提交；`mod-d5-create-date` 的完整回滚要连同索引里写明的较早提交一起做。
-「（Lead 填）」表示该模块的提交尚未发生、哈希未知，由 Lead 在提交后回填本表，执行子代理不得猜测或编造哈希。
+哈希已由 Lead 于 2026-11-19 提交后回填；执行子代理不得猜测或编造哈希。
 「待建」表示模块尚未开始，文档位置在交付时补上。
 
 ## 2 跨模块触碰登记
@@ -75,11 +75,11 @@
 
 ## 5 批次记录
 
-> 追加式（append-only）：每批交付在表尾加一行，不改写历史行。本表四行均为**待提交**；提交哈希由 Lead 提交后回填，当前一律记「（Lead 填）」。
+> 追加式（append-only）：每批交付在表尾加一行，不改写历史行。本表各行的提交哈希已于 2026-11-19 由 Lead 提交后回填。
 
 | 日期 | 模块 | 结果 | 门闸 | 评审 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| 2026-11-19 | `mod-doc-verify` | 已完成，待提交 | 首次真机全链路：编译 / 签名 / 安装 / 启动 / `device-accept`（详见 `docs/VERIFICATION.md` §14） | — | `docs/VERIFICATION.md` §14（首次真机全链路）；提交：（Lead 填） |
-| 2026-11-19 | `mod-module-doctrine` | 已完成，待提交 | 文档一致性回读（无代码门闸） | — | `docs/MODULES.md` + `docs/ROADMAP.md` + `项目理解.md` §7；提交：（Lead 填） |
-| 2026-11-19 | `mod-v2-contract` | 已完成（draft-2），待提交 | 文档门闸（无代码门闸；359 行） | `docs/REVIEW-v2-contract.md`（276 行，P0 2 / P1 7 / P2 11；draft-2 已全部解决 P0/P1） | `docs/DATA-CONTRACT-v2.md`（359 行，v2-draft-2）；提交：（Lead 填） |
-| 2026-11-19 | `mod-v2-migration` + `mod-insert-page-count` | 已完成（含评审修复），待提交 | 全量 **2348 / 2347 / 0 / 1**；`validate-app` 8/8；`tsc` exit 0；`overlay applied=false`；真机 `device-accept` **15 PASS / 0 FAIL / 6 SKIP（exit 3 = 仅未覆盖）** | `docs/REVIEW-v2-migration-and-insert-page.md`（304 行，P0 1 / P1 4 / P2 3 已全部修复） | 迁移 **41 例**（30→39，含 +9 评审修复）/ 真机 **15P0F6S**；两个模块各自一笔提交，提交：（Lead 填） |
+| 2026-11-19 | `mod-doc-verify` | 已完成，待提交 | 首次真机全链路：编译 / 签名 / 安装 / 启动 / `device-accept`（详见 `docs/VERIFICATION.md` §14） | — | `docs/VERIFICATION.md` §14（首次真机全链路）；提交：5a1cd91 |
+| 2026-11-19 | `mod-module-doctrine` | 已完成，待提交 | 文档一致性回读（无代码门闸） | — | `docs/MODULES.md` + `docs/ROADMAP.md` + `项目理解.md` §7；提交：a95ecaa |
+| 2026-11-19 | `mod-v2-contract` | 已完成（draft-2），待提交 | 文档门闸（无代码门闸；359 行） | `docs/REVIEW-v2-contract.md`（276 行，P0 2 / P1 7 / P2 11；draft-2 已全部解决 P0/P1） | `docs/DATA-CONTRACT-v2.md`（359 行，v2-draft-2）；提交：77df67a |
+| 2026-11-19 | `mod-v2-migration` + `mod-insert-page-count` | 已完成（含评审修复），待提交 | 全量 **2348 / 2347 / 0 / 1**；`validate-app` 8/8；`tsc` exit 0；`overlay applied=false`；真机 `device-accept` **15 PASS / 0 FAIL / 6 SKIP（exit 3 = 仅未覆盖）** | `docs/REVIEW-v2-migration-and-insert-page.md`（304 行，P0 1 / P1 4 / P2 3 已全部修复） | 迁移 **41 例**（30→39，含 +9 评审修复）/ 真机 **15P0F6S**；两个模块各自一笔提交，提交：28b8592 / 96d4435 |
