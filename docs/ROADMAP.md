@@ -489,6 +489,7 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 - 只有 Lead 提交/打标签（`mod-<id>` 可选）；总设计师与执行子代理不 commit、不 push、不改 `.git`。阻塞项标注原因后跳过，不卡住整批。
 - 汇报结构：模块 id / 改动文件 / 门闸原始输出尾部 / 评审结论 / 回滚路径 / `unverified` 项 / 下一模块。回滚后必须再跑一次全绿全量（见 `docs/MODULES.md` §4）。
 - 用户离开期间按模块自治交付，每批一模块一提交；报告含 module id / 文件 / 门闸 / 评审 / 回滚路径 / unverified / 下一模块。
+- `docs/RUNBOOK.md`（`mod-runbook`，纯文档模块）：面向操作员的 v1→v2 迁移（dry-run/apply + 媒体迁移）、显式激活/关闭、按 `module/mod-*` tag 从右往左回滚、五类激活拒绝与 outbox 处置、激活后验收清单、未验证边界；无代码门闸，提交哈希待 Lead 回填。
 
 ### B3 批已提交清单（已随提交 `9fa9277` 入库，保留便于查历史）
 
