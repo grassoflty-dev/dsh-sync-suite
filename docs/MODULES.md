@@ -37,6 +37,8 @@
 | mod-v2-sync-wiring | 接线 v2 同步周期（真实 GitRunner + outbox + 三态 UI）与**显式**激活开关；两库并存需显式确认 | 已写完，已提交 | 634da60 | git revert <hash>（6 新增 + 5 改 + 2 跨模块；v1 数据未删） | 依赖 mod-v2-sync-protocol、mod-v2-dual-write-off；被 mod-export-import-v2 依赖 | model/syncCycle.ts（322）、model/v2Activation.ts（74）、services/{gitRunner,syncStatusStore,v2ActivationService}.ets、测试 syncWiring.test.mjs（44 例） |
 | `mod-export-import-v2` | v2 导出/导入：v2 bundle（manifest + 按天 records/summary/media）+ 五类 typed 拒绝 + 只经原子写入落地；v1 导出/导入不动 | 已写完，已提交 | 18a692e | git revert <hash>（1 新增 + 4 改；v1 未删、media add-only、不写 `devices/**`）；**须先回滚本模块，再回滚 `mod-v2-sync-wiring`，最后 `mod-v2-dual-write-off`**（见 §1.1） | 依赖 `mod-v2-sync-wiring`、`mod-v2-dual-write-off`；无下游 | `docs/REVIEW-export-import-v2.md`（评审后填）；测试 `tools/test/exportImportV2.test.mjs`（445 行，26 例） |
 | `mod-runbook` | 运维手册：v1→v2 迁移、激活/关闭、按 tag 从右往左回滚、七类拒绝与 outbox 处置、激活后验收、未验证边界 | 已提交 | 9904161 | 提交前回滚 = 删除 `docs/RUNBOOK.md`；提交后 `git revert <hash>`（纯文档，另需撤销本文件 §1/§5 与 `docs/ROADMAP.md` 交接节的三处登记） | 无代码依赖（只读既有模块文档）；引用 `mod-v2-*` 模块 | `docs/RUNBOOK.md`（6 节，126 行） |
+| `mod-state-summary` | 项目现状一页纸：今天做什么/默认开关、模块与哈希表、v2 默认行为、保证与不保证、未验证、下一步 | 已写完，待提交 | （Lead 填） | 提交前回滚 = 删除 `docs/STATE-OF-PROJECT.md`；提交后 `git revert <hash>`（纯文档，另需撤销本文件 §1/§5 与 `docs/ROADMAP.md` 交接节的三处登记） | 无代码依赖（只读既有模块文档）；引用 `mod-v2-*` 与 §1/§5 哈希 | `docs/STATE-OF-PROJECT.md`（6 节，一页） |
+| `mod-v2-contract-tests` | 契约缺口测试（假 IO 媒体预检、shipped dedupe、R<D/摘要/maxAttempts/未知 schema/4× 推送拒绝） | 已写完，待提交 | （Lead 填） | `git revert <hash>`（仅新增 1 个测试文件） | 独立；覆盖 mod-v2-export-import-v2 / mod-v2-hardening 的已记录 P2 | `tools/test/contractGaps.test.mjs`（520 行，25 例） |
 
 `mod-v2-dual-read` 已被 `mod-v2-dual-write-off` 取代，见契约 §13。
 
@@ -125,6 +127,9 @@ mod-v2-contract
 | 2026-11-20 | mod-v2-sync-wiring | 已完成，已提交 | 全量 2670/2669/0/1；validate 8/8；tsc 0；真机 BUILD SUCCESSFUL + 安装启动，三态行可见 | （评审后填） | 显式激活；两库并存需确认；不 force-push |
 | 2026-11-20 | `mod-export-import-v2` | 已完成，已提交 | 全量 **2711/2710/0/1（+26）**；validate-app 8/8；tsc 0；真机 `BUILD SUCCESSFUL in 4 s 653 ms`（✓ 产物验收通过） | `docs/REVIEW-export-import-v2.md`（评审后填） | v2 导出/导入 + 五类 typed 拒绝（`E_SCHEMA_UNKNOWN`/`E_BUNDLE_CORRUPT`/`E_MEDIA_MISSING`/`E_V1_TARGET`/`E_TARGET_BUSY`）；dry-run 默认、显式确认、只经原子写入、media add-only、不写 `devices/**`；v1 未删（`exportImport.test.mjs` 69 例未改，两导出测试文件共 110 例）；真机未验（无设备连接） |
 | 2026-11-20 | `mod-runbook` | 已完成并提交 | 文档门闸（无代码门闸；`docs/RUNBOOK.md` 6 节 220 行） | — | 运维手册：迁移 / 激活关闭 / 按 `module/mod-*` tag 右→左回滚 / 七类拒绝与 outbox 处置 / 激活后验收 / 未验证边界；§1 与 ROADMAP 交接节各加一行登记；提交：9904161 |
+| 2026-11-20 | `mod-state-summary` | 已完成，待提交 | 文档门闸（无代码门闸；`docs/STATE-OF-PROJECT.md` 6 节，一页） | — | 一页现状：默认 v1 / v2 显式激活 / 模块与哈希（含 `1b79790`/`1447b0f`/`9904161`/`c41c3c5`）/ 保证与不保证 / unverified / 下一步；§1 与 ROADMAP 交接节各加一行登记；提交：（Lead 填） |
+
+| 2026-11-20 | `mod-v2-contract-tests` | 已完成，待提交 | 全量 2771/2770/0/1；validate 8/8；tsc 0 | `docs/REVIEW-contract-tests.md`（P1 登记已补，P2 记录） | 契约缺口 25 例；发现 typedPushError 细节丢失（P2，未修） |
 
 ## 6. 追加批次（2026-11-20 之后，Lead 提交时登记）
 

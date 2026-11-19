@@ -597,6 +597,8 @@ B 批 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
 - mod-v2-dual-write-off 已写完（翻转条件=schema v2；七处写入经 recordWriter；失败停放 outbox 不回退 v1；真机已 BUILD SUCCESSFUL + 安装启动），待提交；**F1 未闭**：`syncProtocolStore.runCycle` 尚无调用点，故本模块加了第二道激活闸 `timeline.v2WriteEnabled`（默认未激活）——v2 写入已接线但不会自行激活；下一模块 = `mod-v2-sync-wiring`（接线 runCycle + 三态 UI + 激活流程），之后才是 export/import v2；真机「建记录→重启→仍在」与 timeline/ 布局变化仍 unverified
 - mod-v2-sync-wiring 已写完（真实 GitRunner + outbox + 三态 UI + 显式激活；两库并存需专用确认），待提交；真机 BUILD SUCCESSFUL + 安装启动，三态行显示「只读·v2 写入未启用」；仍 unverified：设备上激活对话框/真实 push/outbox/重启持久化/双设备。下一模块 = export/import v2
 - mod-export-import-v2 已写完（v2 导出/导入，五个 typed 拒绝，未删 v1），待提交；真机未验（无设备连接）
+- mod-state-summary 一页现状文档已写完（`docs/STATE-OF-PROJECT.md`，6 节）：默认 v1 / v2 显式激活、交付模块与哈希、保证与不保证、未验证边界、若用户回来的下一步；纯文档、只读既有模块文档，提交哈希由 Lead 回填（`MODULES.md` §1/§5 登记为「（Lead 填）」）
+- mod-v2-contract-tests 已写完（契约缺口 25 例，假 IO 媒体预检 / shipped dedupe / 未测契约规则），待提交；评审 P1 登记已补；发现 typedPushError 丢细节（P2，记录不修）
 
 ### 派活模板要点（别漏）
 
