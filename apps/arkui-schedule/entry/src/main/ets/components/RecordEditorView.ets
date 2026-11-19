@@ -150,6 +150,8 @@ export struct RecordEditorView {
   private lastPersistAt: number = 0;
   /** 尾部落盘定时器句柄（`-1` = 没排）。 */
   private persistTimer: number = -1;
+  /** 新建记录的手写板草稿键：本编辑器实例内稳定，换一张新记录即换新键。 */
+  private writingDraftKeyValue: string = '';
 
   aboutToAppear(): void {
     this.handwritingAvailable = getFeatures().handwriting;
@@ -575,6 +577,24 @@ export struct RecordEditorView {
     this.notifyDirty();
   }
 
+  /**
+   * 手写板草稿键：已有记录 = recordId；新建 = 本编辑器实例内稳定的 new-<时间戳>。
+   *
+   * 必须显式传参：手写板 `resolveDraftKey()` 拿不到路由参数时会回退到固定 'default' 键，
+   * 于是上一张记录（或上一次验收）遗留下来的页数/笔迹会被当成草稿恢复进新记录 ——
+   * 真机「插页后 2/3 而非 2/2」的根因。用实例字段而非 AppStorage：退出手写板再进来
+   * （编辑器实例未换）仍恢复同一份；每新建一张记录字段重新分配，绝不复用旧页数。
+   */
+  private writingDraftKey(): string {
+    if (this.recordId.length > 0) {
+      return this.recordId;
+    }
+    if (this.writingDraftKeyValue.length === 0) {
+      this.writingDraftKeyValue = `new-${Date.now().toString()}`;
+    }
+    return this.writingDraftKeyValue;
+  }
+
   private openWritingBoard(): void {
     const route = handwritingPageRoute();
     if (route.length === 0) {
@@ -583,7 +603,7 @@ export struct RecordEditorView {
     }
     // 记录日期透传给手写板：决定附件打哪一天的 zip（`attachments/<YYYY-MM-DD>.zip`）
     const dateParam: string = this.defaultDate.length === 10 ? this.defaultDate : localDateKey(new Date());
-    const params: Record<string, string> = { 'date': dateParam };
+    const params: Record<string, string> = { 'date': dateParam, 'draftKey': this.writingDraftKey() };
     router.pushUrl({ url: route, params: params }).catch((error: Error) => {
       promptAction.showToast({ message: `打开手写板失败：${describeError(error)}` });
     });

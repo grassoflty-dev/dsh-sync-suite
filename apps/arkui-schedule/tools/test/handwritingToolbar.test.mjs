@@ -989,6 +989,18 @@ describe('完成流程：对象遮罩、占位符与完成反馈', () => {
     const hits = [...editor.matchAll(/手迹 \$\{this\.attachments\.length\} 页/g)];
     assert.ok(hits.length >= 2, `正文行与附件区都应有「手迹 N 页」，实际 ${hits.length} 处`);
   });
+
+  // 回归：新建记录若不传 draftKey，手写板回退到固定 'default' 键，会把上一次验收/上一条记录的
+  // 页数与笔迹恢复进新记录 —— 真机「插页后 2/3 而非 2/2」的根因。编辑器必须显式传每会话唯一键。
+  test('打开手写板必须显式传 draftKey（新建记录不得复用固定 default 草稿）', () => {
+    const editorPath = join(here, '..', '..', 'entry', 'src', 'main', 'ets', 'components', 'RecordEditorView.ets');
+    const editor = readFileSync(editorPath, 'utf8');
+    const open = editor.slice(editor.indexOf('private openWritingBoard()'), editor.indexOf('private save()'));
+    assert.match(open, /'draftKey': this\.writingDraftKey\(\)/, '必须用每会话唯一的 draftKey 进入手写板');
+    const keyFn = editor.slice(editor.indexOf('private writingDraftKey()'), editor.indexOf('private openWritingBoard()'));
+    assert.match(keyFn, /this\.recordId\.length > 0[\s\S]{0,60}return this\.recordId/, '已有记录用 recordId 作键');
+    assert.match(keyFn, /new-\$\{Date\.now\(\)\.toString\(\)\}/, '新建记录用 new-<时间戳> 独立键');
+  });
 });
 
 describe('表格逐格 OCR（B3 步 2）的源码级接线', () => {
