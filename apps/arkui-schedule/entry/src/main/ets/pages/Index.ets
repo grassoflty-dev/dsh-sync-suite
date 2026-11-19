@@ -59,6 +59,7 @@ import type { SavedMarker } from '../model/homeRefresh';
 import { redactSecrets } from '../model/syncError';
 import { describeError, newRecordId, scheduleStore } from '../services/scheduleStore';
 import { openIndexStore } from '../services/openIndexStore';
+import { timelineStore } from '../services/timelineStore';
 import { summaryStore } from '../services/summaryStore';
 import { settingsStore } from '../services/settingsStore';
 import { deviceTimeZone, summarize } from '../services/deepseek';
@@ -345,10 +346,13 @@ struct Index {
     try {
       // summaryStore.ensureReady 内部会先 ensureReady(scheduleStore)，这里两处都调以保持幂等与顺序清晰
       await scheduleStore.ensureReady(getContext(this) as common.UIAbilityContext);
+      // v2 只读服务：只读一次 schema 门槛；坏标记/无标记内部降级为「非 v2」，失败也不打断 v1 启动
+      await timelineStore.ensureReady(getContext(this) as common.UIAbilityContext);
       await summaryStore.ensureReady(getContext(this) as common.UIAbilityContext);
       await openIndexStore.ensureReady(getContext(this) as common.UIAbilityContext);
       // 启动自愈：「全部未完成」读索引，这里先把索引与最近 30 天分片对齐（无漂移则不写盘）
-      openIndexStore.reconcile();
+      // v2 模式下启动不得写 v1 索引：reconcile 会重写 devices/<id>/open.jsonl，仅 v1 默认路径执行
+      if (!timelineStore.useV2()) { openIndexStore.reconcile(); }
       this.ready = true;
       this.reload();
       this.loadSummary();
@@ -369,7 +373,17 @@ struct Index {
       return;
     }
     try {
-      if (this.showAllPending) {
+      // v2 只读分支（默认关闭）：useV2() 同时要求「仓库是 v2」且「开关选了 v2」。
+      // 命中时只读 timelineStore，绝不碰 openIndexStore / reconcile / loadSummary；
+      // records 仍是 tab 级全量，下方 refreshQuery + pruneSelection 的筛选/排序逻辑完全不变。
+      if (timelineStore.useV2()) {
+        this.records = this.showAllPending
+          ? timelineStore.pendingRecords() // 未完成由 closed_at 派生（不是 done，也不是 open.jsonl）
+          : timelineStore.readDay(this.selectedDate); // 已用 visibleRecords 过滤删除账本
+        this.statusText = this.records.length === 0
+          ? (this.showAllPending ? '所有日程都已完成' : '这一天还没有日程')
+          : `共 ${this.records.length} 条${this.showAllPending ? '未完成' : ''}（v2 时间线，只读）`;
+      } else if (this.showAllPending) {
         // 数据源：每台设备读自己的 open.jsonl（N 台设备 = N 个小文件）；某台设备缺索引时
         // 在内存里用它的分片重建，绝不写别人的设备目录（契约：每台设备只写自己的目录）。
         // 墓碑过滤：本机走 readDay 时已过滤；跨设备的内存重建读的是原始分片，这里再兜一层。

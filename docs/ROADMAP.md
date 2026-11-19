@@ -551,7 +551,7 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 | 便捷性（B4 收窄，待提交） | 用户 2026-11-19 拍板「日期只在新建时选一次」：**B4 已提交的改期机制（跨日 live + 旧日清理、更早日期拒绝）全部删除**，新增纯逻辑 `model/recordSaveTs.ts`（`tsForDate` / `resolveSaveTs`），编辑器日期行对已有记录只读并显示「创建时选定，不可改」，仅新建时弹 `CalendarPicker`；已有记录保存只在原日期追加更晚版本 | 工作树未提交（见上「待提交清单（B4 收窄）」，6 路径 = 2 改 + 2 删 + 2 新增）；全量 **2306 例 / 2305 pass / 0 fail / 1 skip**（相对 2309 的 −3 是刻意删除测被移除功能的用例；新基线 `b4SaveTs` 20 + `b4DateUi` 21 + `b4CalendarWiring` 18 + `b4SavedRow` 14 = 73）；`validate-app` **8/8**；`tsc` exit 0；删除 diff 的独立只读评审 `docs/REVIEW-b4-narrow.md` |
 
 **当前基线**：全量 `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"`
-**2459 例 / 2458 pass / 0 fail / 1 skip**（相对 2425 基线的 **+34**：`mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` **31**；相对 2391 基线的 **+30**：`mod-quick-record` 的
+**2485 例 / 2484 pass / 0 fail / 1 skip**（相对 2459 基线的 **+23**：`mod-v2-read-service` 的 `timelineService.test.mjs` **23**；相对 2425 基线的 **+34**：`mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` **31**；相对 2391 基线的 **+30**：`mod-quick-record` 的
 `quickRecord.test.mjs` **16** + `quickRecordUi.test.mjs` **14**；相对 2348 基线的 **+42**：`mod-v2-read-timeline` 的
 `timelineRead.test.mjs` **+42**；再往前相对 2306 基线的 **+40**：`mod-v2-migration` 的
 `v2Migration.test.mjs` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` 的 `handwritingToolbar.test.mjs` **+1**；
@@ -590,6 +590,7 @@ B 批 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
 - mod-settings-lean 已写完（设置主表单=仓库地址+令牌；平台/分支/访问方式控件移除；引擎与 store 未改），待提交
 - mod-quick-record 已写完（首页底部快捷记录，路径 1 5→3，合计 33→31，距 P1 目标 26 差 5 步），待提交；页头未动（indexHeader 未改）
 - mod-v2-media-migration 已写完（v1 zip → timeline/<date>/media/；Node 内建 ZIP；v1 不删不改；需先跑记录迁移），待提交；下一模块 = v2 只读服务接线（model/timeline.ts → services/timelineStore.ets，默认 v1、开关控制）
+- mod-v2-read-service 已写完（timelineStore 只读 + Index 开关分支，默认 v1；无 timeline/ → v1 原路；v2 路径不写、不碰 openIndexStore），待提交；下一模块 = mod-v2-dual-write-off（停写 v1 + 一个 release 只读回退），需先说明「已迁移仓库回退到 v1 会读空」的排序风险
 
 ### 派活模板要点（别漏）
 
