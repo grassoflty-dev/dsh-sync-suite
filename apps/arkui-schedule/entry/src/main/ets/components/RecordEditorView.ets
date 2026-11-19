@@ -5,7 +5,8 @@
  * 原 `attachments` / 原 `ocr_time`，正文或标题变更后置 `ai_processed:false` 等重新整理。
  *
  * 契约：BRIEF §3.2、§3.5、`docs/CONTRACT.md` §3.4：
- * - 保存 = 追加一条记录（新 id 用 `newRecordId()`；已有记录保留 id、ts 用 `nextTsSameDate()`）；
+ * - 保存 = 追加一条记录（新 id 用 `newRecordId()`；ts 由 `planDateMove()` 按所选日期决定，
+ *   同日升级 / 迁到更晚一天 + 旧日期墓碑，迁到更早一天直接拒绝，绝不写半条记录）；
  * - 手写板入口仅在 `getFeatures().handwriting` 为真时显示，回填走 AppStorage：
  *   容器在页面 `onPageShow` 里把 `refreshTick` 加一，组件在 `@Watch` 里读取并**立即清除**三个键。
  *
@@ -18,9 +19,13 @@
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
-import { nextTsSameDate, nowIso, localDateKey } from '../common/date';
+import { nowIso, localDateKey } from '../common/date';
 import { getFeatures } from '../common/features';
 import { handwritingPageRoute } from '../common/platformFeatures';
+import { parseDateKey } from '../model/calendar';
+import { planDateMove } from '../model/recordDateMove';
+import type { DateMovePlan } from '../model/recordDateMove';
+import { softDeleteRecord } from '../model/undoDelete';
 import type { Attachment, ScheduleRecord } from '../model/types';
 import {
   EDITOR_DRAFT_MIN_INTERVAL_MS,
@@ -41,6 +46,7 @@ import { draftStore } from '../services/draftStore';
 import { loadingText, toastMsFor } from '../common/copy';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
 import { ActionButton } from './ActionButton';
+import { CalendarPicker } from './CalendarPicker';
 import { StateView } from './StateView';
 
 const INPUT_HEIGHT: number = 44;
@@ -113,6 +119,10 @@ export struct RecordEditorView {
   @State title: string = '';
   @State body: string = '';
   @State author: string = '';
+  /** 本条记录要保存到的日期 `YYYY-MM-DD`（D5：可改期，决定 ts 落在哪个日片）。 */
+  @State formDate: string = '';
+  /** 是否展开日历选择器（复用 `CalendarPicker`，不另造一套日期 UI）。 */
+  @State showDatePicker: boolean = false;
   @State done: boolean = false;
   @State ocrText: string = '';
   @State attachments: Attachment[] = [];
@@ -130,6 +140,8 @@ export struct RecordEditorView {
   private originalTitle: string = '';
   private originalBody: string = '';
   private originalTs: string = '';
+  /** 编辑前的记录快照：迁到更晚一天时用它造旧日期墓碑，绝不用改过的表单内容。 */
+  private originalRecord: ScheduleRecord | null = null;
   private originalOcrTime: string = '';
   private originalAiStructured: string = '';
   private originalAiProcessed: boolean = false;
@@ -292,6 +304,11 @@ export struct RecordEditorView {
         this.loadRecord();
       } else {
         this.loaded = true;
+        // 新建：日期默认取容器传入的 defaultDate（parseDateKey 严格校验），非法退回本机今天。
+        // 仅当 formDate 仍为空才写：retryLoad() 重跑时不能冲掉用户已经选好的日期。
+        if (this.formDate.length === 0) {
+          this.formDate = parseDateKey(this.defaultDate) === null ? localDateKey(new Date()) : this.defaultDate;
+        }
       }
       // 有草稿（同一条记录）就优先用草稿，覆盖刚读到的记录字段
       this.restoreDraft();
@@ -314,6 +331,8 @@ export struct RecordEditorView {
       this.statusText = '记录不存在：可能已被其他设备改写，请返回列表重试';
       return;
     }
+    // 先留一份「编辑前」快照：迁日期时的旧版本墓碑必须基于它，不能基于改过的表单内容。
+    this.originalRecord = record;
     this.title = record.title;
     this.body = record.body;
     this.author = record.author.length > 0 ? record.author : this.author;
@@ -323,6 +342,8 @@ export struct RecordEditorView {
     this.originalTitle = record.title;
     this.originalBody = record.body;
     this.originalTs = record.ts;
+    // 已有记录：日期 = 原 ts 所属日片（不是 defaultDate，也不是本机今天）。
+    this.formDate = resolveRecordDate(this.originalTs);
     this.originalOcrTime = record.ocr_time === undefined ? '' : record.ocr_time;
     this.originalAiStructured = record.ai_structured === undefined ? '' : record.ai_structured;
     this.originalAiProcessed = record.ai_processed;
@@ -413,12 +434,46 @@ export struct RecordEditorView {
     return this.title.trim() !== this.originalTitle.trim() || this.body !== this.originalBody;
   }
 
-  /** 脏判定：新建时只要有内容就算脏；编辑时看标题/正文是否变过。 */
+  /**
+   * 日期是否改过（D5）。
+   *
+   * 只有已有记录才谈得上「改期」：新建记录没有原日期可比，原 ts 没读到时也不算。
+   * 本方法只服务返回守卫 / 提示，**不参与** `contentChanged()` 的 `ai_processed` 重置判定。
+   */
+  private dateChanged(): boolean {
+    if (this.recordId.length === 0 || this.originalTs.length === 0) {
+      return false;
+    }
+    return this.formDate !== resolveRecordDate(this.originalTs);
+  }
+
+  /** 脏判定：新建时只要有内容就算脏；编辑时看标题/正文/日期是否变过。 */
   private isDirty(): boolean {
     if (this.recordId.length === 0) {
       return this.title.trim().length > 0 || this.body.length > 0 || this.attachments.length > 0;
     }
-    return this.contentChanged();
+    return this.contentChanged() || this.dateChanged();
+  }
+
+  /** 选中日期：写表单、收起面板，并同步脏状态给返回守卫。 */
+  private applyPickedDate(dateKey: string): void {
+    this.formDate = dateKey;
+    this.showDatePicker = false;
+    this.notifyDirty();
+  }
+
+  /**
+   * 改期提示：只允许同日 / 更晚，更早的日期会被 `planDateMove` 拒绝。
+   *
+   * 空串 = 当前选择可用；非空 = 原因 + 下一步，渲染成 danger 文案。
+   * 这样用户当场就知道「选早了没生效」，不会等到点保存才发现（不静默丢选择）。
+   */
+  private dateMoveHint(): string {
+    if (!this.dateChanged()) {
+      return '';
+    }
+    const plan: DateMovePlan = planDateMove(this.originalTs, this.formDate, new Date());
+    return plan.ok ? '' : plan.reason;
   }
 
   private notifyDirty(): void {
@@ -571,11 +626,17 @@ export struct RecordEditorView {
       promptAction.showToast({ message: '存储尚未就绪，请稍后重试' });
       return;
     }
+    // 日期计划先算：非法选择（如迁到更早一天）在这里就被拦下，一条记录都不写。
+    const plan: DateMovePlan = planDateMove(this.originalTs, this.formDate, new Date());
+    if (!plan.ok) {
+      promptAction.showToast({ message: plan.reason, duration: toastMsFor(true) });
+      return;
+    }
     const changed = this.contentChanged();
     const record: ScheduleRecord = {
       id: this.recordId.length > 0 ? this.recordId : newRecordId(),
-      // 编辑旧记录时保留原日期（不迁到当天），时刻保证严格大于原 ts
-      ts: this.recordId.length > 0 ? nextTsSameDate(this.originalTs) : nowIso(),
+      // ts 由 plan 决定：同日升级 / 迁到更晚一天（另打旧日期墓碑）/ 新建落在所选日期
+      ts: plan.ts,
       title: title,
       body: this.body,
       author: this.author.trim().length > 0 ? this.author.trim() : '我',
@@ -609,9 +670,29 @@ export struct RecordEditorView {
       return;
     }
     this.saving = false;
+    // 迁到更晚一天：新版本已落在新日期，旧日期那条必须用「编辑前快照」打墓碑，
+    // 否则同一 id 会在两天各留一份可见记录（旧日幽灵）。快照缺失只提示不猜、不补半个墓碑；
+    // 新版本已经落盘是既成事实：清理失败绝不回滚已成功的保存，也绝不把成功提示藏起来，
+    // 它只改变最终提示文案（cleanupNote 覆盖常规成功语），后续收尾与返回照常执行。
+    let cleanupNote: string = '';
+    if (plan.needsTombstone) {
+      if (this.originalRecord === null) {
+        cleanupNote = `已保存到 ${plan.date}，但旧日期 ${resolveRecordDate(plan.tombstoneTs)} 的旧版本未清理：没读到编辑前的记录快照。请返回列表确认，必要时删除旧日期那条`;
+      } else {
+        const tombstone: ScheduleRecord = softDeleteRecord(this.originalRecord, plan.tombstoneTs);
+        try {
+          scheduleStore.appendRecord(tombstone);
+        } catch (error) {
+          cleanupNote = `已保存到 ${plan.date}，但旧日期 ${resolveRecordDate(plan.tombstoneTs)} 的旧版本未清理：${describeError(error)}。请返回列表确认，必要时删除旧日期那条`;
+        }
+      }
+    }
     this.originalTitle = title;
     this.originalBody = this.body;
     this.originalTs = record.ts;
+    this.originalRecord = record;
+    this.formDate = plan.date;
+    this.showDatePicker = false;
     this.lastDirty = false;
     // 保存成功 = 磁盘记录已是权威内容：清掉本记录的草稿键与「已恢复…」提示
     this.clearPersistTimer();
@@ -624,7 +705,17 @@ export struct RecordEditorView {
     if (dirtyHandler !== null) {
       dirtyHandler(false);
     }
-    promptAction.showToast({ message: changed ? '已保存（待 AI 整理）' : '已保存' });
+    // 只弹一次：清理失败时用 cleanupNote 说明「已保存但旧版本没清掉」；否则走常规成功文案，
+    // 迁到更晚一天时把新日期写进去。两条分支都只弹一条 toast，别再补第二条。
+    if (cleanupNote.length > 0) {
+      promptAction.showToast({ message: cleanupNote, duration: toastMsFor(true) });
+    } else {
+      let savedMessage: string = changed ? '已保存（待 AI 整理）' : '已保存';
+      if (plan.kind === 'later') {
+        savedMessage = changed ? `已保存，日期改为 ${plan.date}（待 AI 整理）` : `已保存，日期改为 ${plan.date}`;
+      }
+      promptAction.showToast({ message: savedMessage });
+    }
     // 一次性「保存返回」标记：必须在 onSaved（它会 router.back() 触发首页 onPageShow）之前写好，
     // 首页读到就只做局部刷新（reload + 单行对账），不再跑全量对账 / 重读汇总 / 推进 paneTick。
     AppStorage.setOrCreate<string>(SAVED_MARKER_KEY, encodeSavedMarker(this.savedMarkerOf(record)));
@@ -634,7 +725,7 @@ export struct RecordEditorView {
   /**
    * 构造一次性「保存返回」标记。
    *
-   * `date` 必须按 `ts` 算（`resolveRecordDate(record.ts)`）：编辑旧记录会保留原日期，
+   * `date` 必须按 `ts` 算（`resolveRecordDate(record.ts)`）：改期保存后 ts 已是新日期，
    * 绝不能拿 `defaultDate` / 首页 `selectedDate` 猜——跨日期编辑时两者不一致，
    * 猜了会让首页把「别的日期的保存」误判成当前列表该出现的记录。
    */
@@ -779,6 +870,57 @@ export struct RecordEditorView {
                 this.notifyDirty();
                 this.schedulePersist();
               })
+            Divider()
+              .strokeWidth(DIVIDER)
+              .color($r('app.color.divider'))
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+
+          // 日期（D5）：点整行展开日历，选项直接写进 formDate / ts；不另造第二套日期 UI
+          Column({ space: SPACING.xs }) {
+            Row({ space: SPACING.sm }) {
+              Text('日期')
+                .fontSize(FONT.caption)
+                .lineHeight(LINE_HEIGHT.caption)
+                .fontColor($r('app.color.text_secondary'))
+              Text(this.formDate)
+                .fontSize(FONT.body)
+                .lineHeight(LINE_HEIGHT.body)
+                .fontColor($r('app.color.text_primary'))
+              Blank()
+              Text(this.showDatePicker ? '收起' : '选择')
+                .fontSize(FONT.caption)
+                .lineHeight(LINE_HEIGHT.caption)
+                .fontColor($r('app.color.brand'))
+            }
+            .width('100%')
+            .height(TOUCH_MIN)
+            .alignItems(VerticalAlign.Center)
+            .onClick(() => {
+              this.showDatePicker = !this.showDatePicker;
+            })
+
+            if (this.dateMoveHint().length > 0) {
+              // 迁到更早一天会被拒绝：当场说清原因，不静默丢用户的选择
+              Text(this.dateMoveHint())
+                .fontSize(FONT.caption)
+                .lineHeight(LINE_HEIGHT.caption)
+                .fontColor($r('app.color.danger'))
+                .width('100%')
+                .textAlign(TextAlign.Start)
+            }
+
+            if (this.showDatePicker) {
+              CalendarPicker({
+                value: this.formDate,
+                todayKey: localDateKey(new Date()),
+                onPick: (dateKey: string): void => this.applyPickedDate(dateKey),
+                onClose: (): void => {
+                  this.showDatePicker = false;
+                }
+              })
+            }
             Divider()
               .strokeWidth(DIVIDER)
               .color($r('app.color.divider'))

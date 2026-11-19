@@ -474,6 +474,128 @@
 
 ---
 
+### 4.4 本轮落地（B4 批：D5 新建/编辑可指定日期 + D7 首页日历接线 + B3 评审 P2-1；HEAD `9fa9277` 之上的未提交工作树）
+
+> 口径仍按 §1（v1），下表每个数字都能按算式逐项复核；**全部是源码复算，不是真机实测**（见 §5.2）。
+> 本轮**只做了**三件事：**D5**（记录可指定日期，含改期）、**D7**（首页日期条换成 `CalendarPicker`）、
+> **B3 评审 P2-1**（保存行对账判据放宽）。§3 里其余可砍点（D2-P2 真接管、首页底部「快捷记录」、
+> 路径 1 的 bootstrap wait）**都没做**。
+>
+> 先说结论：**这三项都不减少五条基准路径的 tap/scroll/wait 合计**——D5 修的是「记非今天」这条
+> **原本不可达**的变体，D7 只是换控件（tap 与 scroll 之间换算，净步数不变），P2-1 只是少一次
+> 误报 toast。所以 §4.3 的合计 **33 步原样不变**，与 §4「P1 目标 26」的缺口仍是 **7 步**，
+> 且缺口全部属于未做项。
+
+#### D5 的影响（只算 tap / scroll / wait）
+
+| 变体 | 改前 | 改后（B4） | 差 | 逐项算式 |
+| --- | --- | --- | --- | --- |
+| 路径 1（记**今天**，基准路径） | **5**（tap 3 + wait 2） | **5**（tap 3 + wait 2） | **0** | 新建时日期默认就是今天，`tsForDate(今天, now)` 与旧实现的 `nowIso(now)` **逐字节相同**（有单测钉死），不点日期行就不多一次 tap。 |
+| 1′ 记**非今天**（新记录落到别的日期） | **不可达** | **7**（tap 5 + wait 2） | 从「做不到」到「做得到」 | tap：`新建` 1 + `日期` 行 1 + 日期格 1（同月；跨月再 +1~2 次 `‹` 翻月，`est`）+ 正文框 1 + `保存日程` 1 = 5；wait：冷启动首屏 1 + 编辑页 bootstrap 1 = 2。改前：`ts` 恒为 `nowIso()`，在首页切到别的日期点「新建」仍写今天（`defaultDate` 只当副标题），事后也没有改期入口 → 只能删掉重记（≥3 步返工，且删除本身还要 1 tap）。 |
+| 1″ 编辑已有记录**改日期（往后）** | **不可达** | 进入编辑页后 **tap 3 + wait 0** | 从「做不到」到「做得到」 | tap：`日期` 行 1 + 日期格 1 + `保存修改` 1；wait 0（保存仍是同步写 + 同步派生索引，见 §4.3）。跨月翻月每次 1 tap（`est`）。 |
+| 1‴ 编辑已有记录**改到更早一天** | **不可达** | **明确拒绝**（不写盘） | — | 日期行下方立即显示 danger 原因；点保存只弹同一条原因后 `return`，一条记录都不写。为什么不硬做见下「ts / 分片 / 合并语义」。 |
+
+#### D7 的影响（首页日期条：三列滚轮 → 月视图）
+
+| 场景 | 改前（系统 `DatePicker`） | 改后（`CalendarPicker`） | 差 |
+| --- | --- | --- | --- |
+| 同月改期 | tap 1（展开）+ scroll 1（日列，`est`） | tap 2（展开 + 日期格）+ scroll 0 | tap +1 / scroll −1 |
+| 跨月改期（后退 2 个月） | tap 1（展开）+ scroll 3（月列 2 + 日列 1，`est`） | tap 4（展开 + `‹`×2 + 日期格）+ scroll 0 | tap +3 / scroll −3 |
+
+按 §1 的口径，tap 与 scroll **分别计数、不互相折算**，所以上表**不进「合计」**：五条基准路径合计
+仍是 **33**。D7 真正买到的是「一眼看整月、目标日一次点中、跨月路径可解释」，**不是**步数；
+§3 D7 里「省 1 tap + 2–3 scroll」的旧估按本表口径**不成立**，此处更正为「tap↔scroll 换算」。
+另外 §3 D7 的「死代码」判断已失效：`CalendarPicker` 现在有 **2 处**真实接线
+（`pages/Index.ets:1106` 首页日期条、`components/RecordEditorView.ets:915` 记录编辑器），两者复用同一组件。
+
+#### 4.4.1 D5 的 `ts` / 分片 / 合并语义（可逐步复核）
+
+1. **`ts` 形状不变**：`tsForDate(dateKey, now)`（`model/recordDateMove.ts:77`）先取 `nowIso(now)`
+   （`YYYY-MM-DDTHH:MM:SS±HH:MM`，本地偏移），再把前 10 个字符换成 `dateKey`。所以它**不引入第二种时间
+   格式**，也不会写出 UTC `Z`；目标日是今天时与 `nowIso(now)` 逐字节相同。日期键先过 `^\d{4}-\d{2}-\d{2}$`
+   + 本地日历回读（`new Date(y,m-1,d)` 三字段回读，不用 UTC 解析），`2026-02-30` / `2026-13-01` 一律返回空串。
+2. **同日更新沿用 `nextTsSameDate()`**（`planDateMove` 的 `same` 分支）：原日期不变、时刻取
+   `max(now, 原时刻+1ms)`，23:59:59.999 的钳位行为原样继承（旧测试 `date.test.mjs` 未改动）。
+3. **跨天（往后）用两个追加事件表达**：
+   - (a) 目标日一条**存活版本**：`ts = tsForDate(目标日, now)`，写进 `schedules/<目标日>.jsonl`；
+   - (b) 旧日片一条 `deleted:true` **墓碑**：`ts = nextTsSameDate(原 ts, now)`，由
+     `softDeleteRecord(编辑前快照, tombstoneTs)` 构造，写进 `schedules/<原日>.jsonl`。
+   - **顺序固定为 live 先、墓碑后**（`RecordEditorView.ets:664-689`）：live 先落盘，墓碑写失败也不会丢数据；
+     反过来「先墓碑后 live」在中断时会**整条消失**，所以不做。
+   - 为什么没有旧日幽灵：`readDay(旧日)` 读单文件 → `foldById` 取同 id 较晚 ts（墓碑）→
+     `withoutDeleted()` 过滤 → 旧日列表/导出看不到它；`readAll()` / `findByIdAny()` 跨日折叠后
+     **live 的 ts 更大** → 取 live；`openIndexStore.applyRecord(墓碑)` 因墓碑 ts 更早，
+     `applyRecordToIndex()` 直接返回旧条目（`compareTs < 0`）→ 索引最终停在新日片。
+     三者相互印证，缺一条就会留下幽灵或让记录消失。
+   - `nextTsSameDate` 在 23:59:59.999 时钳到当天上限 → 墓碑 ts **等于**原 ts；同文件内靠「后写覆盖」
+     胜出（`foldById` 稳定排序），跨日比较仍是 live 更大 → 语义不受影响（有单测钉这个边界）。
+4. **往早改为什么必须拒绝**：`ts` 同时是分片键与版本序。目标日更早 ⇒ 新版本 ts 必然早于旧版本，
+   `foldById` / `applyRecordToIndex` 会继续选中旧版本，这次编辑被**静默丢弃**（旧版本还会盖掉新写入）。
+   因此 `planDateMove` 返回 `ok:false, kind:'earlier'` + 原因，`save()` 在**任何写操作之前** `return`
+   （`RecordEditorView.ets:630-634`），UI 同时把原因常显在日期行下方（`:904-912`），不静默丢选择。
+   要支持往早改只能换身份（旧 id 打墓碑 + 新 id 新建，或在格式里加独立日期字段），**需决策**，本批不做。
+5. **契约零改动**：`docs/DATA-CONTRACT.md` 一个字节没改（`git status` 里没有 `docs/` 之外的契约文件变动）；
+   新增的 `deleted:true` 只是既有软删除字段的复用（`model/undoDelete.ts`），同步/导出/合并格式不变。
+6. **失败路径逐条**（`docs/FAILURE-MODES.md` 纪律：不静默、不写半条）：
+   - `!plan.ok`（往早改 / 日期非法 / 原 ts 不可解析 / 偏移异常）→ toast 原因 + `return`，**零写入**；
+   - live 写入抛错 → 原有 `保存失败：…` toast + `return`，没有墓碑、没有标记，记录仍是旧版本；
+   - 编辑前快照缺失（`originalRecord === null`，理论不可达）→ live 已落盘，改弹
+     「已保存但旧日期旧版本未清理…请返回列表确认」并**照常**收尾（不清草稿不算成功是错的）；
+   - 墓碑写入抛错 → 同一句兜底文案（带 `describeError`），**不回滚**已成功的 live、不吞掉「已保存」这件事；
+   - 任何路径都只弹 **1 条** toast（`cleanupNote` 覆盖常规成功语，`:710-718`），不再出现 B3 评审提过的双 toast。
+   - 一次性 `SAVED_MARKER_KEY` 与 `onSaved()` 始终在墓碑块**之后**且无条件执行（`:720-722`），
+     首页因此照常走「局部刷新 + 单行对账」；标记里的 `date` 按 `record.ts` 算，改期后自然是新日期。
+
+#### 4.4.2 实现落点（行号以本轮工作树为准，可 `read` 复核）
+
+- **D5 纯逻辑**：`model/recordDateMove.ts:77`（`tsForDate`）、`:90`（`planDateMove`，六分支顺序：
+  非法目标 → 新记录 → 原 ts 不可解析 → 同日 → 往后 → 往早）。
+- **D5 编辑器**：`components/RecordEditorView.ets:123`（`@State formDate`）、`:144`（`originalRecord` 快照）、
+  `:310`（新建默认 `defaultDate` 否则今天）、`:346`（已有记录取 `resolveRecordDate(originalTs)`）、
+  `:443`（`dateChanged` 进 `isDirty`）、`:459`（`applyPickedDate`）、`:471`（`dateMoveHint`）、
+  `:630`（`planDateMove`）、`:639`（`ts: plan.ts`）、`:677-689`（墓碑块）、`:710-718`（单条 toast 收口）、
+  `:722`（`onSaved`）、`:880-929`（日期行 + 内嵌 `CalendarPicker`，`:915`）。
+- **D7 首页**：`pages/Index.ets:72`（import）、`:462`（`pickDate`，五个动作与原 `onDateChange` 等价）、
+  `:1036`（`DateBlock` 注释）、`:1106`（`CalendarPicker`）；系统 `DatePicker(` 已从首页移除。
+- **B3 P2-1**：`model/homeRefresh.ts:128`（`containsRecordVersion` 改成「同 id 且 ts 不早于标记 ts」，
+  可解析时按时刻比较、任一侧不可解析退回精确字符串相等）；调用点 `pages/Index.ets:317` 注释同步，
+  方法体一字未改，`b3Batch.test.mjs` 的 B3-05/B3-09 **未改一行**即通过。
+- **新增测试**（4 个文件 / **76 例**）：`b4DateMove.test.mjs`（19）、`b4DateUi.test.mjs`（25）、
+  `b4SavedRow.test.mjs`（14）、`b4CalendarWiring.test.mjs`（18）。全量 **2309 例 / 2308 pass / 0 fail / 1 skip**
+  （基线 2233/2232/0/1，失败 0、skip 不增）；`validate-app` **8/8**；`tsc` exit 0。
+
+#### 4.4.3 已知限制（本批不修，登记在此）
+
+- **往早改不支持**（见 4.4.1 第 4 条）——**需决策**：
+  若产品上必须支持，可选「旧 id 墓碑 + 新 id 新建」（内容/附件/OCR/AI 结果带过去，只有 id 变，
+  代价是详情页旧 id 会变「记录不存在」）或加独立日期字段（改格式，需同步/导出/合并一起动）。
+- **草稿不存日期**：`editor.draft.*` 仍只有标题/正文，进程被杀恢复后日期回到 `defaultDate`/原记录日期
+  （不会写出错误日期，只是要重选一次）。
+- **附件归档字段不跟着改期**：`attachments[].archive` 仍指向**原日期的** `attachments/<旧日>.zip`
+  （打包发生在手写板保存时），所以图仍能取到；但新日期那天的 zip 里不会有这几页，跨设备后
+  「按天 zip」与记录日期不再一一对应（`unverified`：未在真机/多设备上验过）。
+- **旧日期汇总可能过期**：`summaries/<旧日>.json` 是 AI 生成的快照，改期后不会自动重算（本批不动 AI 链路）。
+- **`tsForDate` 的偏移取「现在」的偏移**：跨 DST 的目标日期会带上当前偏移（中国无 DST，影响面小）；
+  `planDateMove` 对「往后」分支做了 fail-closed 校验（新 ts 不严格晚于原 ts / 墓碑时直接拒绝），
+  但「往早」与同日分支不依赖跨日比较。
+- **年份 1–99 的日期键被拒**：`new Date(y,m-1,d)` 把 0–99 映射到 1900+，回读不一致 → 判非法。
+  日历选择器的实际可点范围远大于此，属边界取舍（评审 P2-1）。同一来源还有一个更窄的口子：
+  `monthGrid(9999,12,…)` 的补位格会出现 `10000-01-07`（11 位），首页 `pickDate` 的 `length !== 10`
+  守卫会**静默忽略**这次点击（可点但没反应）——只有翻到 9999 年 12 月才会遇到，登记不修（`unverified`：真机未翻到该边界）。
+- **钳位时墓碑 ts 与原 ts 相等**（评审 P2-3）：原记录是 23:59:59.999 时 `nextTsSameDate` 钳到当天上限，
+  墓碑 ts 等于原 ts，旧日去重依赖「后写覆盖 + 稳定排序」。同文件内成立（有单测），但 `undoDelete.ts`
+  注释里「必须严格大于」的措辞对这一条不成立，属措辞与实现的偏差，**不改语义**。
+- **一次性标记无法表达「旧日清理失败」**（评审 P2-5）：`cleanupNote` 只是编辑器里的一次 toast；首页读标记后
+  仍按「保存成功」局部刷新，旧日视图不会再提示残留。记录本身没丢（live 已落盘），故不阻塞。
+- **静态文本断言的表达力上限**（评审 P2-6）：4 个新测试都是「读 `.ets` 文本 + 纯逻辑实跑」，能挡住
+  「顺序写反 / 早退位置错 / 双 toast / 标记被条件包住」这类回归，但挡不住 ArkTS 编译错误与真机行为；
+  伪代码级的缩进/文案改动会让断言变脆，改 UI 时要同步改断言并注明原因。
+- **真机项一律 `unverified`**：本机无 DevEco/SDK、`hdc list targets` 为空。日期行/日历面板的排版、
+  软键盘遮挡、「保存后返回首页立刻看到新日期的那条」的观感、`CalendarPicker` 翻月的点击热区，
+  都只有源码级与静态断言级证据。**设备没连上不许报“已验证”。**
+
+---
+
 ## 5. 本表的可信度边界
 
 ### 5.1 可复算（读源码数的，任何人可用 grep/node 复核）
@@ -490,7 +612,7 @@
   `docs/CONFIG-UX.md`（设计稿）里出现，未落地。
 - **D2 的「完全没有入口」**（**改前基准**；本轮已加跳转出口，见 §4.1）：`ChatDetail.ets` 全文无
   `TextInput` / `TextArea` / `Button('发送')`，只有 `:317-349` 的 `build()`。
-- **D7 的「死代码」**：`node` 全量扫过 `.ets/.ts/.mjs/.md/.json`，`CalendarPicker` 除自身定义、
+- **D7 的「死代码」**（**B4 批已失效**，见 §4.4：首页与记录编辑器两处真实接线）：`node` 全量扫过 `.ets/.ts/.mjs/.md/.json`，`CalendarPicker` 除自身定义、
   `model/calendar.ts` 注释、`docs/FEATURE-BACKLOG.md:20` 与构建缓存外无引用。
 - **D3 的折行算术**：`904vp > 673.7vp` 由 `toolbarMetrics.ts:114` + `Handwriting.ets:407-413` 的公式
   与常量代入得出，可复算。

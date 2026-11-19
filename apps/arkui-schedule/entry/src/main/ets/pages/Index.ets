@@ -69,6 +69,7 @@ import { RecordDetailView } from '../components/RecordDetailView';
 import { RecordEditorView } from '../components/RecordEditorView';
 import { RecordRow } from '../components/RecordRow';
 import { ActionButton } from '../components/ActionButton';
+import { CalendarPicker } from '../components/CalendarPicker';
 import { LoadingState } from '../components/state/LoadingState';
 import { EmptyState } from '../components/state/EmptyState';
 import { ErrorState } from '../components/state/ErrorState';
@@ -313,7 +314,7 @@ struct Index {
    * 三种情况直接返回（不需要额外开销，也不打扰用户）：
    * - 「全部未完成」里 `saved.done=true`：已完成的记录本来就不在该 tab；
    * - 非「全部未完成」且保存的是别的日期：当前列表本就不该出现它；
-   * - 列表里已有同 id 同 ts 的新版本：数据已是刚保存的最新版。
+   * - 列表里已有同 id 且 `ts` 不早于标记 ts 的新版本：数据已是刚保存的最新版。
    * 兜底（读不到刚保存的版本）才全量重建，并明确 toast 告知用户。
    */
   private reconcileSavedRow(saved: SavedMarker): void {
@@ -450,6 +451,22 @@ struct Index {
     this.selectedDate = localDateKey(new Date());
     this.showAllPending = false;
     this.showDatePicker = false;
+    this.reload();
+    this.loadSummary();
+  }
+
+  /**
+   * 日历选中日期：复用 `CalendarPicker.onPick` 回传的 `YYYY-MM-DD` 键（选择器只发合法键），
+   * 行为与原 `DatePicker.onDateChange` 完全一致，仅换控件。
+   */
+  private pickDate(dateKey: string): void {
+    // 空串/非法宽度不应来自选择器；防御性早退且不打扰用户（合法键由选择器保证，无需提示）。
+    if (dateKey.length !== 10) {
+      return;
+    }
+    this.selectedDate = dateKey;
+    this.showDatePicker = false;
+    this.showAllPending = false;
     this.reload();
     this.loadSummary();
   }
@@ -1016,7 +1033,7 @@ struct Index {
 
   // ------------------------------------------------------------------ UI
 
-  /** 日期条：‹ 日期/星期 › + 今天（三处点击区都 ≥ 40vp）；展开时内嵌 DatePicker。 */
+  /** 日期条：‹ 日期/星期 › + 今天（三处点击区都 ≥ 40vp）；展开时内嵌 CalendarPicker（月视图，替代系统三列滚轮 DatePicker）。 */
   @Builder
   DateBlock() {
     Column({ space: SPACING.sm }) {
@@ -1086,18 +1103,12 @@ struct Index {
       .alignItems(VerticalAlign.Center)
 
       if (this.showDatePicker) {
-        DatePicker({
-          start: new Date(2020, 0, 1),
-          end: new Date(2035, 11, 31),
-          selected: dateFromKey(this.selectedDate)
+        CalendarPicker({
+          value: this.selectedDate,
+          todayKey: localDateKey(new Date()),
+          onPick: (dateKey: string): void => { this.pickDate(dateKey); },
+          onClose: (): void => { this.showDatePicker = false; }
         })
-          .onDateChange((value: Date) => {
-            this.selectedDate = localDateKey(value);
-            this.showDatePicker = false;
-            this.showAllPending = false;
-            this.reload();
-            this.loadSummary();
-          })
       }
     }
     .width('100%')

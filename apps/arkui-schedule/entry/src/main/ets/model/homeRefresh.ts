@@ -105,14 +105,39 @@ export function decodeSavedMarker(raw: string | null | undefined): SavedMarker |
 }
 
 /**
- * `records` 里是否已有「同 id 且同 ts」的记录版本（`ts` 精确匹配）。
+ * `records` 里是否已有「同 id，且 ts 不早于标记 ts」的记录版本。
  *
- * `records` 为 `null` / `undefined` 按空数组处理（返回 `false`）。
+ * 判定规则：
+ * - `records` 为 `null` / `undefined` 按空数组处理（返回 `false`）；数组里的 `null` /
+ *   `undefined` 坏项跳过，任何输入都不抛。
+ * - 同 id 时，若 `Date.parse(record.ts)` 与 `Date.parse(ts)` 都解析成功（非 `NaN`），
+ *   按**时刻**比较：`record.ts` 不早于标记（`recordMillis >= markerMillis`）才算命中。
+ * - 任一侧无法解析时，退回**精确字符串相等**（`record.ts === ts`），与旧行为逐字一致
+ *   （保留 `'t1'` / `'t2'` 这类非 ISO 占位串的既有测试语义）。
+ *
+ * 为什么放宽成「不早于」：`ts` 是同一 id 的版本序——`foldById`（`model/jsonl.ts`）按 ts
+ * 升序稳定排序、后写覆盖，同 id 永远取较晚的那一版。因此对同一个 id，列表里出现**更晚**
+ * 的 ts 说明它已经是包含这次保存的最新版（例如 `Detail → Edit → 保存 → 返回 Detail` 期间
+ * 「AI 结构化」又写了同 id 的新 ts），首页列表本就该含有它，命中即可早退、不必兜底重载；
+ * 反过来列表里只有**更早**的 ts，说明展示的还是旧版，必须返回 `false` 让调用方走兜底
+ * `reconcile()`，否则用户会看到过期内容。
+ *
+ * 注意：调用方 `pages/Index.ets` 的 `reconcileSavedRow()` 一字未改——本函数保持导出名与
+ * 签名 `(records, id, ts) => boolean` 不变，早退③照旧调用它；放宽只发生在本判定内部。
  */
 export function containsRecordVersion(records: ScheduleRecord[], id: string, ts: string): boolean {
   const list: ScheduleRecord[] = records === null || records === undefined ? [] : records;
+  const markerMillis: number = Date.parse(ts);
   for (const record of list) {
-    if (record !== null && record !== undefined && record.id === id && record.ts === ts) {
+    if (record === null || record === undefined || record.id !== id) {
+      continue;
+    }
+    const recordMillis: number = Date.parse(record.ts);
+    if (!Number.isNaN(markerMillis) && !Number.isNaN(recordMillis)) {
+      if (recordMillis >= markerMillis) {
+        return true;
+      }
+    } else if (record.ts === ts) {
       return true;
     }
   }
