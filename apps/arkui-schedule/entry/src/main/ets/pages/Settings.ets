@@ -27,19 +27,18 @@
  *    再归一，`settingsStore.save` 落盘（含方式与各字段）后才 `router.pushUrl` 到内嵌页
  *    （`routeToRemote()` + params.url）。地址里的 token 只存本机，不进同步载荷。
  *
- * 同步组（A1/A2 之后；数据边界改动后）：
- * - **主表单只留三个控件**：仓库地址 / 访问 token / **分支**（设备编号由仓库自动分配，
- *   用户在「高级 ▸」里能看到只读一行「本机：device-2（自动分配）」）；
+ * 同步组（mod-settings-lean：设置只留仓库地址 + 令牌）：
+ * - **主表单只留两个控件**：仓库地址 / 访问令牌，地址下固定一行
+ *   「平台按地址自动识别 · 分支固定 main」；平台随地址自动推断、分支恒为 main，
+ *   没有平台/分支选择控件（设备编号仍由仓库自动分配，「高级 ▸」里能看到只读一行
+ *   「本机：device-2（自动分配）」）；
  * - Git 用户名 / 设备标识 / 作者名收进「高级 ▸」折叠区（默认收起）：它们都有安全默认值
  *   （用户名按仓库地址推断、编号自动分配、作者名默认「我」），不该成为同步的前置门槛；
- * - 「立即同步」（= pull）与「推送」（A2 第 3 条）是组内两个主按钮，
- *   查看状态 / 重试上次 / 测试连接 / **托管平台（GitHub、Gitee、GitLab、自建）** /
- *   认证方式在组头「更多」里；
- * - 平台按仓库地址自动推断（手动选过则以用户为准），保存后给一行「已按地址推断平台为 X」；
- * - 分支默认 main、可配，非法值给可读红字；首次推送时远端没有该分支会自动创建；
+ * - 「立即同步」（= pull）与「推送」是组内两个主按钮，查看状态 / 重试上次 / 测试连接
+ *   在组头「更多」里；
  * - 同步状态（分支 / 领先 / 落后 / 冲突 / 本地改动）与最近一次同步时间+成败都在本页展示；
- * - **SSH 在本版本不可用**（内置内核只有 HTTP(S) 传输），选中时直接写「当前版本仅支持 HTTPS」
- *   并禁用同步按钮，不做「看起来支持」的假入口。
+ * - **SSH 在本版本不可用**（内置内核只有 HTTP(S) 传输）：已保存的是 SSH 时主表单给一行
+ *   只读警告，同步按钮照旧拦住，不提供切换控件、不做「看起来支持」的假入口。
  *
  * 「高级」折叠区三个字段的**人话说明**（`FieldNote`）：
  * - Git 用户名 = `HTTPS 认证用；GitHub 可留空（自动 x-access-token），Gitee 自动取仓库 owner`；
@@ -113,7 +112,6 @@ import type {
 } from '../model/remoteAccess';
 import {
   AUTH_HTTPS,
-  AUTH_SSH,
   FIELD_AI_BASE_URL,
   FIELD_AI_MODEL,
   FIELD_AUTHOR,
@@ -134,10 +132,8 @@ import {
   canRetrySync,
   classifySyncError,
   describePushReadiness,
-  normalizeBranchName,
   normalizeSyncAction,
   syncActionLabel,
-  validateBranchName,
   DEFAULT_BRANCH
 } from '../model/syncError';
 import type { SyncErrorInfo, SyncStatusView } from '../model/syncError';
@@ -156,9 +152,7 @@ import {
 import type { AiModelOption, AiProviderPreset } from '../model/aiProvider';
 import {
   GITEE_PLATFORM,
-  PLATFORM_CUSTOM,
   PLATFORM_GITHUB,
-  PLATFORM_GITLAB,
   SSH_UNSUPPORTED_SHORT,
   assertHttpsUsername,
   authHintFor,
@@ -166,8 +160,6 @@ import {
   gitUsernameHintFor,
   gitUsernamePlaceholderFor,
   isSshAuthMode,
-  normalizeGitPlatform,
-  platformLabel,
   repoUrlExamplesFor,
   resolveGitUsername,
   resolvePlatformSelection,
@@ -269,17 +261,11 @@ struct Settings {
   @State aiProviderId: string = DEFAULT_PROVIDER_ID;
   /** 自定义源的接口地址；预设源下存的是预设地址快照，页面上不展示。 */
   @State aiBaseURL: string = '';
-  /** 托管平台：`github` / `gitee` / `gitlab` / `custom`（只影响提示文案与示例）。 */
+  /** 托管平台：`github` / `gitee` / `gitlab` / `custom`（按仓库地址自动推断，只影响文案与示例）。 */
   @State gitPlatform: string = PLATFORM_GITHUB;
-  /** 用户是否手动点过平台 chip（点过 = 以用户为准，不再按地址推断）。 */
+  /** 已保存过的平台锁定标记（本页没有手动选择器；旧数据里的 platformTouched 会在 applyExtras() 里被重置为 false（平台一律按地址重新推断））。 */
   @State platformTouched: boolean = false;
-  /** 平台推断/锁定的一行提示（空串 = 不显示）。 */
-  @State platformNotice: string = '';
-  /** 同步分支（默认 main，可配；存在 gitExtrasStore 里）。 */
-  @State branch: string = DEFAULT_BRANCH;
-  /** 分支名的内联错误。 */
-  @State branchError: string = '';
-  /** 认证方式：`https` / `ssh`（SSH 本版本不可用，会被拦）。 */
+  /** 认证方式：`https` / `ssh`（已保存的 SSH 只显示只读警告，同步仍被拦）。 */
   @State authMode: string = AUTH_HTTPS;
   @State ready: boolean = false;
   @State saveHint: string = '';
@@ -339,7 +325,7 @@ struct Settings {
   /**
    * 同步组「高级 ▸」折叠区是否展开（**默认收起**）。
    *
-   * 主表单只留三个控件：仓库地址 / 访问 token / 分支。Git 用户名、设备标识、作者名
+   * 主表单只留两个控件：仓库地址 / 访问令牌。Git 用户名、设备标识、作者名
    * 全部收在这个折叠区里 —— 它们都有安全的默认值（用户名按地址推断、编号自动分配、
    * 作者名默认「我」），用户不需要为了同步去理解它们。
    */
@@ -653,20 +639,20 @@ struct Settings {
   }
 
   /**
-   * 把扩展设置（分支 / 平台 / 平台锁定标记）铺到表单上。
+   * 把扩展设置（平台 / 平台锁定标记）铺到表单上。
    *
    * 平台以扩展设置为准（它能表达 gitlab/custom）；扩展设置为空时回落到 settingsStore 的
-   * github/gitee，保证老数据不受影响。
+   * github/gitee，保证老数据不受影响。旧的 platformTouched 锁定标记在加载时退役：本页没有
+   * 选平台的控件，平台一律按仓库地址重新推断，不再让历史锁定值永久生效。
+   * v2 起分支固定 `main`；旧 extras 里的 branch 会被忽略并在下次保存时写成 main（无迁移提示）。
    */
   private applyExtras(extras: GitSyncExtras): void {
-    this.branch = extras.branch.length > 0 ? extras.branch : DEFAULT_BRANCH;
-    this.platformTouched = extras.platformTouched;
+    // 旧的 platformTouched=true 会让 resolvePlatformSelection 永远返回历史平台，而本页没有清除入口，
+    // 故加载时统一退役（mod-settings-lean F2），平台重新由地址推断。
+    this.platformTouched = false;
     if (extras.platform.length > 0) {
       this.gitPlatform = extras.platform;
     }
-    this.platformNotice = this.platformTouched
-      ? `平台已固定为 ${platformLabel(this.gitPlatform)}（手动选择优先）`
-      : '';
   }
 
   /** 作者邮箱按设备标识派生（同步提交只用于署名，不涉及个人邮箱）。 */
@@ -679,8 +665,8 @@ struct Settings {
   private configure(): void {
     const config: GitSyncConfig = {
       repoUrl: this.repoUrl.trim(),
-      // 分支可配（A2）：空值回落 main，非法值由 `runAction` / 服务层统一拦住
-      branch: normalizeBranchName(this.branch).length > 0 ? normalizeBranchName(this.branch) : DEFAULT_BRANCH,
+      // 分支固定 main（mod-settings-lean）：本页没有分支输入，内核始终收到 DEFAULT_BRANCH
+      branch: DEFAULT_BRANCH,
       deviceId: normalizeDeviceId(this.deviceId),
       token: this.token.trim(),
       authorName: this.author.trim().length > 0 ? this.author.trim() : normalizeDeviceId(this.deviceId),
@@ -751,7 +737,7 @@ struct Settings {
   private async saveSettings(): Promise<void> {
     const repoEmpty: boolean = this.repoUrl.trim().length === 0;
     const repoCheck: RepoUrlCheck = validateRepoUrl(this.repoUrl);
-    // A1：平台按地址推断（用户手动改过则以用户为准）——保存前算出最终值 + 一行提示
+    // 平台按仓库地址自动推断（applyExtras() 已把旧锁定标记重置为 false，这里一律按地址推断）——保存前算出最终值
     const platformResolution: PlatformResolution = resolvePlatformSelection(
       this.repoUrl,
       this.gitPlatform,
@@ -781,13 +767,10 @@ struct Settings {
       issues.push(usernameIssue);
     }
     this.applyIssues(issues);
-    // A2：分支名（不进 settingsForm 的那张表，单独落内联红字 + 拦保存）
-    const branchProblem: string = validateBranchName(this.branch);
-    this.branchError = branchProblem;
     // 无可见落点的 issue 不拦保存（Settings 属凭据敏感文件，禁止 console/hilog，故这里静默跳过）。
-    const blocking: boolean = this.issuesSummary.length > 0 || branchProblem.length > 0;
+    const blocking: boolean = this.issuesSummary.length > 0;
     if (blocking) {
-      this.saveHint = this.issuesSummary.length > 0 ? this.issuesSummary : branchProblem;
+      this.saveHint = this.issuesSummary;
       // 滚回顶部：红色汇总 + 第一个错误字段（设备标识/作者名/token/仓库地址都在同步组）
       this.pageScroller.scrollEdge(Edge.Top);
       return;
@@ -838,10 +821,10 @@ struct Settings {
       if (this.disposed) {
         return;
       }
-      // A2：分支 + 平台（四值）+ 平台锁定标记单独落盘
+      // 分支固定写入 DEFAULT_BRANCH（保留旧键，不改存储结构）；平台（四值）+ 锁定标记照旧落盘
       const extras: GitSyncExtras = await gitExtrasStore.save(
         {
-          branch: normalizeBranchName(this.branch),
+          branch: DEFAULT_BRANCH,
           platform: platform,
           platformTouched: this.platformTouched
         },
@@ -853,9 +836,7 @@ struct Settings {
       this.applySettings(saved);
       this.applyExtras(extras);
       this.gitPlatform = platform;
-      this.platformNotice = platformResolution.notice;
       this.issuesSummary = '';
-      this.branchError = '';
       scheduleStore.setDeviceId(saved.deviceId);
       this.storageHint = `日程目录：${scheduleStore.deviceRoot()}/schedules/`;
       this.configure();
@@ -863,13 +844,7 @@ struct Settings {
       if (repoEmpty) {
         hint = `设置已保存（${nowIso()}）；仓库地址为空，同步前需要先填写`;
       } else if (isSshAuthMode(this.authMode)) {
-        hint = `设置已保存（${nowIso()}）；${SSH_UNSUPPORTED_SHORT}，请切回 HTTPS(PAT) 后再同步`;
-      }
-      if (platformResolution.notice.length > 0) {
-        hint = `${hint}；${platformResolution.notice}`;
-      }
-      if (this.branch !== normalizeBranchName(this.branch)) {
-        this.branch = normalizeBranchName(this.branch);
+        hint = `设置已保存（${nowIso()}）；${SSH_UNSUPPORTED_SHORT}，请点「改用 HTTPS 令牌」后再同步`;
       }
       this.saveHint = hint;
       promptAction.showToast({ message: '设置已保存' });
@@ -881,62 +856,33 @@ struct Settings {
     }
   }
 
-  /**
-   * 选择平台（只改文案与示例，同步协议不变）。
-   *
-   * 点过就以用户为准（`platformTouched`）：之后保存时不再被地址推断覆盖。
-   */
-  private pickPlatform(value: string): void {
-    this.gitPlatform = normalizeGitPlatform(value);
-    this.platformTouched = true;
-    this.platformNotice = `已手动选择 ${platformLabel(this.gitPlatform)}（保存后不再按地址推断）`;
-  }
-
-  /** 仓库地址变化时更新平台提示（只提示，保存时才真正采用推断值）。 */
-  private syncPlatformNotice(): void {
-    const resolution: PlatformResolution = resolvePlatformSelection(
-      this.repoUrl,
-      this.gitPlatform,
-      this.platformTouched
-    );
-    if (this.platformTouched) {
-      this.platformNotice = resolution.inferred.length > 0 && resolution.inferred !== this.gitPlatform
-        ? `地址看起来是 ${platformLabel(resolution.inferred)}，但平台已按你的选择固定为 ${platformLabel(this.gitPlatform)}`
-        : `平台已固定为 ${platformLabel(this.gitPlatform)}（手动选择优先）`;
-      return;
-    }
-    this.platformNotice = resolution.inferred.length > 0
-      ? `地址识别为 ${platformLabel(resolution.inferred)}（保存时采用）`
-      : '';
-  }
-
-  /** 选择认证方式（影响 token 是否必填与示例文案）。 */
-  private pickAuthMode(value: string): void {
-    this.authMode = normalizeAuthMode(value);
-    this.gitUsernameError = '';
-    // 切到 SSH 时 token 不再必填，清掉残留的必填红字
-    if (this.authMode === AUTH_SSH) {
-      this.tokenError = '';
-      this.syncMessage = `${SSH_UNSUPPORTED_SHORT}：SSH 不会被使用，请切回 HTTPS(PAT)`;
-    }
-  }
-
   /** 当前认证方式的阻塞原因（空串 = 可同步）；页面据此禁用按钮并说明原因。 */
   private authBlocker(): string {
     return describeAuthModeBlocker(this.authMode);
   }
 
-  /** 推送按钮的阻塞原因（空串 = 可以推）：未就绪 / SSH / 无地址 / 分支非法 / 无改动。 */
+  /**
+   * SSH 警告行的显式出口（mod-settings-lean F1）：只切本地状态 + 短提示，不自动保存。
+   *
+   * `@Prop authMode` 是单向的：必须改页面的 `@State`，子节点才会重绘，`configure()` /
+   * `saveSettings()` 也才会拿到新值（下一步由用户点「保存设置」落盘）。顺手清掉上次被 SSH
+   * 拦下时写下的 ❌ 红字，避免切换后界面上还挂着过时的说明。
+   */
+  private switchToHttpsToken(): void {
+    this.authMode = AUTH_HTTPS;
+    if (this.syncMessage.startsWith('❌')) {
+      this.syncMessage = '';
+    }
+    promptAction.showToast({ message: '已切换为 HTTPS + 令牌，保存后生效' });
+  }
+
+  /** 推送按钮的阻塞原因（空串 = 可以推）：未就绪 / SSH / 无地址 / 无改动（分支恒为 main）。 */
   private pushBlockedReason(): string {
     if (isSshAuthMode(this.authMode)) {
       return `${SSH_UNSUPPORTED_SHORT}：SSH 下无法推送`;
     }
     if (this.repoUrl.trim().length === 0) {
       return '推送前需要先填写并保存仓库地址';
-    }
-    const branchProblem: string = validateBranchName(this.branch);
-    if (branchProblem.length > 0) {
-      return branchProblem;
     }
     return '';
   }
@@ -1696,20 +1642,13 @@ struct Settings {
     }
     if (repoCheck.scheme !== 'https' && repoCheck.scheme !== 'http') {
       // 同步内核（isomorphic-git + 桥）只实现 HTTPS，SSH 地址会直接失败，这里先拦住
-      this.syncMessage = `${SSH_UNSUPPORTED_SHORT}：请把仓库地址改成 https:// 并切回 HTTPS(PAT)`;
+      this.syncMessage = `${SSH_UNSUPPORTED_SHORT}：请把仓库地址改成 https:// 并点「改用 HTTPS 令牌」`;
       return;
     }
     // A1：SSH 认证方式在本版本没有传输层，直接拦住并写清原因（不发起任何请求）
     const authBlocker: string = this.authBlocker();
     if (authBlocker.length > 0) {
       this.syncMessage = `❌ ${authBlocker}`;
-      return;
-    }
-    // A2：分支名先在本页校验，非法值不发请求
-    const branchProblem: string = validateBranchName(this.branch);
-    this.branchError = branchProblem;
-    if (branchProblem.length > 0) {
-      this.syncMessage = `❌ 分支名不合法：${branchProblem}`;
       return;
     }
     const op: string = normalizeSyncAction(action);
@@ -2356,11 +2295,8 @@ struct Settings {
       authMode: this.authMode,
       repoUrl: this.repoUrl,
       repoUrlError: this.repoUrlError,
-      platformNotice: this.platformNotice,
       token: this.token,
       tokenError: this.tokenError,
-      branch: this.branch,
-      branchError: this.branchError,
       syncAdvancedOpen: this.syncAdvancedOpen,
       syncAdvancedReason: this.syncAdvancedReason,
       gitUsername: this.gitUsername,
@@ -2389,16 +2325,10 @@ struct Settings {
       onChangeRepoUrl: (value: string): void => {
         this.repoUrl = value;
         this.repoUrlError = '';
-        // A1：地址一变就更新「将按地址推断为哪个平台」的提示（保存时才真正采用）
-        this.syncPlatformNotice();
       },
       onChangeToken: (value: string): void => {
         this.token = value;
         this.tokenError = '';
-      },
-      onChangeBranch: (value: string): void => {
-        this.branch = value;
-        this.branchError = '';
       },
       onChangeGitUsername: (value: string): void => {
         this.gitUsername = value;
@@ -2429,6 +2359,9 @@ struct Settings {
       },
       onOpenRepoHelp: (): void => {
         this.panel = PANEL_REPO;
+      },
+      onSwitchToHttpsToken: (): void => {
+        this.switchToHttpsToken();
       },
       // 隐藏 Web 的控制器与页面 GitSyncService 是同一个实例（`@Prop` 会深拷贝，故用普通成员）
       gitController: this.gitController,
@@ -2782,23 +2715,7 @@ struct Settings {
     .alignItems(VerticalAlign.Center)
   }
 
-  /** 一个平台 chip（A1：四个预设 GitHub / Gitee / GitLab / 自建）。 */
-  @Builder
-  PlatformChip(id: string) {
-    Text(platformLabel(id))
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .fontColor(this.gitPlatform === id ? $r('app.color.brand') : $r('app.color.text_secondary'))
-      .backgroundColor(this.gitPlatform === id ? $r('app.color.brand_soft') : $r('app.color.page_background'))
-      .height(TOUCH_MIN)
-      .layoutWeight(1)
-      .textAlign(TextAlign.Center)
-      .onClick(() => {
-        this.pickPlatform(id);
-      })
-  }
-
-  /** 同步组「更多」：推送 / 查看状态 / 重试 / 测试连接 / 平台 / 认证。 */
+  /** 同步组「更多」：推送 / 查看状态 / 重试 / 测试连接（平台与分支已固定，无选择项）。 */
   @Builder
   SyncMoreSheet() {
     Column({ space: SPACING.md }) {
@@ -2860,59 +2777,6 @@ struct Settings {
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
 
-      this.FieldLabel('托管平台')
-      Row({ space: SPACING.sm }) {
-        this.PlatformChip(PLATFORM_GITHUB)
-        this.PlatformChip(GITEE_PLATFORM)
-      }
-      .width('100%')
-      Row({ space: SPACING.sm }) {
-        this.PlatformChip(PLATFORM_GITLAB)
-        this.PlatformChip(PLATFORM_CUSTOM)
-      }
-      .width('100%')
-      if (this.platformNotice.length > 0) {
-        this.HintLine(this.platformNotice)
-      }
-
-      this.FieldLabel('认证方式')
-      Row({ space: SPACING.sm }) {
-        Text('HTTPS(PAT)')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor(this.authMode === AUTH_HTTPS ? $r('app.color.brand') : $r('app.color.text_secondary'))
-          .backgroundColor(this.authMode === AUTH_HTTPS ? $r('app.color.brand_soft') : $r('app.color.page_background'))
-          .height(TOUCH_MIN)
-          .layoutWeight(1)
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
-            this.pickAuthMode(AUTH_HTTPS);
-          })
-        Text('SSH（本版本不可用）')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor(this.authMode === AUTH_SSH ? $r('app.color.warning') : $r('app.color.text_secondary'))
-          .backgroundColor(this.authMode === AUTH_SSH ? $r('app.color.brand_soft') : $r('app.color.page_background'))
-          .height(TOUCH_MIN)
-          .layoutWeight(1)
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
-            this.pickAuthMode(AUTH_SSH);
-          })
-      }
-      .width('100%')
-
-      if (this.authMode === AUTH_SSH) {
-        // 明确写「仅支持 HTTPS」+ 原因，绝不让用户以为填了私钥路径就能同步
-        Text(describeAuthModeBlocker(this.authMode))
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.danger'))
-          .width('100%')
-          .textAlign(TextAlign.Start)
-      } else {
-        this.HintLine(authHintFor(this.gitPlatform, this.authMode))
-      }
       if (this.connectionText.length > 0) {
         this.HintLine(this.connectionText)
       }
@@ -2945,7 +2809,7 @@ struct Settings {
               .lineHeight(LINE_HEIGHT.caption)
               .fontColor($r('app.color.text_secondary'))
               .width('100%')
-            Text(`平台：${platformLabel(this.gitPlatform)}（保存时按地址自动推断；手动选过则以你的选择为准）。分支默认 ${DEFAULT_BRANCH}，首次推送时远端没有会自动创建。`)
+            Text(`平台按仓库地址自动识别；分支固定 ${DEFAULT_BRANCH}（首次推送时远端没有会自动创建）。`)
               .fontSize(FONT.caption)
               .lineHeight(LINE_HEIGHT.caption)
               .fontColor($r('app.color.text_secondary'))

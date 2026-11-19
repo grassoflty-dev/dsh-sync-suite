@@ -274,24 +274,30 @@ describe('平台与 HTTPS 用户名兜底（P0 不回归）', () => {
   });
 });
 
-describe('设置页接线（源码级）：四个平台 chip、推断提示、SSH 说明', () => {
-  // 因 A2 拆分移动：平台推断提示 / 地址占位符搬到了 components/settings/SyncSection.ets，
-  // 平台 chip 与 `?` 弹层仍在页面里。锚点改成「页面 + 五个 section」的合并源码；断言不变。
+describe('设置页接线（源码级）：无平台/认证选择器，平台仍按地址推断', () => {
+  // mod-settings-lean：平台 chip / 认证方式选择器 / 「已按地址推断平台为 X」提示全部删除。
+  // 锚点仍是「页面 + 五个 section」的合并源码；下面断言改成钉住新契约（含删除项的反证）。
   const PAGE = readSettingsSources();
 
-  test('四个平台 chip 都在，且平台值走 normalizeGitPlatform（不是旧的二值归一）', () => {
+  test('四个平台 chip 与手动选平台入口都已删除，平台仍由地址自动推断', () => {
     for (const chip of ['PLATFORM_GITHUB', 'GITEE_PLATFORM', 'PLATFORM_GITLAB', 'PLATFORM_CUSTOM']) {
-      assert.ok(PAGE.includes(`this.PlatformChip(${chip})`), `缺少平台 chip：${chip}`);
+      assert.equal(PAGE.includes(`this.PlatformChip(${chip})`), false, `不该再有平台 chip：${chip}`);
     }
-    assert.match(PAGE, /this\.gitPlatform = normalizeGitPlatform\(value\);/, '选平台要归一成四值');
-    assert.match(PAGE, /this\.platformTouched = true;/, '手动选平台要置 platformTouched');
+    assert.equal(/pickPlatform\(/.test(PAGE), false, '不该有手动选平台入口');
+    assert.match(
+      PAGE,
+      /private applyExtras\(extras: GitSyncExtras\): void \{[\s\S]{0,400}?this\.platformTouched = false;/,
+      'extras 加载时退役旧的平台锁定：平台重新由地址推断，不再被历史 platformTouched 永久钉住'
+    );
   });
 
-  test('保存前按地址推断 + 页面提示（手动选择优先）', () => {
+  test('保存前按地址推断；旧的推断 notice 已删除，改为固定说明', () => {
     assert.match(PAGE, /resolvePlatformSelection\(\s*this\.repoUrl,\s*this\.gitPlatform,\s*this\.platformTouched\s*\)/);
-    assert.match(PAGE, /this\.platformNotice = platformResolution\.notice;/, '保存后把推断提示展示出来');
-    assert.match(PAGE, /this\.syncPlatformNotice\(\);/, '改地址时即时更新推断提示');
-    assert.match(PAGE, /this\.HintLine\(this\.platformNotice\)/, '提示必须渲染出来');
+    assert.match(PAGE, /const platform: string = platformResolution\.platform;/, '仍用推断出的平台下发');
+    assert.equal(PAGE.includes('this.platformNotice'), false, '不再有平台推断提示状态');
+    assert.equal(PAGE.includes('platformResolution.notice'), false, '不再把推断 notice 上屏');
+    assert.equal(PAGE.includes('syncPlatformNotice'), false, '改地址不再更新平台提示');
+    assert.ok(PAGE.includes('平台按地址自动识别 · 分支固定 main'), '固定说明必须存在');
   });
 
   test('平台文案/示例/用户名占位都复用 model/gitAuth（不再页面自带一套）', () => {
@@ -307,8 +313,14 @@ describe('设置页接线（源码级）：四个平台 chip、推断提示、SS
     }
   });
 
-  test('SSH 必须写「仅支持 HTTPS」+ 原因，并且拦在同步入口', () => {
-    assert.match(PAGE, /SSH（本版本不可用）/, 'SSH chip 要直接标不可用');
+  test('SSH 必须写只读警告 + 原因，并且拦在同步入口（无认证方式选择器）', () => {
+    assert.equal(/pickAuthMode\(/.test(PAGE), false, '不该有认证方式选择器');
+    assert.equal(PAGE.includes("Text('HTTPS(PAT)')"), false, '不该有 HTTPS chip');
+    assert.equal(PAGE.includes('SSH（本版本不可用）'), false, '不该有 SSH chip');
+    assert.ok(
+      PAGE.includes('当前保存的是 SSH 方式；本页只提供 HTTPS + 令牌，建议改成 HTTPS 地址后保存'),
+      '已保存 SSH 要显示只读警告'
+    );
     assert.match(PAGE, /describeAuthModeBlocker\(this\.authMode\)/, 'SSH 原因要展示');
     assert.match(PAGE, /this\.syncMessage = `❌ \$\{authBlocker\}`;/, '同步前拦 SSH 并说明原因');
     assert.match(PAGE, /pushBlockedReason\(\)/, '推送按钮也要按认证方式禁用');

@@ -92,9 +92,10 @@ describe('结构断言：@State 至少被读一次 / issue 必须有渲染落点
       [],
       '幽灵报错：issue 字段没有渲染落点'
     );
-    // 覆盖率下限：Settings 的 9 个内联错误 + 2 个警告 + 页面侧同类字段都要被扫到
+    // 覆盖率下限：Settings 的 7 个内联错误（branchError 随 mod-settings-lean 删除）+ 2 个警告
+    // + 页面侧同类字段（lastSyncError / remoteUrlError）都要被扫到；删除一个控件后下限同步减 1。
     const settingsFields = collectIssueFields(files).filter((item) => item.file.startsWith('main/ets/pages/Settings.ets'));
-    assert.ok(settingsFields.length >= 12, `Settings 的校验类字段只剩 ${settingsFields.length} 个，检查范围疑似缩了`);
+    assert.ok(settingsFields.length >= 11, `Settings 的校验类字段只剩 ${settingsFields.length} 个，检查范围疑似缩了`);
   });
 
   test('装配对齐：页面传给五个 section 的 props 与组件声明双向一致', (t) => {

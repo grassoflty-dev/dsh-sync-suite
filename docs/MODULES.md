@@ -26,10 +26,10 @@
 | `mod-v2-contract` | 单时间线数据契约 v2 草案（两轮：初稿 + 按评审 P0/P1 修订） | 已提交 | 77df67a | 未提交前回滚 = 删除该文件；提交后 `git revert <hash>`（纯文档） | 被 `mod-v2-migration`/`mod-v2-media-migration`/`mod-v2-dual-write-off` 依赖 | `docs/DATA-CONTRACT-v2.md`（359 行，v2-draft-2）、评审 `docs/REVIEW-v2-contract.md`（276 行，P0 2 / P1 7 / P2 11；draft-2 已全部解决 P0/P1） |
 | `mod-v2-migration` | v1→v2 迁移工具（记录/摘要/删除账本；媒体另立模块） | 已提交（含评审修复） | 28b8592 | `git revert <hash>`；工具只读 v1、不删 v1 | 依赖 `mod-v2-contract`；被 `mod-v2-dual-write-off` 依赖 | `tools/migrate-v1-to-v2.mjs`（804 行）、测试 `apps/arkui-schedule/tools/test/v2Migration.test.mjs`（41 例，30→39→41）；评审 `docs/REVIEW-v2-migration-and-insert-page.md`（P0 1 / P1 4 / P2 3 已全部修复）；revert path 不变 |
 | `mod-v2-read-timeline` | v2 单时间线只读解析核心（纯模型，未接线） | 已提交 | 4377b19 | `git revert <hash>`（仅 2 个新文件，未接线，零运行时影响） | 依赖 `mod-v2-contract`；被下一模块（v2 读服务接线）依赖 | `apps/arkui-schedule/entry/src/main/ets/model/timeline.ts`（779 行）、测试 `timelineRead.test.mjs`（42 例）；模块规格写在该文件头注释 |
+| mod-settings-lean | 设置只留仓库地址 + 令牌（移除平台/分支/访问方式控件；引擎行为不变） | 已写完，待提交 | （Lead 填） | git revert <hash>（6 个文件，无 store/引擎改动） | 独立；remote-access 设置留给后续模块 | docs/REVIEW-settings-lean.mddocs/REVIEW-settings-lean.md（P0 0 / P1 1 / P2 3 已修复） |
 | `mod-insert-page-count` | 修复真机「插入页 2/3 而非 2/2」：新建记录手写板草稿键串号 | 已提交（真机已验证 PASS） | 96d4435 | `git revert <hash>`（仅 `RecordEditorView.ets` + 1 个测试） | 跨模块触碰 `RecordEditorView.ets`（见 §2） | `docs/VERIFICATION.md` §14 更新段；真机 `device-accept` **15 PASS / 0 FAIL / 6 SKIP（exit 3 = 仅未覆盖）**；回归测试 `apps/arkui-schedule/tools/test/handwritingToolbar.test.mjs` |
 | `mod-v2-media-migration` | v1 按天 zip → v2 `timeline/<date>/media/` 松散压缩图（尚未开始） | 待开始 | — | — | 依赖 `mod-v2-contract`、`mod-v2-migration` | 待建 |
 | `mod-v2-dual-write-off` | 停止写 v1、保留一个 release 的只读回退（由 `mod-v2-dual-read` 改名而来） | 待开始 | — | — | 依赖 `mod-v2-contract`、`mod-v2-migration` | `docs/DATA-CONTRACT-v2.md` §10/§13 |
-| `mod-settings-lean` | 设置只留仓库地址 + 令牌 | 待开始 | — | `git revert <hash>` | 独立 | 待建 |
 | `mod-quick-record` | 首页底部快捷记录（不跳编辑页） | 待开始 | — | `git revert <hash>` | 依赖 `mod-d5-create-date` | 待建 |
 
 `mod-v2-dual-read` 已被 `mod-v2-dual-write-off` 取代，见契约 §13。
@@ -49,6 +49,7 @@
 | `mod-insert-page-count` | `components/RecordEditorView.ets` | 修复真机插入页串号：新增 `writingDraftKey()`（新建记录按编辑器实例生成 `new-<timestamp>` 草稿键）并新增路由参数 `draftKey`，必须改这个共享组件本身 | 同一文件也被 `mod-d5-create-date`/`mod-d7-month-calendar` 触碰，必须串行、不可双人同时改 |
 | `mod-v2-read-timeline` | 无共享文件（全部新增） | 纯模型 `model/timeline.ts` 与测试 `tools/test/timelineRead.test.mjs` 均为新增，未改 `.ets`/service/UI/写路径，未触碰任何被其他模块共用的文件 | 无跨模块撞文件风险；未接线、零运行时影响；回滚 = 提交后 `git revert <hash>`（未提交前删除这两个新增文件） |
 | `mod-v2-migration`（含评审修复） | 无共享文件（全部新增） | 迁移工具 `tools/migrate-v1-to-v2.mjs` 与测试 `apps/arkui-schedule/tools/test/v2Migration.test.mjs` 均为新增文件，评审修复也只改这两个文件，未触碰任何被其他模块共用的文件 | 无跨模块撞文件风险；回滚 = 提交后 `git revert <hash>`（未提交前删除这两个新增文件），不影响其他模块 |
+| `mod-settings-lean` | `pages/Settings.ets` + `components/settings/SyncSection.ets` | 设置主表单精简为「仓库地址 + 令牌」，需移除平台/分支/访问方式控件并改同步区组件，必须改设置页及其同步区组件本身 | 设置页是共享文件，与 D1-P2/D6 锚点同文件，必须串行；本次未改锚点与组顺序 |
 
 ## 3 提交与标签约定
 
@@ -66,7 +67,7 @@
 2. **执行 revert**：一次只回滚一个模块；同一提交捆绑多个模块时，按登记的补救方案处理，不拿 `git revert <hash>` 一把梭。
 3. **跑门闸并记录原始输出**（工作目录 `dsh-sync-suite`）：
    - `node tools/overlay.mjs status` → 期望 `applied=false`；
-   - `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"` → 当前基线 **2390 例 / 2389 pass / 0 fail / 1 skip**（相对 2348 基线：`mod-v2-read-timeline` **+42**；再往前相对 2306 基线：`mod-v2-migration` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` **+1**；`cec3c93` 之后；数字随模块加入而变动；回滚 D5 相关模块时，因删除的旧用例被恢复，数字会变化，须在批次记录里写明变化原因）；
+   - `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"` → 当前基线 **2391 例 / 2390 pass / 0 fail / 1 skip**（`mod-settings-lean` 原地改测 4 个既有测试文件、用例数不变，delta 0，基线不动；相对 2348 基线：`mod-v2-read-timeline` **+42**；再往前相对 2306 基线：`mod-v2-migration` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` **+1**；`cec3c93` 之后；数字随模块加入而变动；回滚 D5 相关模块时，因删除的旧用例被恢复，数字会变化，须在批次记录里写明变化原因）；
    - `node apps/arkui-schedule/tools/validate-app.mjs` → **8/8**；
    - `node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json` → **exit 0**。
 4. **判定「回滚干净」**：0 fail、skip 数未异常增加、8/8、tsc exit 0、`overlay applied=false` 五项同时成立；任何一项不满足即为未回滚干净，不许在 §1 把状态改回「已回滚」。
@@ -85,4 +86,5 @@
 | 2026-11-19 | `mod-module-doctrine` | 已提交 | 文档一致性回读（无代码门闸） | — | `docs/MODULES.md` + `docs/ROADMAP.md` + `项目理解.md` §7；提交：a95ecaa |
 | 2026-11-19 | `mod-v2-contract` | 已提交（draft-2） | 文档门闸（无代码门闸；359 行） | `docs/REVIEW-v2-contract.md`（276 行，P0 2 / P1 7 / P2 11；draft-2 已全部解决 P0/P1） | `docs/DATA-CONTRACT-v2.md`（359 行，v2-draft-2）；提交：77df67a |
 | 2026-11-19 | `mod-v2-migration` + `mod-insert-page-count` | 已提交（含评审修复） | 全量 **2348 / 2347 / 0 / 1**；`validate-app` 8/8；`tsc` exit 0；`overlay applied=false`；真机 `device-accept` **15 PASS / 0 FAIL / 6 SKIP（exit 3 = 仅未覆盖）** | `docs/REVIEW-v2-migration-and-insert-page.md`（304 行，P0 1 / P1 4 / P2 3 已全部修复） | 迁移 **41 例**（30→39，含 +9 评审修复）/ 真机 **15P0F6S**；两个模块各自一笔提交，提交：28b8592 / 96d4435 |
-| 2026-11-19 | `mod-v2-read-timeline` | 已完成，待提交 | 全量 2386/2385/0/1；validate 8/8；tsc 0 | （评审后填） | 未接线，零运行时影响 |
+| 2026-11-19 | mod-v2-read-timeline | 已完成，待提交 | 全量 2386/2385/0/1；validate 8/8；tsc 0 | docs/REVIEW-v2-read-timeline.md（P0 0 / P1 2 / P2 5 已修复） | 未接线，零运行时影响 |
+| 2026-11-19 | `mod-settings-lean` | 已完成，待提交 | 全量 2391/2390/0/1（+1）；validate 8/8；tsc 0 | docs/REVIEW-settings-lean.md（P0 0 / P1 1 / P2 3 已修复） | 主表单=仓库地址+令牌；平台/分支/访问方式控件移除 |

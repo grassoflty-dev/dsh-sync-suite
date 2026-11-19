@@ -448,20 +448,22 @@ describe('源码级：push 永不 force，首次推送会建本地/远端分支'
   });
 });
 
-describe('设置页接线（源码级）：分支输入、推送按钮、同步状态行', () => {
-  // 因 A2 拆分移动：分支输入框 / 推送按钮 / 状态行搬到了 components/settings/SyncSection.ets，
-  // 锚点改成「页面 + 五个 section」的合并源码（页面仍持有分支状态与 runAction）；断言不变。
+describe('设置页接线（源码级）：分支固定 main、推送按钮、同步状态行', () => {
+  // mod-settings-lean：分支输入 / 校验红字已删除，分支恒为 DEFAULT_BRANCH。
+  // 锚点仍是「页面 + 五个 section」的合并源码（页面仍持有 runAction），断言跟着新契约走。
   const PAGE = readSettingsSources();
 
-  test('分支可配：默认 main、输入框、校验红字、保存进扩展设置', () => {
+  test('分支固定 main：无输入框/无校验红字，下发给内核与扩展设置都用 DEFAULT_BRANCH', () => {
     const has = (pattern) => assert.ok(pattern.test(PAGE), `页面缺少：${pattern}`);
-    has(/@State branch: string = DEFAULT_BRANCH;/);
-    has(/TextInput\(\{ text: this\.branch, placeholder: DEFAULT_BRANCH \}\)/);
-    has(/const branchProblem: string = validateBranchName\(this\.branch\);/);
-    has(/this\.branchError = branchProblem;/);
-    has(/this\.ErrorText\(this\.branchError\)/);
-    has(/gitExtrasStore\.save\(\s*\{[\s\S]{0,200}branch: normalizeBranchName\(this\.branch\)/);
+    const lacks = (pattern) => assert.equal(pattern.test(PAGE), false, `不该再有：${pattern}`);
+    has(/branch: DEFAULT_BRANCH,/);
+    has(/gitExtrasStore\.save\(\s*\{[\s\S]{0,200}branch: DEFAULT_BRANCH/);
     has(/gitExtrasStore\.load\(context\)/);
+    lacks(/@State branch: string = DEFAULT_BRANCH;/);
+    lacks(/TextInput\(\{ text: this\.branch, placeholder: DEFAULT_BRANCH \}\)/);
+    lacks(/validateBranchName\(this\.branch\)/);
+    lacks(/this\.branchError\b/);
+    lacks(/Text\('分支'\)/);
   });
 
   test('配置下发给服务：branch / platform / authMode 都要带上', () => {
@@ -470,7 +472,7 @@ describe('设置页接线（源码级）：分支输入、推送按钮、同步�
     for (const field of ['branch:', 'platform:', 'gitUsername:', 'authMode:']) {
       assert.ok(config[0].includes(field), `下发的配置缺 ${field}`);
     }
-    assert.match(config[0], /branch: normalizeBranchName\(this\.branch\)[\s\S]{0,80}?DEFAULT_BRANCH/);
+    assert.match(config[0], /branch: DEFAULT_BRANCH,/);
   });
 
   test('手动推送按钮：按 pushBlockedReason 禁用，且给出禁用原因', () => {

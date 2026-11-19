@@ -7,11 +7,14 @@
  * 就是最新值（`pushBlockedReason()` 之类的只读派生方法由父页面以函数 props 传入）。
  *
  * 契约（与拆分前逐条对齐，改动前先读 `docs/UI-DESIGN.md`）：
- * - 主表单只有「仓库地址 / 访问 token / 分支」三个控件；
+ * - 主表单只有「仓库地址 / 访问令牌」两个控件，地址下固定一行说明
+ *   「平台按地址自动识别 · 分支固定 main」；平台随地址推断、分支恒为 main，无选择控件；
  * - Git 用户名 / 设备标识 / 作者名在「高级 ▸」折叠区里，**默认收起**（三种情况由页面自动展开）；
  * - 设备标识重复是**常驻** warning（不是 toast），附件被暂停推送同样常驻一行；
- * - 「立即同步」（= pull）与「推送」是组内两个主按钮，查看状态 / 重试 / 测试连接 / 平台 /
- *   认证方式在组头「更多」弹层里（弹层仍在页面，见 `pages/Settings.ets`）；
+ * - 「立即同步」（= pull）与「推送」是组内两个主按钮，查看状态 / 重试 / 测试连接
+ *   在组头「更多」弹层里（弹层仍在页面，见 `pages/Settings.ets`）；已保存的认证方式是 SSH 时
+ *   本组件给一行只读警告 + 一个显式「改用 HTTPS 令牌」按钮（不是认证方式选择器；只切状态、
+ *   不自动保存，落盘仍由用户点「保存设置」完成）；
  * - 隐藏的 Git 运行环境（1x1 全透明 Web）必须挂在本组内（`controller` 与页面是**同一个实例**，
  *   所以是普通成员而不是 `@Prop`：`@Prop` 会深拷贝，代理就注册到副本上了）。
  *
@@ -26,7 +29,7 @@ import { loadingText } from '../../common/copy';
 import { APP_VERSION } from '../../common/version';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../../common/uiTokens';
 import { AUTH_HTTPS, AUTH_SSH } from '../../model/settingsForm';
-import { DEFAULT_BRANCH, canRetrySync, classifySyncError, redactSecrets } from '../../model/syncError';
+import { canRetrySync, classifySyncError, redactSecrets } from '../../model/syncError';
 import { formatDiagnostics } from '../../model/stateView';
 import type { DiagnosticsInput } from '../../model/stateView';
 import { repoUrlPlaceholderFor } from '../../model/gitAuth';
@@ -58,21 +61,24 @@ const SYNC_ERROR_WHAT: string = '同步失败';
 const SYNC_ERROR_NEXT_RETRY: string = '点重试重新拉取；仍失败就到设置页检查仓库地址与 token';
 const SYNC_ERROR_NEXT_FIX: string = '先按上面的原因修正，再重试';
 
+/** 仓库地址下的固定说明：平台随地址推断、分支固定 main（本页没有平台/分支选择控件）。 */
+const SYNC_CAPTION: string = '平台按地址自动识别 · 分支固定 main';
+
+/** 已保存的认证方式是 SSH 时的只读提示（同一行还有一个显式切换按钮，不自动迁移）。 */
+const SSH_STORED_WARNING: string = '当前保存的是 SSH 方式；本页只提供 HTTPS + 令牌，建议改成 HTTPS 地址后保存';
+
 @Component
 export struct SyncSection {
-  /** 托管平台（`github` / `gitee` / `gitlab` / `custom`）：只影响占位符与示例文案。 */
+  /** 托管平台（`github` / `gitee` / `gitlab` / `custom`）：由地址自动推断，只影响占位符与示例文案。 */
   @Prop gitPlatform: string = '';
-  /** 认证方式：`https` / `ssh`（SSH 本版本不可用，会被拦）。 */
+  /** 认证方式：`https` / `ssh`（已保存的 SSH 只显示只读警告，本页不提供选择器）。 */
   @Prop authMode: string = AUTH_HTTPS;
 
-  // ---------------------------------------------------------------- 主表单（三个控件）
+  // ---------------------------------------------------------------- 主表单（两个控件）
   @Prop repoUrl: string = '';
   @Prop repoUrlError: string = '';
-  @Prop platformNotice: string = '';
   @Prop token: string = '';
   @Prop tokenError: string = '';
-  @Prop branch: string = DEFAULT_BRANCH;
-  @Prop branchError: string = '';
 
   // ---------------------------------------------------------------- 「高级」折叠区
   @Prop syncAdvancedOpen: boolean = false;
@@ -119,7 +125,6 @@ export struct SyncSection {
   // ---------------------------------------------------------------- 回调（页面改状态）
   onChangeRepoUrl: (value: string) => void = () => {};
   onChangeToken: (value: string) => void = () => {};
-  onChangeBranch: (value: string) => void = () => {};
   onChangeGitUsername: (value: string) => void = () => {};
   onChangeDeviceId: (value: string) => void = () => {};
   onChangeAuthor: (value: string) => void = () => {};
@@ -133,6 +138,8 @@ export struct SyncSection {
   onOpenSyncMore: () => void = () => {};
   /** 打开仓库地址 `?` 帮助弹层。 */
   onOpenRepoHelp: () => void = () => {};
+  /** SSH 警告行的显式出口：页面切 authMode + toast；本组件不改状态、不自动保存。 */
+  onSwitchToHttpsToken: () => void = () => {};
 
   /**
    * 隐藏 Web 的控制器：与页面 `GitSyncService` 用的是**同一个实例**。
@@ -306,7 +313,7 @@ export struct SyncSection {
     return '';
   }
 
-  /** 「推送」可点吗（未就绪 / SSH / 无地址 / 分支非法 / 分叉都由 `pushBlockedReason()` 给出原因）。 */
+  /** 「推送」可点吗（未就绪 / SSH / 无地址 / 分叉都由 `pushBlockedReason()` 给出原因；分支恒为 main）。 */
   private canPush(): boolean {
     return !this.syncBusy && this.webReady && this.pushBlockedReason().length === 0;
   }
@@ -369,7 +376,7 @@ export struct SyncSection {
     return formatDiagnostics(input);
   }
 
-  /** 同步组：仓库地址 / token / 分支（主表单三个控件）+「高级」折叠区 / 立即同步 + 1 行状态。 */
+  /** 同步组：仓库地址 / 访问令牌（主表单两个控件 + 一行固定说明）+「高级」折叠区 / 立即同步 + 1 行状态。 */
   build() {
     Column({ space: SPACING.md }) {
       this.SyncHeader()
@@ -411,15 +418,15 @@ export struct SyncSection {
         .color($r('app.color.divider'))
       if (this.repoUrlError.length > 0) {
         this.ErrorText(this.repoUrlError)
-      } else if (this.platformNotice.length > 0) {
-        // 平台推断/锁定的提示（「已按地址推断平台为 X」/「已保留你的手动选择」）
-        this.HintLine(this.platformNotice)
+      } else {
+        // 固定说明：平台按地址推断、分支固定 main（没有平台/分支选择控件）
+        this.HintLine(SYNC_CAPTION)
       }
 
-      this.FieldLabel(this.authMode === AUTH_SSH ? '访问 token（SSH 方式可留空）' : '访问 token（仅存本机）')
+      this.FieldLabel('访问令牌（仅存本机）')
       TextInput({
         text: this.token,
-        placeholder: this.authMode === AUTH_SSH ? '当前版本仅支持 HTTPS，可留空' : tokenPlaceholderFor(this.gitPlatform)
+        placeholder: tokenPlaceholderFor(this.gitPlatform)
       })
         .type(InputType.Password)
         .width('100%')
@@ -438,37 +445,33 @@ export struct SyncSection {
         this.ErrorText(this.tokenError)
       }
 
-      // A2：分支可配（默认 main）。首次推送时远端没有该分支会自动创建（桥里 force:false）。
-      Row({ space: SPACING.sm }) {
-        Text('分支')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .width(72)
-          .textAlign(TextAlign.Start)
-        TextInput({ text: this.branch, placeholder: DEFAULT_BRANCH })
-          .height(TOUCH_MIN + SPACING.xs)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.page_background'))
-          .borderRadius(RADIUS.none)
-          .padding({ left: 0, right: 0 })
-          .layoutWeight(1)
-          .onChange((value: string) => {
-            this.onChangeBranch(value);
+      // 已保存的是 SSH 方式时给一行只读警告 + 一个显式出口（不是认证方式选择器，也不自动迁移）
+      if (this.authMode === AUTH_SSH) {
+        Row({ space: SPACING.sm }) {
+          Text(SSH_STORED_WARNING)
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.warning'))
+            .layoutWeight(1)
+            .textAlign(TextAlign.Start)
+          ActionButton({
+            label: '改用 HTTPS 令牌',
+            actionEnabled: true,
+            disabledReason: '',
+            busy: false,
+            variant: 'ghost',
+            block: false,
+            onTap: (): void => {
+              this.onSwitchToHttpsToken();
+            },
+            onBlockedTap: null
           })
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-      if (this.branchError.length > 0) {
-        this.ErrorText(this.branchError)
-      } else {
-        this.HintLine('默认 main；首次推送时远端没有该分支会自动创建（永不强制覆盖远端）')
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
       }
 
-      // ---- 主表单到此结束：只剩「仓库地址 / 访问 token / 分支」三个控件 ----
+      // ---- 主表单到此结束：只剩「仓库地址 / 访问令牌」两个控件 ----
       // 设备编号是仓库自动分配的：成功登记后这里只显示一行只读文字（用户不需要、也不应该手填）。
       if (this.deviceIdNotice.length > 0) {
         this.HintLine(this.deviceIdNotice)
@@ -558,7 +561,7 @@ export struct SyncSection {
           },
           onBlockedTap: null
         })
-        // 手动推送（A2 第 3 条）：未就绪 / SSH / 无地址 / 分支非法时给出原因
+        // 手动推送：未就绪 / SSH / 无地址时给出原因（分支恒为 main，无非法输入）
         ActionButton({
           label: '推送',
           actionEnabled: this.canPush(),
@@ -598,7 +601,7 @@ export struct SyncSection {
           .textAlign(TextAlign.Start)
       }
 
-      // 推送被禁用的具体原因（未就绪/SSH/无地址/分支非法），避免「按钮灰着不知道为什么」
+      // 推送被禁用的具体原因（未就绪/SSH/无地址），避免「按钮灰着不知道为什么」
       if (this.pushBlockedReason().length > 0) {
         this.HintLine(`推送不可用：${this.pushBlockedReason()}`)
       }

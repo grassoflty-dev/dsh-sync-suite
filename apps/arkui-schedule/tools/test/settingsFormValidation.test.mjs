@@ -424,13 +424,13 @@ describe('同步组字段说明：写明「它到底影响什么」', () => {
   });
 });
 
-// ---------------------------------------------------------------- 数据边界：主表单只留三个控件
+// ---------------------------------------------------------------- 数据边界：主表单只留两个控件
 //
-// 产品决定：用户只需要填「仓库地址 + token（+ 分支）」。设备编号由仓库自动分配
-// （`devices/registry.jsonl` + uuid 抢占），用户名按地址推断、作者名默认「我」。
-// 因此那三个原字段必须**默认不可见**（收在「高级 ▸」里），而不是继续占着主表单。
+// 产品决定（mod-settings-lean）：用户只需要填「仓库地址 + 访问令牌」。设备编号由仓库自动分配
+// （`devices/registry.jsonl` + uuid 抢占），用户名按地址推断、作者名默认「我」，平台按地址推断、
+// 分支固定 main。因此那三个原字段必须**默认不可见**（收在「高级 ▸」里），而不是继续占着主表单。
 
-describe('数据边界：主表单只有三个控件，三个原字段藏在「高级」里', () => {
+describe('数据边界：主表单只有两个控件，三个原字段藏在「高级」里', () => {
   const page = readSettingsPage();
   // 因 A2 拆分移动：`SyncAdvancedFields` / 同步组主表单搬进了
   // components/settings/SyncSection.ets（组件的根 builder 就是 `build()`）。
@@ -451,10 +451,15 @@ describe('数据边界：主表单只有三个控件，三个原字段藏在「�
     assert.match(page, /private toggleSyncAdvanced\(\): void/, '点击开关走独立方法（便于清掉自动展开原因）');
   });
 
-  test('主表单只剩「仓库地址 / 访问 token / 分支」三个控件', () => {
+  test('主表单只剩「仓库地址 / 访问令牌」两个控件 + 固定说明 + SSH 只读警告', () => {
     assert.match(mainForm, /Text\('仓库地址'\)/, '仓库地址是主表单字段');
-    assert.match(mainForm, /this\.FieldLabel\(this\.authMode === AUTH_SSH \? '访问 token/, '访问 token 是主表单字段');
-    assert.match(mainForm, /Text\('分支'\)/, '分支是主表单字段');
+    assert.match(mainForm, /this\.FieldLabel\('访问令牌（仅存本机）'\)/, '访问令牌是主表单字段');
+    assert.equal((mainForm.match(/TextInput\(/g) ?? []).length, 2, '主表单恰好两个输入框：仓库地址 + 访问令牌');
+    assert.equal(mainForm.includes("Text('分支')"), false, '分支不该有输入框');
+    assert.equal(mainForm.includes('this.PlatformChip('), false, '主表单不该有平台 chip');
+    assert.equal(/pickAuthMode\(/.test(mainForm), false, '主表单不该有认证方式选择器');
+    assert.match(mainForm, /this\.HintLine\(SYNC_CAPTION\)/, '固定说明必须渲染');
+    assert.match(mainForm, /Text\(SSH_STORED_WARNING\)/, '已保存 SSH 的只读警告必须渲染');
   });
 
   test('三个原字段（用户名 / 设备标识 / 作者名）不在主表单里', () => {
@@ -504,6 +509,55 @@ describe('数据边界：主表单只有三个控件，三个原字段藏在「�
   test('页面不打印凭据（新增代码也遵守）：无 console/hilog', () => {
     assert.equal(/console\.(log|info|warn|error)/.test(page), false);
     assert.equal(/\bHilog\./.test(page), false);
+  });
+});
+
+// ---------------------------------------------------------------- F1（review P1）：旧 SSH 用户的显式出口
+//
+// `authMode='ssh'` 的存量用户此前只能看到一句「建议改成 HTTPS 地址后保存」，但页面上没有任何控件
+// 能改 authMode —— 照做之后警告仍在、同步仍被拦。现在 SSH 警告行恰好一个显式按钮，回调只切本地
+// @State（下一拍由用户点「保存设置」落盘），**不**在这里保存或下发内核。
+
+describe('F1（review P1）：SSH 警告行的显式出口（切换不落盘）', () => {
+  const page = readSettingsPage();
+  const syncSection = readSettingsFile('components/settings/SyncSection.ets');
+
+  test('警告行恰好一个「改用 HTTPS 令牌」ActionButton；handler 只切状态 + toast，不保存/不下发', () => {
+    // ① 警告行（SSH 分支 → 主表单结束标记）里恰好一个动作
+    const row = syncSection.slice(
+      syncSection.indexOf('if (this.authMode === AUTH_SSH) {'),
+      syncSection.indexOf('// ---- 主表单到此结束')
+    );
+    assert.ok(row.length > 0, '找不到 SSH 警告行');
+    assert.match(row, /Text\(SSH_STORED_WARNING\)/, '只读警告文案必须仍在');
+    const actions = [...row.matchAll(/ActionButton\(\{/g)];
+    assert.equal(actions.length, 1, '警告行必须恰好一个动作（显式切换，不是隐式迁移）');
+    const button = row.slice(actions[0].index);
+    assert.match(button, /label: '改用 HTTPS 令牌'/, '按钮文案必须是「改用 HTTPS 令牌」');
+    assert.match(button, /variant: '(ghost|secondary)'/, '沿用设置页既有按钮档位');
+    assert.match(button, /onTap: \(\): void => \{\s*this\.onSwitchToHttpsToken\(\);/, '点按交给页面 handler');
+
+    // ② 页面 handler：只切 @State + 清过时红字 + 短 toast（@Prop 单向，不能只改组件副本）
+    const at = page.indexOf('private switchToHttpsToken(): void {');
+    assert.ok(at > 0, '页面必须有 switchToHttpsToken handler');
+    const handler = page.slice(at, page.indexOf('\n  }', at));
+    assert.match(handler, /this\.authMode = AUTH_HTTPS;/, '必须显式切到 HTTPS（import AUTH_HTTPS）');
+    assert.match(handler, /this\.syncMessage = '';/, '清掉上次 SSH 拦截留下的过时红字');
+    assert.match(
+      handler,
+      /promptAction\.showToast\(\{ message: '已切换为 HTTPS \+ 令牌，保存后生效' \}\)/,
+      '短提示文案'
+    );
+    assert.equal(/settingsStore\.save\(/.test(handler), false, '不在这里自动保存');
+    assert.equal(/this\.configure\(/.test(handler), false, '不在这里自动下发同步内核');
+
+    // ③ 装配：组件的回调 prop 必须接到页面 handler（少传 = 永远默认值，按钮白点）
+    assert.match(
+      page,
+      /onSwitchToHttpsToken: \(\): void => \{\s*this\.switchToHttpsToken\(\);/,
+      'SyncGroup 必须把回调接到页面 handler'
+    );
+    assert.match(syncSection, /onSwitchToHttpsToken: \(\) => void = \(\) => \{\};/, '组件必须声明回调 prop');
   });
 });
 
