@@ -1378,8 +1378,39 @@ export const V2_BUNDLE_SCHEMA_VERSION: number = 2;
 /** v2 bundle 的 kind 标记（避免把别的 JSON 误当成时间线备份）。 */
 export const V2_BUNDLE_KIND: string = 'dsh-schedule-v2';
 
+// ---------------------------------------------------------------- bundle 版本与账本（mod-export-v2-ledgers）
+//
+// **Bundle/version compatibility rule（逐字，代码与 docs/EXPORT-IMPORT.md §7 同源）：**
+// - `bundleVersion` 缺失或 `1`（旧 bundle）：按今天的方式导入（records/summary/media only），
+//   **不拒绝**；返回 / 记录一条 informational note，说明 bundle 里没有按日账本
+//   （deleted/restore/conflicts），因此跨端删除 / 撤销 / 冲突审计状态没有被搬运。
+// - `bundleVersion: 2`：连同三本按日账本一起导入，并与目标已有账本做**并集**
+//   （只追加；delete/restore 按 `(id, ts)` 去重，conflicts 按 `(id, ts, dedupeKey)` 去重；
+//   目标已有的账本字节**永不截断、永不重写**）。records/summary/media 规则不变
+//   （media 只增、预检 sha256 不变）。
+// - 只有**未来**未知的 `bundleVersion > 2` 才以 typed `E_BUNDLE_VERSION` 拒绝。
+//   非正整数 / 非数字的畸形 bundleVersion 按 E_BUNDLE_CORRUPT 处理（它不是"未来版本"）。
+
+/** 当前导出的 bundle 格式版本（v2 时间线的第一版带账本 bundle）。 */
+export const V2_BUNDLE_VERSION: number = 2;
+/** 旧 bundle 的隐含版本：manifest 没有 bundleVersion 字段时按 1 处理。 */
+export const V2_BUNDLE_VERSION_LEGACY: number = 1;
+/** 三本按日账本的裸文件名（顺序即 manifest / bundle 里的稳定顺序）。 */
+export const V2_LEDGER_DELETED: string = 'deleted.jsonl';
+export const V2_LEDGER_RESTORE: string = 'restore.jsonl';
+export const V2_LEDGER_CONFLICTS: string = 'conflicts.jsonl';
+export const V2_LEDGER_FILES: string[] = [V2_LEDGER_DELETED, V2_LEDGER_RESTORE, V2_LEDGER_CONFLICTS];
+/** 账本去重口径：delete/restore 按 (id,ts)，conflicts 按 (id,ts,dedupeKey)。 */
+export type V2LedgerKind = 'delete' | 'restore' | 'conflict';
+/** 旧 bundle 缺账本时的 informational note（中文，返回给调用方并由服务层记日志）。 */
+export const V2_NOTE_LEDGERS_ABSENT: string =
+  '旧版备份（bundleVersion=1）不含按日账本；已按旧规则导入记录/汇总/媒体，' +
+  '未合并 deleted.jsonl / restore.jsonl / conflicts.jsonl（跨端删除与撤销状态未搬运）。';
+
 /** 五类类型化拒绝原因（对应 brief / DATA-CONTRACT-v2 §11 的写路径门禁）。 */
 export const V2_REFUSAL_SCHEMA_UNKNOWN: string = 'E_SCHEMA_UNKNOWN';
+/** 未来未知 bundle 版本（>2）的 typed 拒绝；旧 bundle / 缺失版本不拒绝。 */
+export const V2_REFUSAL_BUNDLE_VERSION: string = 'E_BUNDLE_VERSION';
 export const V2_REFUSAL_BUNDLE_CORRUPT: string = 'E_BUNDLE_CORRUPT';
 export const V2_REFUSAL_MEDIA_MISSING: string = 'E_MEDIA_MISSING';
 export const V2_REFUSAL_V1_TARGET: string = 'E_V1_TARGET';
@@ -1389,6 +1420,14 @@ export const V2_REFUSAL_MEDIA_CORRUPT: string = 'E_MEDIA_CORRUPT';
 /** 同日同名（sha16 前缀）不同内容 → 拒绝，不覆盖、不保留错误旧图（§14 开放项 1 的"拒绝"分支）。 */
 export const V2_REFUSAL_MEDIA_COLLISION: string = 'E_MEDIA_COLLISION';
 
+/** manifest 中「一本按日账本」的声明（名字 + 逐字节搬运的 UTF-8 字节数）。 */
+export interface V2LedgerMeta {
+  /** 裸文件名（deleted.jsonl / restore.jsonl / conflicts.jsonl）。 */
+  name: string;
+  /** bundle 内该账本文件的字节数；空账本为 0（契约 §10 要求空账本也要建文件）。 */
+  bytes: number;
+}
+
 /** manifest 中「一天」的摘要。 */
 export interface V2BundleDay {
   date: string;
@@ -1396,6 +1435,8 @@ export interface V2BundleDay {
   hasSummary: boolean;
   /** 该日 media/ 下的裸文件名（sha16.jpg），按文件名升序。 */
   media: string[];
+  /** 该日三本账本的字节数声明（bundleVersion>=2 恒有 3 项；旧 bundle 可缺席）。 */
+  ledgers?: V2LedgerMeta[];
 }
 
 /** manifest 中「一张媒体」的条目。 */
@@ -1406,8 +1447,9 @@ export interface V2BundleMedia {
   date: string;
 }
 
-/** v2 manifest 的逐字结构（键序即契约）。 */
+/** v2 manifest 的逐字结构（键序即契约；bundleVersion 为最外层版本门槛）。 */
 export interface V2Manifest {
+  bundleVersion: number;
   schemaVersion: number;
   kind: string;
   range: ExportRange;
@@ -1431,7 +1473,51 @@ const V2_MEDIA_FILE_RE: RegExp = /^[0-9a-f]{16}\.jpg$/;
 /** 完整 sha256：64 位小写十六进制。 */
 const V2_SHA256_RE: RegExp = /^[0-9a-f]{64}$/;
 
-function copyV2BundleDay(day: V2BundleDay): V2BundleDay {
+/**
+ * 纯函数：UTF-8 字节数（不依赖 Node Buffer / TextEncoder，ArkTS 严格模式可直接跑）。
+ * 账本字节数按此计算，保证 manifest 的 bytes 与 bundle 内文件字节逐字对应。
+ */
+export function v2Utf8ByteLength(text: string): number {
+  const value = typeof text === 'string' ? text : '';
+  let bytes = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code < 0x80) {
+      bytes += 1;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length) {
+      const low = value.charCodeAt(i + 1);
+      bytes += low >= 0xdc00 && low <= 0xdfff ? 4 : 3;
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        i += 1;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+/** 规范化一天的三本账本声明：固定顺序、恒 3 项，缺失按 0 字节（空账本也要进 bundle）。 */
+function copyV2LedgerMetas(day: V2BundleDay): V2LedgerMeta[] {
+  const byName = new Map<string, number>();
+  const source: V2LedgerMeta[] = Array.isArray(day.ledgers) ? day.ledgers : [];
+  for (const meta of source) {
+    if (meta !== null && typeof meta === 'object' && typeof meta.name === 'string') {
+      const size = meta.bytes;
+      byName.set(meta.name, typeof size === 'number' && Number.isFinite(size) && size >= 0 ? Math.floor(size) : 0);
+    }
+  }
+  const out: V2LedgerMeta[] = [];
+  for (const name of V2_LEDGER_FILES) {
+    const bytes = byName.get(name);
+    out.push({ name: name, bytes: bytes === undefined ? 0 : bytes });
+  }
+  return out;
+}
+
+function copyV2BundleDay(day: V2BundleDay, withLedgers: boolean = true): V2BundleDay {
   const media: string[] = [];
   const source: string[] = Array.isArray(day.media) ? day.media : [];
   for (const name of source) {
@@ -1442,7 +1528,8 @@ function copyV2BundleDay(day: V2BundleDay): V2BundleDay {
     date: day.date,
     recordCount: day.recordCount,
     hasSummary: day.hasSummary === true,
-    media: media
+    media: media,
+    ledgers: withLedgers ? copyV2LedgerMetas(day) : undefined
   };
   return out;
 }
@@ -1455,7 +1542,8 @@ function copyV2BundleMedia(item: V2BundleMedia): V2BundleMedia {
 /**
  * 构造 v2 manifest 文本（纯函数，不写盘）。
  *
- * - 顶层键序固定 `schemaVersion, kind, range, exportedAt, dayCount, days, media`；
+ * - 顶层键序固定 `bundleVersion, schemaVersion, kind, range, exportedAt, dayCount, days, media`；
+ * - 每个 day 恒声明三本账本的字节数（空账本为 0，顺序 deleted/restore/conflicts）；
  * - days 按 date 升序、day.media 按文件名升序、media 按 (date, file) 升序；
  * - 2 空格缩进 + 末尾一个换行；区间非法时抛中文 Error（与 v1 渲染入口同口径）。
  */
@@ -1487,6 +1575,7 @@ export function buildV2Manifest(input: V2ManifestInput): string {
     return left.file < right.file ? -1 : 1;
   });
   const doc: V2Manifest = {
+    bundleVersion: V2_BUNDLE_VERSION,
     schemaVersion: V2_BUNDLE_SCHEMA_VERSION,
     kind: V2_BUNDLE_KIND,
     range: range,
@@ -1541,6 +1630,22 @@ export function parseV2Manifest(text: string): V2ManifestResult {
       `不认识的 v2 备份版本（${clip(String(doc.schemaVersion))}），只支持 schemaVersion=2`
     );
   }
+  // bundleVersion 是**最外层**版本门槛：缺失/1 = 旧 bundle（照常导入 + informational note），
+  // 2 = 带账本 bundle，>2 = 未来未知版本 → E_BUNDLE_VERSION。畸形值按 E_BUNDLE_CORRUPT。
+  const rawBundleVersion = doc.bundleVersion;
+  let bundleVersion: number = V2_BUNDLE_VERSION_LEGACY;
+  if (rawBundleVersion !== undefined) {
+    if (typeof rawBundleVersion !== 'number' || !Number.isInteger(rawBundleVersion) || rawBundleVersion < 1) {
+      return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 bundleVersion 非法：${clip(String(rawBundleVersion))}`);
+    }
+    if (rawBundleVersion > V2_BUNDLE_VERSION) {
+      return v2ManifestFailure(
+        V2_REFUSAL_BUNDLE_VERSION,
+        `不认识的 v2 bundle 版本（${rawBundleVersion}），本机只支持 bundleVersion<=2；请换用新版本工具导出的备份`
+      );
+    }
+    bundleVersion = rawBundleVersion;
+  }
   if (doc.kind !== V2_BUNDLE_KIND) {
     return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 kind 不是 ${V2_BUNDLE_KIND}`);
   }
@@ -1586,13 +1691,48 @@ export function parseV2Manifest(text: string): V2ManifestResult {
       }
       mediaNames.push(name);
     }
+    // 账本声明只在 bundleVersion>=2 存在；旧 bundle（缺失/1）不声明、也不强制要求账本。
+    let ledgerMetas: V2LedgerMeta[] | undefined = undefined;
+    if (bundleVersion >= 2) {
+      if (!Array.isArray(dayDoc.ledgers)) {
+        return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 ${date} 缺少账本声明 ledgers`);
+      }
+      const byName = new Map<string, number>();
+      for (const rawLedger of dayDoc.ledgers as unknown[]) {
+        if (rawLedger === null || typeof rawLedger !== 'object' || Array.isArray(rawLedger)) {
+          return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 ${date} 的账本声明里有非对象元素`);
+        }
+        const ledgerDoc = rawLedger as Record<string, unknown>;
+        const name = typeof ledgerDoc.name === 'string' ? ledgerDoc.name : '';
+        const size = ledgerDoc.bytes;
+        if (V2_LEDGER_FILES.indexOf(name) < 0) {
+          return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 ${date} 的账本名非法：${clip(name)}`);
+        }
+        if (typeof size !== 'number' || !Number.isInteger(size) || size < 0) {
+          return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 ${date}/${name} 的账本字节数非法`);
+        }
+        if (byName.has(name)) {
+          return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 ${date} 重复声明账本 ${name}`);
+        }
+        byName.set(name, size);
+      }
+      if (byName.size !== V2_LEDGER_FILES.length) {
+        return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 ${date} 必须声明三本账本（deleted/restore/conflicts）`);
+      }
+      ledgerMetas = [];
+      for (const name of V2_LEDGER_FILES) {
+        const size = byName.get(name);
+        ledgerMetas.push({ name: name, bytes: size === undefined ? 0 : size });
+      }
+    }
     const day: V2BundleDay = {
       date: date,
       recordCount: count,
       hasSummary: dayDoc.hasSummary,
-      media: mediaNames
+      media: mediaNames,
+      ledgers: ledgerMetas
     };
-    days.push(copyV2BundleDay(day));
+    days.push(copyV2BundleDay(day, bundleVersion >= 2));
   }
   const media: V2BundleMedia[] = [];
   for (const rawMedia of doc.media as unknown[]) {
@@ -1621,6 +1761,7 @@ export function parseV2Manifest(text: string): V2ManifestResult {
   }
   const exportedAt = typeof doc.exportedAt === 'string' ? doc.exportedAt : '';
   const result: V2Manifest = {
+    bundleVersion: bundleVersion,
     schemaVersion: V2_BUNDLE_SCHEMA_VERSION,
     kind: V2_BUNDLE_KIND,
     range: range,
@@ -1729,6 +1870,12 @@ export function buildV2RecordsText(date: string, records: ScheduleRecord[]): str
   return buildRecordsText(date, v2Records);
 }
 
+/** 从 bundle 读入的一本账本原文（逐字节搬运，名字为裸文件名）。 */
+export interface V2LedgerInput {
+  name: string;
+  text: string;
+}
+
 /** 从 v2 bundle 目录读入的一日原文。 */
 export interface V2BundleDayInput {
   date: string;
@@ -1736,6 +1883,8 @@ export interface V2BundleDayInput {
   summaryText: string;
   /** 该日 media/ 目录里实际存在的文件名（裸名）。 */
   mediaFiles: string[];
+  /** 该日三本账本原文（bundleVersion>=2 才有；旧 bundle 缺席=空数组）。 */
+  ledgers?: V2LedgerInput[];
 }
 
 /** 从磁盘拼好的、待校验的 v2 bundle。 */
@@ -1750,6 +1899,8 @@ export interface V2ValidatedDay {
   records: TimelineRecord[];
   summaryText: string;
   mediaFiles: string[];
+  /** 已通过字节数校验的账本原文（旧 bundle 为空数组）。 */
+  ledgers: V2LedgerInput[];
 }
 
 /** `validateV2Bundle` 的结果。 */
@@ -1772,7 +1923,9 @@ function v2ValidationFailure(code: string, reason: string, manifest: V2Manifest 
  * - manifest 不对：透传 `parseV2Manifest` 的 E_SCHEMA_UNKNOWN / E_BUNDLE_CORRUPT；
  * - 天数 / 日期 / 记录数 / summary 标记与 manifest 不符：E_BUNDLE_CORRUPT；
  * - 某日 records.json 解析失败（顶层坏 / 有坏行）：E_BUNDLE_CORRUPT；
- * - manifest 里声明的媒体文件在某日 media/ 名单里缺失：E_MEDIA_MISSING。
+ * - manifest 里声明的媒体文件在某日 media/ 名单里缺失：E_MEDIA_MISSING；
+ * - bundleVersion>=2 且账本声明的字节数与实际账本原文不符 / 非空账本缺失：E_BUNDLE_CORRUPT
+ *   （空账本允许原文缺席，按空串处理）；旧 bundle 跳过账本校验。
  */
 export function validateV2Bundle(bundle: V2BundleInput): V2ValidationResult {
   const parsed = parseV2Manifest(bundle === null || bundle === undefined ? '' : bundle.manifestText);
@@ -1842,11 +1995,37 @@ export function validateV2Bundle(bundle: V2BundleInput): V2ValidationResult {
         );
       }
     }
+    // 账本逐字节校验：manifest 声明的字节数必须等于 bundle 内账本原文的 UTF-8 字节数。
+    // 空账本（bytes=0）允许原文缺席，按空串处理——契约 §10 要求空账本也建文件，
+    // 但旧工具 / 手工拼装的 bundle 可能没有该文件，此时用空串等价。
+    const ledgers: V2LedgerInput[] = [];
+    if (manifest.bundleVersion >= 2 && Array.isArray(declared.ledgers)) {
+      const supplied = new Map<string, string>();
+      const inputLedgers: V2LedgerInput[] = Array.isArray(input.ledgers) ? input.ledgers : [];
+      for (const item of inputLedgers) {
+        if (item !== null && typeof item === 'object' && typeof item.name === 'string') {
+          supplied.set(item.name, typeof item.text === 'string' ? item.text : '');
+        }
+      }
+      for (const meta of declared.ledgers) {
+        const text = supplied.get(meta.name);
+        const bytes = v2Utf8ByteLength(text === undefined ? '' : text);
+        if (bytes !== meta.bytes) {
+          return v2ValidationFailure(
+            V2_REFUSAL_BUNDLE_CORRUPT,
+            `v2 备份 ${input.date}/${meta.name} 账本字节数不符：manifest 声明 ${meta.bytes}，实际 ${bytes}`,
+            manifest
+          );
+        }
+        ledgers.push({ name: meta.name, text: text === undefined ? '' : text });
+      }
+    }
     const valid: V2ValidatedDay = {
       date: input.date,
       records: records,
       summaryText: typeof input.summaryText === 'string' ? input.summaryText : '',
-      mediaFiles: input.mediaFiles.slice()
+      mediaFiles: input.mediaFiles.slice(),
+      ledgers: ledgers
     };
     days.push(valid);
   }
@@ -1870,7 +2049,7 @@ export interface V2PlanTotals {
   bytes: number;
 }
 
-/** `planV2Import` 的结果（ok=false 时 code 为五类类型化原因之一）。 */
+/** `planV2Import` 的结果（ok=false 时 code 为类型化原因之一）。 */
 export interface V2ImportPlan {
   ok: boolean;
   code: string;
@@ -1878,6 +2057,10 @@ export interface V2ImportPlan {
   totals: V2PlanTotals;
   manifest: V2Manifest | null;
   days: V2ValidatedDay[];
+  /** 生效的 bundle 版本（缺失按 1）；服务层据此决定是否搬运账本。 */
+  bundleVersion: number;
+  /** informational note（不是错误）：旧 bundle 无账本时给出，供 UI 展示与服务层记日志。 */
+  notes: string[];
 }
 
 function emptyV2Totals(): V2PlanTotals {
@@ -1892,7 +2075,9 @@ function v2PlanFailure(code: string, reason: string, manifest: V2Manifest | null
     reason: reason,
     totals: emptyV2Totals(),
     manifest: manifest,
-    days: []
+    days: [],
+    bundleVersion: manifest === null ? V2_BUNDLE_VERSION_LEGACY : manifest.bundleVersion,
+    notes: []
   };
   return out;
 }
@@ -1935,15 +2120,112 @@ export function planV2Import(bundle: V2BundleInput, target: V2TargetState): V2Im
       totals.bytes += item.bytes;
     }
   }
+  const bundleVersion: number = checked.manifest === null ? V2_BUNDLE_VERSION_LEGACY : checked.manifest.bundleVersion;
+  const notes: string[] = [];
+  // 旧 bundle 不拒绝：返回 informational note（服务层同时 console.info + 面板展示）。
+  if (bundleVersion < 2) {
+    notes.push(V2_NOTE_LEDGERS_ABSENT);
+  }
   const out: V2ImportPlan = {
     ok: true,
     code: '',
     reason: '',
     totals: totals,
     manifest: checked.manifest,
-    days: checked.days
+    days: checked.days,
+    bundleVersion: bundleVersion,
+    notes: notes
   };
   return out;
+}
+
+// ---------------------------------------------------------------- 账本并集合并（mod-export-v2-ledgers）
+
+/** 账本行的去重键（按账本种类分流；坏行 / 缺字段退化为整行，绝不误吞历史行）。 */
+export function v2LedgerRowKey(line: string, kind: V2LedgerKind): string {
+  const raw = typeof line === 'string' ? line : '';
+  let row: Record<string, unknown> | null = null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      row = parsed as Record<string, unknown>;
+    }
+  } catch {
+    row = null;
+  }
+  if (row === null) {
+    return `raw\u0000${raw}`;
+  }
+  const id = typeof row.id === 'string' ? row.id : '';
+  const ts = typeof row.ts === 'string' ? row.ts : '';
+  if (id.length === 0 || ts.length === 0) {
+    return `raw\u0000${raw}`;
+  }
+  if (kind === 'conflict') {
+    const dedupeKey = typeof row.dedupeKey === 'string' ? row.dedupeKey : '';
+    return `conflict\u0000${id}\u0000${ts}\u0000${dedupeKey}`;
+  }
+  return `${kind}\u0000${id}\u0000${ts}`;
+}
+
+/** 账本并集合并的结果（text 为目标最终全文；toAppend 为真正需要物理追加的新行）。 */
+export interface V2LedgerMergeResult {
+  /** 合并后的完整文本：目标已有字节恒为前缀（缺尾换行时补一个 \n，不改动任何历史字节）。 */
+  text: string;
+  /** 只含目标里没有的新行（每行以 \n 结尾）；空串表示无需落盘。 */
+  toAppend: string;
+  /** 新增行数。 */
+  added: number;
+  /** 因重复被跳过的行数。 */
+  skipped: number;
+}
+
+/**
+ * 账本**并集**合并（纯函数，零 IO）：目标账本 + 备份账本 → 目标已有字节不变，新行只追加。
+ *
+ * - delete/restore 按 `(id, ts)` 去重；conflicts 按 `(id, ts, dedupeKey)` 去重（§4 / §7）；
+ * - 目标原文恒为 `text` 的严格前缀（如末尾缺 `\n` 只补分隔符，不重写历史行）；
+ * - 备份里的坏行 / 缺字段行按整行去重（与 timelineWriteStore.appendLedgerLine 同口径），
+ *   绝不因为解析失败而丢弃一条真实事实；
+ * - 幂等：同一份备份合并两次，第二次 `added=0` / `toAppend=''`。
+ */
+export function mergeV2LedgerText(existingText: string, incomingText: string, kind: V2LedgerKind): V2LedgerMergeResult {
+  const existing = typeof existingText === 'string' ? existingText : '';
+  const incoming = typeof incomingText === 'string' ? incomingText : '';
+  const keys = new Set<string>();
+  const existingLines = existing.split('\n');
+  for (const line of existingLines) {
+    if (line.length === 0) {
+      continue;
+    }
+    keys.add(v2LedgerRowKey(line, kind));
+  }
+  const newLines: string[] = [];
+  let skipped = 0;
+  const incomingLines = incoming.split('\n');
+  for (const line of incomingLines) {
+    if (line.length === 0) {
+      continue;
+    }
+    const key = v2LedgerRowKey(line, kind);
+    if (keys.has(key)) {
+      skipped += 1;
+      continue;
+    }
+    keys.add(key);
+    newLines.push(line);
+  }
+  const toAppend = newLines.length === 0 ? '' : `${newLines.join('\n')}\n`;
+  const separator = existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
+  const text = `${existing}${separator}${toAppend}`;
+  const out: V2LedgerMergeResult = { text: text, toAppend: toAppend, added: newLines.length, skipped: skipped };
+  return out;
+}
+
+/** 把 informational notes 拼成可展示的一段（面板用；空数组返回空串）。 */
+export function v2PlanNotes(plan: V2ImportPlan): string {
+  const notes: string[] = plan !== null && Array.isArray(plan.notes) ? plan.notes : [];
+  return notes.join('；');
 }
 
 // ---------------------------------------------------------------- 落盘前媒体完整性预检（P1-1 / P2 碰撞）
@@ -2076,14 +2358,20 @@ export function v2PlanSummary(plan: V2ImportPlan): string {
   if (!plan.ok) {
     return '';
   }
-  return (
+  const head = (
     `将导入 ${plan.totals.days} 天 / ${plan.totals.records} 条记录 / ` +
     `${plan.totals.media} 个媒体文件（共 ${plan.totals.bytes} 字节）`
   );
+  // informational note 跟在计划行后，用户能看见「旧 bundle 没带账本」这件事（不是错误、不阻止导入）。
+  const note = v2PlanNotes(plan);
+  return note.length > 0 ? `${head}；${note}` : head;
 }
 
-/** 五类拒绝原因对应的「下一步」文案（面板错误态用，未登记的类型给通用文案）。 */
+/** 各类型化拒绝原因对应的「下一步」文案（面板错误态用，未登记的类型给通用文案）。 */
 export function v2RefusalNext(code: string): string {
+  if (code === V2_REFUSAL_BUNDLE_VERSION) {
+    return '换用 bundleVersion<=2 的 v2 备份；更高版本请升级本机导出/导入工具后再导入';
+  }
   if (code === V2_REFUSAL_SCHEMA_UNKNOWN) {
     return '换用 schemaVersion=2 的 v2 备份；不认识的版本不猜着导入';
   }

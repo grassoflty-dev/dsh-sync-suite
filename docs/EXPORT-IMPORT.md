@@ -356,3 +356,40 @@ node tools\validate-app.mjs                                         # 8/8
 同一天多条只一次物理追加、第 2 个日期失败时 `ok:false` + `files` 只含已写文件 + 已写内容完整、
 编码失败零写入、索引异常不翻转 `ok`；**复核（M2）**：`reconcileBeforeAppend` 的三种归属、
 同批复核去重、双击端到端不产生第二次物理追加、`.ets` 侧「重读 → 复核 → 写入」顺序与并发闸的源码级断言。
+
+---
+
+## 7. v2 bundle 版本与按日账本（`mod-export-v2-ledgers`）
+
+v2 bundle（沙箱 `<filesDir>/exports/v2-<stamp>/`，不进 Git）在原 `manifest.json` 基础上增加**最外层** `bundleVersion`，并为每个导出日增加三本账本文件；其余 bundle 内容（records/summary/media、键序、确定性排序）**逐字节不变**。
+
+```
+v2-<stamp>/
+  manifest.json                        # bundleVersion, schemaVersion, kind, range, exportedAt, dayCount, days, media
+  timeline/<date>/records.json
+  timeline/<date>/summary.json         # 存在才写
+  timeline/<date>/deleted.jsonl        # 逐字节复制源仓库，空账本也建文件
+  timeline/<date>/restore.jsonl
+  timeline/<date>/conflicts.jsonl
+  timeline/<date>/media/<sha16>.jpg
+```
+
+- manifest 的 `days[]` 每天增 `ledgers: [{name, bytes}, …]`，恒三项、顺序固定 `deleted.jsonl` / `restore.jsonl` / `conflicts.jsonl`，`bytes` 为该账本 UTF-8 字节数（空账本为 0）；
+- 账本从源仓库 **append-only 逐字节复制**（不解析、不重排、不重写历史行），与 `DATA-CONTRACT-v2.md` §7 P2-3 的「旧字节是新字节严格前缀」一致；
+- 确定性不变：days 按 date、ledgers 按固定名序、records 按 `(ts,id)`、media 按 `(date,file)`；同数据重复导出逐字节相同。
+
+### 7.1 Bundle/version compatibility rule（verbatim，与 `model/exportImport.ts` 头注释同源）
+
+> - `bundleVersion` missing or `1` (old bundles): import as today (records/summary/media only), and **log/return an informational note** that ledgers were absent — do not refuse.
+> - `bundleVersion: 2`: import ledgers too, **union** with the target's existing ledgers (append-only, dedupe by `(id,ts)` for delete/restore, `(id,ts,dedupeKey)` for conflicts), never truncating target bytes; record/summary/media rules unchanged (media add-only, preflight sha256 unchanged).
+> - Refuse with typed `E_BUNDLE_VERSION` only for a *future* unknown bundleVersion (`> 2`).
+
+中文等价说明（面板展示文案同源）：
+- 旧 bundle（缺字段或 1）不拒绝：照常导入记录/汇总/媒体，返回 informational note（`V2_NOTE_LEDGERS_ABSENT`），服务层 `console.info` 记日志、面板把 note 附在计划行后；跨端删除/撤销/冲突审计状态不会因旧 bundle 被搬运。
+- `bundleVersion: 2`：三本账本与目标已有账本做**并集**，只追加目标里没有的新行；`mergeV2LedgerText()` 保证目标已有字节恒为新字节前缀（缺尾换行只补 `\n`），delete/restore 按 `(id,ts)`、conflicts 按 `(id,ts,dedupeKey)` 去重，坏行按整行去重；重复导入零新增（幂等）。
+- 只有 `bundleVersion > 2` 以 typed `E_BUNDLE_VERSION` 拒绝（下一步：换用 `bundleVersion<=2` 的备份或升级工具）；畸形值（非正整数 / 非数字）按 `E_BUNDLE_CORRUPT`，不误判为未来版本。
+- `schemaVersion` 仍固定为 2、规则不变（非 2 仍是 `E_SCHEMA_UNKNOWN`）；`bundleVersion` 不是仓库级 schema 门槛，只是 bundle 格式门槛。
+
+### 7.2 验证（`tools/test/exportImportV2.test.mjs`）
+
+新增覆盖：v2 bundle 含三本账本（含空账本）与字节数声明、旧 bundle（缺字段/1）不拒绝且带 note、并集去重与不截断、未来版本 `E_BUNDLE_VERSION`、账本乱序声明仍确定性、round-trip（空目标账本逐字节相等；已有目标行并集 + 重放幂等）。v1 导出/导入测试 `exportImport.test.mjs` 一字未改。

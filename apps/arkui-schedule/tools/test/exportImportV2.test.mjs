@@ -10,7 +10,9 @@
 // 3. 落点只经 timelineWriteStore（源码级断言），不写 devices/**、不删媒体；
 // 4. UI 只在 timelineStore.useV2() 时显示 v2 节，禁用按钮必须有中文原因（无假入口）；
 // 5. 落盘前媒体 sha256 预检：篡改 / 读不出 → E_MEDIA_CORRUPT，同名不同内容 → E_MEDIA_COLLISION，
-//    失败时零写入；四个 v2 回调已全部接线，无「未接入」死路径（review follow-up）。
+//    失败时零写入；四个 v2 回调已全部接线，无「未接入」死路径（review follow-up）；
+// 6. mod-export-v2-ledgers：bundleVersion 兼容规则（缺/1 不拒绝 + informational note，2 并集账本，
+//    >2 typed E_BUNDLE_VERSION）、三本按日账本逐字节搬运 / 字节数声明 / 去重 / 不截断 / round-trip。
 //
 // v1 行为不改：本文件不改也不削弱 exportImport.test.mjs 的任何用例。
 
@@ -42,7 +44,14 @@ registerHooks({
 const {
   V2_BUNDLE_KIND,
   V2_BUNDLE_SCHEMA_VERSION,
+  V2_BUNDLE_VERSION,
+  V2_LEDGER_CONFLICTS,
+  V2_LEDGER_DELETED,
+  V2_LEDGER_FILES,
+  V2_LEDGER_RESTORE,
+  V2_NOTE_LEDGERS_ABSENT,
   V2_REFUSAL_BUNDLE_CORRUPT,
+  V2_REFUSAL_BUNDLE_VERSION,
   V2_REFUSAL_MEDIA_CORRUPT,
   V2_REFUSAL_MEDIA_COLLISION,
   V2_REFUSAL_MEDIA_MISSING,
@@ -53,11 +62,15 @@ const {
   buildV2Manifest,
   buildV2RecordsText,
   checkV2MediaIntegrity,
+  mergeV2LedgerText,
   parseV2Manifest,
   planV2Import,
   validateV2Bundle,
+  v2LedgerRowKey,
+  v2PlanNotes,
   v2PlanSummary,
-  v2RefusalNext
+  v2RefusalNext,
+  v2Utf8ByteLength
 } = await import('../.build/model/exportImport.js');
 
 const {
@@ -109,6 +122,19 @@ function recWithMedia(overrides, file, sha, pageIndex = 0) {
   return v2rec({ ...overrides, media: [{ file, sha256: sha, pageIndex }] });
 }
 
+/** 三本账本都为空（契约 §10：按日建账本，空账本也要进 bundle）。 */
+function emptyLedgers() {
+  return V2_LEDGER_FILES.map((name) => ({ name, text: '' }));
+}
+
+/** 把账本原文数组转成 manifest 的字节数声明（顺序固定、逐字节对应）。 */
+function ledgerMetas(ledgers) {
+  return V2_LEDGER_FILES.map((name) => {
+    const found = ledgers.find((item) => item.name === name);
+    return { name, bytes: v2Utf8ByteLength(found ? found.text : '') };
+  });
+}
+
 /** 造一个合法的 bundle（默认两天，可覆盖 manifest 与逐日输入）。 */
 function makeBundle(options = {}) {
   const dates = options.dates ?? ['2026-11-19', '2026-11-20'];
@@ -121,12 +147,14 @@ function makeBundle(options = {}) {
     for (const name of mediaFiles) {
       mediaEntries.push({ file: name, sha256: name.slice(0, -4).padEnd(64, '0'), bytes: 10, date });
     }
-    dayEntries.push({ date, recordCount: records.length, hasSummary: false, media: mediaFiles });
+    const ledgers = options.ledgersFor ? options.ledgersFor(date) : emptyLedgers();
+    dayEntries.push({ date, recordCount: records.length, hasSummary: false, media: mediaFiles, ledgers: ledgerMetas(ledgers) });
     days.push({
       date,
       recordsText: buildV2RecordsText(date, records),
       summaryText: '',
-      mediaFiles: options.presentMediaFor ? options.presentMediaFor(date) : mediaFiles.slice()
+      mediaFiles: options.presentMediaFor ? options.presentMediaFor(date) : mediaFiles.slice(),
+      ledgers
     });
   }
   const manifestText = buildV2Manifest({
@@ -189,15 +217,16 @@ function mediaIo(bytes, options = {}) {
 // ---------------------------------------------------------------- buildV2Manifest
 
 describe('v2 导出 manifest：确定性 + 逐字节稳定', () => {
-  test('顶层键序固定，schemaVersion=2 / kind 标记写入', () => {
+  test('顶层键序固定，bundleVersion=2 / schemaVersion=2 / kind 标记写入', () => {
     const text = buildV2Manifest({
       from: '2026-11-01', to: '2026-11-30', exportedAt: '2026-11-18T00:00:00+08:00',
       days: [], media: []
     });
     const doc = JSON.parse(text);
+    assert.equal(doc.bundleVersion, V2_BUNDLE_VERSION);
     assert.equal(doc.schemaVersion, V2_BUNDLE_SCHEMA_VERSION);
     assert.equal(doc.kind, V2_BUNDLE_KIND);
-    assert.deepEqual(Object.keys(doc), ['schemaVersion', 'kind', 'range', 'exportedAt', 'dayCount', 'days', 'media']);
+    assert.deepEqual(Object.keys(doc), ['bundleVersion', 'schemaVersion', 'kind', 'range', 'exportedAt', 'dayCount', 'days', 'media']);
     assert.deepEqual(doc.range, { from: '2026-11-01', to: '2026-11-30' });
     assert.equal(doc.dayCount, 0);
     assert.equal(text.endsWith('\n'), true);
@@ -416,9 +445,9 @@ describe('planV2Import：五类类型化拒绝（typed refusals）', () => {
     assert.ok(plan.reason.includes('写入'), '原因里要点名写入路径');
   });
 
-  test('七类拒绝都有中文「下一步」文案（含新增 E_MEDIA_CORRUPT / E_MEDIA_COLLISION）', () => {
+  test('八类拒绝都有中文「下一步」文案（含 E_BUNDLE_VERSION / E_MEDIA_CORRUPT / E_MEDIA_COLLISION）', () => {
     for (const code of [
-      V2_REFUSAL_SCHEMA_UNKNOWN, V2_REFUSAL_BUNDLE_CORRUPT, V2_REFUSAL_MEDIA_MISSING,
+      V2_REFUSAL_SCHEMA_UNKNOWN, V2_REFUSAL_BUNDLE_VERSION, V2_REFUSAL_BUNDLE_CORRUPT, V2_REFUSAL_MEDIA_MISSING,
       V2_REFUSAL_V1_TARGET, V2_REFUSAL_TARGET_BUSY,
       V2_REFUSAL_MEDIA_CORRUPT, V2_REFUSAL_MEDIA_COLLISION
     ]) {
@@ -547,6 +576,236 @@ describe('checkV2MediaIntegrity：sha256 校验与 sha16 碰撞（fail closed be
   });
 });
 
+// ---------------------------------------------------------------- bundle 版本与账本（mod-export-v2-ledgers）
+
+const LDAY = '2026-11-19';
+const LT10 = `${LDAY}T10:00:00+08:00`;
+const LT11 = `${LDAY}T11:00:00+08:00`;
+
+function delLine(id, ts, extra = '') {
+  return `{"id":"${id}","ts":"${ts}","deletedAt":"${ts}"${extra}}`;
+}
+function restoreLine(id, ts) {
+  return `{"id":"${id}","ts":"${ts}","restoredAt":"${ts}"}`;
+}
+function conflictLine(id, ts, losing, dedupeKey) {
+  return `{"id":"${id}","ts":"${ts}","losingLine":"${losing}","dedupeKey":"${dedupeKey}"}`;
+}
+function sampleLedgers() {
+  return [
+    { name: V2_LEDGER_DELETED, text: `${delLine('a', LT10)}\n` },
+    { name: V2_LEDGER_RESTORE, text: `${restoreLine('a', LT11)}\n` },
+    { name: V2_LEDGER_CONFLICTS, text: `${conflictLine('b', LT10, 'loser', 'dk1')}\n` }
+  ];
+}
+const LEDGER_KIND_OF = {
+  [V2_LEDGER_DELETED]: 'delete',
+  [V2_LEDGER_RESTORE]: 'restore',
+  [V2_LEDGER_CONFLICTS]: 'conflict'
+};
+
+describe('bundleVersion=2：三本按日账本进 bundle + 字节数声明', () => {
+  test('v2 bundle 含三本账本（含空账本），manifest 逐本记字节数', () => {
+    const bundle = makeBundle({ dates: [LDAY] });
+    const doc = JSON.parse(bundle.manifestText);
+    assert.equal(doc.bundleVersion, V2_BUNDLE_VERSION);
+    assert.equal(doc.bundleVersion, 2);
+    assert.deepEqual(doc.days[0].ledgers.map((m) => m.name), V2_LEDGER_FILES);
+    assert.deepEqual(doc.days[0].ledgers.map((m) => m.bytes), [0, 0, 0], '空账本也要声明 0 字节');
+    assert.deepEqual(bundle.days[0].ledgers.map((l) => l.name), V2_LEDGER_FILES);
+    assert.deepEqual(bundle.days[0].ledgers.map((l) => l.text), ['', '', '']);
+    const plan = planV2Import(bundle, V2_TARGET_OK);
+    assert.equal(plan.ok, true, plan.reason);
+    assert.equal(plan.bundleVersion, 2);
+    assert.deepEqual(plan.days[0].ledgers.map((l) => l.name), V2_LEDGER_FILES);
+    assert.deepEqual(plan.notes, [], 'v2 bundle 不需要 absent-note');
+  });
+
+  test('非空账本字节数与 UTF-8 相符；账本声明乱序仍逐字节稳定（determinism）', () => {
+    const ledgers = sampleLedgers();
+    const bundle = makeBundle({ dates: [LDAY], ledgersFor: () => ledgers });
+    const doc = JSON.parse(bundle.manifestText);
+    assert.deepEqual(
+      doc.days[0].ledgers.map((m) => m.bytes),
+      V2_LEDGER_FILES.map((name) => v2Utf8ByteLength(ledgers.find((l) => l.name === name).text))
+    );
+    const entries = [{ date: LDAY, recordCount: 0, hasSummary: false, media: [], ledgers: ledgerMetas(ledgers) }];
+    const a = buildV2Manifest({ from: LDAY, to: LDAY, exportedAt: 'E', days: entries, media: [] });
+    const b = buildV2Manifest({
+      from: LDAY, to: LDAY, exportedAt: 'E',
+      days: [{ ...entries[0], ledgers: ledgerMetas(ledgers).slice().reverse() }], media: []
+    });
+    assert.equal(a, b, '账本声明顺序不影响 manifest 字节');
+    assert.equal(buildV2Manifest({ from: LDAY, to: LDAY, exportedAt: 'E', days: entries, media: [] }), a);
+  });
+
+  test('账本字节数不符 → E_BUNDLE_CORRUPT（fail-closed，不静默导入错账本）', () => {
+    const bundle = makeBundle({ dates: [LDAY], ledgersFor: () => sampleLedgers() });
+    const doc = JSON.parse(bundle.manifestText);
+    doc.days[0].ledgers[0].bytes += 1;
+    const plan = planV2Import({ ...bundle, manifestText: JSON.stringify(doc) }, V2_TARGET_OK);
+    assert.equal(plan.ok, false);
+    assert.equal(plan.code, V2_REFUSAL_BUNDLE_CORRUPT);
+    assert.ok(plan.reason.includes('账本字节数不符'));
+  });
+});
+
+describe('旧 bundle（bundleVersion 缺失 / 1）：不拒绝 + informational note', () => {
+  function asLegacy(bundle, explicitOne) {
+    const doc = JSON.parse(bundle.manifestText);
+    if (explicitOne) {
+      doc.bundleVersion = 1;
+    } else {
+      delete doc.bundleVersion;
+    }
+    for (const d of doc.days) {
+      delete d.ledgers;
+    }
+    const days = bundle.days.map((d) => ({ ...d, ledgers: [] }));
+    return { manifestText: JSON.stringify(doc), days };
+  }
+
+  for (const explicitOne of [false, true]) {
+    const label = explicitOne ? '显式 bundleVersion=1' : '缺 bundleVersion 字段';
+    test(`${label}：照常导入记录/汇总/媒体，返回 absent-note`, () => {
+      const legacy = asLegacy(makeBundle({ dates: [LDAY] }), explicitOne);
+      const parsed = parseV2Manifest(legacy.manifestText);
+      assert.equal(parsed.ok, true, parsed.reason);
+      assert.equal(parsed.code, '');
+      assert.equal(parsed.manifest.bundleVersion, 1);
+      assert.equal(parsed.manifest.days[0].ledgers, undefined, '旧 bundle 不声明账本');
+
+      const plan = planV2Import(legacy, V2_TARGET_OK);
+      assert.equal(plan.ok, true, plan.reason);
+      assert.equal(plan.code, '');
+      assert.equal(plan.bundleVersion, 1);
+      assert.deepEqual(plan.notes, [V2_NOTE_LEDGERS_ABSENT]);
+      assert.equal(v2PlanNotes(plan), V2_NOTE_LEDGERS_ABSENT);
+      assert.ok(v2PlanSummary(plan).includes('旧版备份'), 'note 随计划行展示给用户');
+      assert.deepEqual(plan.days[0].ledgers, [], '旧 bundle 无账本行可搬运');
+      assert.equal(plan.totals.records, 1, 'records 仍照常导入');
+    });
+  }
+});
+
+describe('mergeV2LedgerText：并集、去重、不截断目标字节', () => {
+  test('delete/restore 按 (id,ts) 去重：旧字节为前缀，同键新内容被跳过', () => {
+    const existing = `${delLine('a', LT10)}\n`;
+    const incoming = `${delLine('a', LT10, ',"intentId":"new"')}\n${delLine('b', LT11)}\n`;
+    const merged = mergeV2LedgerText(existing, incoming, 'delete');
+    assert.equal(merged.added, 1);
+    assert.equal(merged.skipped, 1);
+    assert.ok(merged.text.startsWith(existing), '目标已有账本字节必须是新字节的严格前缀');
+    assert.equal(merged.text, `${existing}${delLine('b', LT11)}\n`);
+    assert.equal(merged.toAppend, `${delLine('b', LT11)}\n`);
+
+    const existingRestore = `${restoreLine('r', LT10)}\n`;
+    const mergedRestore = mergeV2LedgerText(existingRestore, `${restoreLine('r', LT10)}\n${restoreLine('s', LT11)}\n`, 'restore');
+    assert.equal(mergedRestore.added, 1);
+    assert.equal(mergedRestore.skipped, 1);
+    assert.ok(mergedRestore.text.startsWith(existingRestore));
+  });
+
+  test('conflicts 按 (id,ts,dedupeKey) 去重：同 id/ts 不同 dedupeKey 各自保留', () => {
+    const existing = `${conflictLine('x', LT10, 'L1', 'dk1')}\n`;
+    const incoming = `${conflictLine('x', LT10, 'L2', 'dk2')}\n${conflictLine('x', LT10, 'L1', 'dk1')}\n`;
+    const merged = mergeV2LedgerText(existing, incoming, 'conflict');
+    assert.equal(merged.added, 1, 'dk2 是新事实，dk1 是重复');
+    assert.equal(merged.skipped, 1);
+    assert.ok(merged.text.startsWith(existing));
+    assert.ok(merged.text.includes('dk2'));
+    assert.notEqual(
+      v2LedgerRowKey(delLine('a', LT10), 'delete'),
+      v2LedgerRowKey(delLine('a', LT10), 'conflict'),
+      'delete 与 conflict 的去重键空间必须分离'
+    );
+  });
+
+  test('幂等：同一份备份合并两次，第二次零新增零 IO；目标缺尾换行只补分隔符', () => {
+    const source = `${delLine('a', LT10)}\n${delLine('b', LT11)}\n`;
+    const first = mergeV2LedgerText('', source, 'delete');
+    assert.equal(first.text, source);
+    const second = mergeV2LedgerText(first.text, source, 'delete');
+    assert.equal(second.added, 0);
+    assert.equal(second.toAppend, '');
+    assert.equal(second.text, first.text);
+
+    const noNewline = delLine('z', LT10);
+    const third = mergeV2LedgerText(noNewline, `${delLine('q', LT11)}\n`, 'delete');
+    assert.ok(third.text.startsWith(noNewline));
+    assert.equal(third.text, `${noNewline}\n${delLine('q', LT11)}\n`);
+  });
+
+  test('坏行 / 缺字段行按整行去重，不吞真实事实', () => {
+    const existing = 'not-json\n';
+    const merged = mergeV2LedgerText(existing, 'not-json\n{"id":"a"}\n', 'delete');
+    assert.equal(merged.added, 1);
+    assert.equal(merged.skipped, 1);
+    assert.ok(merged.text.startsWith(existing));
+    assert.equal(merged.toAppend, '{"id":"a"}\n');
+  });
+});
+
+describe('未来 bundleVersion>2：typed E_BUNDLE_VERSION 拒绝', () => {
+  test('bundleVersion=3 → parse / plan 均 E_BUNDLE_VERSION，零计划零写入', () => {
+    const bundle = makeBundle({ dates: [LDAY] });
+    const doc = JSON.parse(bundle.manifestText);
+    doc.bundleVersion = 3;
+    const text = JSON.stringify(doc);
+    const parsed = parseV2Manifest(text);
+    assert.equal(parsed.ok, false);
+    assert.equal(parsed.code, V2_REFUSAL_BUNDLE_VERSION);
+    const plan = planV2Import({ ...bundle, manifestText: text }, V2_TARGET_OK);
+    assert.equal(plan.ok, false);
+    assert.equal(plan.code, V2_REFUSAL_BUNDLE_VERSION);
+    assert.deepEqual(plan.days, []);
+    assert.equal(plan.totals.records, 0);
+    assert.match(v2RefusalNext(V2_REFUSAL_BUNDLE_VERSION), /[\u4e00-\u9fa5]/);
+  });
+
+  test('畸形版本（0 / "2"）按 E_BUNDLE_CORRUPT，不误当未来版本', () => {
+    const base = makeBundle({ dates: [LDAY] });
+    for (const bad of [0, '2']) {
+      const doc = JSON.parse(base.manifestText);
+      doc.bundleVersion = bad;
+      const parsed = parseV2Manifest(JSON.stringify(doc));
+      assert.equal(parsed.ok, false);
+      assert.equal(parsed.code, V2_REFUSAL_BUNDLE_CORRUPT);
+    }
+  });
+});
+
+describe('round-trip：导出账本 → 导入空 v2 仓库 → 账本逐字节相等（modulo ordering）', () => {
+  test('空目标：三本账本 toAppend 与源字节逐字相等', () => {
+    const source = sampleLedgers();
+    const bundle = makeBundle({ dates: [LDAY], ledgersFor: () => source });
+    const plan = planV2Import(bundle, V2_TARGET_OK);
+    assert.equal(plan.ok, true, plan.reason);
+    for (const item of source) {
+      const imported = plan.days[0].ledgers.find((l) => l.name === item.name);
+      assert.ok(imported !== undefined, `${item.name} 必须随计划带出`);
+      const merged = mergeV2LedgerText('', imported.text, LEDGER_KIND_OF[item.name]);
+      assert.equal(merged.toAppend, item.text, `${item.name} 字节相等`);
+      assert.equal(merged.text, item.text, `${item.name} 全文字节相等`);
+      assert.equal(v2Utf8ByteLength(merged.text), v2Utf8ByteLength(item.text));
+    }
+  });
+
+  test('目标已有账本行：并集（旧字节前缀 + 新行），modulo ordering；重复重放零新增', () => {
+    const old = `${delLine('old', LT10)}\n`;
+    const source = `${delLine('a', LT10)}\n${delLine('b', LT11)}\n`;
+    const merged = mergeV2LedgerText(old, source, 'delete');
+    assert.ok(merged.text.startsWith(old), '不截断目标已有字节');
+    const actual = merged.text.trim().split('\n').sort();
+    const expected = [old.trim(), ...source.trim().split('\n')].sort();
+    assert.deepEqual(actual, expected, '并集内容 = 目标行 ∪ 源行（顺序无关）');
+    const replay = mergeV2LedgerText(merged.text, source, 'delete');
+    assert.equal(replay.added, 0);
+    assert.equal(replay.toAppend, '');
+    assert.equal(replay.text, merged.text, '重放不产生任何字节变化');
+  });
+});
+
 // ---------------------------------------------------------------- 源码级接线断言
 
 /** 剥掉行注释（本测试只判可执行文本；注释里写「不写 devices/**」是纪律陈述，不是路径）。 */
@@ -576,6 +835,9 @@ describe('源码级：v2 落点只经原子写、不碰 devices、UI flag-gated'
     assert.match(v2Code, /timelineStore\.readDay\(/, '导出复用 timelineStore 的账本过滤读');
     assert.match(v2Code, /buildV2RecordsText\(/, '日文件字节由 buildRecordsText 生成');
     assert.match(v2Code, /planV2Import\(/, '导入先 dry-run');
+    assert.match(v2Code, /V2_LEDGER_FILES/, '三本账本名来自统一常量');
+    assert.match(v2Code, /mergeV2LedgerText\(/, '账本并集必须走纯函数（去重口径可 Node 测）');
+    assert.match(v2Code, /appendTextAtEnd\(/, '账本必须以 append-only 方式追加，绝不截断');
     assert.equal(v2Code.includes('devices/'), false, 'v2 段不得出现 devices/** 路径');
     assert.equal(v2Code.includes('unlinkSync'), false, 'v2 段不得删除媒体或历史');
   });
@@ -588,7 +850,8 @@ describe('源码级：v2 落点只经原子写、不碰 devices、UI flag-gated'
     const firstWrite = Math.min(
       SERVICE.indexOf('timelineWriteStore.append(', start),
       SERVICE.indexOf('timelineWriteStore.appendSummary(', start),
-      SERVICE.indexOf('v2WriteBinary(', start)
+      SERVICE.indexOf('v2WriteBinary(', start),
+      SERVICE.indexOf('appendTextAtEnd(', start)
     );
     assert.ok(preflightAt > 0 && firstWrite > 0 && preflightAt < firstWrite,
       '媒体预检必须发生在任何记录 / 汇总 / 媒体写入之前');

@@ -24,6 +24,9 @@ import { common } from '@kit.AbilityKit';
 import { nowIso } from '../common/date';
 import {
   EXPORT_FORMAT_JSON,
+  V2_LEDGER_CONFLICTS,
+  V2_LEDGER_FILES,
+  V2_LEDGER_RESTORE,
   V2_REFUSAL_BUNDLE_CORRUPT,
   V2_REFUSAL_MEDIA_CORRUPT,
   V2_REFUSAL_MEDIA_COLLISION,
@@ -33,6 +36,9 @@ import {
   buildV2RecordsText,
   checkV2MediaIntegrity,
   decodeUtf8,
+  mergeV2LedgerText,
+  v2PlanNotes,
+  v2Utf8ByteLength,
   exportFileName,
   exportFileStamp,
   exportRecordsInRange,
@@ -59,6 +65,9 @@ import type {
   V2BundleDayInput,
   V2BundleMedia,
   V2ImportPlan,
+  V2LedgerInput,
+  V2LedgerKind,
+  V2LedgerMeta,
   V2Manifest,
   V2TargetState,
   WritePlanResult
@@ -350,6 +359,17 @@ function readTextFromUri(uri: string): string {
 }
 
 /**
+ * 读一本账本的原文（**逐字节搬运**：不做 JSON 解析、不重排、不裁剪）。
+ * 文件不存在按空串处理（契约 §10：空账本也要建文件，但旧 bundle / 手工拼装可能缺文件）。
+ */
+function v2ReadLedgerText(path: string): string {
+  if (!fileExists(path)) {
+    return '';
+  }
+  return readTextFromUri(path);
+}
+
+/**
  * 让用户选一份 JSON 导出文件并读成字符串。
  *
  * 用系统文件选择器（`@kit.CoreFileKit` 的 `picker`），**不新增任何权限**；
@@ -575,7 +595,8 @@ function applyImportPlanOnce(plan: ImportPlan): ImportApplyResult {
 // 只在 `timelineStore.useV2()` 为真时可用；v1 的 exportSchedules / planImportFromText /
 // appendImportPlan 一节一行未改。v2 bundle 落在沙箱 `<filesDir>/exports/v2-<stamp>/`，
 // **不在 git 仓库里**；导入只经 `timelineWriteStore`（原子写 records.json / summary.json）
-// 与 media/ 只增复制，绝不写 devices/**、绝不改历史账本、绝不删媒体。
+// 与 media/ 只增复制，绝不写 devices/**、绝不删媒体；三本账本按 bundleVersion 做**并集追加**
+// （目标已有账本字节恒为新字节前缀，只追加新行，绝不重写历史行，见 docs/EXPORT-IMPORT.md §7）。
 //
 // 关键纪律：
 // - 导出：读侧复用 timelineStore.readDay（已套用 deleted/restore 优先级）+ readSummaryText，
@@ -607,6 +628,8 @@ interface V2PreparedDay {
   recordsText: string;
   summaryText: string;
   mediaNames: string[];
+  /** 三本账本原文（逐字节搬运，空账本为空串但仍在 bundle 里建文件）。 */
+  ledgers: V2LedgerInput[];
 }
 
 /** v2 记录的服务层视图（v2 扩展字段可选，读取一律 typeof / Array.isArray 收窄）。 */
@@ -855,9 +878,21 @@ export function exportV2Timeline(request: ExportRequestInput): V2ExportResult {
         mediaNames.push(name);
         totalBytes += size;
       }
+      // 三本账本逐字节搬运（§7 P2-3：源文件 append-only、绝不重写历史行）。
+      // 空账本也进 bundle（契约 §10：按日新建账本，故空文件也要写），manifest 记字节数。
+      const ledgers: V2LedgerInput[] = [];
+      const ledgerMetas: V2LedgerMeta[] = [];
+      for (const name of V2_LEDGER_FILES) {
+        const text = v2ReadLedgerText(`${repoRoot}/${date}/${name}`);
+        ledgers.push({ name: name, text: text });
+        ledgerMetas.push({ name: name, bytes: v2Utf8ByteLength(text) });
+      }
       totalRecords += records.length;
-      dayEntries.push({ date: date, recordCount: records.length, hasSummary: summaryText.length > 0, media: mediaNames });
-      prepared.push({ date: date, recordsText: recordsText, summaryText: summaryText, mediaNames: mediaNames });
+      dayEntries.push({
+        date: date, recordCount: records.length, hasSummary: summaryText.length > 0,
+        media: mediaNames, ledgers: ledgerMetas
+      });
+      prepared.push({ date: date, recordsText: recordsText, summaryText: summaryText, mediaNames: mediaNames, ledgers: ledgers });
     }
   } catch (error) {
     return failed('', `读取 v2 时间线失败：${describeError(error)}`);
@@ -881,6 +916,10 @@ export function exportV2Timeline(request: ExportRequestInput): V2ExportResult {
       writeTextFile(`${dayDir}/${V2_RECORDS_FILE}`, day.recordsText);
       if (day.summaryText.length > 0) {
         writeTextFile(`${dayDir}/${V2_SUMMARY_FILE}`, day.summaryText);
+      }
+      // 三本账本恒写出（空账本为空文件），字节与 manifest 声明逐字对应。
+      for (const ledger of day.ledgers) {
+        writeTextFile(`${dayDir}/${ledger.name}`, ledger.text);
       }
       if (day.mediaNames.length > 0) {
         const mediaDir = `${dayDir}/${V2_MEDIA_DIR}`;
@@ -924,12 +963,27 @@ export function planV2ImportFromPicked(text: string, uri: string): V2ImportPlanR
       const dayDir = `${bundleDir}/timeline/${day.date}`;
       const recordsText: string = readTextFromUri(`${dayDir}/${V2_RECORDS_FILE}`);
       const summaryText: string = day.hasSummary ? readTextFromUri(`${dayDir}/${V2_SUMMARY_FILE}`) : '';
-      dayInputs.push({ date: day.date, recordsText: recordsText, summaryText: summaryText, mediaFiles: v2ListMedia(`${dayDir}/${V2_MEDIA_DIR}`) });
+      const ledgers: V2LedgerInput[] = [];
+      // 旧 bundle（bundleVersion<2）没有账本文件；跳过读取，plan 会返回 informational note。
+      if (manifest.bundleVersion >= 2) {
+        for (const name of V2_LEDGER_FILES) {
+          ledgers.push({ name: name, text: v2ReadLedgerText(`${dayDir}/${name}`) });
+        }
+      }
+      dayInputs.push({
+        date: day.date, recordsText: recordsText, summaryText: summaryText,
+        mediaFiles: v2ListMedia(`${dayDir}/${V2_MEDIA_DIR}`), ledgers: ledgers
+      });
     }
   } catch (error) {
     return failed(V2_REFUSAL_BUNDLE_CORRUPT, `读取 v2 备份文件失败：${describeError(error)}`);
   }
   const plan: V2ImportPlan = planV2Import({ manifestText: text, days: dayInputs }, v2TargetState());
+  // informational note（不是拒绝）：记日志 + 随计划行回给面板展示。
+  const notes: string = v2PlanNotes(plan);
+  if (notes.length > 0) {
+    console.info(`[export-v2-ledgers] ${notes}`);
+  }
   const result: V2ImportPlanResult = {
     ok: plan.ok,
     code: plan.code,
@@ -1058,6 +1112,32 @@ function applyV2ImportOnce(plan: V2ImportPlan | null, bundleDir: string): V2Appl
         timelineWriteStore.appendSummary(day.date, day.summaryText);
       } catch (error) {
         return v2ApplyFailure('', `写入 ${day.date} 的汇总失败：${describeError(error)}`);
+      }
+    }
+    // 账本并集（bundleVersion>=2 才有）：目标旧字节恒为新字节前缀，只追加备份里没有的新行。
+    // delete/restore 按 (id,ts)、conflicts 按 (id,ts,dedupeKey) 去重；绝不截断 / 重写目标账本。
+    if (plan.bundleVersion >= 2) {
+      for (const ledger of day.ledgers) {
+        const dest = `${repoRoot}/${day.date}/${ledger.name}`;
+        let targetText: string = '';
+        try {
+          targetText = v2ReadLedgerText(dest);
+        } catch (error) {
+          return v2ApplyFailure('', `复核 ${day.date}/${ledger.name} 的既有账本失败：${describeError(error)}`);
+        }
+        const kind: V2LedgerKind = ledger.name === V2_LEDGER_CONFLICTS
+          ? 'conflict'
+          : (ledger.name === V2_LEDGER_RESTORE ? 'restore' : 'delete');
+        const merged = mergeV2LedgerText(targetText, ledger.text, kind);
+        if (merged.toAppend.length === 0) {
+          continue; // 全部已在目标里（幂等），零 IO。
+        }
+        try {
+          ensureDir(`${repoRoot}/${day.date}`);
+          appendTextAtEnd(dest, merged.toAppend);
+        } catch (error) {
+          return v2ApplyFailure('', `追加 ${day.date}/${ledger.name} 账本失败：${describeError(error)}`);
+        }
       }
     }
     days += 1;
