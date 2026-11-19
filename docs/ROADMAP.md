@@ -458,21 +458,22 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 ## 交接：当前状态与下一步（2026-11-18 22:00 起笔，23:10 收口 B 批；2026-11-19 追加 B2 批）
 
 > 用途：换会话/重启后**先读这一节**，不用问人。
-> **HEAD = main 顶端 = `22acdb8`**（B 批代码提交 = `8f34418`，其后是两笔 docs 提交）。
-> **工作树不干净**：B2 批（D4 + D6）的 5 个源码/测试文件 + 3 个 docs 尚未提交，清单见下；
-> **提交由 Lead 统一做**，规划者/执行子代理都不 commit。
+> **HEAD = main 顶端**：A 批 / C 批 / B 批（一键重连 + chat 出口）/ B2 批（导出 chip + 设置页锚点）
+> 与安全脱敏、历史清理都已提交，`git status --short` 为空。
 >
-> B2 批待提交清单（`git status --short`，源码 + 测试 = 5 个文件 / 约 **+675 −7**）：
-> ```
->  M apps/arkui-schedule/entry/src/main/ets/components/ExportImportPanel.ets   (+47 −1)
->  M apps/arkui-schedule/entry/src/main/ets/model/exportImport.ts              (+71)
->  M apps/arkui-schedule/entry/src/main/ets/pages/Settings.ets                 (+115 −6)
->  M apps/arkui-schedule/tools/test/exportImport.test.mjs                      (+148，只在末尾追加)
-> ?? apps/arkui-schedule/tools/test/b2Batch.test.mjs                           (新增 294 行)
->  M docs/UX-STEPS.md                                                          (+57，新增 §4.2)
->  M docs/ROADMAP.md                                                           (本节)
-> ?? docs/REVIEW-b2-batch.md                                                   (新增，独立评审)
-> ```
+> **2026-11-19 历史清理（重要，读下面这段再查哈希）**：为把仓库做成可公开的
+> 「无 secret、无 SDK 大二进制」形态，**未推送区间**的历史做过两次 `git filter-repo` 重写：
+> ① `docs/VERIFICATION.md` 里的 DSH 访问令牌与调试签名口令，历史中已替换为 `<已脱敏>`；
+> ② 历史中的 ArkUI-X SDK 资产（`fonts/`、`icudt74l.dat`、`resources.index`，约 18MB）整目录移除。
+> 因此**本文件里 2026-11-19 之前写下的提交哈希（`8f34418` / `22acdb8` / `87c56d3` / `9e41a03` 等）
+> 已不可解析**，查历史请用提交信息（`git log --grep`）。已推送过的提交未被改写。
+>
+> **远端状态**：`origin/main` 上是另一台设备在本次清理前 force-push 的**旧快照线**
+> （39 提交，缺 A/B/C/B2 四批，且仍是旧包名 `dsh-git-config-sync`）；本线是它的**超集**
+> （所有远端提交的 subject 与内容标记都在本线里，且多出四批工作）。清理后的本线已推到
+> `origin/ours-20261119`，`main` 用 `--force-with-lease` 更新为本线（见提交记录）。
+>
+> **提交由 Lead 统一做**，规划者/执行子代理都不 commit。
 
 ### 已交付（本轮及之前）
 
