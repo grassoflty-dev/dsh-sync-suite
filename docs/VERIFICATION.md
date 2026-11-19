@@ -223,6 +223,9 @@ push → 另一设备 pull → preview → apply → rollback 全链路，不依
 
 ## 6. 未验证项与验证步骤（如实标注）
 
+> 2026-11-19 更新：真机已连上（serial `6MFBB25C27205131`，`MLR-AL00`），下表「无鸿蒙设备」的历史判断不再成立；
+> 首次真实编译 / 签名 / 安装 / 启动 / 设备验收的证据与诚实翻转见 **§14**。点按交互、OCR 端到端、第二设备同步、插件 live 仍 unverified。
+
 | 未验证项 | 原因 | 验证步骤 |
 | --- | --- | --- |
 | 真机 OCR、PixelMap 截图、Canvas 手写 | 无鸿蒙设备 | 真机运行 Handwriting 页，确认每页落盘 sha256、释放 PixelMap、0→N 拼接 |
@@ -945,3 +948,169 @@ $hdc = 'D:\A-DevEco\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe'
 # 错误页证据
 & $hdc -t 6MFBB25C27205131 shell "hilog -r"; & $hdc -t 6MFBB25C27205131 shell "hilog -x" | Select-String -Pattern 'ERR_WS_UPGRADE|blank screen|NetworkTransactionTimeout'
 ```
+
+## 14. 首次真机全链路：编译 / 签名 / 安装 / 启动 / 验收（2026-11-19 实测）
+
+本节记录 2026-11-19 首次把 ArkTS 应用**真实编译、签名、安装并在 MLR-AL00 平板启动**的证据，并据此诚实翻转 §6 / §13 中「无设备、unverified」的标记。原则：**FAIL 保持 FAIL**，需要点按注入的交互流程仍标 unverified，不因设备已连上而自动判通过。
+
+### 14.1 设备与工具链
+
+| 项 | 值 |
+| --- | --- |
+| `hdc list targets` | `6MFBB25C27205131` |
+| 设备型号 | `MLR-AL00` |
+| 系统 | `const.ohos.apiversion=26`，软件 `MLR-AL00 7.0.0.111(SP16C00E111R4P2)` |
+| IDE | `D:\A-DevEco\DevEco Studio`（SDK `sdk\default`，API 26） |
+| hvigor | `6.26.9` |
+| hdc | `sdk\default\openharmony\toolchains\hdc.exe`，Ver `3.2.0f` |
+| devecocli | npm `@deveco/deveco-cli@1.3.0-stable`，重装于 `C:\Users\GWL\Desktop\itwillclaude\.tmp\deveco-cli` |
+
+> devecocli 原目录此前被删除，本次重装（`npm install` exit 0，252 包）后才可构建。原因：`tools/build-harmony.ps1` 与 `tools/device-accept.mjs` **硬编码**该路径，不可改指向。
+
+### 14.2 首次真实编译失败与修复（commit `cec3c93`）
+
+第一次 `build-harmony.ps1 -Cores 4 -Product default` 在 `entry:default@CompileArkTS` 失败，恰好 **5** 个错误（原文引用）：
+
+| # | 错误（原文） | 位置 |
+| --- | --- | --- |
+| 1 | `Property 'enabled' in type 'ActionButton' is not assignable to the same property in base type 'CustomComponent'.` | `components/ActionButton.ets:42` |
+| 2 | `Property 'background' in type 'ActionButton' ...`（同类继承冲突） | `components/ActionButton.ets:73` |
+| 3 | `The struct name cannot contain reserved tag name: 'CalendarPicker'.` | `components/CalendarPicker.ets:36` |
+| 4 | `Property 'lineHeight' does not exist on type 'ButtonAttribute'.` | `pages/Settings.ets:2305` |
+| 5 | `The struct 'CalendarPicker' cannot have the same name as the built-in component 'CalendarPicker'.` | `components/CalendarPicker.ets:36` |
+
+修复 commit `cec3c93`：`ActionButton.enabled` → `actionEnabled`（41 处调用点）、`background()` → `buttonBackground()`、struct / 文件 `CalendarPicker` → `MonthCalendar`、删除非法的 `.lineHeight()`。修复后门禁：全量 **2306 / 2305 / 0 / 1**，`validate-app` **8/8**，`tsc` **0**。
+
+### 14.3 构建 / 签名 / 安装 / 启动
+
+| 步骤 | 命令 / 产物 | 证据 |
+| --- | --- | --- |
+| 构建 | `build-harmony.ps1 -Cores 4 -Product default` | `BUILD SUCCESSFUL` |
+| 未签 HAP | `entry\build\default\outputs\default\entry-default-unsigned.hap` | **4,134,584 B** |
+| 产物验收 | `verify-hap` | `✓ 产物验收通过`（16 项；`main_pages.json` 含 `pages/Handwriting`；`modules.abc` 含 `Handwriting` ×16、`hw-page-` ×1、`PageBook` ×2、`OcrBatch` ×7；OCR 能力命中 3） |
+| 签名 | `sign-hap.ps1 -Deliver` | exit 0；`dist-harmony/arkui-schedule-harmony-debug-signed.hap` **4,191,063 B** |
+| 安装 | `hdc install -r <signed>` | `install bundle successfully` |
+| 启动 | `aa start -a EntryAbility -b com.itwill.schedule` | `start ability successfully` |
+| 进程 | `ps -ef \| grep itwill` | `com.itwill.schedule` + `:render` 在运行 |
+
+**签名陷阱（值得记录）**：`signing/pass.txt` 存的是 **v2** 口令，但 v2 的 `.cer`/`.p7b` 缺失，脚本因此回退到 v1 keystore 并报 `11014003 Init keystore failed`；只有显式传入 v1 口令才签名成功（方法记在 `signing/README.md`）。口令值本身不落本文。
+
+**首页截图**：`snapshot_display` 1600×2560，**121,847 B**，本地副本 `.tmp/device-shots/home-1.jpeg`；渲染出 今天 / `2026-11-19 周四` / 今日待办·全部未完成 / 搜索 / 全部·未完成·已完成 / ✨今日汇总 空态 / 新建。
+
+### 14.4 设备验收 `device-accept.mjs --serial 6MFBB25C27205131 --skip-install`
+
+原始结果行（逐字）：
+
+```
+PASS  设备连接  6MFBB25C27205131
+SKIP  安装  --skip-install
+PASS  启动  aa start successfully
+PASS  启动无崩溃  hilog 8s 无 fatal
+PASS  布局·竖屏单列  「新建」宽 1486px（>60% 屏宽）
+PASS  布局·竖屏无右栏  未出现右栏空态
+PASS  手写板工具条  「笔迹」+「插入」就位，无拼接标签、无独立颜色/粗细
+PASS  工具条两行  row1=6 个（↶, ↷, 手动框, 橡皮, 笔迹, 插入） / row2=1 个（完成）（y 容差 24）
+PASS  pen对照组·关闭时手指能画  同一组坐标下手指落笔有证据（draft bytes=1180917）
+PASS  pen过滤·开启时手指不画  手指未落笔（未捕获拒绝提示，但无落笔证据）
+PASS  插入菜单  含「图片」「表格」（图片 / 表格 / 表格行列）
+FAIL  插入页  页数未变成 2/2（当前 2/3）
+合计：PASS 10 / FAIL 1 / SKIP 1
+[accept] pass=10 fail=1 skip=1 total=12 → exit 1（未覆盖：安装）
+```
+
+| 汇总 | PASS | FAIL | SKIP | 合计 |
+| --- | --- | --- | --- | --- |
+| `device-accept` | **10** | **1** | **1** | 12 |
+
+> **已被 §14.10 修复并复验**：上表唯一 FAIL（`插入页  页数未变成 2/2（当前 2/3）`）与 §14.5 / §14.8 的 FAIL 记录均为首次真机验收的历史原文，如实保留；该缺陷已在 §14.10 修复并复验通过（插入页 **2/2**，PASS 15 / FAIL 0 / SKIP 6）。下方历史 FAIL 文字不再代表当前状态。
+
+### 14.5 未决缺陷（FAIL，未修复）
+
+- **插入页页数错误**：`FAIL  插入页  页数未变成 2/2（当前 2/3）`。这是本次验收**唯一 FAIL**，如实保留为**开放缺陷**，**未修复**、**不标记为 verified-pass**。（**已被 §14.10 修复并复验**；本条仅作历史保留。）
+- 下一步：用 `device-accept --keep-going` 复现（避免首错即停），并检查 `pages/Handwriting.ets` 的插入页流程（页数状态与 `2/2` 断言的差额来源）。
+
+### 14.6 点按注入限制与仍不可验的交互
+
+`uitest uiInput click` 在 px 与 vp 两种坐标下均返回 “No Error”，但首页没有变化（两次尝试、截图完全一致）。因此**需要点按注入的交互流程仍未验证**：新建 → editor 日期行 → 月历、设置分组锚点、聊天详情页「在电脑上继续」。本仓库可用的验证路径是 `tools/device-accept.mjs`（layout-dump + 基于文本的点按），不是裸坐标注入。
+
+### 14.7 插件安装与 live 验证阻塞
+
+- `dsh plugin --profile desktop install` → `+ dsh-dots 1.0.0 <- ..\..\..\Desktop\itwillclaude\dsh-sync-suite\packages\dsh-dots`，exit 0；`~/.dsh/profiles/desktop/node_modules/dsh-dots` 已存在。
+- 当前 live profile 为 **desktop**（GUI 进程运行 `… dsh C:\Users\GWL\.dsh\profiles\desktop …`）；`dsh-dots` 本就在 `bundles` 与 `dependencies`（`link:…`）中但未解析，故 RPC 缺失。
+- **尚未 live**：`POST http://127.0.0.1:14093/dsh-dots/rpc {"action":"getState"}` → **HTTP 405**；bundle 行在 DSH 启动时解析，需**重启 DSH**。标记：`blocked — needs DSH restart; cannot be verified in this session`。
+
+### 14.8 标记翻转（保守）
+
+**已翻转为 VERIFIED（本次有真机证据）**
+
+| 项 | 证据 |
+| --- | --- |
+| 真实 ArkTS 编译 | §14.2 首个失败修复后 `BUILD SUCCESSFUL` |
+| HAP 内容 | §14.3 `✓ 产物验收通过`（16 项） |
+| 签名 | §14.3 exit 0，签名 HAP 4,191,063 B |
+| 安装 / 启动 | §14.3 `install bundle successfully` / `start ability successfully` |
+| 8s 无 fatal | §14.4 `启动无崩溃 hilog 8s 无 fatal` |
+| 横/竖屏单列骨架 | §14.4 竖屏单列 + 无右栏（`新建` 1486px） |
+| 工具条两行布局 | §14.4 `row1=6 / row2=1`（y 容差 24） |
+| pen 对照的手指行为 | §14.4 关闭时手指能画 / 开启时不画（**pen 注入仍不可行**） |
+| 插入菜单内容 | §14.4 含「图片」「表格」 |
+| 首页渲染 | §14.3 首页截图（今天 / 日期 / 待办 / 汇总 / 新建） |
+
+**STILL UNVERIFIED（本次未翻转）**
+
+| 项 | 原因 |
+| --- | --- |
+| 新建 → editor 日期行 → 月历 | 需点按注入，见 §14.6 |
+| 设置分组锚点 | 需点按注入，见 §14.6 |
+| 聊天「在电脑上继续」 | 需点按注入，见 §14.6；`ERR_WS_UPGRADE(-173)` 根因仍未定位（见 §远程控制页未验证） |
+| OCR 端到端质量 | 无真机 OCR 质量证据 |
+| 与真实第二设备 / PC 的同步 | 未在双端真实仓库上验证 |
+| 插件 live 设置页 | `blocked — needs DSH restart`（§14.7） |
+
+**FAIL（保持）**：插入页页数 `2/3`（§14.5）。（**已被 §14.10 修复并复验**；本行仅作历史保留。）
+
+### 14.9 如何复现本次验证
+
+在仓库根 `C:\Users\GWL\Desktop\itwillclaude\dsh-sync-suite` 下依次执行：`powershell -File tools/build-harmony.ps1 -Cores 4 -Product default`（**前提**：npm `@deveco/deveco-cli@1.3.0-stable` 必须已装在硬编码路径 `.tmp\deveco-cli`，否则脚本找不到入口）；`powershell -File tools/sign-hap.ps1 -Deliver`（若报 `11014003`，按 `signing/README.md` 显式传 v1 口令）；`hdc -t 6MFBB25C27205131 install -r dist-harmony\arkui-schedule-harmony-debug-signed.hap`；`hdc -t 6MFBB25C27205131 shell "aa start -a EntryAbility -b com.itwill.schedule"`；最后 `node tools/device-accept.mjs --serial 6MFBB25C27205131 --skip-install`（本次结果 PASS 10 / FAIL 1 / SKIP 1，exit 1；复现该 FAIL 可加 `--keep-going`）。
+
+## 14.10 2026-11-19 晚：插入页 FAIL 已修复并复验
+
+> 本节取代 §14.4 / §14.5 / §14.8 的唯一 FAIL（那几处文字按历史原文保留）。修复模块为 `mod-insert-page-count`，见 `docs/MODULES.md` §1/§2（待提交）。
+
+### 根因
+
+- `RecordEditorView.openWritingBoard()` 没有传 `draftKey`，于是 `Handwriting.resolveDraftKey()` 回退到固定的 `'default'` 键。
+- `insertPage()` 会保存草稿：每一次验收失败运行都留下一个 2 页草稿，下一次运行再把它恢复回来——设备 dump 显示进入时 `1/2`、点 `+` 后 `2/3`；设备文件 `drafts/default.json` 为 `pages=3`、正文约 1.18 MB（与 §14.4 的 `draft bytes=1180917` 同量级）。
+- 结论：**Harness 期望 `2/2` 是对的，App 是错的**；不是断言写错，也不是坐标注入误差（§14.6 的限制与本次 FAIL 无关）。
+
+### 修复
+
+- 新增 `writingDraftKey()`：已有记录 → `recordId`；新建记录 → `new-<timestamp>`（每个编辑器实例一个），并通过新增的路由参数 `draftKey` 传给手写板，使每次新建记录的草稿互不复用。
+- +19 行代码（均在 `components/RecordEditorView.ets`）；回归测试加在 `handwritingToolbar.test.mjs`（+1 例）。
+
+### 复验（verbatim，验收尾部）
+
+```
+PASS  插入页  2/2
+PASS  完成  返回编辑页且未崩溃
+PASS  完成反馈  编辑页显示「手迹 2 页」
+...
+合计：PASS 15 / FAIL 0 / SKIP 6
+[accept] pass=15 fail=0 skip=6 total=21 → exit 3（未覆盖：安装, 正文占位符, 附件 zip 存在, 详情页附件, 下拉刷新, 全部未完成·索引）
+```
+
+- 修复后 dump：进入 `1/1`、点 `+` 后 `2/2`（对照修复前的 `1/2` → `2/3`）。
+- 构建 / 签名 / 安装 / 启动：`BUILD SUCCESSFUL 4m03s`；签名 exit 0；`install bundle successfully`；`start ability successfully`。
+- 门闸（修复后）：全量 **2337 / 2336 / 0 / 1**（`mod-v2-migration` +30、`mod-insert-page-count` +1）；`validate-app` **8/8**；`tsc` **0**；`overlay applied=false`。
+- 对照：修复前那次为 PASS 10 / FAIL 1 / SKIP 1（exit 1，见 §14.4）。
+
+### `exit 3` 的含义：仅 SKIP（未覆盖），不是失败
+
+本次 `exit 3` 表示验收中**有 SKIP 项、没有 FAIL 项**（0 fail），绝不能读成失败。6 个 SKIP 及原因（与上方 `[accept]` 行的「未覆盖」清单逐一对应）：
+
+1. **安装**——复验使用 `--skip-install`，安装步骤被显式跳过（装机另以 `install bundle successfully` 单独证明）。
+2. **正文占位符**——需点按/文本注入，本机 pen/坐标注入不可行（见 §14.6）。
+3. **附件 zip 存在**——附件 zip 需先同步 / 推送才会产生，本次未走该链路。
+4. **详情页附件**——详情页标签 / 附件区需点按进入，注入不可行（见 §14.6）。
+5. **下拉刷新**——需手势 / 点按注入触发，无法自动化。
+6. **全部未完成·索引**——索引日志路径本次未触发、未覆盖。
