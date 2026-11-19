@@ -455,11 +455,12 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
   其余任务在后台跑，等独占方结束再入场。
 - 规划子代理每轮向主会话汇报三行：完成 / 进行中含 owner / 阻塞或需决策。
 
-## 交接：当前状态与下一步（2026-11-18 22:00 起笔，23:10 收口 B 批；2026-11-19 追加 B2 批）
+## 交接：当前状态与下一步（2026-11-18 22:00 起笔，23:10 收口 B 批；2026-11-19 追加 B2 批、B3 批）
 
 > 用途：换会话/重启后**先读这一节**，不用问人。
-> **HEAD = main 顶端**：A 批 / C 批 / B 批（一键重连 + chat 出口）/ B2 批（导出 chip + 设置页锚点）
-> 与安全脱敏、历史清理都已提交，`git status --short` 为空。
+> **HEAD = main 顶端 `8435b38`**：A 批 / C 批 / B 批（一键重连 + chat 出口）/ B2 批（导出 chip + 设置页锚点）
+> 与安全脱敏、历史清理都已提交；**B3 批（路径 1 / 路径 2 落盘改造 + D1-P2）已写完，工作树待 Lead 提交**
+> （清单见下「待提交清单（B3 批）」，共 9 个文件）。除此之外 `git status` 无其他改动。
 >
 > **2026-11-19 历史清理（重要，读下面这段再查哈希）**：为把仓库做成可公开的
 > 「无 secret、无 SDK 大二进制」形态，**未推送区间**的历史做过两次 `git filter-repo` 重写：
@@ -475,6 +476,21 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 >
 > **提交由 Lead 统一做**，规划者/执行子代理都不 commit。
 
+### 待提交清单（B3 批，HEAD `8435b38` 之上的工作树）
+
+| 文件 | 性质 | 一句话 |
+| --- | --- | --- |
+| `apps/arkui-schedule/entry/src/main/ets/model/homeRefresh.ts` | 新增（纯逻辑） | 一次性「保存返回」标记的编解码 + 版本包含判定（`SAVED_MARKER_KEY` / `encodeSavedMarker` / `decodeSavedMarker` / `containsRecordVersion`） |
+| `apps/arkui-schedule/entry/src/main/ets/components/RecordEditorView.ets` | 改（+91 −7） | `@Prop autoFocusTitle` + 标题 `defaultFocus`；`save()` 写一次性标记；`onRefreshTick` → `applyPendingInkResult()` 返回 `applied` → `maybeAutoSaveAfterInk()`（路径 2 消费者） |
+| `apps/arkui-schedule/entry/src/main/ets/pages/Edit.ets` | 改（+2） | 传 `autoFocusTitle: true`（仍是薄壳，无 toast / 无重逻辑） |
+| `apps/arkui-schedule/entry/src/main/ets/pages/Index.ets` | 改（+54） | `onPageShow` 先消费「保存返回」标记 → `reload()` + `reconcileSavedRow()` 后 return（不再 `reconcileIfDue` / `loadSummary` / `paneTick`）；右栏保存也消费标记 |
+| `apps/arkui-schedule/entry/src/harmony/ets/pages/Handwriting.ets` | 改（+10） | `finish()` 成功且有内容时写 `handwriting.autosave='1'`（空笔迹给原因）；「退出」路径清键 |
+| `apps/arkui-schedule/entry/src/main/ets/pages/Settings.ets` | 改（+57） | D1-P2：`normalizeRemoteOnBlur()`（失焦归一 + 一次性 toast，不落盘不跳转、绝不回填令牌） |
+| `apps/arkui-schedule/entry/src/main/ets/components/settings/RemoteSection.ets` | 改（+5） | 「DSH 地址」`TextInput` 加 `.onBlur` + `onBlurRemoteUrl` 回调 prop |
+| `apps/arkui-schedule/tools/test/b3Batch.test.mjs` | 新增（19 例） | 路径 1 + D1-P2 契约 + `homeRefresh` 纯逻辑用例 |
+| `apps/arkui-schedule/tools/test/b3HandwritingAutoSave.test.mjs` | 新增（10 例） | 路径 2 生产者/消费者契约（一次性键、四类早退、`discardDraft` 顺序） |
+| `docs/UX-STEPS.md`、`docs/ROADMAP.md`、`docs/REVIEW-b3-batch.md` | 文档 | 本文件的 §4.3 / 交接节 / 独立评审 |
+
 ### 已交付（本轮及之前）
 
 | 块 | 内容 | 证据 |
@@ -485,22 +501,26 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 | 稳定性（C 批） | 同步重入、拉取去重、超时、草稿崩溃恢复 | 同上；`docs/FAILURE-MODES.md` |
 | 工具链 | `device-accept.mjs` 退出码分级与 pre-flight、`preflight.mjs`、手写板两行工具条断言 | `docs/PREFLIGHT.md`、`docs/REVIEW-device-accept.md` |
 | 便捷性（B 批，**部分**） | D1 远程地址归一 + **一键重连**（`settingsStore.remoteLastOk` + `RemoteControl.onPageEnd` 记「最近成功」→ 设置页 `重新连接 <host:port>`）；D2 P1 **chat 详情页「在电脑上继续」**跳转出口（只读纪律不变，无输入框） | 提交 `8f34418`（11 文件 / **+1122 −45**）；全量 **2179 例 / 2178 pass / 0 fail / 1 skip**；`validate-app` **8/8**；独立评审 `docs/REVIEW-b-batch.md`（P0 0 / P1 1 / P2 2）+ Lead 复审追加 P2-3，四条 P1/P2 已修、P2-2 列为已知限制；`docs/UX-STEPS.md` §4.1（N→M） |
-| 便捷性（B2 批，**待提交**） | **D4 导出区间快捷 chip**（今天 / 本周 / 近 7 天；「本周」周一为首日、手改后以手改为准、不新增 @State）；**D6 设置页紧凑屏组锚点**（同步 / AI / 远程 / 数据 / 关于；`pageScroller.scrollTo` 真跳转，未测量时 toast 原因，宽屏不做） | 工作树未提交（见上「待提交清单」）；全量 **2204 例 / 2203 pass / 0 fail / 1 skip**（B2 新增 25 例）；`validate-app` **8/8**；独立评审 `docs/REVIEW-b2-batch.md`（P0 0 / P1 1 / P2 4，不阻塞；P1-1 与 P2-1/P2-3 已补钉，见该文 §6 复审）；`docs/UX-STEPS.md` §4.2（路径 3 10→7、路径 4 8→7 / 7→6、路径 5 10→8 / 5′ 12→10；合计 43→37，承接 §4.1 口径 42→36） |
+| 便捷性（B2 批） | **D4 导出区间快捷 chip**（今天 / 本周 / 近 7 天；「本周」周一为首日、手改后以手改为准、不新增 @State）；**D6 设置页紧凑屏组锚点**（同步 / AI / 远程 / 数据 / 关于；`pageScroller.scrollTo` 真跳转，未测量时 toast 原因，宽屏不做） | 提交 `37a602d`（8 文件 / **+1377 −19**，含评审与文档）；全量 **2204 例 / 2203 pass / 0 fail / 1 skip**（B2 新增 25 例）；`validate-app` **8/8**；独立评审 `docs/REVIEW-b2-batch.md`（P0 0 / P1 1 / P2 4，不阻塞；P1-1 与 P2-1/P2-3 已补钉，见该文 §6 复审）；`docs/UX-STEPS.md` §4.2（路径 3 10→7、路径 4 8→7 / 7→6、路径 5 10→8 / 5′ 12→10；合计 43→37，承接 §4.1 口径 42→36） |
+| 便捷性（B3 批，**待提交**） | **路径 1**：新建记录 `defaultFocus` 自动聚焦标题（省 1 tap）+ 保存返回首页改**局部刷新**（一次性标记 → `reload()` + 单行对账，不再全量对账/重读汇总，省 1 wait）；**路径 2**：「完成」即回编辑页并**自动保存**（`handwriting.autosave` 一次性键；空笔迹/无标题/未就绪/写盘失败全部给原因、不写半条记录），省 1 tap + 1 wait；**D1-P2**：远程地址失焦即归一 + 一次性提示（0 步，只提前暴露问题） | 工作树未提交（见上「待提交清单（B3 批）」）；全量 **2233 例 / 2232 pass / 0 fail / 1 skip**（B3 新增 29 例：`b3Batch.test.mjs` +19、`b3HandwritingAutoSave.test.mjs` +10）；`validate-app` **8/8**；`tsc` exit 0；独立评审 `docs/REVIEW-b3-batch.md`（P0 0 / P1 0 / P2 6，**不阻塞**；6 条 P2 已登记进 `docs/UX-STEPS.md` §4.3「已知限制」，评审后只改过 `Index.ets` 的一处注释措辞）；`docs/UX-STEPS.md` §4.3（路径 1 **7→5**、路径 2 **8→6**；合计 37→33 / 首算 43→33） |
 
 **当前基线**：全量 `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"`
-**2204 例 / 2203 pass / 0 fail / 1 skip**（B2 批新增 25 例：`exportImport.test.mjs` +12、新增
-`b2Batch.test.mjs` +13；skip 数未增加，仍是既有那条 fetch 直连用例）；`validate-app` **8/8**；
+**2233 例 / 2232 pass / 0 fail / 1 skip**（B3 批新增 29 例：`b3Batch.test.mjs` +19、
+`b3HandwritingAutoSave.test.mjs` +10；skip 数未增加，仍是既有那条 fetch 直连用例）；`validate-app` **8/8**；
 `overlay applied=false`；`node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json` exit 0。
-（B 批基线 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
+（B2 批基线 **2204 / 2203 / 0 / 1**、B 批基线 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
+（B3 批的 2233 里含 B2 之后新增的两组；B2 批当时是 2204，B 批当时是 2179。）
 
 ### 未完成（按优先级）
 
-1. **便捷性（B 批 / B2 批）**：D1-b（一键重连）与 D2 P1（「在电脑上继续」跳转出口）已在 `8f34418` 落地；
-   **B2 批的 D4（导出快捷 chip）与 D6（设置页组锚点）已写完、待 Lead 提交**（见上表与 `docs/UX-STEPS.md` §4.2：
-   路径 3 **10→7**、路径 4 **8→7**（首次）/ **7→6**（二次）、路径 5 **10→8**、路径 5′ **12→10**；
-   合计 **43→37**，承接 §4.1 口径 **42→36**）。
-   **仍未完成**：D1 的 P2（输入框失焦即归一）、D2 的 P2（真接管，要等 `CHAT-SYNC` §1/§5 的租约 + sha
-   校验）、D7 `CalendarPicker` 接线、路径 1/2 的落盘改造；原 §4「P1 目标 26」**仍未达成**（当前 37 步，差 11 步）。
+1. **便捷性（B 批 / B2 批 / B3 批）**：D1-b（一键重连）与 D2 P1（「在电脑上继续」跳转出口）已在 `8f34418` 落地；
+   B2 批的 D4（导出快捷 chip）与 D6（设置页组锚点）已提交 `37a602d`（路径 3 **10→7**、路径 4 **8→7**（首次）/
+   **7→6**（二次）、路径 5 **10→8**、路径 5′ **12→10**；合计 **43→37**，承接 §4.1 口径 **42→36**）。
+   **B3 批已写完、待 Lead 提交**（见上表与 `docs/UX-STEPS.md` §4.3：路径 1 **7→5**、路径 2 **8→6**；
+   合计 **37→33**，首算 **43→33**），含 D1 的 P2（输入框失焦即归一）。
+   **仍未完成**：D2 的 P2（真接管，要等 `CHAT-SYNC` §1/§5 的租约 + sha 校验）、D5（新建可指定日期）、
+   D7 `CalendarPicker` 接线、首页底部「快捷记录」（不跳编辑页那条）；
+   原 §4「P1 目标 26」**仍未达成**（当前 33 步，差 7 步，缺口全在未做项）。
 2. **真机验收（全部挂起，`hdc list targets` = `[Empty]`）**：手写板 5 项（penOnly 挡手指、笔迹面板二级菜单、工具条两行、撤销重做可点、折叠布局画布高度）、chat 内嵌 Web 的 `ERR_WS_UPGRADE(-173)`、UU 两个实测点（入口形态 / WS 透传）。**设备没连上不许报“已验证”。**
 3. **模型路由**：`dsh-opencode-go/hy4-flash-free` 的允许清单是**会话启动快照**，改配置后需**重启 DSH + 新会话**才生效；当前会话只能用继承的 `deepseek-v4.1-flash`。重启后再验 `list_subagent_models(provider: "dsh-opencode-go")`。
 4. **后续排队**：类型注册表（`docs/SYNC-SCOPES.md`：6 项声明，无合并策略即拒绝接入）→ Git 接入向导（`docs/CONFIG-UX.md`）→ 远程连接收敛（`auto` 优先级 + 一键自检 + 二维码）；F 测试套件卫生；G 吞错审计；H 契约静态测试；E APK 收尾。
@@ -518,6 +538,19 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
   每组 `Column().onAreaChange()` 取 `Area.position.y`（相对父内容 Column ⇒ 内容偏移）；
   未测量时 toast 原因，**不要用 `scrollEdge(Edge.Top)` 冒充目标跳转**；源码文本断言要同时钉
   「yOffset 来自测量缓存（`this.groupOffsets[index]`）」，只钉「调了 scrollTo」挡不住硬编码假跳转。
+- **「保存后不再全量重载」的写法**（B3 批沉淀）：**一次性 AppStorage 标记**（`home.lastSaved`）+ 首页
+  `onPageShow` 先消费（读后即清）→ 只 `reload()`，再按标记做**单行对账**（`containsRecordVersion`），
+  对不上才退回 `openIndexStore.reconcile()` 全量重建并 toast 原因。关键前提是「写盘与派生索引已在
+  `appendRecord` 内同步完成」——改那条链路前先回读 `scheduleStore.appendRecord()` 的 `notifyAppend` 钩子。
+  **不要**用「改 `onPageShow` 全局跳过 reconcile」实现：那会让设置页返回、pull 之后全部少一次对账。
+- **「焦点」类改动的写法**（B3 批沉淀）：本机没有 SDK，**不要引入新 import 去调 `focusControl` /
+  `getUIContext()`**（编不过也验不了）；用纯组件属性 `.defaultFocus(...)`，并把「该不该聚焦」写成
+  可静态断言的三条件表达式（`autoFocusTitle && recordId.length === 0 && title.trim().length === 0`）。
+  已有记录的编辑不许自动弹键盘（会遮挡正文、易误改标题）。
+- **「完成即自动保存」的写法**（B3 批沉淀）：跨页用**一次性键**（`handwriting.autosave`）传信号，
+  消费侧**先读后清**；生产者只在「真成功且真有内容」时写 `'1'`，空笔迹/失败写 `''` 并 toast 原因；
+  消费侧四类早退（无信号 / 无回填 / 未就绪 / 标题为空）全部给可读原因，**绝不**写半条坏记录。
+  一次性键的清除要覆盖「退出」路径，否则上一次完成的信号会在下一次返回时误触发。
 - 静态断言现在盯的是 `ActionButton({ label: … })` 与 `ErrorState({…})`，**不再是** `Button('…')` / `Text('…')`——改 UI 时同步改断言并注明原因。
 
 

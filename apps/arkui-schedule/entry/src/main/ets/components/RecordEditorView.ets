@@ -32,7 +32,9 @@ import {
   shouldPersistDraft
 } from '../model/editorDraft';
 import type { EditorDraft, EditorText } from '../model/editorDraft';
-import { newRecordId, scheduleStore, describeError } from '../services/scheduleStore';
+import { SAVED_MARKER_KEY, encodeSavedMarker } from '../model/homeRefresh';
+import type { SavedMarker } from '../model/homeRefresh';
+import { newRecordId, resolveRecordDate, scheduleStore, describeError } from '../services/scheduleStore';
 import { settingsStore } from '../services/settingsStore';
 import { attachmentStore, parseAttachmentList } from '../services/attachmentStore';
 import { draftStore } from '../services/draftStore';
@@ -82,6 +84,14 @@ export struct RecordEditorView {
   @Prop recordId: string = '';
   /** 新建时用于副标题提示的日期（可空）。 */
   @Prop defaultDate: string = '';
+  /**
+   * 是否让标题输入框在挂载时自动获得焦点（省掉「点标题」这一次 tap）。
+   *
+   * 只有「新建记录且没有草稿内容」才聚焦：已有记录不聚焦，避免软键盘遮挡正文、
+   * 也避免用户误改标题。真正是否聚焦由 `defaultFocus` 的表达式再判一次
+   * （`recordId` 为空 且 `title` 为空白），双保险。
+   */
+  @Prop autoFocusTitle: boolean = false;
   /** 容器在页面 `onPageShow` 时 +1（手写板返回后回填）。 */
   @Prop @Watch('onRefreshTick') refreshTick: number = 0;
   /** 保存成功回调：带上刚追加的记录。 */
@@ -236,9 +246,10 @@ export struct RecordEditorView {
     return memoryDraft.savedAt >= diskDraft.savedAt ? memoryDraft : diskDraft;
   }
 
-  /** 页面从手写板返回时触发回填。 */
+  /** 页面从手写板返回时触发回填；回填到内容时再决定要不要自动保存（B3 路径 2）。 */
   onRefreshTick(): void {
-    this.applyPendingInkResult();
+    const applied: boolean = this.applyPendingInkResult();
+    this.maybeAutoSaveAfterInk(applied);
   }
 
   /**
@@ -318,21 +329,30 @@ export struct RecordEditorView {
     this.loaded = true;
   }
 
-  /** 手写板回填：正文、原始识别文本、截图附件三路数据（读后立即清空键）。 */
-  private applyPendingInkResult(): void {
+  /**
+   * 手写板回填：正文、原始识别文本、截图附件、插入对象四路数据（读后立即清空键）。
+   *
+   * 返回 `applied` = 本次是否真的把内容回填进表单：只有内容真的进来了，调用方才值得
+   * 省掉那一次「保存日程」tap；空回来（失败 / 退出 / 空笔迹）一个字都不自动写。
+   */
+  private applyPendingInkResult(): boolean {
+    let applied: boolean = false;
     const text = AppStorage.get<string>('handwriting.result');
     if (text !== undefined && text.length > 0) {
       this.body = this.body.length > 0 ? `${this.body}\n${text}` : text;
+      applied = true;
       AppStorage.setOrCreate<string>('handwriting.result', '');
     }
     const ocrText = AppStorage.get<string>('handwriting.ocrText');
     if (ocrText !== undefined && ocrText.length > 0) {
       this.ocrText = ocrText;
+      applied = true;
       AppStorage.setOrCreate<string>('handwriting.ocrText', '');
     }
     const pageObjectsJson = AppStorage.get<string>('handwriting.pageObjects');
     if (pageObjectsJson !== undefined && pageObjectsJson.length > 0) {
       this.pageObjectsJson = pageObjectsJson;
+      applied = true;
       AppStorage.setOrCreate<string>('handwriting.pageObjects', '');
     }
     const attachmentsJson = AppStorage.get<string>('handwriting.attachments');
@@ -340,12 +360,50 @@ export struct RecordEditorView {
       const incoming = parseAttachmentList(attachmentsJson);
       if (incoming.length > 0) {
         this.attachments = mergeAttachments(this.attachments, incoming);
+        applied = true;
       }
       AppStorage.setOrCreate<string>('handwriting.attachments', '');
     }
     this.notifyDirty();
     // 手写板回填也是「刚从手写板回来」的未保存输入：立刻按去抖规则落盘，别等用户再敲键
     this.schedulePersist();
+    return applied;
+  }
+
+  /**
+   * 手写板「完成」返回后的自动保存（B3 路径 2）：省掉「保存日程」这一 tap 与回首页那一次等待。
+   *
+   * 一次性键 `handwriting.autosave` 由手写板在**识别成功且有内容**时写 `'1'`；这里读后**立即清空**
+   * （不管走不走自动保存），绝不让下一次进入编辑页误触发。以下情况不自动保存，只给原因并停在
+   * 可继续操作的状态（`docs/FAILURE-MODES.md` §6：宁可多一步，不写半条坏记录）：
+   * - 手写板没给可保存信号（识别失败 / 空笔迹 / 用户点的是「退出」）；
+   * - 这次回来没有任何内容回填；
+   * - 编辑页还没就绪（`ready`/`loaded` 为假：这时 `originalTs` 还没读到，保存会写出错误日期）；
+   * - 标题为空（新记录必须先有标题）；
+   * - 正在保存中。
+   */
+  private maybeAutoSaveAfterInk(applied: boolean): void {
+    const flag: string | undefined = AppStorage.get<string>('handwriting.autosave');
+    AppStorage.setOrCreate<string>('handwriting.autosave', '');
+    if (flag !== '1' || !applied) {
+      return;
+    }
+    if (this.saving) {
+      return;
+    }
+    if (!this.ready || !this.loaded) {
+      promptAction.showToast({ message: '手写内容已回填，但编辑页还没就绪：请稍后点「保存日程」', duration: toastMsFor(false) });
+      return;
+    }
+    if (this.title.trim().length === 0) {
+      promptAction.showToast({ message: '手写内容已回填：先填标题，再点「保存日程」', duration: toastMsFor(false) });
+      return;
+    }
+    if (this.body.trim().length === 0 && this.attachments.length === 0 && this.pageObjectsJson.length === 0) {
+      promptAction.showToast({ message: '没有可保存的内容：请补充正文后再保存', duration: toastMsFor(false) });
+      return;
+    }
+    this.save();
   }
 
   private contentChanged(): boolean {
@@ -567,7 +625,27 @@ export struct RecordEditorView {
       dirtyHandler(false);
     }
     promptAction.showToast({ message: changed ? '已保存（待 AI 整理）' : '已保存' });
+    // 一次性「保存返回」标记：必须在 onSaved（它会 router.back() 触发首页 onPageShow）之前写好，
+    // 首页读到就只做局部刷新（reload + 单行对账），不再跑全量对账 / 重读汇总 / 推进 paneTick。
+    AppStorage.setOrCreate<string>(SAVED_MARKER_KEY, encodeSavedMarker(this.savedMarkerOf(record)));
     this.onSaved(record);
+  }
+
+  /**
+   * 构造一次性「保存返回」标记。
+   *
+   * `date` 必须按 `ts` 算（`resolveRecordDate(record.ts)`）：编辑旧记录会保留原日期，
+   * 绝不能拿 `defaultDate` / 首页 `selectedDate` 猜——跨日期编辑时两者不一致，
+   * 猜了会让首页把「别的日期的保存」误判成当前列表该出现的记录。
+   */
+  private savedMarkerOf(record: ScheduleRecord): SavedMarker {
+    const marker: SavedMarker = {
+      id: record.id,
+      date: resolveRecordDate(record.ts),
+      ts: record.ts,
+      done: record.done
+    };
+    return marker;
   }
 
   // ------------------------------------------------------------------ UI
@@ -693,6 +771,9 @@ export struct RecordEditorView {
               .backgroundColor($r('app.color.page_background'))
               .borderRadius(RADIUS.none)
               .padding({ left: 0, right: 0 })
+              // 纯组件属性、零新 API：仅「新建且标题未被草稿填入」时自动聚焦。
+              // 不用 focusControl.requestFocus / getUIContext()——本机无 DevEco/SDK，无法验证新增 import。
+              .defaultFocus(this.autoFocusTitle && this.recordId.length === 0 && this.title.trim().length === 0)
               .onChange((value: string) => {
                 this.title = value;
                 this.notifyDirty();

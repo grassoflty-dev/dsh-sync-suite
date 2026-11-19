@@ -92,6 +92,8 @@ export struct RemoteSection {
   onChangeRemoteToken: (value: string) => void = () => {};
   /** 「DSH 地址」那一行（手动方式下同时同步到手输框）。 */
   onChangeRemoteUrl: (value: string) => void = () => {};
+  /** 「DSH 地址」失焦即归一（D1 的 P2；只改输入框文本 + 一次性 toast，不落盘不跳转）。 */
+  onBlurRemoteUrl: () => void = () => {};
   /** 「清除令牌」：立刻落盘空串。 */
   onClearToken: () => void = () => {};
   /** 「打开远程控制」：拼地址 → 归一 → 落盘 → 跳内嵌页。 */
@@ -334,6 +336,9 @@ export struct RemoteSection {
         .padding({ left: 0, right: 0 })
         .onChange((value: string) => {
           this.onChangeRemoteUrl(value);
+        })
+        .onBlur(() => {
+          this.onBlurRemoteUrl();
         })
       Divider()
         .strokeWidth(DIVIDER)

@@ -39,7 +39,7 @@
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
-import { loadingText } from '../common/copy';
+import { loadingText, toastMsFor } from '../common/copy';
 import { localDateKey, nextTsSameDate, nowIso } from '../common/date';
 import { APP_VERSION } from '../common/version';
 import { applyAiResult, buildAiPayload } from '../model/aiPayload';
@@ -52,6 +52,8 @@ import type { QueryFilter } from '../model/query';
 import { UNDO_TTL_MS, UndoDelete, restoreRecord, softDeleteRecord, withoutDeleted } from '../model/undoDelete';
 import { formatDiagnostics } from '../model/stateView';
 import type { DiagnosticsInput } from '../model/stateView';
+import { SAVED_MARKER_KEY, decodeSavedMarker, containsRecordVersion } from '../model/homeRefresh';
+import type { SavedMarker } from '../model/homeRefresh';
 import { redactSecrets } from '../model/syncError';
 import { describeError, scheduleStore } from '../services/scheduleStore';
 import { openIndexStore } from '../services/openIndexStore';
@@ -262,6 +264,16 @@ struct Index {
     // 「含其他设备」开关归设置页管，回来时同步一次
     this.syncHomeFilter();
     if (this.ready) {
+      const saved: SavedMarker | null = this.consumeSavedMarker();
+      if (saved !== null) {
+        // 保存返回：只重读列表（写盘与派生索引在 appendRecord 内已同步完成），
+        // 不再**直接**跑 reconcileIfDue 全量对账、不重读汇总、不推进 paneTick。
+        // 注：「全部未完成」tab 的 reload() 走 pendingRecords()，它内部仍会做一次
+        // 被 15s 节流的索引自愈（openIndexStore.ets），这里省掉的是首页自己那次显式调用。
+        this.reload();
+        this.reconcileSavedRow(saved);
+        return;
+      }
       // 从设置页 pull 回来也走这里：顺手做一次带节流的索引自愈，保证「全部未完成」数据是新的
       openIndexStore.reconcileIfDue();
       this.reload();
@@ -281,6 +293,46 @@ struct Index {
       .catch((error: Error) => {
         this.statusText = `存储初始化失败：${describeError(error)}`;
       });
+  }
+
+  /**
+   * 取出并立刻清掉一次性「保存返回」标记。
+   *
+   * 一次性：读后即清，避免下一次从设置页返回被误判成保存返回
+   * （从设置页返回仍要走全量对账 + 重读汇总）。
+   */
+  private consumeSavedMarker(): SavedMarker | null {
+    const raw: string | undefined = AppStorage.get<string>(SAVED_MARKER_KEY);
+    AppStorage.setOrCreate<string>(SAVED_MARKER_KEY, '');
+    return decodeSavedMarker(raw);
+  }
+
+  /**
+   * 保存返回、局部 `reload()` 之后对账刚保存的那一行（**不许静默**）。
+   *
+   * 三种情况直接返回（不需要额外开销，也不打扰用户）：
+   * - 「全部未完成」里 `saved.done=true`：已完成的记录本来就不在该 tab；
+   * - 非「全部未完成」且保存的是别的日期：当前列表本就不该出现它；
+   * - 列表里已有同 id 同 ts 的新版本：数据已是刚保存的最新版。
+   * 兜底（读不到刚保存的版本）才全量重建，并明确 toast 告知用户。
+   */
+  private reconcileSavedRow(saved: SavedMarker): void {
+    if (this.showAllPending && saved.done === true) {
+      return;
+    }
+    if (!this.showAllPending && saved.date !== this.selectedDate) {
+      return;
+    }
+    if (containsRecordVersion(this.records, saved.id, saved.ts)) {
+      return;
+    }
+    openIndexStore.reconcile();
+    this.reload();
+    this.loadSummary();
+    promptAction.showToast({
+      message: '返回列表时没读到刚保存的日程，已重新加载',
+      duration: toastMsFor(true)
+    });
   }
 
   private async bootstrap(): Promise<void> {
@@ -485,6 +537,8 @@ struct Index {
 
   /** 右栏编辑保存成功：刷新左栏并把右栏切到该记录详情。 */
   private onEditorSaved(record: ScheduleRecord): void {
+    // 右栏保存也会写标记，这里消费掉，避免之后从设置页返回时误走「保存返回」分支。
+    this.consumeSavedMarker();
     this.editorDirty = false;
     this.editorRecordId = '';
     this.selectedId = record.id;

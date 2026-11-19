@@ -384,6 +384,96 @@
 
 ---
 
+### 4.3 本轮落地（B3 批：路径 1 自动聚焦 + 保存后局部刷新；路径 2 完成即自动保存；D1-P2 失焦归一；HEAD `8435b38` 之上的未提交工作树）
+
+> 口径仍按 §1（v1），每个数字都能按下表算式逐项复核；**全部是源码复算，不是真机实测**（见 §5.2）。
+> 本轮**只做了**路径 1 / 路径 2 的落盘改造与 D1 的 P2；D2-P2（真接管）、D5（新建可指定日期）、
+> D7（`CalendarPicker` 接线）与「首页底部快捷记录」**都没做**——所以下表不出现它们，
+> §4 的「P1 目标 26」本轮也仍未达成（见下「合计」）。
+
+| # | 路径 | 改前 | 改后（B3） | 差 | 逐项算式（tap / scroll / wait） |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 记一条日程 | **7**（tap 4 + wait 3） | **5**（tap 3 + wait 2） | **−2** | tap：`新建` 1 + 正文框 1 + `保存日程` 1 = 3（**点标题框**那一次被自动聚焦省掉）；wait：冷启动首屏 1 + 编辑页 bootstrap 1 = 2（**保存 → 返回 → 首页**这一段已不再等异步，见下）。 |
+| 2 | 加手写 | **8**（tap 4 + wait 4） | **6**（tap 3 + wait 3） | **−2** | tap：`新建` 1 + `手写板` 1 + `完成` 1 = 3（**`保存日程`** 被「完成即自动保存」省掉）；wait：编辑页 bootstrap 1 + 手写板挂载/草稿恢复 1 + OCR 批处理 1 = 3（原来第 4 个 wait「落盘 + 回首页」被吸收进 OCR 返回，见下）。 |
+
+**合计**：承接 §4.2 的口径 **37 → 33**（−4）；相对 §2.0 的首次口径 **43 → 33**（−10）；
+若承接 §4.1 的「路径 4 按二次及以后算 7 步」口径，则 **36 → 32**。
+相对原 §4 的 **P1 目标 26** 仍差 **7 步**，缺口全部属于未做项（D2-P2 / D5 / D7 / 快捷记录 /
+路径 1 那 1 个 bootstrap wait），不是本轮回归。
+
+- **路径 2 达标**：§4 目标 6（tap 3 + wait 3）**达成**。
+- **路径 1 未达 §4 目标 4**，实际 **5**：差的正好是「**编辑页 bootstrap**」这 1 个 wait。本轮只做了
+  「自动聚焦标题 + 保存后不再全量重载」两件事，**没有**改 `RecordEditorView.bootstrap()`
+  （`scheduleStore.ensureReady` + `settingsStore.load` 仍在进页时 `await`）。按 §1 的定义
+  （「一次必须等异步返回才能继续的动作」）它仍记 1 个 wait。要说它「不再是必经等待」，需要真机证明
+  「进页即可输入、且保存不依赖这次读取」——**没验过，所以不写进「改后」**。
+  若将来真机确认并改口径（§1 要求升版本并在本文件留痕），路径 1 才是 4（tap 3 + wait 1）。
+- **为什么「保存 → 返回 → 首页」那 1 个 wait 真的没了**：`RecordEditorView.save()` 里
+  `scheduleStore.appendRecord()` 是**同步写**，并在同一栈内触发派生索引钩子
+  `openIndexStore.applyRecord()`；返回首页后 `Index.onPageShow()` 先消费一次性标记，命中时**只**做
+  `reload()`（同步读当日分片）+ 单行对账，**不再直接调用** `reconcileIfDue()`（跨 30 天分片对账）/
+  **不再** `loadSummary()` / **不再** `paneTick + 1`。整条链路上没有 >300ms 的异步等待，所以这一步从 1 wait 变 0。
+  （精确一点：「全部未完成」tab 的 `reload()` 走 `openIndexStore.pendingRecords()`，它内部还会做一次
+  **被 15s 节流**的索引自愈（`openIndexStore.ets:292`）——省掉的是首页自己那次**显式**全量对账，
+  不是「这条链路上永远不存在 reconcile」。）
+- **路径 2 为什么正好 6**：自动保存发生在「从手写板 `router.back()` 回编辑页」的同一帧
+  （`onRefreshTick → applyPendingInkResult() → maybeAutoSaveAfterInk() → save()`）；
+  `save()` 同步落盘后 `onSaved` 再 `router.back()` 回首页。用户不再点「保存日程」，也不再单独等一次
+  落盘/回首页 —— 省下的正是 1 tap + 1 wait。
+- **失败路径一条都没被吞**（`docs/FAILURE-MODES.md` 纪律）：
+  - 手写识别失败 / 取消：手写板 `catch` / 取消分支只 toast 原因，**不写**自动保存信号、不动草稿，用户留在手写板可重试；
+  - 空笔迹（无识别文字、无插入对象）：信号写 `''` + toast「没有识别到文字：原图已保留，回到编辑页补充正文后再保存」，**不自动保存**；
+  - 用户在编辑页还没填标题：toast「手写内容已回填：先填标题，再点「保存日程」」并停在可编辑状态（**不写半条无标题记录**）；
+  - 编辑页还没就绪（`ready` / `loaded` 为假）：toast 说明且**不**自动保存（避免 `originalTs` 未读到而写错日期）；
+  - 自动保存写盘失败：`save()` 原有 `catch` toast「保存失败：…」，留在编辑页，内容与草稿都还在；
+  - 返回首页后读不到刚保存的那一行（极端情况）：`reconcileSavedRow()` 兜底做一次 `reconcile()` 重读并
+    toast「返回列表时没读到刚保存的日程，已重新加载」，**不静默**。
+- **硬约束的落实**：返回列表立刻能看到刚保存/修改的那条（`reload()` 同步读分片 + 按 `id` 折叠取最新 `ts`，
+  另有上面的对账兜底）；跨设备合并语义未改（仍是 `appendRecord` 追加 + 读侧 `foldById`，
+  `docs/DATA-CONTRACT.md` 一个字未动）；`handwriting.result` 的「追加到正文」语义未改
+  （`applyPendingInkResult()` 的回填逻辑一行未动，只多了一个返回值）。
+- **D1 的 P2（失焦即归一）不改变步数**：它把「补 `http://`」从点「打开远程控制」提前到输入框失焦，
+  并在真的改了文本时给一次 toast（同一段原文只提示一次）。整条路径的 tap / scroll / wait **都没有变化**
+  （路径 4 仍是 §4.2 的 7 / 6），所以不进上表；它买的是「填错地址时立刻看见」，不是步数。
+  边界：纯令牌片段（`k=…` / `?token=…`）与非法地址**不改写输入框**（解释留给打开时的红字），
+  也**绝不**把已保存令牌合进输入框（凭据纪律，`docs/CHAT-APP.md`）；保存/跳转顺序未改
+  （归一方法里没有 `settingsStore.save` / `router.pushUrl` / `openRemote()`）。
+- **实现落点**（行号以本轮工作树为准，可 `read` 复核）：
+  - 路径 1：`components/RecordEditorView.ets:94`（`@Prop autoFocusTitle`）、`:776`（`.defaultFocus(...)` 三条件）、
+    `:630`（`save()` 写一次性标记，在 `onSaved` 之前）、`:641`（`savedMarkerOf()`，`date` 按 `ts` 算）；
+    `pages/Edit.ets:124`（传 `autoFocusTitle: true`）；
+    `pages/Index.ets:263-281`（`onPageShow` 保存返回分支）、`:302`（`consumeSavedMarker()` 读后即清）、
+    `:317-334`（`reconcileSavedRow()` 三条早退 + 兜底）、`:539`（右栏保存也消费标记）；
+    纯逻辑 `model/homeRefresh.ts:19/50/68/112`（键 / 编码 / 解码 / 版本包含）。
+  - 路径 2：`entry/src/harmony/ets/pages/Handwriting.ets:1471-1475`（`autoSaveReady` + 一次性键 +
+    空笔迹 toast）、`:935`（退出路径清键）；`components/RecordEditorView.ets:250-253`
+    （`onRefreshTick` 先回填再判定）、`:338-371`（`applyPendingInkResult()` 返回 `applied`，
+    四键「读后清空」未变）、`:385-407`（`maybeAutoSaveAfterInk()` 四类早退）。
+  - D1-P2：`pages/Settings.ets:2031-2065`（`normalizeRemoteOnBlur()`）、`:451`（去重键）、
+    `:2579-2581`（装配）；`components/settings/RemoteSection.ets:96`（回调 prop）、`:340-342`（`.onBlur`）。
+- **真机项（一律 `unverified`，见 §5.2）**：
+  1. `defaultFocus` 在真机上是否真的弹出软键盘、页面转场期间会不会被抢焦点——本机无 SDK、无真机，未验；
+  2. 从手写板返回时 `@Watch('onRefreshTick')` 的触发时序，以及自动保存与 `router.back()` 的先后观感；
+  3. 「返回列表立刻看到刚保存的那条」是源码级结论（同步读分片），真机上列表首帧的刷新观感未测；
+  4. 保存时写一次性 `AppStorage` 标记、首页读后即清，在真机页面栈里是否严格只消费一次（单页栈上成立，未实测）；
+  5. 「编辑页 bootstrap 不算必经等待」这一口径**没有**采用（需要真机证据），所以路径 1 记 5 而不是 4。
+
+**已知限制（独立评审 `docs/REVIEW-b3-batch.md` 的 P2，均不阻塞；本批不修，登记在此）**：
+- **P2-1 Detail 间接路径的陈旧标记**：`Detail → Edit → 保存 → 返回 Detail → 再返回首页` 时，标记要等回到
+  首页才被消费；若这期间在详情页对同一条记录做了 AI 结构化（写出更晚的 `ts`），首页的「同 id 同 ts」
+  对账会失配并兜底重载 + 一条「没读到刚保存的日程，已重新加载」toast（记录本身是可见的，只是文案偏误导）。
+  建议下一批把判据放宽成「同 id 且 `ts` 不早于标记」或让 `Detail.onPageShow` 消费标记。
+- **P2-4 对账判据偏严**：同上，精确 `ts` 相等在跨设备并发 / 详情页二次写入时会误报（后果只是多一次
+  `reconcile()` + 一条 toast，不会写坏数据）。「不再跑 reconcileIfDue」的精确含义见上（`pendingRecords()`
+  内部仍有被节流的自愈）。
+- **P2-3 双 toast**：点「打开远程控制」会先触发地址框失焦（归一 toast）再触发 `openRemote()` 的「已保存」
+  toast；非 `manual` 方式下 `openRemote()` 还会按方式字段重算地址，所以失焦提示的未必是最终地址。
+  行为/顺序没问题，观感待真机确认。
+- **P2-2 / P2-5 / P2-6**：`defaultFocus` 从手写板返回是否重复抢焦点、新测试用例对文案/缩进的脆弱度、
+  「只插图不写字（`body` 与 `objectsJson` 都空）」时按设计不自动保存——都属 `unverified` 或刻意取舍。
+
+---
+
 ## 5. 本表的可信度边界
 
 ### 5.1 可复算（读源码数的，任何人可用 grep/node 复核）

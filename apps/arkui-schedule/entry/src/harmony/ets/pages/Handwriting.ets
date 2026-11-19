@@ -931,6 +931,8 @@ struct Handwriting {
   private exitWritingBoard(): void {    this.clearDraftTimer();
     this.saveDraftNow(false);
     console.info(`[hw] exit key=${this.draftKey}`);
+    // 上一次完成留下的标记不能沿用到「退出」路径（退出 = 明确不保存）。
+    AppStorage.setOrCreate<string>('handwriting.autosave', '');
     router.back();
   }
 
@@ -1462,6 +1464,14 @@ struct Handwriting {
       });
       if (failedTables.length > 0) {
         promptAction.showToast({ message: '表格识别超时，已保留原图', duration: 3000 });
+      }
+      // B3（路径 2）：把「这一次完成是否允许编辑页自动保存」一并交出去（一次性键，编辑页消费即清）。
+      // 只有识别到文字或插入了对象才算有内容：空笔迹 / 识别不出字时宁可让用户手动补一句，
+      // 也不自动保存出一条半成品记录（失败可解释、可继续编辑）。
+      const autoSaveReady: boolean = body.trim().length > 0 || objectsJson.length > 0;
+      AppStorage.setOrCreate<string>('handwriting.autosave', autoSaveReady ? '1' : '');
+      if (!autoSaveReady) {
+        promptAction.showToast({ message: '没有识别到文字：原图已保留，回到编辑页补充正文后再保存', duration: 4000 });
       }
       // 只有「完成且 OCR 成功」才作废草稿；失败路径保留（catch 里不动草稿）
       this.discardDraft();

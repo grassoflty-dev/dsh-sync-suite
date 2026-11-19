@@ -86,7 +86,10 @@ import type { RepoUrlCheck } from '../model/repoUrl';
 import { normalizeRemoteUrl, routeToRemote } from '../model/remoteUrl';
 // 一键重连（§B.4）：只把记录还原成可打开的地址并派生按钮文案，令牌不进记录
 import { decodeLastOk, mergeRemoteToken, reconnectLabel } from '../model/remoteUrl';
-import type { RemoteUrlCheck } from '../model/remoteUrl';
+// D1 的 P2：「DSH 地址」失焦即归一 —— 只借 parseRemoteInput 分辨「地址 / 令牌片段 / 非法」，
+// 地址校验仍走 normalizeRemoteUrl 那一份规则（见 model/remoteUrl 的分工注释）。
+import { parseRemoteInput } from '../model/remoteUrl';
+import type { RemoteUrlCheck, RemoteInputResult } from '../model/remoteUrl';
 import type { LastOkEntry } from '../model/remoteUrl';
 import {
   REMOTE_AVAILABILITY_NEEDS_SETUP,
@@ -441,6 +444,11 @@ struct Settings {
   private groupOffsets: number[] = [-1, -1, -1, -1, -1];
   /** 远程控制的「旧数据 → manual」迁移是否已经做过（只做一次，见 `applySettings`）。 */
   private remoteMigrated: boolean = false;
+  /**
+   * 「DSH 地址」失焦归一的一次性 toast 去重键：记用户原文，同一段原文只提示一次。
+   * 刻意不是 @State：它只用于去重、不参与渲染（同 `savedRemoteToken` 的纪律）。
+   */
+  private lastBlurNormalizeText: string = '';
   /**
    * 待用户确认的导入计划（**就是 dry-run 那一份**）。
    *
@@ -2008,6 +2016,50 @@ struct Settings {
   }
 
   /**
+   * 「DSH 地址」输入框失焦即归一（D1 的 P2）。
+   *
+   * 只管两件事：① 把用户自己敲/粘贴的那段地址规整成可打开的形式（补 http:// 、去首尾空格）；
+   * ② 真的改动了才给一次 toast。**不落盘、不跳转** —— 保存与跳转仍然只发生在 `openRemote()`，
+   * 顺序不许变（评审要求：归一不能提前产生「看似已保存」的副作用）。
+   *
+   * 三条安全边界：
+   * - 纯令牌片段（`k=…` / `?token=…`）与非法地址**不**改写输入框：`parseRemoteInput` 判 kind≠url
+   *   就直接返回，把解释留给 `openRemote()` 的红字（这里猜错等于把地址改成垃圾）；
+   * - **绝不**调用 `mergeRemoteToken` / 绝不把已保存的令牌合进输入框（凭据卫生）；
+   * - 同一段原文只提示一次（`lastBlurNormalizeText`），反复焦点进出不刷屏。
+   */
+  private normalizeRemoteOnBlur(): void {
+    const raw: string = this.remoteUrl;
+    if (raw.trim().length === 0) {
+      return;
+    }
+    const parsed: RemoteInputResult = parseRemoteInput(raw);
+    if (!parsed.ok || parsed.kind !== 'url') {
+      return;
+    }
+    const normalized: string = parsed.url;
+    if (normalized === raw) {
+      return;
+    }
+    if (this.lastBlurNormalizeText === raw) {
+      return;
+    }
+    this.lastBlurNormalizeText = raw;
+    this.remoteUrl = normalized;
+    // 手动方式下这一行就是「完整地址」字段：两份状态同步，语义与 onChangeRemoteUrl 一致
+    if (this.remoteMode === REMOTE_MODE_MANUAL) {
+      this.remoteManualUrl = normalized;
+    }
+    // 与 onChange 一致：用户改了就不再用旧红字压着
+    this.remoteUrlError = '';
+    if (!parsed.hadScheme) {
+      promptAction.showToast({ message: '已自动补 http://', duration: toastMsFor(false) });
+    } else {
+      promptAction.showToast({ message: '已把地址整理成可打开的形式', duration: toastMsFor(false) });
+    }
+  }
+
+  /**
    * 「打开远程控制」：按访问方式拼地址 → 归一 → 落盘 → 再跳内嵌页。
    *
    * 顺序是刻意的：先保存再跳转，远程控制页拿到的一定是已经落盘的新地址；
@@ -2523,6 +2575,9 @@ struct Settings {
           this.remoteManualUrl = value;
         }
         this.remoteUrlError = '';
+      },
+      onBlurRemoteUrl: (): void => {
+        this.normalizeRemoteOnBlur();
       },
       onClearToken: (): void => {
         this.clearRemoteToken();

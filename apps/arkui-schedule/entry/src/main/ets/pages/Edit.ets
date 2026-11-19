@@ -120,6 +120,8 @@ struct Edit {
         RecordEditorView({
           recordId: this.recordId,
           defaultDate: this.defaultDate,
+          // 新建记录自动聚焦标题（省掉点标题那一次 tap）；已有记录由组件内部判 recordId 不聚焦
+          autoFocusTitle: true,
           refreshTick: this.tick,
           onSaved: () => {
             this.leaving = true;
