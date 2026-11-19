@@ -32,7 +32,7 @@
 | mod-quick-record | 首页底部快捷记录（不跳编辑页，路径 1 5→3） | 已写完，待提交 | ff1560f | git revert <hash>（4 个新增文件：2 代码 + 2 测试；Index.ets 增量，页头未动） | 依赖 mod-d5-create-date（日期语义） | docs/UX-STEPS.md §4.5；测试 quickRecord.test.mjs（16）/ quickRecordUi.test.mjs（14） |
 | `mod-v2-media-migration` | v1 按天 zip → v2 `timeline/<date>/media/`（Node 内建 ZIP 读取，无新依赖） | 已写完，待提交 | 2f32752 | `git revert <hash>`（2 个新文件；不碰 devices/、不删 v1） | 依赖 `mod-v2-contract`、`mod-v2-migration`（需先有 `timeline/schema.json`） | `tools/migrate-media-v1-to-v2.mjs`（765 行）、测试 `v2MediaMigration.test.mjs`（34 例） |
 | mod-v2-read-service | v2 单时间线只读服务（timelineStore），开关控制、默认 v1、不写 v2 | 已写完，已提交 | c6f2935 | git revert <hash>（2 新增 + Index.ets 14 行；默认 v1，无持久状态） | 依赖 mod-v2-read-timeline、mod-v2-contract；被 mod-v2-dual-write-off 依赖 | services/timelineStore.ets（278 行）、测试 timelineService.test.mjs（26 例） |
-| mod-v2-write-service | v2 写入核心（原子替换 records.json + 追加式账本；开关关闭即抛错，默认不启用） | 已写完，待提交 | （Lead 填） | git revert <hash>（3 个新文件；未接线，默认 v1） | 依赖 mod-v2-read-service、mod-v2-contract；被 mod-v2-dual-write-off 依赖 | model/timelineWrite.ts（302 行）、services/timelineWriteStore.ets（613 行）、测试 timelineWrite.test.mjs（639 行，51 例） |
+| mod-v2-write-service | v2 写入核心（原子替换 records.json + 追加式账本；开关关闭即抛错，默认不启用） | 已写完，已提交 | c5dc58c | git revert <hash>（3 个新文件；未接线，默认 v1） | 依赖 mod-v2-read-service、mod-v2-contract；被 mod-v2-dual-write-off 依赖 | model/timelineWrite.ts（302 行）、services/timelineWriteStore.ets（613 行）、测试 timelineWrite.test.mjs（639 行，51 例） |
 
 `mod-v2-dual-read` 已被 `mod-v2-dual-write-off` 取代，见契约 §13。
 
@@ -97,4 +97,4 @@
 | 2026-11-19 | mod-quick-record | 已完成，待提交 | 全量 2421/2420/0/1；validate 8/8；tsc 0 | （评审后填） | 路径 1 5→3；页头零改动 |
 | 2026-11-20 | mod-v2-media-migration | 已完成，待提交 | 全量 2456/2455/0/1；validate 8/8；tsc 0 | （评审后填） | 无新依赖；v1 zip 不删不改；ZIP64/加密拒绝 |
 | 2026-11-20 | mod-v2-read-service | 已完成，已提交 | 全量 2482/2481/0/1；validate 8/8；tsc 0 | （评审后填） | 开关 timeline.readMode 默认 v1；无 timeline/ → v1 原路；v2 读不写 |
-| 2026-11-20 | mod-v2-write-service | 已完成，待提交 | 全量 2517/2516/0/1；validate 8/8；tsc 0 | （评审后填） | 关闭即抛错、无 IO；原子替换 + 追加账本；未接线；后续 `mod-v2-dual-write-off` 需路由的 v1 写调用点：`pages/Index.ets:544/822/918/950/1093`、`components/RecordEditorView.ets:663`、`components/RecordDetailView.ets:193`、`services/exportService.ets:456`、`services/summaryStore.ets`（RepoSummaryIO 写入）、`model/undoDelete.ts` `schedule()`、插件 `packages/dsh-dots` `bridge.ts` `ScheduleBridge.add` 及其余 `schedule_*` |
+| 2026-11-20 | mod-v2-write-service | 已完成，已提交 | 全量 2517/2516/0/1；validate 8/8；tsc 0 | （评审后填） | 关闭即抛错、无 IO；原子替换 + 追加账本；未接线；后续 `mod-v2-dual-write-off` 需路由的 v1 写调用点：`pages/Index.ets:544/822/918/950/1093`、`components/RecordEditorView.ets:663`、`components/RecordDetailView.ets:193`、`services/exportService.ets:456`、`services/summaryStore.ets`（RepoSummaryIO 写入）、`model/undoDelete.ts` `schedule()`、插件 `packages/dsh-dots` `bridge.ts` `ScheduleBridge.add` 及其余 `schedule_*` |
