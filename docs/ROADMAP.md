@@ -551,7 +551,7 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 | 便捷性（B4 收窄，待提交） | 用户 2026-11-19 拍板「日期只在新建时选一次」：**B4 已提交的改期机制（跨日 live + 旧日清理、更早日期拒绝）全部删除**，新增纯逻辑 `model/recordSaveTs.ts`（`tsForDate` / `resolveSaveTs`），编辑器日期行对已有记录只读并显示「创建时选定，不可改」，仅新建时弹 `CalendarPicker`；已有记录保存只在原日期追加更晚版本 | 工作树未提交（见上「待提交清单（B4 收窄）」，6 路径 = 2 改 + 2 删 + 2 新增）；全量 **2306 例 / 2305 pass / 0 fail / 1 skip**（相对 2309 的 −3 是刻意删除测被移除功能的用例；新基线 `b4SaveTs` 20 + `b4DateUi` 21 + `b4CalendarWiring` 18 + `b4SavedRow` 14 = 73）；`validate-app` **8/8**；`tsc` exit 0；删除 diff 的独立只读评审 `docs/REVIEW-b4-narrow.md` |
 
 **当前基线**：全量 `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"`
-**2670 例 / 2669 pass / 0 fail / 1 skip**（+44 = `mod-v2-sync-wiring` 的 `syncWiring.test.mjs` 44；相对 2607 基线的 **+18**：`mod-v2-dual-write-off` 的 `dualWriteOff.test.mjs` **18**；相对 2536 基线的 **+56**：`mod-v2-sync-protocol` 的 `syncProtocol.test.mjs` **56**；相对 2485 基线的 **+51**：`mod-v2-write-service` 的 `timelineWrite.test.mjs` **32**；相对 2459 基线的 **+23**：`mod-v2-read-service` 的 `timelineService.test.mjs` **23**；相对 2425 基线的 **+34**：`mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` **31**；相对 2391 基线的 **+30**：`mod-quick-record` 的
+**2711 例 / 2710 pass / 0 fail / 1 skip**（+26 = `mod-export-import-v2` 的 `exportImportV2.test.mjs` 26；相对 2670 基线的 **+44**：`mod-v2-sync-wiring` 的 `syncWiring.test.mjs` 44；相对 2607 基线的 **+18**：`mod-v2-dual-write-off` 的 `dualWriteOff.test.mjs` **18**；相对 2536 基线的 **+56**：`mod-v2-sync-protocol` 的 `syncProtocol.test.mjs` **56**；相对 2485 基线的 **+51**：`mod-v2-write-service` 的 `timelineWrite.test.mjs` **32**；相对 2459 基线的 **+23**：`mod-v2-read-service` 的 `timelineService.test.mjs` **23**；相对 2425 基线的 **+34**：`mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` **31**；相对 2391 基线的 **+30**：`mod-quick-record` 的
 `quickRecord.test.mjs` **16** + `quickRecordUi.test.mjs` **14**；相对 2348 基线的 **+42**：`mod-v2-read-timeline` 的
 `timelineRead.test.mjs` **+42**；再往前相对 2306 基线的 **+40**：`mod-v2-migration` 的
 `v2Migration.test.mjs` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` 的 `handwritingToolbar.test.mjs` **+1**；
@@ -595,6 +595,7 @@ B 批 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
 - mod-v2-sync-protocol 已写完（§11 门槛 + §9 周期 + outbox，未接线；不 force-push），待提交；下一模块 = mod-v2-dual-write-off（接线 runCycle + 翻转 timeline.readMode='v2' + 重定向 7 处写调用点 + 保留 v1ReadFallback 至 2026-12-31），再之后 export/import v2
 - mod-v2-dual-write-off 已写完（翻转条件=schema v2；七处写入经 recordWriter；失败停放 outbox 不回退 v1；真机已 BUILD SUCCESSFUL + 安装启动），待提交；**F1 未闭**：`syncProtocolStore.runCycle` 尚无调用点，故本模块加了第二道激活闸 `timeline.v2WriteEnabled`（默认未激活）——v2 写入已接线但不会自行激活；下一模块 = `mod-v2-sync-wiring`（接线 runCycle + 三态 UI + 激活流程），之后才是 export/import v2；真机「建记录→重启→仍在」与 timeline/ 布局变化仍 unverified
 - mod-v2-sync-wiring 已写完（真实 GitRunner + outbox + 三态 UI + 显式激活；两库并存需专用确认），待提交；真机 BUILD SUCCESSFUL + 安装启动，三态行显示「只读·v2 写入未启用」；仍 unverified：设备上激活对话框/真实 push/outbox/重启持久化/双设备。下一模块 = export/import v2
+- mod-export-import-v2 已写完（v2 导出/导入，五个 typed 拒绝，未删 v1），待提交；真机未验（无设备连接）
 
 ### 派活模板要点（别漏）
 

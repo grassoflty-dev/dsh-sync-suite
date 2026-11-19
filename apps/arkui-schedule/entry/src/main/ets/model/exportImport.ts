@@ -20,6 +20,9 @@ import { localDateKey } from '../common/date';
 import { formatDateKey, monthGrid, parseDateKey } from './calendar';
 import { encodeRecord, recordDateKey, sortRecords } from './jsonl';
 import type { Attachment, ScheduleRecord } from './types';
+import { buildRecordsText } from './timelineWrite';
+import { parseTimelineDay } from './timeline';
+import type { TimelineMedia, TimelineRecord } from './timeline';
 
 /** 导出格式：Markdown。 */
 export const EXPORT_FORMAT_MARKDOWN: string = 'markdown';
@@ -1352,4 +1355,619 @@ export function importBlockedTip(state: ExportImportState): string {
     return NO_IMPORTABLE_TEXT;
   }
   return '';
+}
+
+// ================================================================ v2 单时间线导出 / 导入（additive）
+//
+// 这一节只服务 `timelineStore.useV2()` 分支：v1 的 Markdown/JSON 导出与 append-only 导入
+// 一节不改（字节不变、测试不变）。全部是纯函数、零 SDK import，可由 `tools/tsconfig.json`
+// 直接编到 `.build/` 用 Node 跑；文件 IO 与原子写盘分别在 `services/exportService.ets`
+// 与 `services/timelineWriteStore.ets`。
+//
+// v2 bundle（放在沙箱 `<filesDir>/exports/v2-<stamp>/`，**不在 git 仓库里**）的形状：
+//   manifest.json                       # {schemaVersion:2, kind, range, exportedAt, dayCount, days, media}
+//   timeline/<date>/records.json         # 当日可见记录（已套用 deleted/restore 账本优先级）
+//   timeline/<date>/summary.json         # 当日汇总原文（存在才导出）
+//   timeline/<date>/media/<sha16>.jpg    # 散图，内容寻址名原样保留
+// 确定性：days 按 date、records 按 (ts,id)（buildRecordsText）、media 按 (date,file) 排序；
+// 同一份数据重复导出得到逐字节相同的 manifest 与日文件。
+
+/** v2 bundle 的 schema 标记值（只认 2；其余按 E_SCHEMA_UNKNOWN 拒绝）。 */
+export const V2_BUNDLE_SCHEMA_VERSION: number = 2;
+/** v2 bundle 的 kind 标记（避免把别的 JSON 误当成时间线备份）。 */
+export const V2_BUNDLE_KIND: string = 'dsh-schedule-v2';
+
+/** 五类类型化拒绝原因（对应 brief / DATA-CONTRACT-v2 §11 的写路径门禁）。 */
+export const V2_REFUSAL_SCHEMA_UNKNOWN: string = 'E_SCHEMA_UNKNOWN';
+export const V2_REFUSAL_BUNDLE_CORRUPT: string = 'E_BUNDLE_CORRUPT';
+export const V2_REFUSAL_MEDIA_MISSING: string = 'E_MEDIA_MISSING';
+export const V2_REFUSAL_V1_TARGET: string = 'E_V1_TARGET';
+export const V2_REFUSAL_TARGET_BUSY: string = 'E_TARGET_BUSY';
+
+/** manifest 中「一天」的摘要。 */
+export interface V2BundleDay {
+  date: string;
+  recordCount: number;
+  hasSummary: boolean;
+  /** 该日 media/ 下的裸文件名（sha16.jpg），按文件名升序。 */
+  media: string[];
+}
+
+/** manifest 中「一张媒体」的条目。 */
+export interface V2BundleMedia {
+  file: string;
+  sha256: string;
+  bytes: number;
+  date: string;
+}
+
+/** v2 manifest 的逐字结构（键序即契约）。 */
+export interface V2Manifest {
+  schemaVersion: number;
+  kind: string;
+  range: ExportRange;
+  exportedAt: string;
+  dayCount: number;
+  days: V2BundleDay[];
+  media: V2BundleMedia[];
+}
+
+/** `buildV2Manifest` 入参。 */
+export interface V2ManifestInput {
+  from: string;
+  to: string;
+  exportedAt: string;
+  days: V2BundleDay[];
+  media: V2BundleMedia[];
+}
+
+/** 裸媒体文件名：<sha256[0:16]>.jpg（与契约 §5 / P2-11 一致）。 */
+const V2_MEDIA_FILE_RE: RegExp = /^[0-9a-f]{16}\.jpg$/;
+/** 完整 sha256：64 位小写十六进制。 */
+const V2_SHA256_RE: RegExp = /^[0-9a-f]{64}$/;
+
+function copyV2BundleDay(day: V2BundleDay): V2BundleDay {
+  const media: string[] = [];
+  const source: string[] = Array.isArray(day.media) ? day.media : [];
+  for (const name of source) {
+    media.push(name);
+  }
+  media.sort();
+  const out: V2BundleDay = {
+    date: day.date,
+    recordCount: day.recordCount,
+    hasSummary: day.hasSummary === true,
+    media: media
+  };
+  return out;
+}
+
+function copyV2BundleMedia(item: V2BundleMedia): V2BundleMedia {
+  const out: V2BundleMedia = { file: item.file, sha256: item.sha256, bytes: item.bytes, date: item.date };
+  return out;
+}
+
+/**
+ * 构造 v2 manifest 文本（纯函数，不写盘）。
+ *
+ * - 顶层键序固定 `schemaVersion, kind, range, exportedAt, dayCount, days, media`；
+ * - days 按 date 升序、day.media 按文件名升序、media 按 (date, file) 升序；
+ * - 2 空格缩进 + 末尾一个换行；区间非法时抛中文 Error（与 v1 渲染入口同口径）。
+ */
+export function buildV2Manifest(input: V2ManifestInput): string {
+  const range = requireRange(input.from, input.to);
+  const days: V2BundleDay[] = [];
+  const sourceDays: V2BundleDay[] = Array.isArray(input.days) ? input.days : [];
+  for (const day of sourceDays) {
+    days.push(copyV2BundleDay(day));
+  }
+  days.sort((left: V2BundleDay, right: V2BundleDay): number => {
+    if (left.date === right.date) {
+      return 0;
+    }
+    return left.date < right.date ? -1 : 1;
+  });
+  const media: V2BundleMedia[] = [];
+  const sourceMedia: V2BundleMedia[] = Array.isArray(input.media) ? input.media : [];
+  for (const item of sourceMedia) {
+    media.push(copyV2BundleMedia(item));
+  }
+  media.sort((left: V2BundleMedia, right: V2BundleMedia): number => {
+    if (left.date !== right.date) {
+      return left.date < right.date ? -1 : 1;
+    }
+    if (left.file === right.file) {
+      return 0;
+    }
+    return left.file < right.file ? -1 : 1;
+  });
+  const doc: V2Manifest = {
+    schemaVersion: V2_BUNDLE_SCHEMA_VERSION,
+    kind: V2_BUNDLE_KIND,
+    range: range,
+    exportedAt: typeof input.exportedAt === 'string' ? input.exportedAt : '',
+    dayCount: days.length,
+    days: days,
+    media: media
+  };
+  return `${JSON.stringify(doc, null, 2)}\n`;
+}
+
+/** `parseV2Manifest` 的结果（失败时 manifest 为 null）。 */
+export interface V2ManifestResult {
+  ok: boolean;
+  code: string;
+  reason: string;
+  manifest: V2Manifest | null;
+}
+
+function v2ManifestFailure(code: string, reason: string): V2ManifestResult {
+  const out: V2ManifestResult = { ok: false, code: code, reason: reason, manifest: null };
+  return out;
+}
+
+/**
+ * 解析并校验 v2 manifest（fail-closed）。
+ *
+ * - 空 / 非法 JSON / 顶层非对象 / kind 不符 / 字段缺失或畸形 → E_BUNDLE_CORRUPT；
+ * - schemaVersion 存在但不为 2 → E_SCHEMA_UNKNOWN；完全缺标记 → E_BUNDLE_CORRUPT。
+ */
+export function parseV2Manifest(text: string): V2ManifestResult {
+  const raw = typeof text === 'string' ? text.replace(/^\ufeff/, '').trim() : '';
+  if (raw.length === 0) {
+    return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, 'v2 备份的 manifest.json 是空的');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 manifest 不是合法 JSON：${describe(error)}`);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, 'v2 备份 manifest 顶层必须是 JSON 对象');
+  }
+  const doc = parsed as Record<string, unknown>;
+  if (doc.schemaVersion === undefined) {
+    return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, 'v2 备份 manifest 缺少 schemaVersion 标记');
+  }
+  if (doc.schemaVersion !== V2_BUNDLE_SCHEMA_VERSION) {
+    return v2ManifestFailure(
+      V2_REFUSAL_SCHEMA_UNKNOWN,
+      `不认识的 v2 备份版本（${clip(String(doc.schemaVersion))}），只支持 schemaVersion=2`
+    );
+  }
+  if (doc.kind !== V2_BUNDLE_KIND) {
+    return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 kind 不是 ${V2_BUNDLE_KIND}`);
+  }
+  const rangeRaw = doc.range;
+  if (rangeRaw === null || typeof rangeRaw !== 'object' || Array.isArray(rangeRaw)) {
+    return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, 'v2 备份 manifest 缺少 range 对象');
+  }
+  const rangeDoc = rangeRaw as Record<string, unknown>;
+  const range = parseDateRange(
+    typeof rangeDoc.from === 'string' ? rangeDoc.from : '',
+    typeof rangeDoc.to === 'string' ? rangeDoc.to : ''
+  );
+  if (!range.ok) {
+    return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份区间非法：${range.reason}`);
+  }
+  if (!Array.isArray(doc.days) || !Array.isArray(doc.media)) {
+    return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, 'v2 备份 manifest 缺少 days 或 media 数组');
+  }
+  const days: V2BundleDay[] = [];
+  for (const rawDay of doc.days as unknown[]) {
+    if (rawDay === null || typeof rawDay !== 'object' || Array.isArray(rawDay)) {
+      return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, 'v2 备份 days 里有非对象元素');
+    }
+    const dayDoc = rawDay as Record<string, unknown>;
+    const date = typeof dayDoc.date === 'string' ? dayDoc.date : '';
+    if (parseDateKey(date) === null) {
+      return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 days 里有非法日期：${clip(date)}`);
+    }
+    const count = dayDoc.recordCount;
+    if (typeof count !== 'number' || !Number.isInteger(count) || count < 0) {
+      return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 ${date} 的 recordCount 非法`);
+    }
+    if (typeof dayDoc.hasSummary !== 'boolean') {
+      return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 ${date} 的 hasSummary 非法`);
+    }
+    if (!Array.isArray(dayDoc.media)) {
+      return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 ${date} 的 media 不是数组`);
+    }
+    const mediaNames: string[] = [];
+    for (const name of dayDoc.media as unknown[]) {
+      if (typeof name !== 'string' || !V2_MEDIA_FILE_RE.test(name)) {
+        return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 ${date} 的媒体文件名非法：${clip(String(name))}`);
+      }
+      mediaNames.push(name);
+    }
+    const day: V2BundleDay = {
+      date: date,
+      recordCount: count,
+      hasSummary: dayDoc.hasSummary,
+      media: mediaNames
+    };
+    days.push(copyV2BundleDay(day));
+  }
+  const media: V2BundleMedia[] = [];
+  for (const rawMedia of doc.media as unknown[]) {
+    if (rawMedia === null || typeof rawMedia !== 'object' || Array.isArray(rawMedia)) {
+      return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, 'v2 备份 media 里有非对象元素');
+    }
+    const mediaDoc = rawMedia as Record<string, unknown>;
+    const file = typeof mediaDoc.file === 'string' ? mediaDoc.file : '';
+    const sha = typeof mediaDoc.sha256 === 'string' ? mediaDoc.sha256 : '';
+    const bytes = mediaDoc.bytes;
+    const date = typeof mediaDoc.date === 'string' ? mediaDoc.date : '';
+    if (!V2_MEDIA_FILE_RE.test(file) || !V2_SHA256_RE.test(sha)) {
+      return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份媒体条目非法：${clip(file)}`);
+    }
+    if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) {
+      return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份媒体大小非法：${clip(file)}`);
+    }
+    if (parseDateKey(date) === null) {
+      return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份媒体日期非法：${clip(date)}`);
+    }
+    media.push(copyV2BundleMedia({ file: file, sha256: sha, bytes: bytes, date: date }));
+  }
+  const declaredDayCount = doc.dayCount;
+  if (typeof declaredDayCount !== 'number' || declaredDayCount !== days.length) {
+    return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, 'v2 备份 dayCount 与 days 数量不一致');
+  }
+  const exportedAt = typeof doc.exportedAt === 'string' ? doc.exportedAt : '';
+  const result: V2Manifest = {
+    schemaVersion: V2_BUNDLE_SCHEMA_VERSION,
+    kind: V2_BUNDLE_KIND,
+    range: range,
+    exportedAt: exportedAt,
+    dayCount: days.length,
+    days: days,
+    media: media
+  };
+  const ok: V2ManifestResult = { ok: true, code: '', reason: '', manifest: result };
+  return ok;
+}
+
+/** 从一条 v1 形状记录构造 v2 记录（导出 bundle 时用，全部字段显式搬运）。 */
+interface IncomingV2Record extends ScheduleRecord {
+  media?: TimelineMedia[];
+  opened_at?: string;
+  closed_at?: string;
+}
+
+/** 把媒体数组逐项校验后复制（畸形条目丢弃，不写进 bundle）。 */
+function v2MediaOf(value: TimelineMedia[] | undefined): TimelineMedia[] {
+  const out: TimelineMedia[] = [];
+  if (!Array.isArray(value)) {
+    return out;
+  }
+  for (const item of value) {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      continue;
+    }
+    if (!V2_MEDIA_FILE_RE.test(item.file) || !V2_SHA256_RE.test(item.sha256)) {
+      continue;
+    }
+    if (!Number.isInteger(item.pageIndex) || item.pageIndex < 0) {
+      continue;
+    }
+    const copy: TimelineMedia = { file: item.file, sha256: item.sha256, pageIndex: item.pageIndex };
+    out.push(copy);
+  }
+  return out;
+}
+
+/** v2 记录已写入的字段名（搬运未知扩展字段时避免重复）。 */
+function v2WrittenFieldNames(): Set<string> {
+  const names: Set<string> = new Set<string>();
+  for (const name of [
+    'id', 'ts', 'title', 'body', 'author', 'done', 'media',
+    'ocr_text', 'ai_structured', 'ai_processed', 'ocr_time', 'opened_at', 'closed_at'
+  ]) {
+    names.add(name);
+  }
+  return names;
+}
+
+/** 把 `timelineStore.readDay()` 带出的记录规范化为可序列化的 v2 记录。 */
+export function asV2Record(record: ScheduleRecord): TimelineRecord {
+  const src: IncomingV2Record = record as IncomingV2Record;
+  const opened = typeof src.opened_at === 'string' && src.opened_at.length > 0 ? src.opened_at : record.ts;
+  const out: TimelineRecord = {
+    id: record.id,
+    ts: record.ts,
+    title: record.title,
+    body: record.body,
+    author: record.author,
+    done: record.done,
+    media: v2MediaOf(src.media),
+    ai_processed: record.ai_processed,
+    opened_at: opened
+  };
+  const ocr = record.ocr_text;
+  if (typeof ocr === 'string') {
+    out.ocr_text = ocr;
+  }
+  const structured = record.ai_structured;
+  if (typeof structured === 'string') {
+    out.ai_structured = structured;
+  }
+  const ocrTime = record.ocr_time;
+  if (typeof ocrTime === 'string') {
+    out.ocr_time = ocrTime;
+  }
+  const closed = src.closed_at;
+  if (typeof closed === 'string' && closed.length > 0) {
+    out.closed_at = closed;
+  } else if (record.done) {
+    out.closed_at = record.ts;
+  }
+  // 未知扩展字段原样尾随（与 model/timeline.ts 的 canonicalRecordLine 同口径）。
+  const written = v2WrittenFieldNames();
+  const source = record as unknown as Record<string, unknown>;
+  const target = out as unknown as Record<string, unknown>;
+  for (const key of Object.keys(source)) {
+    if (!written.has(key)) {
+      target[key] = source[key];
+    }
+  }
+  return out;
+}
+
+/** 用 v2 原子写入的字节生成器序列化一日可见记录（先规范化，再由 buildRecordsText 自检）。 */
+export function buildV2RecordsText(date: string, records: ScheduleRecord[]): string {
+  const list: ScheduleRecord[] = Array.isArray(records) ? records : [];
+  const v2Records: TimelineRecord[] = [];
+  for (const record of list) {
+    v2Records.push(asV2Record(record));
+  }
+  return buildRecordsText(date, v2Records);
+}
+
+/** 从 v2 bundle 目录读入的一日原文。 */
+export interface V2BundleDayInput {
+  date: string;
+  recordsText: string;
+  summaryText: string;
+  /** 该日 media/ 目录里实际存在的文件名（裸名）。 */
+  mediaFiles: string[];
+}
+
+/** 从磁盘拼好的、待校验的 v2 bundle。 */
+export interface V2BundleInput {
+  manifestText: string;
+  days: V2BundleDayInput[];
+}
+
+/** 校验通过的一日（records 为已折叠、已过滤账本的记录）。 */
+export interface V2ValidatedDay {
+  date: string;
+  records: TimelineRecord[];
+  summaryText: string;
+  mediaFiles: string[];
+}
+
+/** `validateV2Bundle` 的结果。 */
+export interface V2ValidationResult {
+  ok: boolean;
+  code: string;
+  reason: string;
+  manifest: V2Manifest | null;
+  days: V2ValidatedDay[];
+}
+
+function v2ValidationFailure(code: string, reason: string, manifest: V2Manifest | null): V2ValidationResult {
+  const out: V2ValidationResult = { ok: false, code: code, reason: reason, manifest: manifest, days: [] };
+  return out;
+}
+
+/**
+ * 校验一个 v2 bundle（只读、无 IO）：manifest 标记 → 逐日 records.json 解析 → 媒体文件在位。
+ *
+ * - manifest 不对：透传 `parseV2Manifest` 的 E_SCHEMA_UNKNOWN / E_BUNDLE_CORRUPT；
+ * - 天数 / 日期 / 记录数 / summary 标记与 manifest 不符：E_BUNDLE_CORRUPT；
+ * - 某日 records.json 解析失败（顶层坏 / 有坏行）：E_BUNDLE_CORRUPT；
+ * - manifest 里声明的媒体文件在某日 media/ 名单里缺失：E_MEDIA_MISSING。
+ */
+export function validateV2Bundle(bundle: V2BundleInput): V2ValidationResult {
+  const parsed = parseV2Manifest(bundle === null || bundle === undefined ? '' : bundle.manifestText);
+  if (!parsed.ok || parsed.manifest === null) {
+    return v2ValidationFailure(parsed.code, parsed.reason, null);
+  }
+  const manifest = parsed.manifest;
+  const inputDays: V2BundleDayInput[] = Array.isArray(bundle.days) ? bundle.days : [];
+  if (inputDays.length !== manifest.days.length) {
+    return v2ValidationFailure(
+      V2_REFUSAL_BUNDLE_CORRUPT,
+      `v2 备份天数不符：manifest 声明 ${manifest.days.length} 天，实际 ${inputDays.length} 天`,
+      manifest
+    );
+  }
+  const byDate = new Map<string, V2BundleDay>();
+  for (const day of manifest.days) {
+    byDate.set(day.date, day);
+  }
+  const sorted = inputDays.slice();
+  sorted.sort((left: V2BundleDayInput, right: V2BundleDayInput): number => {
+    if (left.date === right.date) {
+      return 0;
+    }
+    return left.date < right.date ? -1 : 1;
+  });
+  const seen = new Set<string>();
+  const days: V2ValidatedDay[] = [];
+  for (const input of sorted) {
+    if (seen.has(input.date)) {
+      return v2ValidationFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份有重复日期：${input.date}`, manifest);
+    }
+    seen.add(input.date);
+    const declared = byDate.get(input.date);
+    if (declared === undefined) {
+      return v2ValidationFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份多出 manifest 未声明的一天：${input.date}`, manifest);
+    }
+    const dayParse = parseTimelineDay(input.recordsText, input.date);
+    if (dayParse.day === null || dayParse.errors.length > 0) {
+      return v2ValidationFailure(
+        V2_REFUSAL_BUNDLE_CORRUPT,
+        `v2 备份 ${input.date} 的 records.json 无法安全解析（${dayParse.errors.length} 处错误）`,
+        manifest
+      );
+    }
+    const records = dayParse.day.allRecords;
+    if (records.length !== declared.recordCount) {
+      return v2ValidationFailure(
+        V2_REFUSAL_BUNDLE_CORRUPT,
+        `v2 备份 ${input.date} 记录数不符：manifest 声明 ${declared.recordCount}，实际 ${records.length}`,
+        manifest
+      );
+    }
+    if ((typeof input.summaryText === 'string' && input.summaryText.length > 0) !== declared.hasSummary) {
+      return v2ValidationFailure(V2_REFUSAL_BUNDLE_CORRUPT, `v2 备份 ${input.date} 的汇总存在标记不符`, manifest);
+    }
+    const present = new Set<string>();
+    for (const name of input.mediaFiles) {
+      present.add(name);
+    }
+    for (const name of declared.media) {
+      if (!present.has(name)) {
+        return v2ValidationFailure(
+          V2_REFUSAL_MEDIA_MISSING,
+          `v2 备份缺少媒体文件 ${input.date}/media/${name}（content-addressed 文件必须一起搬运）`,
+          manifest
+        );
+      }
+    }
+    const valid: V2ValidatedDay = {
+      date: input.date,
+      records: records,
+      summaryText: typeof input.summaryText === 'string' ? input.summaryText : '',
+      mediaFiles: input.mediaFiles.slice()
+    };
+    days.push(valid);
+  }
+  const ok: V2ValidationResult = { ok: true, code: '', reason: '', manifest: manifest, days: days };
+  return ok;
+}
+
+/** 导入目标的门槛状态（由服务层从 timelineStore / timelineWriteStore 读取后传入）。 */
+export interface V2TargetState {
+  /** 仓库级 timeline/schema.json 明确为 schemaVersion:2。 */
+  repoIsV2: boolean;
+  /** 写入闸已开启（timelineWriteStore.isEnabled()）。 */
+  writeEnabled: boolean;
+}
+
+/** dry-run 计划的总量。 */
+export interface V2PlanTotals {
+  days: number;
+  records: number;
+  media: number;
+  bytes: number;
+}
+
+/** `planV2Import` 的结果（ok=false 时 code 为五类类型化原因之一）。 */
+export interface V2ImportPlan {
+  ok: boolean;
+  code: string;
+  reason: string;
+  totals: V2PlanTotals;
+  manifest: V2Manifest | null;
+  days: V2ValidatedDay[];
+}
+
+function emptyV2Totals(): V2PlanTotals {
+  const out: V2PlanTotals = { days: 0, records: 0, media: 0, bytes: 0 };
+  return out;
+}
+
+function v2PlanFailure(code: string, reason: string, manifest: V2Manifest | null): V2ImportPlan {
+  const out: V2ImportPlan = {
+    ok: false,
+    code: code,
+    reason: reason,
+    totals: emptyV2Totals(),
+    manifest: manifest,
+    days: []
+  };
+  return out;
+}
+
+/**
+ * v2 导入 dry-run（**只算不写**）：先校验 bundle，再检查目标门槛，最后给出 days/records/media/bytes。
+ *
+ * 拒绝优先级（typed）：
+ * 1. bundle 校验失败的 E_SCHEMA_UNKNOWN / E_BUNDLE_CORRUPT / E_MEDIA_MISSING；
+ * 2. 目标是 v1 仓库（无 v2 schema 标记）→ E_V1_TARGET（先迁移）；
+ * 3. 写入路径未启用（显式激活闸关闭 / 存储未初始化）→ E_TARGET_BUSY。
+ */
+export function planV2Import(bundle: V2BundleInput, target: V2TargetState): V2ImportPlan {
+  const checked = validateV2Bundle(bundle);
+  if (!checked.ok) {
+    return v2PlanFailure(checked.code, checked.reason, checked.manifest);
+  }
+  if (!target.repoIsV2) {
+    return v2PlanFailure(
+      V2_REFUSAL_V1_TARGET,
+      '目标是 v1 仓库：请先把仓库单向迁移到 v2（timeline/schema.json 声明 schemaVersion:2）后再导入',
+      checked.manifest
+    );
+  }
+  if (!target.writeEnabled) {
+    return v2PlanFailure(
+      V2_REFUSAL_TARGET_BUSY,
+      'v2 写入路径未启用：请先在设置页显式激活 v2 写入后再导入',
+      checked.manifest
+    );
+  }
+  const totals: V2PlanTotals = emptyV2Totals();
+  totals.days = checked.days.length;
+  for (const day of checked.days) {
+    totals.records += day.records.length;
+    totals.media += day.mediaFiles.length;
+  }
+  if (checked.manifest !== null) {
+    for (const item of checked.manifest.media) {
+      totals.bytes += item.bytes;
+    }
+  }
+  const out: V2ImportPlan = {
+    ok: true,
+    code: '',
+    reason: '',
+    totals: totals,
+    manifest: checked.manifest,
+    days: checked.days
+  };
+  return out;
+}
+
+/** dry-run 计划的中文展示行（面板逐字显示）。 */
+export function v2PlanSummary(plan: V2ImportPlan): string {
+  if (!plan.ok) {
+    return '';
+  }
+  return (
+    `将导入 ${plan.totals.days} 天 / ${plan.totals.records} 条记录 / ` +
+    `${plan.totals.media} 个媒体文件（共 ${plan.totals.bytes} 字节）`
+  );
+}
+
+/** 五类拒绝原因对应的「下一步」文案（面板错误态用，未登记的类型给通用文案）。 */
+export function v2RefusalNext(code: string): string {
+  if (code === V2_REFUSAL_SCHEMA_UNKNOWN) {
+    return '换用 schemaVersion=2 的 v2 备份；不认识的版本不猜着导入';
+  }
+  if (code === V2_REFUSAL_BUNDLE_CORRUPT) {
+    return '重新导出一份完整备份；坏 manifest / 坏日文件不写盘';
+  }
+  if (code === V2_REFUSAL_MEDIA_MISSING) {
+    return '重新导出并确保 media/ 散图一起搬运；缺图不会静默丢图';
+  }
+  if (code === V2_REFUSAL_V1_TARGET) {
+    return '先执行 v1→v2 单向迁移，再导入 v2 备份';
+  }
+  if (code === V2_REFUSAL_TARGET_BUSY) {
+    return '稍后重试，或到设置页检查 v2 写入是否已显式激活';
+  }
+  return '检查备份与仓库状态后重试';
 }

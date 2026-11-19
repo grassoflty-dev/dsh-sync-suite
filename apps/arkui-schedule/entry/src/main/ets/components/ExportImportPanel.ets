@@ -46,6 +46,7 @@ import {
 import type { DateRangeResult, ExportImportState, ExportRequest, QuickRangeOption } from '../model/exportImport';
 import { formatDiagnostics } from '../model/stateView';
 import type { DiagnosticsInput } from '../model/stateView';
+import { timelineStore } from '../services/timelineStore';
 import { ActionButton } from './ActionButton';
 import { EmptyState } from './state/EmptyState';
 import { ErrorState } from './state/ErrorState';
@@ -81,6 +82,19 @@ const PANEL_ERROR_NEXT: string = '检查日期区间与文件后重试';
  */
 const FAILURE_PREFIXES: string[] = ['导出失败', '导入失败', '选择文件失败', '无法读取导入文件', '复制路径失败', '没有待确认'];
 
+// ---- v2 时间线备份（只在 timelineStore.useV2() 时渲染，v1 用户看不到这一节）----
+const V2_GROUP_TITLE: string = 'v2 时间线备份';
+const V2_HINT: string = '导出共享时间线（含媒体）为只读备份；导入先 dry-run，确认后才写入 timeline/';
+const V2_EXPORT_LABEL: string = '导出 v2 备份';
+const V2_PICK_LABEL: string = '选择 v2 备份并试算';
+const V2_APPLY_LABEL: string = '确认导入 v2';
+const V2_CANCEL_LABEL: string = '取消 v2 导入';
+const V2_EMPTY_TITLE: string = '还没有 v2 导入计划';
+const V2_EMPTY_DETAIL: string = '选一份 v2 备份的 manifest.json，先算出计划再决定要不要写入';
+const V2_EMPTY_ACTION: string = '去选备份';
+const V2_NOT_WIRED: string = '该操作尚未在当前页面接入，请先在设置页完成接线';
+const V2_BUSY: string = 'v2 备份正在处理，请稍候';
+
 @Component
 export struct ExportImportPanel {
   /** 展示状态（区间初值、格式、开关、dry-run 计数、导出路径、错误文案、忙碌标志）。 */
@@ -106,6 +120,24 @@ export struct ExportImportPanel {
   onCancelWait: () => void = () => {};
   /** 可选：显式「复制路径」按钮（`null` = 不渲染，只靠长按复制）。 */
   onCopyPath: (() => void) | null = null;
+
+  // ---- v2 时间线备份（展示数据由页面写回，组件只读；不新增 @State，保持纯展示）----
+  /** v2 导入计划是否已生成（页面 dry-run 成功后置 true）。 */
+  @Prop v2PlanReady: boolean = false;
+  /** v2 计划的中文展示行（days / records / media / bytes，由纯函数 v2PlanSummary 产出）。 */
+  @Prop v2PlanText: string = '';
+  /** v2 导入最近一次提示（成功 / 类型化拒绝原因，空串 = 无）。 */
+  @Prop v2Message: string = '';
+  /** v2 操作是否进行中（按钮统一的忙碌原因来源）。 */
+  @Prop v2Busy: boolean = false;
+  /** 导出 v2 备份（页面调 exportV2Timeline 并写回 v2Message）。 */
+  onV2Export: (() => void) | null = null;
+  /** 选择 v2 备份并 dry-run（页面调 picker + planV2ImportFromPicked，写回 v2Plan*）。 */
+  onV2Pick: (() => void) | null = null;
+  /** 显式确认导入（页面调 applyV2Import；dry-run 默认不写）。 */
+  onV2Apply: (() => void) | null = null;
+  /** 取消 v2 导入（页面清空计划，本机零改动）。 */
+  onV2Cancel: (() => void) | null = null;
 
   // 可编辑项在组件本地承接：`@Prop` 是单向的，输入框直接改父状态会来回抖动。
   // 初始值来自 `state`（`aboutToAppear` 同步一次），之后由用户输入主导并随 `onExport` 回传。
@@ -182,6 +214,46 @@ export struct ExportImportPanel {
     if (handler !== null) {
       handler();
     }
+  }
+
+  // ------------------------------------------------------------------ v2 时间线备份
+
+  /** 只有仓库确为 v2 且读模式选了 v2 时才显示这一节（默认 v1 用户完全看不到）。 */
+  private v2Visible(): boolean {
+    return timelineStore.useV2();
+  }
+
+  /** 按钮不可用原因：忙碌优先，其次「尚未接入」；没有任何理由时说明可点。 */
+  private v2BlockedReason(handler: (() => void) | null): string {
+    if (this.v2Busy) {
+      return V2_BUSY;
+    }
+    if (handler === null) {
+      return V2_NOT_WIRED;
+    }
+    return '';
+  }
+
+  /** 按钮是否真的能执行：有回调且不在忙碌中（不可用按钮仍可点，点了给原因）。 */
+  private v2CanTap(handler: (() => void) | null): boolean {
+    return handler !== null && !this.v2Busy;
+  }
+
+  /** 确认导入是否可点：必须已有 dry-run 计划且不忙（与 v1 的「先算后写」纪律一致）。 */
+  private v2CanApply(): boolean {
+    return this.v2CanTap(this.onV2Apply) && this.v2PlanReady && this.v2PlanText.length > 0;
+  }
+
+  /** 确认导入的不可用原因：先解释忙碌 / 未接入，其次「还没试算」。 */
+  private v2ApplyBlockedReason(): string {
+    const blocked: string = this.v2BlockedReason(this.onV2Apply);
+    if (blocked.length > 0) {
+      return blocked;
+    }
+    if (!this.v2PlanReady || this.v2PlanText.length === 0) {
+      return '先选择 v2 备份并试算（dry-run 不写任何记录）';
+    }
+    return '';
   }
 
   /** 选文件按钮文案：还没选过 → 「选择 JSON 文件」；选过 → 「重新选择文件」。 */
@@ -508,6 +580,135 @@ export struct ExportImportPanel {
     .alignItems(HorizontalAlign.Start)
   }
 
+  /**
+   * v2 时间线备份节（flag-gated）：只在 useV2() 时渲染。
+   *
+   * 三态纪律（docs/STATE-UI.md）：没计划 → EmptyState 给「去选备份」；忙 → LoadingState；
+   * 类型化拒绝文案走 v2Message + HintLine（不是静默吞点击）。按钮统一 ActionButton，
+   * 不可用时不禁用命中，而是点击给 v2BlockedReason() 的具体原因。
+   */
+  @Builder
+  V2Section() {
+    Column({ space: SPACING.md }) {
+      this.GroupTitle(V2_GROUP_TITLE)
+      this.HintLine(V2_HINT)
+
+      if (!this.v2PlanReady && this.v2Message.length === 0) {
+        EmptyState({
+          title: V2_EMPTY_TITLE,
+          detail: V2_EMPTY_DETAIL,
+          actionLabel: V2_EMPTY_ACTION,
+          compact: true,
+          onAction: (): void => {
+            const handler: (() => void) | null = this.onV2Pick;
+            if (handler !== null) {
+              handler();
+            }
+          }
+        })
+      }
+
+      Row({ space: SPACING.sm }) {
+        ActionButton({
+          label: V2_EXPORT_LABEL,
+          actionEnabled: this.v2CanTap(this.onV2Export),
+          disabledReason: this.v2BlockedReason(this.onV2Export),
+          busy: this.v2Busy,
+          variant: 'secondary',
+          block: false,
+          onTap: (): void => {
+            const handler: (() => void) | null = this.onV2Export;
+            if (handler !== null) {
+              handler();
+            }
+          },
+          onBlockedTap: null
+        })
+        ActionButton({
+          label: V2_PICK_LABEL,
+          actionEnabled: this.v2CanTap(this.onV2Pick),
+          disabledReason: this.v2BlockedReason(this.onV2Pick),
+          busy: this.v2Busy,
+          variant: 'secondary',
+          block: false,
+          onTap: (): void => {
+            const handler: (() => void) | null = this.onV2Pick;
+            if (handler !== null) {
+              handler();
+            }
+          },
+          onBlockedTap: null
+        })
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      if (this.v2Busy) {
+        LoadingState({
+          title: loadingText('处理 v2 备份'),
+          progress: -1,
+          compact: true,
+          onCancel: (): void => {
+            const handler: (() => void) | null = this.onV2Cancel;
+            if (handler !== null) {
+              handler();
+            }
+          }
+        })
+      }
+
+      if (this.v2PlanReady && this.v2PlanText.length > 0) {
+        this.HintLine(this.v2PlanText)
+      }
+      if (this.v2Message.length > 0) {
+        this.HintLine(this.v2Message)
+      }
+
+      Row({ space: SPACING.sm }) {
+        Column() {
+          ActionButton({
+            label: V2_APPLY_LABEL,
+            actionEnabled: this.v2CanApply(),
+            disabledReason: this.v2ApplyBlockedReason(),
+            busy: this.v2Busy,
+            variant: 'primary',
+            block: true,
+            onTap: (): void => {
+              const handler: (() => void) | null = this.onV2Apply;
+              if (handler !== null) {
+                handler();
+              }
+            },
+            onBlockedTap: null
+          })
+        }
+        .layoutWeight(1)
+
+        Column() {
+          ActionButton({
+            label: V2_CANCEL_LABEL,
+            actionEnabled: this.v2CanTap(this.onV2Cancel),
+            disabledReason: this.v2BlockedReason(this.onV2Cancel),
+            busy: false,
+            variant: 'secondary',
+            block: true,
+            onTap: (): void => {
+              const handler: (() => void) | null = this.onV2Cancel;
+              if (handler !== null) {
+                handler();
+              }
+            },
+            onBlockedTap: null
+          })
+        }
+        .layoutWeight(1)
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
   build() {
     Column({ space: SPACING.md }) {
       this.GroupTitle('导出')
@@ -696,6 +897,14 @@ export struct ExportImportPanel {
         .layoutWeight(1)
       }
       .width('100%')
+
+      // v2 时间线备份：只在共享时间线模式启用时出现；v1 用户看不到这一节。
+      if (this.v2Visible()) {
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+        this.V2Section()
+      }
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)

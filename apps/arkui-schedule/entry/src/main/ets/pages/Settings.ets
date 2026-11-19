@@ -195,25 +195,35 @@ import {
   applyPlan,
   clearDryRun,
   defaultExportImportState,
+  todayText,
+  v2PlanSummary,
+  v2RefusalNext,
   withExportPath,
   withImportFileName,
   withPanelMessage
 } from '../model/exportImport';
-import type { ExportImportState, ExportRequest, ImportPlan } from '../model/exportImport';
+import type { ExportImportState, ExportRequest, ImportPlan, V2ImportPlan } from '../model/exportImport';
 import {
   appendImportPlan,
+  applyV2Import,
   exportSchedules,
+  exportV2Timeline,
   exportsDirPath,
   pickImportFile,
-  planImportFromText
+  planImportFromText,
+  planV2ImportFromPicked
 } from '../services/exportService';
 import type {
   ExportFileResult,
   ExportRequestInput,
   ImportApplyResult,
   ImportFilePickResult,
-  ImportPlanResult
+  ImportPlanResult,
+  V2ApplyResult,
+  V2ExportResult,
+  V2ImportPlanResult
 } from '../services/exportService';
+import { timelineStore } from '../services/timelineStore';
 import { DIVIDER, FONT, HOME_INCLUDE_OTHER_KEY, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
 import { applyThemeMode, isSystemDark } from '../common/themeApply';
 import { normalizeThemeMode, resolveTheme, themeModeHint, themeModeLabel } from '../model/theme';
@@ -360,6 +370,16 @@ struct Settings {
    */
   @State exportImport: ExportImportState = defaultExportImportState();
 
+  // v2 时间线备份（ExportImportPanel.V2Section 的展示状态；纯展示回写，不含任何 IO）
+  /** dry-run 是否已产出可确认的 v2 导入计划。 */
+  @State v2PlanReady: boolean = false;
+  /** dry-run 计划行（days / records / media / bytes，由 v2PlanSummary 产出）。 */
+  @State v2PlanText: string = '';
+  /** 最近一次 v2 提示（导出摘要 / 导入结果 / 类型化拒绝原因，空串 = 无）。 */
+  @State v2Message: string = '';
+  /** v2 操作进行中（四个按钮共用的忙碌来源）。 */
+  @State v2Busy: boolean = false;
+
   /** 是否启用「多源 fallback」（默认关闭：关闭时内容只发给主源，见 `docs/AI-FALLBACK.md` §6）。 */
   @State aiFallbackEnabled: boolean = false;
   /** 备用源顺序（不含主源，最多 3 个；`parseFallbackOrder` / `serializeFallbackOrder` 归一）。 */
@@ -451,6 +471,14 @@ struct Settings {
    * `null` = 没有待确认的计划（没选文件 / 已取消 / 已确认落盘）。
    */
   private pendingImport: ImportPlan | null = null;
+
+  /**
+   * 待确认的 v2 导入计划（**就是 dry-run 那一份**，确认时原样交给 applyV2Import，绝不重新解析）。
+   * `null` = 没有待确认的计划（没选备份 / 已取消 / 已确认落盘）。
+   */
+  private pendingV2Plan: V2ImportPlan | null = null;
+  /** 待确认计划所在的 bundle 目录（媒体兄弟文件从这里按 sha16 搬运，绝不写 devices/**）。 */
+  private pendingV2BundleDir: string = '';
 
   aboutToAppear(): void {
     this.platformText = isHarmonyOS() ? 'HarmonyOS' : 'Android';
@@ -1273,6 +1301,194 @@ struct Settings {
         false
       );
     }
+  }
+
+  // ------------------------------------------------------------------ v2 时间线导出 / 导入（additive）
+  //
+  // 与 v1 完全分开：v1 的 exportImport / pendingImport 一行未改。这里只把
+  // services/exportService.ets 的 v2 API 接到面板已声明的四个回调上；面板保持纯展示，
+  // 类型化拒绝（E_SCHEMA_UNKNOWN / E_BUNDLE_CORRUPT / E_MEDIA_MISSING / E_V1_TARGET /
+  // E_TARGET_BUSY）统一由 v2RefusalNext 给出下一步，绝不静默吞点击。
+
+  /** v2 忙碌复位：页面已销毁时不再 setState（与 v1 的 disposed 纪律一致）。 */
+  private v2ResetBusy(): void {
+    if (!this.disposed) {
+      this.v2Busy = false;
+    }
+  }
+
+  /** 类型化错误行：`动作失败：E_xxx 原因（下一步：…）`；无类型码时只给动作与原因。 */
+  private v2RefusalLine(code: string, reason: string, action: string): string {
+    const head: string = code.length > 0 ? `${action}失败：${code}` : `${action}失败`;
+    return `${head} ${reason}（下一步：${v2RefusalNext(code)}）`;
+  }
+
+  /**
+   * v2 导出的区间：V2Section 没有自己的日期输入，按时间线现有全部日备份
+   * （listDates 升序，取首尾；空时间线取今天），避免让用户先去 v1 区间框填日期。
+   * exportV2Timeline 内部仍按这个区间过滤 listDates，不读任何 devices/**。
+   */
+  private v2ExportRequest(): ExportRequestInput {
+    const dates: string[] = timelineStore.listDates();
+    const from: string = dates.length > 0 ? dates[0] : todayText();
+    const to: string = dates.length > 0 ? dates[dates.length - 1] : from;
+    const request: ExportRequestInput = {
+      from: from,
+      to: to,
+      format: this.exportImport.format,
+      includeAttachments: false,
+      includeMeta: false
+    };
+    return request;
+  }
+
+  /** 导出 v2 备份：只读派生，成功后把 bundle 路径与计数写进 v2Message（不产出导入计划）。 */
+  private handleV2Export(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.v2Busy = true;
+    this.v2Message = '';
+    // 导出是一次全新动作：清掉上一次的导入计划，避免旧计划被误确认。
+    this.pendingV2Plan = null;
+    this.pendingV2BundleDir = '';
+    this.v2PlanReady = false;
+    this.v2PlanText = '';
+    try {
+      const result: V2ExportResult = exportV2Timeline(this.v2ExportRequest());
+      if (this.disposed) {
+        return;
+      }
+      if (!result.ok) {
+        this.v2Message = this.v2RefusalLine(result.code, result.reason, '导出 v2 备份');
+        return;
+      }
+      this.v2Message =
+        `已导出 v2 备份：${result.dirPath}（${result.days} 天 / ${result.records} 条记录 / ` +
+        `${result.media} 个媒体文件，共 ${result.bytes} 字节）`;
+    } catch (error) {
+      if (this.disposed) {
+        return;
+      }
+      this.v2Message = this.v2RefusalLine('', describeError(error), '导出 v2 备份');
+    } finally {
+      this.v2ResetBusy();
+    }
+  }
+
+  /**
+   * 选 v2 备份并 dry-run（一个字节都不写）：picker + planV2ImportFromPicked。
+   * 成功 → 把 v2PlanSummary 的逐日/记录/媒体计数写进 v2PlanText，供用户决定是否确认；
+   * 拒绝 → 清计划 + 写类型化原因（写入路径未激活时就是 E_TARGET_BUSY）。
+   */
+  private async handleV2Pick(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    this.v2Busy = true;
+    this.v2Message = '';
+    this.pendingV2Plan = null;
+    this.pendingV2BundleDir = '';
+    this.v2PlanReady = false;
+    this.v2PlanText = '';
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const picked: ImportFilePickResult = await pickImportFile(context);
+      if (this.disposed) {
+        return;
+      }
+      if (!picked.ok) {
+        this.v2Message = this.v2RefusalLine('', picked.reason, '选择 v2 备份');
+        return;
+      }
+      const planned: V2ImportPlanResult = planV2ImportFromPicked(picked.text, picked.uri);
+      if (this.disposed) {
+        return;
+      }
+      if (!planned.ok || planned.plan === null) {
+        this.v2Message = this.v2RefusalLine(planned.code, planned.reason, '试算 v2 备份');
+        return;
+      }
+      this.pendingV2Plan = planned.plan;
+      this.pendingV2BundleDir = planned.bundleDir;
+      this.v2PlanText = v2PlanSummary(planned.plan);
+      this.v2PlanReady = this.v2PlanText.length > 0;
+    } catch (error) {
+      if (this.disposed) {
+        return;
+      }
+      this.v2Message = this.v2RefusalLine('', describeError(error), '选择 v2 备份');
+    } finally {
+      this.v2ResetBusy();
+    }
+  }
+
+  /**
+   * 确认导入 v2：**先弹显式确认框**，用户点「确认导入」才调 applyV2Import（dry-run 默认不写）。
+   * 成功 → 结果行（days / records / media）+ 清计划；拒绝 → 类型化错误行，计划保留以便改好后重试。
+   */
+  private async handleV2Apply(): Promise<void> {
+    const plan: V2ImportPlan | null = this.pendingV2Plan;
+    if (this.disposed || plan === null || !plan.ok) {
+      if (!this.disposed) {
+        this.v2Message = this.v2RefusalLine('', '没有待确认的 v2 导入计划，请先选择备份并试算', '导入 v2 备份');
+      }
+      return;
+    }
+    this.v2Busy = true;
+    this.v2Message = '';
+    try {
+      const response = await promptAction.showDialog({
+        title: '确认导入 v2 备份',
+        message:
+          `将按 dry-run 计划写入 timeline/：${this.v2PlanText}。` +
+          '只追加记录与媒体，不覆盖更晚版本、不删除任何历史；点「取消」本机零改动。',
+        buttons: [
+          { text: '取消', color: $r('app.color.text_secondary') },
+          { text: '确认导入', color: $r('app.color.brand') }
+        ]
+      });
+      if (this.disposed) {
+        return;
+      }
+      if (response.index !== 1) {
+        this.v2Message = '已取消导入 v2 备份（本机记录没有任何改动）';
+        return;
+      }
+      const result: V2ApplyResult = applyV2Import(plan, this.pendingV2BundleDir);
+      if (this.disposed) {
+        return;
+      }
+      if (!result.ok) {
+        this.v2Message = this.v2RefusalLine(result.code, result.reason, '导入 v2 备份');
+        return;
+      }
+      this.pendingV2Plan = null;
+      this.pendingV2BundleDir = '';
+      this.v2PlanReady = false;
+      this.v2PlanText = '';
+      this.v2Message =
+        `已导入 v2 备份：${result.days} 天 / ${result.records} 条记录 / ` +
+        `${result.media} 个媒体文件（跳过 ${result.skipped} 条）`;
+      promptAction.showToast({ message: '已导入 v2 备份', duration: toastMsFor(false) });
+    } catch (error) {
+      if (this.disposed) {
+        return;
+      }
+      this.v2Message = this.v2RefusalLine('', describeError(error), '导入 v2 备份');
+    } finally {
+      this.v2ResetBusy();
+    }
+  }
+
+  /** 取消 v2 导入：丢掉待确认计划、清空计划行/提示/忙碌，本机零改动（与面板 EmptyState 同步）。 */
+  private handleV2Cancel(): void {
+    this.pendingV2Plan = null;
+    this.pendingV2BundleDir = '';
+    this.v2PlanReady = false;
+    this.v2PlanText = '';
+    this.v2Message = '';
+    this.v2Busy = false;
   }
 
   // ------------------------------------------------------------------ 多源 fallback（C 线）
@@ -2652,6 +2868,23 @@ struct Settings {
       },
       onCopyPath: (): void => {
         this.handleCopyPath();
+      },
+      // v2 时间线备份：展示状态 + 四个回调全部接线（面板按 useV2() 自行隐藏这一节）。
+      v2PlanReady: this.v2PlanReady,
+      v2PlanText: this.v2PlanText,
+      v2Message: this.v2Message,
+      v2Busy: this.v2Busy,
+      onV2Export: (): void => {
+        this.handleV2Export();
+      },
+      onV2Pick: (): void => {
+        this.handleV2Pick();
+      },
+      onV2Apply: (): void => {
+        this.handleV2Apply();
+      },
+      onV2Cancel: (): void => {
+        this.handleV2Cancel();
       }
     })
   }

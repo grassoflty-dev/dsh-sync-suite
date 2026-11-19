@@ -34,7 +34,8 @@
 | mod-v2-write-service | v2 写入核心（原子替换 records.json + 追加式账本；开关关闭即抛错，默认不启用） | 已写完，已提交 | c5dc58c | git revert <hash>（3 个新文件；未接线，默认 v1） | 依赖 mod-v2-read-service、mod-v2-contract；被 mod-v2-dual-write-off 依赖 | model/timelineWrite.ts（302 行）、services/timelineWriteStore.ets（613 行）、测试 timelineWrite.test.mjs（639 行，51 例） |
 | mod-v2-sync-protocol | §9/§11 同步协议核心（assertWritable 门槛 + fetch→union→replay→commit→push + outbox；不 force-push、不改写远端历史） | 已写完，已提交 | e6c202b | git revert <hash>（3 个新文件；未接线，默认 v1） | 依赖 mod-v2-write-service、mod-v2-contract；被 mod-v2-dual-write-off 依赖 | model/syncProtocol.ts（887 行）、services/syncProtocolStore.ets（642 行）、测试 syncProtocol.test.mjs（814 行，71 例） |
 | mod-v2-dual-write-off | 停写 v1：schema=v2 **且**显式激活位 `timeline.v2WriteEnabled` 为真时才把 readMode 翻到 v2；七处写入经 recordWriter 分流；失败停放 outbox 并抛 typed 错 | 已写完，已提交 | 241bab5 | git revert <hash>（5 新增 + 3 UI + 3 服务编译修复；v1 数据未删） | 依赖 mod-v2-write-service、mod-v2-sync-protocol；被 export/import v2 依赖 | model/timelineMode.ts（89 行）、services/{outboxStore,recordWriter,timelineModeSwitch}.ets、测试 dualWriteOff.test.mjs（18 例） |
-| mod-v2-sync-wiring | 接线 v2 同步周期（真实 GitRunner + outbox + 三态 UI）与**显式**激活开关；两库并存需显式确认 | 已写完，已提交 | 634da60 | git revert <hash>（6 新增 + 5 改 + 2 跨模块；v1 数据未删） | 依赖 mod-v2-sync-protocol、mod-v2-dual-write-off；被 export/import v2 依赖 | model/syncCycle.ts（322）、model/v2Activation.ts（74）、services/{gitRunner,syncStatusStore,v2ActivationService}.ets、测试 syncWiring.test.mjs（44 例） |
+| mod-v2-sync-wiring | 接线 v2 同步周期（真实 GitRunner + outbox + 三态 UI）与**显式**激活开关；两库并存需显式确认 | 已写完，已提交 | 634da60 | git revert <hash>（6 新增 + 5 改 + 2 跨模块；v1 数据未删） | 依赖 mod-v2-sync-protocol、mod-v2-dual-write-off；被 mod-export-import-v2 依赖 | model/syncCycle.ts（322）、model/v2Activation.ts（74）、services/{gitRunner,syncStatusStore,v2ActivationService}.ets、测试 syncWiring.test.mjs（44 例） |
+| `mod-export-import-v2` | v2 导出/导入：v2 bundle（manifest + 按天 records/summary/media）+ 五类 typed 拒绝 + 只经原子写入落地；v1 导出/导入不动 | 已写完，待提交 | （Lead 填） | git revert <hash>（1 新增 + 4 改；v1 未删、media add-only、不写 `devices/**`）；**须先回滚本模块，再回滚 `mod-v2-sync-wiring`，最后 `mod-v2-dual-write-off`**（见 §1.1） | 依赖 `mod-v2-sync-wiring`、`mod-v2-dual-write-off`；无下游 | `docs/REVIEW-export-import-v2.md`（评审后填）；测试 `tools/test/exportImportV2.test.mjs`（445 行，26 例） |
 
 `mod-v2-dual-read` 已被 `mod-v2-dual-write-off` 取代，见契约 §13。
 
@@ -48,11 +49,11 @@
 mod-v2-contract
  ├─ mod-v2-migration ─ mod-v2-media-migration
  ├─ mod-v2-read-timeline ─ mod-v2-read-service ──┐
- ├─ mod-v2-write-service ────────────────────────┼─ mod-v2-dual-write-off ─ mod-v2-sync-wiring ─ export/import v2
+ ├─ mod-v2-write-service ────────────────────────┼─ mod-v2-dual-write-off ─ mod-v2-sync-wiring ─ mod-export-import-v2
  └─ mod-v2-sync-protocol ────────────────────────┘
 ```
 
-回滚必须从右往左（先回滚依赖方）；单独回滚 `mod-v2-read-service` 而保留 `mod-v2-dual-write-off` 会让已迁移仓库没有读取方（见 ROADMAP 的排序风险）。`mod-v2-sync-wiring` 是激活环节，**单独回滚它只让应用回到「v2 写入未激活」状态（安全，v1 数据未删）**；但若先回滚 `mod-v2-dual-write-off` 而保留 sync-wiring，接线会悬空（`runCycle`/激活闸失去分流基础），故二者必须按此顺序回滚。
+回滚必须从右往左（先回滚依赖方）；单独回滚 `mod-v2-read-service` 而保留 `mod-v2-dual-write-off` 会让已迁移仓库没有读取方（见 ROADMAP 的排序风险）。`mod-v2-sync-wiring` 是激活环节，**单独回滚它只让应用回到「v2 写入未激活」状态（安全，v1 数据未删）**；但若先回滚 `mod-v2-dual-write-off` 而保留 sync-wiring，接线会悬空（`runCycle`/激活闸失去分流基础），故二者必须按此顺序回滚。新增 `mod-export-import-v2` 位于依赖链最右端（依赖 sync-wiring）；**回滚顺序固定为：先回滚 `mod-export-import-v2`（导出/导入），再回滚 `mod-v2-sync-wiring`，最后回滚 `mod-v2-dual-write-off`**，不可颠倒——先回滚下游会让仍在线的导出/导入失去分流基础。
 
 ## 2 跨模块触碰登记
 
@@ -75,6 +76,7 @@ mod-v2-contract
 | `mod-v2-dual-write-off`（ArkTS 编译修复） | `services/timelineStore.ets`、`services/timelineWriteStore.ets`、`services/syncProtocolStore.ets` | 真机 ArkTS 严格类型编译暴露的硬错误（typed interface 化、去掉 `unknown`/`in`、`writeTextSync`→`writeTextToFile` 助手），不改这三个服务无法编译通过 | 这三处属于 read-service / write-service / sync-protocol 模块，单独回滚那些模块前必须先回滚本模块 |
 | `mod-v2-sync-wiring` | `pages/Index.ets` / `pages/Settings.ets` / `components/settings/SyncSection.ets` | 三态同步状态行（已同步 / N 条待同步 / 只读）要显示在首页，显式激活开关与两库并存专用确认对话框要落在设置页及其同步区组件，必须改这三个文件本身 | 与 D1-P2/D6/settings-lean 同文件（Index/Settings/SyncSection），撞文件必须串行、不可双人同时改 |
 | `mod-v2-sync-wiring`（跨模块） | `services/GitSyncService.ets` + `resources/rawfile/git/git-bridge.js` | 真实同步周期需要一个 git runner 执行 fetch→union→commit→push：在 `GitSyncService` 增 `v2Git()`，并在共享 git 桥 `git-bridge.js` 增 `opV2Git`（isomorphic-git 1.25.3，`force:false`，`fastForwardOnly:true`） | git 桥属于多模块共享设施，回滚本模块前不得回滚桥；跨模块触碰，与其他用户串行 |
+| `mod-export-import-v2` | `pages/Settings.ets` / `components/settings/DataSection.ets` / `components/ExportImportPanel.ets` / `services/exportService.ets` / `model/exportImport.ts` | v2 导出/导入的 UI 走 Settings → DataSection → panel 的 flag-gated（`useV2()`）接线，导出/导入逻辑复用 `exportService` / `exportImport` 模型并追加 v2 helper，必须改这五个共享文件本身；section 无「尚未接入」文案、拒绝时显示 typed 错误行 | 这五个文件同时被 `mod-settings-lean`、D4（导出区间 chip）、D6（设置页组锚点）触碰，撞文件**必须串行、不可双人同时改**；v1 导出/导入行为与 `exportImport.test.mjs`（69 例）不变，两导出测试文件共 110 例 |
 
 ## 3 提交与标签约定
 
@@ -92,7 +94,7 @@ mod-v2-contract
 2. **执行 revert**：一次只回滚一个模块；同一提交捆绑多个模块时，按登记的补救方案处理，不拿 `git revert <hash>` 一把梭。
 3. **跑门闸并记录原始输出**（工作目录 `dsh-sync-suite`）：
    - `node tools/overlay.mjs status` → 期望 `applied=false`；
-   - `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"` → 当前基线 **2670 例 / 2669 pass / 0 fail / 1 skip**（+44 = `mod-v2-sync-wiring` 的 `syncWiring.test.mjs` 44；相对 2607 基线的 **+18 = `mod-v2-dual-write-off` 的 `dualWriteOff.test.mjs` 18**；相对 2536 基线的 **+56 = `mod-v2-sync-protocol` 的 `syncProtocol.test.mjs` 56**；相对 2485 基线的 **+51 = `mod-v2-write-service` 的 `timelineWrite.test.mjs` 32**；相对 2459 基线的 **+23 = `mod-v2-read-service` 的 `timelineService.test.mjs` 23**；相对 2425 基线的 **+34 = `mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` 31**；相对 2391 基线的 **+30 = `mod-quick-record` 的 `quickRecord.test.mjs` 16 + `quickRecordUi.test.mjs` 14**；`mod-settings-lean` 原地改测 4 个既有测试文件、用例数不变，delta 0，基线不动；相对 2348 基线：`mod-v2-read-timeline` **+42**；再往前相对 2306 基线：`mod-v2-migration` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` **+1**；`cec3c93` 之后；数字随模块加入而变动；回滚 D5 相关模块时，因删除的旧用例被恢复，数字会变化，须在批次记录里写明变化原因）；
+   - `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"` → 当前基线 **2711 例 / 2710 pass / 0 fail / 1 skip**（+26 = `mod-export-import-v2` 的 `exportImportV2.test.mjs` 26；相对 2670 基线的 **+44 = `mod-v2-sync-wiring` 的 `syncWiring.test.mjs` 44**；相对 2607 基线的 **+18 = `mod-v2-dual-write-off` 的 `dualWriteOff.test.mjs` 18**；相对 2536 基线的 **+56 = `mod-v2-sync-protocol` 的 `syncProtocol.test.mjs` 56**；相对 2485 基线的 **+51 = `mod-v2-write-service` 的 `timelineWrite.test.mjs` 32**；相对 2459 基线的 **+23 = `mod-v2-read-service` 的 `timelineService.test.mjs` 23**；相对 2425 基线的 **+34 = `mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` 31**；相对 2391 基线的 **+30 = `mod-quick-record` 的 `quickRecord.test.mjs` 16 + `quickRecordUi.test.mjs` 14**；`mod-settings-lean` 原地改测 4 个既有测试文件、用例数不变，delta 0，基线不动；相对 2348 基线：`mod-v2-read-timeline` **+42**；再往前相对 2306 基线：`mod-v2-migration` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` **+1**；`cec3c93` 之后；数字随模块加入而变动；回滚 D5 相关模块时，因删除的旧用例被恢复，数字会变化，须在批次记录里写明变化原因）；
    - `node apps/arkui-schedule/tools/validate-app.mjs` → **8/8**；
    - `node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json` → **exit 0**。
 4. **判定「回滚干净」**：0 fail、skip 数未异常增加、8/8、tsc exit 0、`overlay applied=false` 五项同时成立；任何一项不满足即为未回滚干净，不许在 §1 把状态改回「已回滚」。
@@ -120,3 +122,4 @@ mod-v2-contract
 | 2026-11-20 | mod-v2-sync-protocol | 已完成，已提交 | 全量 2592/2591/0/1；validate 8/8；tsc 0 | （评审后填） | 门槛= schema v2 + main + HEAD==origin/main；拒绝即零写入；不 force-push |
 | 2026-11-20 | mod-v2-dual-write-off | 已完成，已提交 | 全量 2626/2625/0/1；validate 8/8；tsc 0；真机 BUILD SUCCESSFUL + 安装启动通过 | （评审后填） | 翻转条件=schema v2 + 显式激活（默认未激活，F1 同步周期未接线）；失败停放 outbox；v1 未删 |
 | 2026-11-20 | mod-v2-sync-wiring | 已完成，已提交 | 全量 2670/2669/0/1；validate 8/8；tsc 0；真机 BUILD SUCCESSFUL + 安装启动，三态行可见 | （评审后填） | 显式激活；两库并存需确认；不 force-push |
+| 2026-11-20 | `mod-export-import-v2` | 已完成，待提交 | 全量 **2711/2710/0/1（+26）**；validate-app 8/8；tsc 0；真机 `BUILD SUCCESSFUL in 4 s 653 ms`（✓ 产物验收通过） | `docs/REVIEW-export-import-v2.md`（评审后填） | v2 导出/导入 + 五类 typed 拒绝（`E_SCHEMA_UNKNOWN`/`E_BUNDLE_CORRUPT`/`E_MEDIA_MISSING`/`E_V1_TARGET`/`E_TARGET_BUSY`）；dry-run 默认、显式确认、只经原子写入、media add-only、不写 `devices/**`；v1 未删（`exportImport.test.mjs` 69 例未改，两导出测试文件共 110 例）；真机未验（无设备连接） |
