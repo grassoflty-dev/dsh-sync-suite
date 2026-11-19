@@ -246,6 +246,8 @@ v2 替换的是 v1 的**日程时间线域**：`devices/<deviceId>/schedules/*.j
 
 客户端读取开关：`AppStorage` 键 `timeline.readMode`（`'v1'` 默认 / `'v2'`）。仅当 `<repo>/timeline/schema.json` 为 `schemaVersion:2` **且** 开关为 `'v2'` 时才走 v2 只读路径；否则一律走 v1 原路径（`timeline/` 缺失、`schema.json` 缺失/坏/版本不符时同样降级，只多一行 `[tl]` 日志）。本开关不写默认值，回退到 v1 不需要清理任何持久状态。
 
+实现见 `mod-v2-sync-protocol`：`assertWritable()` 先校验 schema=2 / 分支 `main` / HEAD==`origin/main`，失败即零写入；周期为 fetch → 读远端与本地 → unionDay → 原子写 → commit → push，**仅**在 push 被拒后才 `reset --hard origin/main` 并重放 outbox（≤4 次生命周期上限）；outbox 在 `<filesDir>/sync-outbox.json`（不进仓库）；**永不 force-push、不改写远端历史、不删除远端文件**。
+
 ## 10. 兼容与迁移
 
 **v1 检测优先级（P2-8）**：`timeline/schema.json` 存在且 `schemaVersion === 2` → v2，无论 `devices/` 是否存在（迁移提交只新增 `timeline/` 不删 `devices/`，故"两者并存"是迁移后常态）；标记存在但版本不认识 → 只读（`E_SCHEMA_UNKNOWN`）；标记缺失但 `devices/` 存在 → v1、需迁移（`E_MIGRATION_REQUIRED`）；两者都不存在 → 空仓库，按 v2 初始化并写标记。可测：四种 (标记, devices/) 组合 → 四个确定分支。
