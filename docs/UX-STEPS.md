@@ -584,6 +584,57 @@
 
 ---
 
+### 4.5 本轮落地（B4.5 / `mod-quick-record`：首页底部快捷记录）
+
+> 口径仍按 §1（v1），下表每个数字都能按算式逐项复核；**全部是源码复算，不是真机实测**（见 §5.2）。
+> 本批**只交付了一件事**：**首页底部「快捷记录」一行**——一个标题输入框 + 快捷条「保存」，直接落盘到
+> 当前所选日期，**不跳编辑页**。§3 里其余可砍点（D2-P2 真接管、路径 1 残余的 bootstrap wait、
+> 路径 2′ 插图 / OCR 后台化、路径 3/5 的 P2 项）**都没做**，下表不出现它们。
+>
+> **硬约束：页头零改动。** 快捷条加在**列表区**（`CompactBody` / `WideBody` 主操作之上），
+> `PageLayout` 的属性区**一个字节未动**，`tools/test/indexHeader.test.mjs` **未改一行**
+> （首页页头仍只有「今天」+「⚙ 设置」，属性区里没有任何第二个动作）。这是本模块的硬约束，
+> 违反它会直接破 `indexHeader.test.mjs` 的防回归断言（§3 D6 P2 的旧坑，本轮不再踩）。
+
+| # | 路径 | 改前 | 改后（B4.5） | 差 | 逐项算式（tap / scroll / wait） |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 记一条日程 | **5**（tap 3 + wait 2） | **3**（tap 2 + wait 1） | **−2** | 改前 5（承接 §4.3）：`新建` 1 + 正文框 1 + `保存日程` 1 = tap 3；冷启动首屏 1 + 编辑页 bootstrap 1 = wait 2。改后 3：标题框 1 + 快捷条 `保存` 1 = tap 2；冷启动首屏 1 = wait 1。省掉的正好是「打开编辑页」这 1 tap（`新建`）与「编辑页 bootstrap」这 1 wait——快捷记录**不走编辑页**：`appendRecord` 同步写 + 派生索引钩子（`openIndexStore.applyRecord`）同步跑，随后 `reload()` + `loadSummary()`，没有 >300ms 的异步等待。 |
+
+**合计**：承接 §4.3 / §4.4 口径 **33 → 31**（−2）；相对 §2.0 首次口径 **43 → 31**；
+相对原 §4「P1 目标 26」仍差 **5 步**，缺口全部属于未做项（D2-P2 真接管 / 路径 2′ 插图 / OCR 后台化 /
+路径 3、5 的 P2 项），不是本轮回归。
+**注意**：§4.4 的 D5 / D7 **不进合计**（各 0 步，买的是正确性与可解释性，§4.4 明示 33 → 33），
+所以本模块是 **B4 之后第一个真正减步的模块**（§4.3 的 33 → §4.4 仍是 33 → 本轮 31）。
+
+- **实现落点**（行号以本轮工作树为准，可 `read` 复核）：
+  - **纯逻辑（新文件）**：`model/quickRecord.ts`（48 行）——`planQuickRecord()` `:38-48`，空标题 /
+    非法日期 fail-closed（中文原因），`ts` 复用 `recordSaveTs.ts` 的 `tsForDate`，不发明第二种日期格式。
+  - **组件（新文件）**：`components/QuickRecordBar.ets`（84 行）——一个 `TextInput`（标题）+ 一个
+    `ActionButton`（`保存`），`:25-84`；只用按钮提交，成功才清空输入框，失败保留原文供重试。
+  - **首页接线**：`pages/Index.ets`——imports `:48-49` / `:60` / `:75`；`@State quickBusy` `:137-138`
+    （防重复提交）；`defaultAuthorOrMe()` `:494-500`（`settingsStore.cached()` 同步取作者名，回落「我」）；
+    `submitQuickRecord()` `:509-541`（`planQuickRecord` → `appendRecord` → 清输入 → `reload()` +
+    `loadSummary()` → toast `已记下`；不写 `SAVED_MARKER_KEY`）；`@Builder QuickRecordRow()` `:1220-1227`；
+    调用点 `:1722`（`CompactBody`）/ `:1756`（`WideBody`）——**都在列表区，不在 `PageLayout` 属性区**。
+  - **测试**：`tools/test/quickRecord.test.mjs`（**16 例**，纯逻辑）+ `tools/test/quickRecordUi.test.mjs`
+    （**14 例**，接线静态断言），共 **30 例**。
+  - **页头零改动的证据**：`git status --porcelain` 只有 `Index.ets` 与 4 个新增文件；`PageLayout.ets` /
+    `indexHeader.test.mjs` **均不在改动清单里**。
+
+- **已知限制 / 真机项（一律 `unverified`，见 §5.2）**：
+  1. **键盘回车提交未接线**：`QuickRecordBar.ets` 的占位符写着「回车或点『保存』」，但 `TextInput.onSubmit`
+     的 ArkTS 事件签名本机**无法验证**（无 DevEco / SDK），为避免引入编译不过的 API 本版没有绑回车事件；
+     **按钮提交是唯一可用的入口**。真机上回车是否真的不触发，也未验（`unverified`）。
+  2. **无 DevEco / 真机**：组件渲染、`已记下` toast、列表即时刷新的观感均 `unverified`
+     （本机 `hdc list targets` 为空，见 §5.2）。步数 5 → 3 是源码复算，不是实测。
+  3. **快捷记录只写标题**：`body: ''`（`Index.ets:523`），正文为空；后续可在详情页补正文，本轮不做。
+  4. **作者名取自同步缓存**：`settingsStore.cached()` 是同步读，缓存由启动 `bootstrap()` 填充
+     （`Index.ets:490-493` 注释）；真机冷启动竞态未验（`unverified`）。
+  5. **静态断言的表达力上限**：`quickRecordUi.test.mjs` 以读 `.ets` 文本为主，能挡住「接线位置错 /
+     主操作被替换 / 页头被改」这类回归，但挡不住 ArkTS 编译错误与真机行为；改 UI 时同步改断言。
+
+---
+
 ## 5. 本表的可信度边界
 
 ### 5.1 可复算（读源码数的，任何人可用 grep/node 复核）

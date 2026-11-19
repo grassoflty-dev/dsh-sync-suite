@@ -45,6 +45,8 @@ import { APP_VERSION } from '../common/version';
 import { applyAiResult, buildAiPayload } from '../model/aiPayload';
 import type { AiPayload, ScheduleRecord } from '../model/types';
 import { cloneRecord } from '../model/types';
+import { planQuickRecord } from '../model/quickRecord';
+import type { QuickRecordPlan } from '../model/quickRecord';
 import { SUMMARY_MAX_POINTS, truncateSummaryForDisplay } from '../model/dailySummary';
 import type { DailySummary, SummaryDisplay } from '../model/dailySummary';
 import { applyQuery, authorsOf, hasKeyword, isFilterActive, makeFilter } from '../model/query';
@@ -55,7 +57,7 @@ import type { DiagnosticsInput } from '../model/stateView';
 import { SAVED_MARKER_KEY, decodeSavedMarker, containsRecordVersion } from '../model/homeRefresh';
 import type { SavedMarker } from '../model/homeRefresh';
 import { redactSecrets } from '../model/syncError';
-import { describeError, scheduleStore } from '../services/scheduleStore';
+import { describeError, newRecordId, scheduleStore } from '../services/scheduleStore';
 import { openIndexStore } from '../services/openIndexStore';
 import { summaryStore } from '../services/summaryStore';
 import { settingsStore } from '../services/settingsStore';
@@ -70,6 +72,7 @@ import { RecordEditorView } from '../components/RecordEditorView';
 import { RecordRow } from '../components/RecordRow';
 import { ActionButton } from '../components/ActionButton';
 import { MonthCalendar } from '../components/MonthCalendar';
+import { QuickRecordBar } from '../components/QuickRecordBar';
 import { LoadingState } from '../components/state/LoadingState';
 import { EmptyState } from '../components/state/EmptyState';
 import { ErrorState } from '../components/state/ErrorState';
@@ -131,6 +134,8 @@ struct Index {
   /** 下拉刷新中的转圈状态（`Refresh` 组件用 `$$` 双向绑定）。 */
   @State refreshing: boolean = false;
   @State ready: boolean = false;
+  /** 快捷记录保存中（防重复提交；appendRecord 同步完成，正常一闪而过）。 */
+  @State quickBusy: boolean = false;
 
   // 搜索 / 筛选状态（与 tab 正交：tab 决定数据源，这里只过滤）
   /** 搜索框原始输入（匹配时才做 trim / 小写 / 空白折叠）。 */
@@ -476,6 +481,63 @@ struct Index {
     router.pushUrl({ url: 'pages/Edit', params: params }).catch((error: Error) => {
       promptAction.showToast({ message: `打开编辑页失败：${describeError(error)}` });
     });
+  }
+
+  // ------------------------------------------------------------------ 首页快捷记录（列表区一行落盘，不进编辑页）
+
+  /**
+   * 快捷记录的作者：与 `RecordEditorView` 同一来源（`settings.author`，空则「我」），但走
+   * `settingsStore.cached()` 这个**同步**读取口。`bootstrap()` 里的 `scheduleStore.ensureReady()`
+   * 已经 `await settingsStore.load()` 填好缓存（下面还挡了一层 `isReady()`），所以点击路径
+   * 零异步、零等待，不需要在保存时再读一次偏好设置。
+   */
+  private defaultAuthorOrMe(): string {
+    const settings = settingsStore.cached();
+    if (settings !== null && settings.author.trim().length > 0) {
+      return settings.author.trim();
+    }
+    return '我';
+  }
+
+  /**
+   * 保存快捷记录：纯标题 + 当前所选日期，走与编辑页相同的 `appendRecord` 落盘链。
+   *
+   * 返回 `boolean` 给 `QuickRecordBar`：成功才清空输入框，失败保留原文供重试。
+   * 不写 `SAVED_MARKER_KEY`（那是「编辑页保存返回」的一次性标记，本路径不返回列表）；
+   * 派生索引在 `appendRecord` 内已同步更新，这里直接 `reload()` + `loadSummary()` 刷新首页。
+   */
+  private submitQuickRecord(rawTitle: string): boolean {
+    const plan: QuickRecordPlan = planQuickRecord(rawTitle, this.selectedDate, new Date());
+    if (!plan.ok) {
+      promptAction.showToast({ message: plan.reason, duration: toastMsFor(true) });
+      return false;
+    }
+    if (!scheduleStore.isReady()) {
+      promptAction.showToast({ message: '存储尚未就绪，请稍后重试' });
+      return false;
+    }
+    const record: ScheduleRecord = {
+      id: newRecordId(),
+      ts: plan.ts,
+      title: plan.title,
+      body: '',
+      author: this.defaultAuthorOrMe(),
+      done: false,
+      ai_processed: false
+    };
+    this.quickBusy = true;
+    try {
+      scheduleStore.appendRecord(record);
+    } catch (error) {
+      this.quickBusy = false;
+      promptAction.showToast({ message: `保存失败：${describeError(error)}`, duration: toastMsFor(true) });
+      return false;
+    }
+    this.quickBusy = false;
+    this.reload();
+    this.loadSummary();
+    promptAction.showToast({ message: '已记下' });
+    return true;
   }
 
   /** 进设置页：同步配置（仓库/token/含其他设备/立即同步/推送/测试连接）全部在那里。 */
@@ -1155,6 +1217,15 @@ struct Index {
     .width('100%')
   }
 
+  /** 列表区的快捷记录条（紧凑屏 / 宽屏共用同一个 Builder，都放在主操作之上）。 */
+  @Builder
+  QuickRecordRow() {
+    QuickRecordBar({
+      busy: this.quickBusy,
+      onSubmit: (title: string): boolean => this.submitQuickRecord(title)
+    })
+  }
+
   /** 紧凑屏底部主操作：全宽（紧凑屏跳编辑页）。 */
   @Builder
   PrimaryAction() {
@@ -1648,6 +1719,7 @@ struct Index {
       .width('100%')
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
+      this.QuickRecordRow()
       this.PrimaryAction()
     }
     .width('100%')
@@ -1681,6 +1753,7 @@ struct Index {
         .width('100%')
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
+        this.QuickRecordRow()
         this.SidebarAction()
       }
       .width(masterPaneWidth(this.contentWidth))

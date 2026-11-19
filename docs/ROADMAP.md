@@ -551,7 +551,8 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 | 便捷性（B4 收窄，待提交） | 用户 2026-11-19 拍板「日期只在新建时选一次」：**B4 已提交的改期机制（跨日 live + 旧日清理、更早日期拒绝）全部删除**，新增纯逻辑 `model/recordSaveTs.ts`（`tsForDate` / `resolveSaveTs`），编辑器日期行对已有记录只读并显示「创建时选定，不可改」，仅新建时弹 `CalendarPicker`；已有记录保存只在原日期追加更晚版本 | 工作树未提交（见上「待提交清单（B4 收窄）」，6 路径 = 2 改 + 2 删 + 2 新增）；全量 **2306 例 / 2305 pass / 0 fail / 1 skip**（相对 2309 的 −3 是刻意删除测被移除功能的用例；新基线 `b4SaveTs` 20 + `b4DateUi` 21 + `b4CalendarWiring` 18 + `b4SavedRow` 14 = 73）；`validate-app` **8/8**；`tsc` exit 0；删除 diff 的独立只读评审 `docs/REVIEW-b4-narrow.md` |
 
 **当前基线**：全量 `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"`
-**2391 例 / 2390 pass / 0 fail / 1 skip**（相对 2348 基线的 **+42**：`mod-v2-read-timeline` 的
+**2425 例 / 2424 pass / 0 fail / 1 skip**（相对 2391 基线的 **+30**：`mod-quick-record` 的
+`quickRecord.test.mjs` **16** + `quickRecordUi.test.mjs` **14**；相对 2348 基线的 **+42**：`mod-v2-read-timeline` 的
 `timelineRead.test.mjs` **+42**；再往前相对 2306 基线的 **+40**：`mod-v2-migration` 的
 `v2Migration.test.mjs` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` 的 `handwritingToolbar.test.mjs` **+1**；
 skip 数未变，仍是既有那条 fetch 直连用例；数字随模块加入而变动。再往前，B4 批 **2309 / 2308 / 0 / 1**，收窄时 **−3**
@@ -572,9 +573,11 @@ B 批 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
    「待提交清单（B4 收窄）」与 `docs/UX-STEPS.md` §4.4）。
    **不做改期（用户 2026-11-19 拍板）**：日期只在新建时选一次，已有记录永不换日；旧 id 换身份 / 加独立日期字段
    等候选方案一并作废，不再是未决事项。
-   **仍未完成**：D2 的 P2（真接管，要等 `CHAT-SYNC` §1/§5 的租约 + sha 校验）、首页底部「快捷记录」
-   （不跳编辑页那条）、路径 1 的 bootstrap wait（需真机证明「进页即可输入」）；
-   原 §4「P1 目标 26」**仍未达成**（当前 33 步，差 7 步，缺口全在未做项——D5/D7 买的是正确性，不是步数）。
+   **仍未完成**：D2 的 P2（真接管，要等 `CHAT-SYNC` §1/§5 的租约 + sha 校验）、路径 1 的 bootstrap wait（需真机证明「进页即可输入」）；
+   首页底部「快捷记录」（不跳编辑页那条）**已随 B4.5 / `mod-quick-record` 完成**（路径 1 5→3，见 `docs/UX-STEPS.md` §4.5）。
+   原 §4「P1 目标 26」**仍未达成**（当前 **31 步，差 5 步**；D5/D7 买的是正确性、不进合计，B4.5 的快捷记录
+   已把路径 1 从 5 降到 3、合计 33→31；缺口 = D2-P2（真接管，需租约 + sha 校验）+ 路径 2′（插图 / OCR 后台化）
+   + 路径 3/5 的 P2 项，全在未做项）。
 2. **真机验收（全部挂起，`hdc list targets` = `[Empty]`）**：手写板 5 项（penOnly 挡手指、笔迹面板二级菜单、工具条两行、撤销重做可点、折叠布局画布高度）、chat 内嵌 Web 的 `ERR_WS_UPGRADE(-173)`、UU 两个实测点（入口形态 / WS 透传）。**设备没连上不许报“已验证”。**
 3. **模型路由**：`dsh-opencode-go/hy4-flash-free` 的允许清单是**会话启动快照**，改配置后需**重启 DSH + 新会话**才生效；当前会话只能用继承的 `deepseek-v4.1-flash`。重启后再验 `list_subagent_models(provider: "dsh-opencode-go")`。
 4. **后续排队**：类型注册表（`docs/SYNC-SCOPES.md`：6 项声明，无合并策略即拒绝接入）→ Git 接入向导（`docs/CONFIG-UX.md`）→ 远程连接收敛（`auto` 优先级 + 一键自检 + 二维码）；F 测试套件卫生；G 吞错审计；H 契约静态测试；E APK 收尾。
@@ -585,6 +588,7 @@ B 批 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
 - **已提交（Lead 已提交并打标签）**：`mod-v2-contract`（draft-2）、`mod-v2-migration`（含评审修复，41 例）、`mod-insert-page-count`（真机已复验）三者均**未提交、已就绪待 Lead 提交**；按 `docs/MODULES.md` 每个模块各自一笔独立提交，不混批，提交哈希由 Lead 提交后回填 `docs/MODULES.md` §1/§5。
 - `mod-v2-read-timeline` 已写完（纯模型，未接线，42 例），待提交；下一模块是把它接进只读服务（`timelineStore`），之后再谈写切换
 - mod-settings-lean 已写完（设置主表单=仓库地址+令牌；平台/分支/访问方式控件移除；引擎与 store 未改），待提交
+- mod-quick-record 已写完（首页底部快捷记录，路径 1 5→3，合计 33→31，距 P1 目标 26 差 5 步），待提交；页头未动（indexHeader 未改）
 
 ### 派活模板要点（别漏）
 
