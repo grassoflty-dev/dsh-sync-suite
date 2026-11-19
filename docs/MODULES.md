@@ -40,6 +40,9 @@
 | `mod-state-summary` | 项目现状一页纸：今天做什么/默认开关、模块与哈希表、v2 默认行为、保证与不保证、未验证、下一步 | 已提交 | 2a475e0 | 提交前回滚 = 删除 `docs/STATE-OF-PROJECT.md`；提交后 `git revert <hash>`（纯文档，另需撤销本文件 §1/§5 与 `docs/ROADMAP.md` 交接节的三处登记） | 无代码依赖（只读既有模块文档）；引用 `mod-v2-*` 与 §1/§5 哈希 | `docs/STATE-OF-PROJECT.md`（6 节，一页） |
 | `mod-v2-contract-tests` | 契约缺口测试（假 IO 媒体预检、shipped dedupe、R<D/摘要/maxAttempts/未知 schema/4× 推送拒绝） | 已提交 | 58caeb2 | `git revert <hash>`（仅新增 1 个测试文件） | 独立；覆盖 mod-v2-export-import-v2 / mod-v2-hardening 的已记录 P2 | `tools/test/contractGaps.test.mjs`（520 行，25 例） |
 | `mod-push-detail` | 修复 `typedPushError` 丢细节：带细节的 `E_PUSH_REJECTED` 逐字保真进 message + lastError；裸码 / 非 E_ 传输错误仍折叠成通用中文文案 | 已交付，待提交 | ea7b603 | 提交前回滚 = 撤销 `model/syncCycle.ts`、`contractGaps.test.mjs`、`syncWiring.test.mjs` 三处改动；提交后 `git revert <hash>` | **独立叶子，无被依赖**；只改纯模型 + 测试，不进依赖回滚链 | `docs/REVIEW-contract-tests.md` §3（P2 缺陷）；`tools/test/contractGaps.test.mjs`（C12 修正 + C14/C15/C16，共 28 例） |
+| `mod-v2-media-gc` | v2 散图垃圾回收：**默认只读**列未引用 `timeline/<date>/media/*.jpg`（按 §5/§7 可见记录口径），`--delete` 需打印的 plan hash 确认，只删计划内文件 | 已写完，待提交 | （Lead 填） | 提交前回滚 = 删除 2 个新增文件并撤销本文 §1/§2/§5/§6 登记；提交后 `git revert <hash>` | 依赖 `mod-v2-contract`（§5 媒体 / §7 账本语义）、`mod-v2-media-migration`（产出散图）；独立叶子、无下游，不进回滚链 | `tools/media-gc-v2.mjs`（约 400 行，模块头注明「默认只读；--delete 需 plan hash 确认」）、测试 `apps/arkui-schedule/tools/test/mediaGcV2.test.mjs`（22 例） |
+| `mod-v2-doctor` | READ-ONLY 仓库体检 CLI：schema / 布局 / 每日 records / 账本 / 媒体 / v1 侧 / 冲突审计的 typed 诊断，零写入、零修复 | 已写完，待提交 | （Lead 填） | 提交前回滚 = 删除 `tools/doctor-v2.mjs` + `apps/arkui-schedule/tools/test/doctorV2.test.mjs` 两个新增文件并撤销本文 §1/§2/§5/§6 登记；提交后 `git revert <hash>` | 独立叶子，无代码依赖、无下游，不进回滚链；只读 v1/v2 仓库布局与 `docs/DATA-CONTRACT-v2.md` §2/§3/§4/§5/§6/§7/§9/§11 | `tools/doctor-v2.mjs`（自包含、仅 `node:` 内建）、测试 `apps/arkui-schedule/tools/test/doctorV2.test.mjs`（39 例；含 `I_LEDGER_RETAINED`/`W_LEDGER_ORPHAN`/`W_MEDIA_NOT_MIGRATED` 新码；每次运行前后整棵 repo 逐字节快照相等） |
+| `mod-export-v2-ledgers` | v2 bundle 增 `bundleVersion:2` + 三本按日账本（逐字节搬运 + 并集导入 + 旧 bundle note + 未来版本 typed 拒绝） | 已写完，待提交 | （Lead 填） | 提交前回滚 = 撤销 `model/exportImport.ts` / `services/exportService.ets` / `tools/test/exportImportV2.test.mjs` 三处增量 + `docs/EXPORT-IMPORT.md` §7 + 本文 §1/§2/§5/§6 登记；提交后 `git revert <hash>`（v1 导出导入与媒体预检不变，旧 bundle 仍可导入） | 依赖 `mod-export-import-v2`（在其 v2 bundle 上追加字段，不删既有内容）；独立叶子、无下游，不进回滚链 | `docs/EXPORT-IMPORT.md` §7（bundle/version 兼容规则 verbatim）；测试 `tools/test/exportImportV2.test.mjs` |
 
 `mod-v2-dual-read` 已被 `mod-v2-dual-write-off` 取代，见契约 §13。
 
@@ -59,6 +62,10 @@ mod-v2-contract
 
 `mod-push-detail` 是**独立叶子**（无被依赖、无下游），不在上面的回滚链里：只改 `model/syncCycle.ts` 的 `typedPushError` 及两个测试文件（`contractGaps.test.mjs` / `syncWiring.test.mjs`），回滚独立、不影响任何 v2 模块。
 
+`mod-v2-media-gc` 同为**独立叶子**：离线 CLI + 测试两个新增文件，不接线、不改 app / 插件 / 写路径；不进上面的回滚链，回滚只需删这两个文件（或 `git revert <hash>`）。
+
+`mod-v2-doctor` 也是**独立叶子**：纯只读离线 CLI + 测试两个新增文件，不接线、不改 app / 插件 / 任何写路径，也不创建临时文件；不进上面的回滚链，回滚只需删这两个文件（或 `git revert <hash>`）。它与 `mod-v2-media-gc` 互不依赖：前者只观察、后者可删除，二者可各自单独回滚。
+
 回滚必须从右往左（先回滚依赖方）；单独回滚 `mod-v2-read-service` 而保留 `mod-v2-dual-write-off` 会让已迁移仓库没有读取方（见 ROADMAP 的排序风险）。`mod-v2-sync-wiring` 是激活环节，**单独回滚它只让应用回到「v2 写入未激活」状态（安全，v1 数据未删）**；但若先回滚 `mod-v2-dual-write-off` 而保留 sync-wiring，接线会悬空（`runCycle`/激活闸失去分流基础），故二者必须按此顺序回滚。新增 `mod-export-import-v2` 位于依赖链最右端（依赖 sync-wiring）；**回滚顺序固定为：先回滚 `mod-export-import-v2`（导出/导入），再回滚 `mod-v2-sync-wiring`，最后回滚 `mod-v2-dual-write-off`**，不可颠倒——先回滚下游会让仍在线的导出/导入失去分流基础。
 
 ## 2 跨模块触碰登记
@@ -75,6 +82,8 @@ mod-v2-contract
 | `mod-settings-lean` | `pages/Settings.ets` + `components/settings/SyncSection.ets` | 设置主表单精简为「仓库地址 + 令牌」，需移除平台/分支/访问方式控件并改同步区组件，必须改设置页及其同步区组件本身 | 设置页是共享文件，与 D1-P2/D6 锚点同文件，必须串行；本次未改锚点与组顺序 |
 | `mod-quick-record` | `pages/Index.ets`（:48–49 / :60 / :75 imports、:137–138 `@State quickBusy`、:494–541 `defaultAuthorOrMe` + `submitQuickRecord`、:1220–1227 `@Builder QuickRecordRow()`、:1722 `CompactBody`、:1756 `WideBody`） | 首页底部快捷记录条要在列表区加一行 + 一个 builder + 一个 submit 方法，必须改首页本身；日期语义复用 `mod-d5-create-date` 的 `tsForDate` | 只加列表区一行 + 一个 builder + 一个 submit 方法；`PageLayout`/页头、`DateBlock`（D7）、`onPageShow` 保存标记消费（B3）**均未触碰**；与 `mod-d7-month-calendar`（`Index.DateBlock`）和 `mod-d5-create-date`（编辑页）串行 |
 | `mod-v2-media-migration` | 无共享文件（全部新增） | 迁移工具 `tools/migrate-media-v1-to-v2.mjs` 与测试 `apps/arkui-schedule/tools/test/v2MediaMigration.test.mjs` 均为新增文件，未触碰任何被其他模块共用的文件 | 无跨模块撞文件风险；回滚 = 提交后 `git revert <hash>`（未提交前删除这两个新增文件），v1 zip 不删不改，不影响其他模块 |
+| `mod-v2-media-gc` | 无共享文件（全部新增） | 工具 `tools/media-gc-v2.mjs` 与测试 `apps/arkui-schedule/tools/test/mediaGcV2.test.mjs` 均为新增，未改 app / 插件 / 任何既有 `.ets`、服务或写路径 | 无跨模块撞文件风险；回滚 = 提交后 `git revert <hash>`（未提交前删除这两个新增文件），默认只读、删除需显式 planHash 确认，不影响任何 v2 模块 |
+| `mod-v2-doctor` | 无共享文件（全部新增） | 工具 `tools/doctor-v2.mjs` 与测试 `apps/arkui-schedule/tools/test/doctorV2.test.mjs` 均为新增，未改 app / 插件 / 任何既有 `.ets`、服务或写路径；工具只用 `node:fs` 的 exists/stat/readdir/read 四类只读 API | 无跨模块撞文件风险；回滚 = 提交后 `git revert <hash>`（未提交前删除这两个新增文件），工具绝不写盘、不做修复、不建 tmp，不影响任何 v2 模块 |
 | `mod-v2-read-service` | `pages/Index.ets`（:62 import、:349–350 bootstrap `ensureReady`、:375–385 `reload` 的 useV2 分支） | v2 只读服务接线：首页引入 timelineStore、启动时 `ensureReady`、`reload` 增加 `useV2` 只读分支，必须改首页本身；未触碰 `DateBlock`(D7)、`onPageShow`/`reconcileSavedRow` 保存标记消费(B3)、quick-record 的 submit | 同文件还承载 `mod-d7-month-calendar` / `mod-b3-saved-row-relax` / `mod-quick-record` 的接线，撞文件必须串行、不可双人同时改；默认 `timeline.readMode='v1'` 使 v2 分支惰性，无 timeline/ → v1 原路，v2 路径不写、不碰 `openIndexStore` |
 | `mod-v2-write-service` | 无共享文件（全部新增，未接线） | 纯写入核心 `model/timelineWrite.ts`、flag-gated 服务 `services/timelineWriteStore.ets` 与测试 `tools/test/timelineWrite.test.mjs` 均为新增；未改任何既有 `.ets`/service/UI/写路径，不写 `AppStorage`、不写 `devices/**`；开关 `timelineStore.useV2()` 默认 `'v1'` 且无人翻转，零运行时影响 | 无跨模块撞文件风险；回滚 = 提交后 `git revert <hash>`（未提交前删除这三个新增文件），默认 v1、零运行时影响 |
 | `mod-v2-sync-protocol` | 无共享文件（全部新增，未接线） | 同步协议核心 `model/syncProtocol.ts`（纯逻辑）、flag-gated 服务 `services/syncProtocolStore.ets` 与测试 `tools/test/syncProtocol.test.mjs` 均为新增；未改任何既有 `.ets`/service/UI/写路径；outbox 落在 `<filesDir>/sync-outbox.json`（`git-repo/` 之外），未接线、零运行时影响 | 无跨模块撞文件风险；回滚 = 提交后 `git revert <hash>`（未提交前删除这三个新增文件），默认 v1、零运行时影响；不 force-push、不改写远端历史 |
@@ -83,6 +92,7 @@ mod-v2-contract
 | `mod-v2-sync-wiring` | `pages/Index.ets` / `pages/Settings.ets` / `components/settings/SyncSection.ets` | 三态同步状态行（已同步 / N 条待同步 / 只读）要显示在首页，显式激活开关与两库并存专用确认对话框要落在设置页及其同步区组件，必须改这三个文件本身 | 与 D1-P2/D6/settings-lean 同文件（Index/Settings/SyncSection），撞文件必须串行、不可双人同时改 |
 | `mod-v2-sync-wiring`（跨模块） | `services/GitSyncService.ets` + `resources/rawfile/git/git-bridge.js` | 真实同步周期需要一个 git runner 执行 fetch→union→commit→push：在 `GitSyncService` 增 `v2Git()`，并在共享 git 桥 `git-bridge.js` 增 `opV2Git`（isomorphic-git 1.25.3，`force:false`，`fastForwardOnly:true`） | git 桥属于多模块共享设施，回滚本模块前不得回滚桥；跨模块触碰，与其他用户串行 |
 | `mod-export-import-v2` | `pages/Settings.ets` / `components/settings/DataSection.ets` / `components/ExportImportPanel.ets` / `services/exportService.ets` / `model/exportImport.ts` | v2 导出/导入的 UI 走 Settings → DataSection → panel 的 flag-gated（`useV2()`）接线，导出/导入逻辑复用 `exportService` / `exportImport` 模型并追加 v2 helper，必须改这五个共享文件本身；section 无「尚未接入」文案、拒绝时显示 typed 错误行 | 这五个文件同时被 `mod-settings-lean`、D4（导出区间 chip）、D6（设置页组锚点）触碰，撞文件**必须串行、不可双人同时改**；v1 导出/导入行为与 `exportImport.test.mjs`（69 例）不变，两导出测试文件共 110 例 |
+| `mod-export-v2-ledgers` | `model/exportImport.ts` / `services/exportService.ets` / `tools/test/exportImportV2.test.mjs` | 在 v2 bundle 上追加 `bundleVersion` 与三本按日账本：manifest/校验/并集合并/拒绝类型全部落在纯模型，文件 IO 落在服务层，测试文件为本模块自带；三文件均已被 `mod-export-import-v2` 触碰，必须改同一文件 | 与 `mod-export-import-v2` 共写三文件，撞文件必须串行；只做 additive 追加，v1 导出/导入与已交付的媒体 sha256 预检字节不变，旧 bundle（缺字段/1）仍可导入 |
 
 ## 3 提交与标签约定
 
@@ -134,6 +144,9 @@ mod-v2-contract
 
 | 2026-11-20 | `mod-v2-contract-tests` | 已提交 | 全量 2771/2770/0/1；validate 8/8；tsc 0 | `docs/REVIEW-contract-tests.md`（P1 登记已补，P2 记录） | 契约缺口 25 例；发现 typedPushError 细节丢失（P2，未修） |
 | 2026-11-20 | `mod-push-detail` | 已提交 | 全量 **2774/2773/0/1**（+3，contractGaps **28/28**）；validate 8/8；tsc 0 | `docs/REVIEW-contract-tests.md` §3（P2 缺陷已修）；`syncWiring.test.mjs` 旧断言同步更新 | 闭合上一行记录的 P2：带细节的 `E_PUSH_REJECTED` 逐字保真进 message + lastError；C12 保真断言不再恒真 + C14/C15/C16；裸码 / 非 E_ 传输错误仍通用 |
+| 2026-11-20 | `mod-v2-media-gc` | 已写完，待提交 | 全量 **2796/2795/0/1**（+22 = `mediaGcV2.test.mjs` 22/22）；`validate-app` 8/8；`tsc` exit 0；`--repo <本仓>` 只读 no-op exit 0 | （评审后填） | 默认只读、零写入；planHash = sha256(排序路径列表以 `\n` 相连 + 尾换行) 前 12 位；`--delete` 缺/错 token 或空计划 → exit 2 + 零写入；只 unlink 计划内 `timeline/*/media/*.jpg`，逐条记日志，不碰 devices/、账本、记录；提交哈希（Lead 填） |
+| 2026-11-20 | `mod-v2-doctor` | 已写完，待提交 | 全量 **2848/2847/0/1**（+4 = 评审修复新增 4 例；`doctorV2.test.mjs` 39/39）；`validate-app` 8/8；`tsc` exit 0；`--repo <本仓>` 只读 v1 no-op exit 0 | （评审后填） | READ-ONLY 体检：schema / 布局 / records / 账本 / 媒体 / v1 侧 / 冲突审计的 typed code；评审修复后新增 `I_LEDGER_RETAINED`(info，已删清行后保留账本) / `W_LEDGER_ORPHAN`(warning，无佐证孤儿账本) / `W_MEDIA_NOT_MIGRATED`(warning，媒体迁移未运行)，三者均不计入 problems / 不 exit 2；`E_MEDIA_MISSING` 仅保留于 media/ 目录存在但文件缺失；`perDay[].conflicts` 按 conflicts.jsonl 行数计；四套临时仓库（v1-only / v2-only / mixed / corrupt），39 例每次运行前后整棵 repo 逐字节快照相等；只 `node:` 内建、无 tmp、无修复；提交哈希（Lead 填） |
+| 2026-11-20 | `mod-export-v2-ledgers` | 已写完，待提交 | 全量 / 导出两文件 / `validate-app` / `tsc` 结果见本模块批次汇报与 `docs/EXPORT-IMPORT.md` §7.2；v1 导出测试 84 例不动 | （评审后填） | v2 bundle 追加 `bundleVersion:2` + 三本按日账本逐字节搬运；旧 bundle 缺字段/1 不拒绝且返回 informational note；并集导入按 (id,ts)/(id,ts,dedupeKey) 去重、目标字节不截断；未来版本 `E_BUNDLE_VERSION` typed 拒绝；提交哈希（Lead 填） |
 
 ## 6. 追加批次（2026-11-20 之后，Lead 提交时登记）
 
@@ -149,3 +162,7 @@ mod-v2-contract
 > 追加登记：mod-v2-contract-tests = 8caeb2（仅测试，25 例）；mod-state-summary = a475e0（文档）；两批评审见 docs/REVIEW-contract-tests.md（A 判可以提交 P1 已修、B 判可以提交）。
 
 > 追加登记：mod-push-detail = ea7b603（推送被拒保留原始细节；评审 GO，P0 0 / P1 0 / P2 3）。
+
+| mod-v2-media-gc | 默认只读散图 GC：列未引用 `timeline/*/media/*.jpg` + planHash；`--delete` 需 planHash 确认，只删计划内文件并逐条记日志 | 已写完，待提交 | （Lead 填） | 提交前回滚 = 删除 `tools/media-gc-v2.mjs` + `apps/arkui-schedule/tools/test/mediaGcV2.test.mjs` 并撤销 §1/§2/§5 登记；提交后 `git revert <hash>`（独立叶子，无下游） |
+| mod-v2-doctor | READ-ONLY 仓库体检 CLI：typed code + 中文原因/下一步，v1/v2/mixed/corrupt 四套夹具，零写入 | 已写完，待提交 | （Lead 填） | 提交前回滚 = 删除 `tools/doctor-v2.mjs` + `apps/arkui-schedule/tools/test/doctorV2.test.mjs` 并撤销 §1/§2/§5 登记；提交后 `git revert <hash>`（独立叶子，无下游） |
+| mod-export-v2-ledgers | v2 bundle 加 `bundleVersion:2` 与三本按日账本（逐字节搬运 / 并集去重 / 旧 bundle note / 未来版本 typed 拒绝），旧 bundle 仍可导入 | 已写完，待提交 | （Lead 填） | 提交前回滚 = 撤销 `model/exportImport.ts` / `services/exportService.ets` / `tools/test/exportImportV2.test.mjs` 三处增量 + `docs/EXPORT-IMPORT.md` §7 + 本文 §1/§2/§5/§6 登记；提交后 `git revert <hash>`（独立叶子，无下游，不进 v2 回滚链） |

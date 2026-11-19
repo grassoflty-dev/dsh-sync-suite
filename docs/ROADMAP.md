@@ -600,6 +600,9 @@ B 批 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
 - mod-state-summary 一页现状文档已写完（`docs/STATE-OF-PROJECT.md`，6 节）：默认 v1 / v2 显式激活、交付模块与哈希、保证与不保证、未验证边界、若用户回来的下一步；纯文档、只读既有模块文档，提交哈希由 Lead 回填（`MODULES.md` §1/§5 登记为「（Lead 填）」）
 - mod-v2-contract-tests 已写完（契约缺口 25 例，假 IO 媒体预检 / shipped dedupe / 未测契约规则），待提交；评审 P1 登记已补；发现 typedPushError 丢细节（P2，记录不修）
 - mod-push-detail 已完成（修 `typedPushError`：带细节的 `E_PUSH_REJECTED` 逐字保真进 message + lastError，裸码 / 非 E_ 错误行为不变；C12 空断言已修 + C14/C15/C16，contractGaps 28/28），待提交；**当前为干净停止点**：在不具备 (a) 平板上配置好仓库、(b) chat 租约/sha 规格、(c) DSH 重启 之前，没有可推进的模块。
+- mod-v2-media-gc 已写完（`tools/media-gc-v2.mjs`：默认只读列未引用 `timeline/*/media/*.jpg` + planHash；`--delete` 需 planHash 确认，只删计划内文件、逐条记日志，token 缺失/错误/空计划 → exit 2 零写入；22 例，全量 2796/2795/0/1、validate 8/8、tsc 0），待提交；独立叶子不进回滚链，提交哈希待 Lead 回填 `docs/MODULES.md` §1/§5/§6。
+- mod-v2-doctor 已写完（`tools/doctor-v2.mjs`：READ-ONLY 仓库体检 CLI，schema/布局/每日 records/账本/媒体/v1 侧/冲突审计全部给 typed code + 中文原因 + 下一步；`--json`/`--quiet`，exit 0 健康 / 2 有问题 / 1 未预期；只 `node:` 内建、无 tmp、无修复；四套夹具 v1-only/v2-only/mixed/corrupt，39 例每次运行前后整棵 repo 逐字节快照相等；评审修复后 code 严重度：已删清行后保留账本 = `I_LEDGER_RETAINED`(info)、无佐证孤儿账本 = `W_LEDGER_ORPHAN`(warning)、媒体迁移未运行 = `W_MEDIA_NOT_MIGRATED`(warning)，三者均不计入 problems / 不 exit 2；`E_MEDIA_MISSING` 仅保留于 media/ 目录存在但文件缺失；`perDay[].conflicts` 现按 conflicts.jsonl 行数计；全量 2848/2847/0/1、validate 8/8、tsc 0、`--repo <本仓>` no-op exit 0），待提交；独立叶子不进回滚链，提交哈希待 Lead 回填 `docs/MODULES.md` §1/§5/§6。
+- mod-export-v2-ledgers 已写完（v2 bundle 追加 `bundleVersion:2` + 三本按日账本 deleted/restore/conflicts 逐字节搬运；旧 bundle 缺字段/1 不拒绝、返回 informational note，2 并集导入按 (id,ts)/(id,ts,dedupeKey) 去重且目标字节不截断，未来 `>2` typed `E_BUNDLE_VERSION`；规则 verbatim 在 `docs/EXPORT-IMPORT.md` §7.1 与 `model/exportImport.ts` 头注释），待提交；独立叶子不进 v2 回滚链，提交哈希待 Lead 回填 `docs/MODULES.md` §1/§5/§6；真机 / 第二设备端的行为仍 `unverified`。
 
 ### 派活模板要点（别漏）
 
