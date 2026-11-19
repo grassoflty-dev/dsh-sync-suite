@@ -115,6 +115,8 @@ v2 替换的是 v1 的**日程时间线域**：`devices/<deviceId>/schedules/*.j
 
 **P1-5 媒体迁移范围**：媒体解包**不属于 Stage B（本契约所属阶段）**。Stage B 只交付 records / summaries / 删除与撤销账本 / 冲突审计；真实 zip 解包与文件搬运归独立模块 **`mod-v2-media-migration`**（其自身模块条目、测试与回滚路径由该模块交付时登记，本文件不改 `docs/MODULES.md`）。在该模块落地前，`timeline/<date>/media/` 可能只有空目录；记录仍按本节写 `file:"<sha16>.jpg"`（即指向 `timeline/<date>/media/<sha16>.jpg`），**app 遇到目标文件缺失时必须显示类型化占位文案 `媒体待迁移`，绝不显示破图、不触发重复加载**。可测：给定一条 `media[].file` 存在但磁盘无对应文件 → 渲染结果为占位组件而非图片错误态。
 
+迁移实现见 `mod-v2-media-migration`（`tools/migrate-media-v1-to-v2.mjs`）：Node 内建 ZIP 读取（stored/deflate + CRC-32 校验），**不支持 ZIP64 与加密条目**（遇到即逐条报错、不落盘）；`archive` 字段决定媒体归属日期；`--apply` 前必须已有 `timeline/schema.json`。v1 `devices/**/attachments/*.zip` 在 v2 切换前保持原样、不删不改。
+
 ## 6. 未完成索引
 
 - v2 **没有独立的 `open.jsonl` 文件**：未完成会话的 `opened_at` / `closed_at` 直接写在记录里（§3）；`records.json` 顶层的 `open` 数组只是当日「未完成 id」的派生缓存。

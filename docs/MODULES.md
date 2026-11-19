@@ -28,9 +28,9 @@
 | `mod-v2-read-timeline` | v2 单时间线只读解析核心（纯模型，未接线） | 已提交 | 4377b19 | `git revert <hash>`（仅 2 个新文件，未接线，零运行时影响） | 依赖 `mod-v2-contract`；被下一模块（v2 读服务接线）依赖 | `apps/arkui-schedule/entry/src/main/ets/model/timeline.ts`（779 行）、测试 `timelineRead.test.mjs`（42 例）；模块规格写在该文件头注释 |
 | mod-settings-lean | 设置只留仓库地址 + 令牌（移除平台/分支/访问方式控件；引擎行为不变） | 已写完，待提交 | 4176654 | git revert <hash>（6 个文件，无 store/引擎改动） | 独立；remote-access 设置留给后续模块 | docs/REVIEW-settings-lean.mddocs/REVIEW-settings-lean.md（P0 0 / P1 1 / P2 3 已修复） |
 | `mod-insert-page-count` | 修复真机「插入页 2/3 而非 2/2」：新建记录手写板草稿键串号 | 已提交（真机已验证 PASS） | 96d4435 | `git revert <hash>`（仅 `RecordEditorView.ets` + 1 个测试） | 跨模块触碰 `RecordEditorView.ets`（见 §2） | `docs/VERIFICATION.md` §14 更新段；真机 `device-accept` **15 PASS / 0 FAIL / 6 SKIP（exit 3 = 仅未覆盖）**；回归测试 `apps/arkui-schedule/tools/test/handwritingToolbar.test.mjs` |
-| `mod-v2-media-migration` | v1 按天 zip → v2 `timeline/<date>/media/` 松散压缩图（尚未开始） | 待开始 | — | — | 依赖 `mod-v2-contract`、`mod-v2-migration` | 待建 |
 | `mod-v2-dual-write-off` | 停止写 v1、保留一个 release 的只读回退（由 `mod-v2-dual-read` 改名而来） | 待开始 | — | — | 依赖 `mod-v2-contract`、`mod-v2-migration` | `docs/DATA-CONTRACT-v2.md` §10/§13 |
 | mod-quick-record | 首页底部快捷记录（不跳编辑页，路径 1 5→3） | 已写完，待提交 | ff1560f | git revert <hash>（4 个新增文件：2 代码 + 2 测试；Index.ets 增量，页头未动） | 依赖 mod-d5-create-date（日期语义） | docs/UX-STEPS.md §4.5；测试 quickRecord.test.mjs（16）/ quickRecordUi.test.mjs（14） |
+| `mod-v2-media-migration` | v1 按天 zip → v2 `timeline/<date>/media/`（Node 内建 ZIP 读取，无新依赖） | 已写完，待提交 | （Lead 填） | `git revert <hash>`（2 个新文件；不碰 devices/、不删 v1） | 依赖 `mod-v2-contract`、`mod-v2-migration`（需先有 `timeline/schema.json`） | `tools/migrate-media-v1-to-v2.mjs`（765 行）、测试 `v2MediaMigration.test.mjs`（34 例） |
 
 `mod-v2-dual-read` 已被 `mod-v2-dual-write-off` 取代，见契约 §13。
 
@@ -51,6 +51,7 @@
 | `mod-v2-migration`（含评审修复） | 无共享文件（全部新增） | 迁移工具 `tools/migrate-v1-to-v2.mjs` 与测试 `apps/arkui-schedule/tools/test/v2Migration.test.mjs` 均为新增文件，评审修复也只改这两个文件，未触碰任何被其他模块共用的文件 | 无跨模块撞文件风险；回滚 = 提交后 `git revert <hash>`（未提交前删除这两个新增文件），不影响其他模块 |
 | `mod-settings-lean` | `pages/Settings.ets` + `components/settings/SyncSection.ets` | 设置主表单精简为「仓库地址 + 令牌」，需移除平台/分支/访问方式控件并改同步区组件，必须改设置页及其同步区组件本身 | 设置页是共享文件，与 D1-P2/D6 锚点同文件，必须串行；本次未改锚点与组顺序 |
 | `mod-quick-record` | `pages/Index.ets`（:48–49 / :60 / :75 imports、:137–138 `@State quickBusy`、:494–541 `defaultAuthorOrMe` + `submitQuickRecord`、:1220–1227 `@Builder QuickRecordRow()`、:1722 `CompactBody`、:1756 `WideBody`） | 首页底部快捷记录条要在列表区加一行 + 一个 builder + 一个 submit 方法，必须改首页本身；日期语义复用 `mod-d5-create-date` 的 `tsForDate` | 只加列表区一行 + 一个 builder + 一个 submit 方法；`PageLayout`/页头、`DateBlock`（D7）、`onPageShow` 保存标记消费（B3）**均未触碰**；与 `mod-d7-month-calendar`（`Index.DateBlock`）和 `mod-d5-create-date`（编辑页）串行 |
+| `mod-v2-media-migration` | 无共享文件（全部新增） | 迁移工具 `tools/migrate-media-v1-to-v2.mjs` 与测试 `apps/arkui-schedule/tools/test/v2MediaMigration.test.mjs` 均为新增文件，未触碰任何被其他模块共用的文件 | 无跨模块撞文件风险；回滚 = 提交后 `git revert <hash>`（未提交前删除这两个新增文件），v1 zip 不删不改，不影响其他模块 |
 
 ## 3 提交与标签约定
 
@@ -68,7 +69,7 @@
 2. **执行 revert**：一次只回滚一个模块；同一提交捆绑多个模块时，按登记的补救方案处理，不拿 `git revert <hash>` 一把梭。
 3. **跑门闸并记录原始输出**（工作目录 `dsh-sync-suite`）：
    - `node tools/overlay.mjs status` → 期望 `applied=false`；
-   - `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"` → 当前基线 **2425 例 / 2424 pass / 0 fail / 1 skip**（相对 2391 基线的 **+30 = `mod-quick-record` 的 `quickRecord.test.mjs` 16 + `quickRecordUi.test.mjs` 14**；`mod-settings-lean` 原地改测 4 个既有测试文件、用例数不变，delta 0，基线不动；相对 2348 基线：`mod-v2-read-timeline` **+42**；再往前相对 2306 基线：`mod-v2-migration` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` **+1**；`cec3c93` 之后；数字随模块加入而变动；回滚 D5 相关模块时，因删除的旧用例被恢复，数字会变化，须在批次记录里写明变化原因）；
+   - `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"` → 当前基线 **2459 例 / 2458 pass / 0 fail / 1 skip**（相对 2425 基线的 **+34 = `mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` 31**；相对 2391 基线的 **+30 = `mod-quick-record` 的 `quickRecord.test.mjs` 16 + `quickRecordUi.test.mjs` 14**；`mod-settings-lean` 原地改测 4 个既有测试文件、用例数不变，delta 0，基线不动；相对 2348 基线：`mod-v2-read-timeline` **+42**；再往前相对 2306 基线：`mod-v2-migration` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` **+1**；`cec3c93` 之后；数字随模块加入而变动；回滚 D5 相关模块时，因删除的旧用例被恢复，数字会变化，须在批次记录里写明变化原因）；
    - `node apps/arkui-schedule/tools/validate-app.mjs` → **8/8**；
    - `node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json` → **exit 0**。
 4. **判定「回滚干净」**：0 fail、skip 数未异常增加、8/8、tsc exit 0、`overlay applied=false` 五项同时成立；任何一项不满足即为未回滚干净，不许在 §1 把状态改回「已回滚」。
@@ -90,3 +91,4 @@
 | 2026-11-19 | mod-v2-read-timeline | 已完成，待提交 | 全量 2386/2385/0/1；validate 8/8；tsc 0 | docs/REVIEW-v2-read-timeline.md（P0 0 / P1 2 / P2 5 已修复） | 未接线，零运行时影响 |
 | 2026-11-19 | `mod-settings-lean` | 已完成，待提交 | 全量 2391/2390/0/1（+1）；validate 8/8；tsc 0 | docs/REVIEW-settings-lean.md（P0 0 / P1 1 / P2 3 已修复） | 主表单=仓库地址+令牌；平台/分支/访问方式控件移除 |
 | 2026-11-19 | mod-quick-record | 已完成，待提交 | 全量 2421/2420/0/1；validate 8/8；tsc 0 | （评审后填） | 路径 1 5→3；页头零改动 |
+| 2026-11-20 | mod-v2-media-migration | 已完成，待提交 | 全量 2456/2455/0/1；validate 8/8；tsc 0 | （评审后填） | 无新依赖；v1 zip 不删不改；ZIP64/加密拒绝 |

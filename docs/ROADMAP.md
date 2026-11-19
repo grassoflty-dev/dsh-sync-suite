@@ -512,7 +512,7 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 | `apps/arkui-schedule/entry/src/main/ets/model/recordDateMove.ts` | 新增（纯逻辑，130 行） | D5 的 `ts` 决策：`tsForDate()`（日期前缀 + `nowIso` 时钟/偏移，今天与 `nowIso` 逐字节相同）、`planDateMove()`（非法目标 → 新记录 → 原 ts 不可解析 → 同日 `nextTsSameDate` → 往后 live+墓碑 → 往早拒绝） |
 | `apps/arkui-schedule/entry/src/main/ets/components/RecordEditorView.ets` | 改（+158 −8） | D5：`@State formDate` / `showDatePicker` + 「日期」行 + 内嵌 `CalendarPicker`；`save()` 改用 `plan.ts`；往后改期时 live 先落盘、再用**编辑前快照**打旧日墓碑（`softDeleteRecord`），清理失败只改文案不回滚、不静默；单条 toast 收口 |
 | `apps/arkui-schedule/entry/src/main/ets/pages/Index.ets` | 改（+37 −6） | D7：`DateBlock` 的系统三列滚轮 `DatePicker` 换成 `CalendarPicker`（新增 `pickDate()`，五个动作与原 `onDateChange` 等价）；B3 P2-1 的 `reconcileSavedRow()` 注释同步 |
-| `apps/arkui-schedule/entry/src/main/ets/model/homeRefresh.ts` | 改（+31 −3） | B3 P2-1：`containsRecordVersion()` 判据放宽为「同 id 且 ts **不早于**标记 ts」（按时刻比较，任一侧不可解析退回精确字符串相等）；导出名/签名/调用点不变 |
+| `apps/arkui-schedule/entry/src/main/ets/model/homeRefresh.ts` | 改（+34 −3） | B3 P2-1：`containsRecordVersion()` 判据放宽为「同 id 且 ts **不早于**标记 ts」（按时刻比较，任一侧不可解析退回精确字符串相等）；导出名/签名/调用点不变 |
 | `apps/arkui-schedule/tools/test/b4DateMove.test.mjs` | 新增（19 例） | `tsForDate` 格式/字节等价/非法日期/闰日；`planDateMove` 六分支、墓碑严格夹在中间、23:59:59.999 钳位、确定性与不改入参 |
 | `apps/arkui-schedule/tools/test/b4DateUi.test.mjs` | 新增（25 例） | 编辑器接线静态断言：组件复用、日期行、保存顺序（`!plan.ok` 早退在写之前、live 先于墓碑）、失败路径不早退、单条 toast、marker/`onSaved` 无条件 |
 | `apps/arkui-schedule/tools/test/b4SavedRow.test.mjs` | 新增（14 例） | 放宽后的对账判据：同 ts / 更晚 ts / 更早 ts / 跨偏移按时刻 / 占位串退回精确相等 / 坏项不抛 |
@@ -551,7 +551,7 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 | 便捷性（B4 收窄，待提交） | 用户 2026-11-19 拍板「日期只在新建时选一次」：**B4 已提交的改期机制（跨日 live + 旧日清理、更早日期拒绝）全部删除**，新增纯逻辑 `model/recordSaveTs.ts`（`tsForDate` / `resolveSaveTs`），编辑器日期行对已有记录只读并显示「创建时选定，不可改」，仅新建时弹 `CalendarPicker`；已有记录保存只在原日期追加更晚版本 | 工作树未提交（见上「待提交清单（B4 收窄）」，6 路径 = 2 改 + 2 删 + 2 新增）；全量 **2306 例 / 2305 pass / 0 fail / 1 skip**（相对 2309 的 −3 是刻意删除测被移除功能的用例；新基线 `b4SaveTs` 20 + `b4DateUi` 21 + `b4CalendarWiring` 18 + `b4SavedRow` 14 = 73）；`validate-app` **8/8**；`tsc` exit 0；删除 diff 的独立只读评审 `docs/REVIEW-b4-narrow.md` |
 
 **当前基线**：全量 `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"`
-**2425 例 / 2424 pass / 0 fail / 1 skip**（相对 2391 基线的 **+30**：`mod-quick-record` 的
+**2459 例 / 2458 pass / 0 fail / 1 skip**（相对 2425 基线的 **+34**：`mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` **31**；相对 2391 基线的 **+30**：`mod-quick-record` 的
 `quickRecord.test.mjs` **16** + `quickRecordUi.test.mjs` **14**；相对 2348 基线的 **+42**：`mod-v2-read-timeline` 的
 `timelineRead.test.mjs` **+42**；再往前相对 2306 基线的 **+40**：`mod-v2-migration` 的
 `v2Migration.test.mjs` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` 的 `handwritingToolbar.test.mjs` **+1**；
@@ -589,6 +589,7 @@ B 批 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
 - `mod-v2-read-timeline` 已写完（纯模型，未接线，42 例），待提交；下一模块是把它接进只读服务（`timelineStore`），之后再谈写切换
 - mod-settings-lean 已写完（设置主表单=仓库地址+令牌；平台/分支/访问方式控件移除；引擎与 store 未改），待提交
 - mod-quick-record 已写完（首页底部快捷记录，路径 1 5→3，合计 33→31，距 P1 目标 26 差 5 步），待提交；页头未动（indexHeader 未改）
+- mod-v2-media-migration 已写完（v1 zip → timeline/<date>/media/；Node 内建 ZIP；v1 不删不改；需先跑记录迁移），待提交；下一模块 = v2 只读服务接线（model/timeline.ts → services/timelineStore.ets，默认 v1、开关控制）
 
 ### 派活模板要点（别漏）
 
