@@ -32,6 +32,7 @@
 | mod-quick-record | 首页底部快捷记录（不跳编辑页，路径 1 5→3） | 已写完，待提交 | ff1560f | git revert <hash>（4 个新增文件：2 代码 + 2 测试；Index.ets 增量，页头未动） | 依赖 mod-d5-create-date（日期语义） | docs/UX-STEPS.md §4.5；测试 quickRecord.test.mjs（16）/ quickRecordUi.test.mjs（14） |
 | `mod-v2-media-migration` | v1 按天 zip → v2 `timeline/<date>/media/`（Node 内建 ZIP 读取，无新依赖） | 已写完，待提交 | 2f32752 | `git revert <hash>`（2 个新文件；不碰 devices/、不删 v1） | 依赖 `mod-v2-contract`、`mod-v2-migration`（需先有 `timeline/schema.json`） | `tools/migrate-media-v1-to-v2.mjs`（765 行）、测试 `v2MediaMigration.test.mjs`（34 例） |
 | mod-v2-read-service | v2 单时间线只读服务（timelineStore），开关控制、默认 v1、不写 v2 | 已写完，已提交 | c6f2935 | git revert <hash>（2 新增 + Index.ets 14 行；默认 v1，无持久状态） | 依赖 mod-v2-read-timeline、mod-v2-contract；被 mod-v2-dual-write-off 依赖 | services/timelineStore.ets（278 行）、测试 timelineService.test.mjs（26 例） |
+| mod-v2-write-service | v2 写入核心（原子替换 records.json + 追加式账本；开关关闭即抛错，默认不启用） | 已写完，待提交 | （Lead 填） | git revert <hash>（3 个新文件；未接线，默认 v1） | 依赖 mod-v2-read-service、mod-v2-contract；被 mod-v2-dual-write-off 依赖 | model/timelineWrite.ts（302 行）、services/timelineWriteStore.ets（613 行）、测试 timelineWrite.test.mjs（639 行，51 例） |
 
 `mod-v2-dual-read` 已被 `mod-v2-dual-write-off` 取代，见契约 §13。
 
@@ -54,6 +55,7 @@
 | `mod-quick-record` | `pages/Index.ets`（:48–49 / :60 / :75 imports、:137–138 `@State quickBusy`、:494–541 `defaultAuthorOrMe` + `submitQuickRecord`、:1220–1227 `@Builder QuickRecordRow()`、:1722 `CompactBody`、:1756 `WideBody`） | 首页底部快捷记录条要在列表区加一行 + 一个 builder + 一个 submit 方法，必须改首页本身；日期语义复用 `mod-d5-create-date` 的 `tsForDate` | 只加列表区一行 + 一个 builder + 一个 submit 方法；`PageLayout`/页头、`DateBlock`（D7）、`onPageShow` 保存标记消费（B3）**均未触碰**；与 `mod-d7-month-calendar`（`Index.DateBlock`）和 `mod-d5-create-date`（编辑页）串行 |
 | `mod-v2-media-migration` | 无共享文件（全部新增） | 迁移工具 `tools/migrate-media-v1-to-v2.mjs` 与测试 `apps/arkui-schedule/tools/test/v2MediaMigration.test.mjs` 均为新增文件，未触碰任何被其他模块共用的文件 | 无跨模块撞文件风险；回滚 = 提交后 `git revert <hash>`（未提交前删除这两个新增文件），v1 zip 不删不改，不影响其他模块 |
 | `mod-v2-read-service` | `pages/Index.ets`（:62 import、:349–350 bootstrap `ensureReady`、:375–385 `reload` 的 useV2 分支） | v2 只读服务接线：首页引入 timelineStore、启动时 `ensureReady`、`reload` 增加 `useV2` 只读分支，必须改首页本身；未触碰 `DateBlock`(D7)、`onPageShow`/`reconcileSavedRow` 保存标记消费(B3)、quick-record 的 submit | 同文件还承载 `mod-d7-month-calendar` / `mod-b3-saved-row-relax` / `mod-quick-record` 的接线，撞文件必须串行、不可双人同时改；默认 `timeline.readMode='v1'` 使 v2 分支惰性，无 timeline/ → v1 原路，v2 路径不写、不碰 `openIndexStore` |
+| `mod-v2-write-service` | 无共享文件（全部新增，未接线） | 纯写入核心 `model/timelineWrite.ts`、flag-gated 服务 `services/timelineWriteStore.ets` 与测试 `tools/test/timelineWrite.test.mjs` 均为新增；未改任何既有 `.ets`/service/UI/写路径，不写 `AppStorage`、不写 `devices/**`；开关 `timelineStore.useV2()` 默认 `'v1'` 且无人翻转，零运行时影响 | 无跨模块撞文件风险；回滚 = 提交后 `git revert <hash>`（未提交前删除这三个新增文件），默认 v1、零运行时影响 |
 
 ## 3 提交与标签约定
 
@@ -71,7 +73,7 @@
 2. **执行 revert**：一次只回滚一个模块；同一提交捆绑多个模块时，按登记的补救方案处理，不拿 `git revert <hash>` 一把梭。
 3. **跑门闸并记录原始输出**（工作目录 `dsh-sync-suite`）：
    - `node tools/overlay.mjs status` → 期望 `applied=false`；
-   - `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"` → 当前基线 **2485 例 / 2484 pass / 0 fail / 1 skip**（相对 2459 基线的 **+23 = `mod-v2-read-service` 的 `timelineService.test.mjs` 23**；相对 2425 基线的 **+34 = `mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` 31**；相对 2391 基线的 **+30 = `mod-quick-record` 的 `quickRecord.test.mjs` 16 + `quickRecordUi.test.mjs` 14**；`mod-settings-lean` 原地改测 4 个既有测试文件、用例数不变，delta 0，基线不动；相对 2348 基线：`mod-v2-read-timeline` **+42**；再往前相对 2306 基线：`mod-v2-migration` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` **+1**；`cec3c93` 之后；数字随模块加入而变动；回滚 D5 相关模块时，因删除的旧用例被恢复，数字会变化，须在批次记录里写明变化原因）；
+   - `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"` → 当前基线 **2536 例 / 2535 pass / 0 fail / 1 skip**（相对 2485 基线的 **+51 = `mod-v2-write-service` 的 `timelineWrite.test.mjs` 32**；相对 2459 基线的 **+23 = `mod-v2-read-service` 的 `timelineService.test.mjs` 23**；相对 2425 基线的 **+34 = `mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` 31**；相对 2391 基线的 **+30 = `mod-quick-record` 的 `quickRecord.test.mjs` 16 + `quickRecordUi.test.mjs` 14**；`mod-settings-lean` 原地改测 4 个既有测试文件、用例数不变，delta 0，基线不动；相对 2348 基线：`mod-v2-read-timeline` **+42**；再往前相对 2306 基线：`mod-v2-migration` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` **+1**；`cec3c93` 之后；数字随模块加入而变动；回滚 D5 相关模块时，因删除的旧用例被恢复，数字会变化，须在批次记录里写明变化原因）；
    - `node apps/arkui-schedule/tools/validate-app.mjs` → **8/8**；
    - `node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json` → **exit 0**。
 4. **判定「回滚干净」**：0 fail、skip 数未异常增加、8/8、tsc exit 0、`overlay applied=false` 五项同时成立；任何一项不满足即为未回滚干净，不许在 §1 把状态改回「已回滚」。
@@ -95,3 +97,4 @@
 | 2026-11-19 | mod-quick-record | 已完成，待提交 | 全量 2421/2420/0/1；validate 8/8；tsc 0 | （评审后填） | 路径 1 5→3；页头零改动 |
 | 2026-11-20 | mod-v2-media-migration | 已完成，待提交 | 全量 2456/2455/0/1；validate 8/8；tsc 0 | （评审后填） | 无新依赖；v1 zip 不删不改；ZIP64/加密拒绝 |
 | 2026-11-20 | mod-v2-read-service | 已完成，已提交 | 全量 2482/2481/0/1；validate 8/8；tsc 0 | （评审后填） | 开关 timeline.readMode 默认 v1；无 timeline/ → v1 原路；v2 读不写 |
+| 2026-11-20 | mod-v2-write-service | 已完成，待提交 | 全量 2517/2516/0/1；validate 8/8；tsc 0 | （评审后填） | 关闭即抛错、无 IO；原子替换 + 追加账本；未接线；后续 `mod-v2-dual-write-off` 需路由的 v1 写调用点：`pages/Index.ets:544/822/918/950/1093`、`components/RecordEditorView.ets:663`、`components/RecordDetailView.ets:193`、`services/exportService.ets:456`、`services/summaryStore.ets`（RepoSummaryIO 写入）、`model/undoDelete.ts` `schedule()`、插件 `packages/dsh-dots` `bridge.ts` `ScheduleBridge.add` 及其余 `schedule_*` |

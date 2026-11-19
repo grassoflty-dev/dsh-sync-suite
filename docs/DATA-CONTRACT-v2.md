@@ -288,6 +288,8 @@ v2 替换的是 v1 的**日程时间线域**：`devices/<deviceId>/schedules/*.j
 
 **分支断言（P2-12）**：阶段 0 同时断言当前分支与 upstream 均为 `main`；插件 `bridge.ts:423` 仍从 settings 读 `settings.branch`，v2 一律忽略该值，不匹配报 `E_BRANCH_MISMATCH`，零写入。可测：settings.branch='dev' 且当前分支为 main → 仍按 main 执行、不报分支错；实际 checkout 到 dev → 报 `E_BRANCH_MISMATCH`。
 
+写入实现：`mod-v2-write-service`（`services/timelineWriteStore.ets`）在 `useV2()` 为假时**先抛错再 IO**；`records.json` 用同目录 `*.tmp-<pid>` + rename 原子替换，`deleted.jsonl`/`restore.jsonl` 只追加；本模块只做单机原子写，**跨设备并发/outbox/union 由后续 `mod-v2-sync-protocol` 负责**（§9）。`assertWritable()` 的完整门槛（schema + 分支 main + HEAD==origin/main）也留给该模块。
+
 ## 12. 与 v1 的差异清单
 
 | 项 | v1 | v2 | 影响面 |
