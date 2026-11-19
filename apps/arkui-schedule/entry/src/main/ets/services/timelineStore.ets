@@ -29,6 +29,7 @@ import {
 } from '../model/timeline';
 import type { TimelineDay, TimelineRecord, LedgerEntry } from '../model/timeline';
 import type { ScheduleRecord } from '../model/types';
+import { PERSISTENT_READ_MODE_KEY } from '../model/persistentSettings';
 
 const ROOT_DIR_NAME: string = 'git-repo';
 const SCHEMA_FILE_NAME: string = 'schema.json';
@@ -38,8 +39,12 @@ const SUMMARY_FILE_NAME: string = 'summary.json';
 /** 日期目录的**形状**：YYYY-MM-DD；真实日历合法性由 isCalendarDate() 往返校验（契约 §2 可测项）。 */
 const DATE_KEY_RE: RegExp = /^\d{4}-\d{2}-\d{2}$/;
 
-/** 读模式在 AppStorage 里的键；取值仅 'v1' | 'v2'，缺省视作 'v1'。 */
-export const TIMELINE_READ_MODE_KEY: string = 'timeline.readMode';
+/**
+ * 读模式在 AppStorage 里的键；取值仅 'v1' | 'v2'，缺省视作 'v1'。
+ * P1-5：键与缺省值由 model/persistentSettings.ts 统一定义，EntryAbility 启动时
+ * 用 PersistentStorage.persistProp 绑定；这里的 setOrCreate 写入即自动落盘。
+ */
+export const TIMELINE_READ_MODE_KEY: string = PERSISTENT_READ_MODE_KEY;
 
 /**
  * 一日三文件的解析结果（loadDay 的返回类型）。

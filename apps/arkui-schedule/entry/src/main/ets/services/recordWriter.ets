@@ -8,9 +8,13 @@
  *   - deleteRecord → scheduleDelete（§7 删除账本，不写墓碑版本）；
  *   - restoreRecord → restore（§7 撤销账本，ts 严格晚于删除）。
  *
- * **失败语义（绝不 fork 两 store）**：v2 分支一旦抛错，先按 `makeIntentId` 构造意图并
- * `outboxStore.enqueue` 停放，再抛 `E_V2_WRITE_PARKED: …` 类型化错误由调用点 toast 显示；
- * **绝不回落到 v1 写**（那会让 v1 / v2 两份数据分叉）。停放失败也照样抛类型化错误并如实说明。
+ * **失败语义（绝不 fork 两 store，P1-1）**：
+ * 1. 先用 `writeV2()` 把意图**停放落盘**（durable），再做 v2 写尝试；
+ * 2. 写成功 → 出队该意图（幂等）→ 触发同步；
+ * 3. 写失败 → 意图**留在 outbox**（并记 typed 原因）→ **仍触发一次同步**，
+ *    使停放意图的日期进入周期 days（服务层把 outbox.date 并入 days）→ 抛 `E_V2_WRITE_PARKED`。
+ * 这样「新日期首次写盘就失败」的意图不会永久滞留，§9「无静默本地未推提交」成立。
+ * 停放本身失败也照样抛类型化错误并如实说明；**绝不回落到 v1 写**（避免双存储分叉）。
  *
  * 硬约束：本文件不写 AppStorage、不写 `devices/**`、不迁移数据、不引入新依赖。
  */
@@ -22,9 +26,15 @@ import { makeIntentId } from '../model/syncProtocol';
 import { ledgerDeleteLine, ledgerRestoreLine } from '../model/timelineWrite';
 import type { OutboxEntry } from '../model/syncProtocol';
 import type { ScheduleRecord } from '../model/types';
+import { syncProtocolStore } from './syncProtocolStore';
+import type { CycleResult } from './syncProtocolStore';
+import { syncStatusStore } from './syncStatusStore';
 
 /** 本模块会停放的三种意图（outbox 的 purge 由同步协议自身产生，这里不生成）。 */
 type ParkOp = 'upsert' | 'delete' | 'restore';
+
+/** v2 写的一次尝试（由三个公开入口以闭包注入，便于统一顺序）。 */
+type V2Apply = () => void;
 
 /** 日期归属键 = ts 前 10 位；畸形 ts 得到空串，随后由写侧 E_TS_SHAPE 门禁拦下并停放。 */
 function dateOf(ts: string): string {
@@ -40,12 +50,9 @@ export class RecordWriter {
   /** 保存 / 勾选完成 / 编辑 / AI 更新：v2 upsert，否则 v1 追加。 */
   writeRecord(record: ScheduleRecord): void {
     if (this.useV2()) {
-      try {
+      this.writeV2('upsert', record, (): void => {
         timelineWriteStore.append(record, dateOf(record.ts));
-      } catch (error) {
-        // 停放 + 类型化抛出；此分支内没有任何 v1 写。
-        this.parkAndThrow('upsert', record, error);
-      }
+      });
       return;
     }
     // 翻转前的 v1 路径：保持调用点原语义，原样追加一条版本行。
@@ -55,11 +62,9 @@ export class RecordWriter {
   /** 删除：v2 写删除账本（记录行保留到确认清行），否则 v1 追加已构造好的墓碑版本。 */
   deleteRecord(record: ScheduleRecord): void {
     if (this.useV2()) {
-      try {
+      this.writeV2('delete', record, (): void => {
         timelineWriteStore.scheduleDelete(record.id, dateOf(record.ts), record.ts);
-      } catch (error) {
-        this.parkAndThrow('delete', record, error);
-      }
+      });
       return;
     }
     // 翻转前的 v1 路径：调用点已用 softDeleteRecord() 构造墓碑，原样追加。
@@ -69,15 +74,65 @@ export class RecordWriter {
   /** 撤销删除：v2 写撤销账本，否则 v1 追加已构造好的恢复版本。 */
   restoreRecord(record: ScheduleRecord): void {
     if (this.useV2()) {
-      try {
+      this.writeV2('restore', record, (): void => {
         timelineWriteStore.restore(record.id, dateOf(record.ts), record.ts);
-      } catch (error) {
-        this.parkAndThrow('restore', record, error);
-      }
+      });
       return;
     }
     // 翻转前的 v1 路径：调用点已用 restoreRecord() 构造恢复版本，原样追加。
     scheduleStore.appendRecord(record);
+  }
+
+  /**
+   * v2 写的统一编排（P1-1）：**先停放、后写、成败都触发一次周期**。
+   *
+   * 停放发生在写尝试之前，因此进程在写盘中/写盘后崩溃都仍有 outbox 真值；
+   * 写失败留停放并记 typed 原因；写成功出队。两条路径都 `triggerSync()`：
+   * 失败路径也触发是为了让新日期进入周期 days、把停放意图真正重放掉。
+   */
+  private writeV2(op: ParkOp, record: ScheduleRecord, apply: V2Apply): void {
+    const entry: OutboxEntry = this.buildIntent(op, record);
+    let parkNote: string = '已存入待同步队列';
+    try {
+      // durable first：意图在任何 v2 写句柄打开之前就已落盘（仓库之外）。
+      outboxStore.enqueue(entry);
+    } catch (parkError) {
+      parkNote = `待同步队列写入失败（${this.errorText(parkError)}），请检查本机存储`;
+    }
+    try {
+      apply();
+    } catch (error) {
+      const reason: string = this.errorText(error);
+      // 停放成功则把 typed 原因写回该意图（供三态行 / 重试入口显示），失败也不二次吞错。
+      try {
+        outboxStore.updateLastError(entry.intentId, `E_V2_WRITE_PARKED: ${reason}`);
+      } catch (parkError) {
+        void parkError; // enqueue 失败已由 parkNote 如实告知，此处不再叠加提示
+      }
+      // 关键：失败仍触发同步 —— 服务层把 outbox 的 date 并入 days，
+      // 这条「只有停放意图才存在的新日期」才会被周期取到并重放。
+      this.triggerSync();
+      throw new Error(`E_V2_WRITE_PARKED: v2 写入失败（${reason}），${parkNote}`);
+    }
+    // 写成功：出队停放意图（若 enqueue 失败则 remove 是 no-op），随后照常 fire-and-forget 同步。
+    outboxStore.remove(entry.intentId);
+    this.triggerSync();
+  }
+
+  /**
+   * 写成功后的 fire-and-forget 同步（F1 关闭）：typed 结果统一交给 syncStatusStore 驱动三态，
+   * 失败如实显示原因；没有 runner / 未启用时周期返回 null，只跳过不伪造「已同步」。
+   */
+  private triggerSync(): void {
+    syncProtocolStore.runConfiguredCycle()
+      .then((result: CycleResult | null): void => {
+        if (result !== null) {
+          syncStatusStore.fromCycle(result, new Date());
+        }
+      })
+      .catch((error: Error): void => {
+        syncStatusStore.setPending(0, this.errorText(error));
+      });
   }
 
   // ------------------------------------------------------------------ 失败停放
@@ -94,13 +149,12 @@ export class RecordWriter {
   }
 
   /**
-   * 先停放、后抛出：never 返回，调用点不会继续走任何"成功"分支，也不会回落到 v1。
-   * enqueuedAt 直接用入队时固定的 ts（与契约 §9「payload 入队不可变、重放不重新生成」一致）。
+   * 纯构造：intentId / date / ts 全部在入队时固定（契约 §9「payload 入队不可变、
+   * 重放不重新生成」），lastError 初始为空，写失败再由 updateLastError 回填。
    */
-  private parkAndThrow(op: ParkOp, record: ScheduleRecord, error: object): never {
-    const reason: string = this.errorText(error);
+  private buildIntent(op: ParkOp, record: ScheduleRecord): OutboxEntry {
     const date: string = dateOf(record.ts);
-    const entry: OutboxEntry = {
+    return {
       intentId: makeIntentId(date, record.id, record.ts, op),
       op: op,
       date: date,
@@ -110,16 +164,8 @@ export class RecordWriter {
       enqueuedAt: record.ts,
       attempts: 0,
       state: 'pending',
-      lastError: reason
+      lastError: ''
     };
-    let parkNote: string = '已存入待同步队列';
-    try {
-      outboxStore.enqueue(entry);
-    } catch (parkError) {
-      // 停放本身失败也绝不静默、绝不 v1 回落；如实告知用户停放未成功。
-      parkNote = `待同步队列写入失败（${this.errorText(parkError)}），请检查本机存储`;
-    }
-    throw new Error(`E_V2_WRITE_PARKED: v2 写入失败（${reason}），${parkNote}`);
   }
 
   private errorText(error: object): string {

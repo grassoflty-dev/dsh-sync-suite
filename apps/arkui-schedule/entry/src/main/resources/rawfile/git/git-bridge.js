@@ -77,6 +77,7 @@
     'log',
     'currentBranch',
     'resolveRef',
+    'v2Git',
     'zipUpsert',
     'zipList',
     'zipRead'
@@ -1988,6 +1989,163 @@
     return { ref: ref, oid: oid === undefined || oid === null ? null : String(oid) };
   }
 
+  // ---------------------------------------------------------------- v2 同步周期（mod-v2-sync-wiring）
+  //
+  // 单一薄桥：把 ArkTS 侧 GitPort 的八个能力收进一个 op，避免为每一步各开一个桥方法。
+  // 硬约束（与契约 §9 一致）：分支恒为 main；force 恒为 false；只有一个 resetHard，
+  // 且它只把本地分支指回 origin/main（远端文件一个都不删、历史不改写）。
+  // args.op ∈ fetch | resolveRef | currentBranch | readBlob | mergeBase |
+  //           fastForward | addCommit | push | resetHard
+
+  /** 把一个 oid/ref 解析成 sha；已经是 40 位十六进制时直接返回。 */
+  async function v2OidOf(git, ref) {
+    if (/^[0-9a-f]{40}$/.test(ref)) {
+      return ref;
+    }
+    var oid = await git.resolveRef({ fs: session.fs, dir: session.repoRoot, ref: ref });
+    return oid === undefined || oid === null ? '' : String(oid);
+  }
+
+  async function opV2Git(args) {
+    var config = applyConfig(args);
+    var root = ensureRepo();
+    var git = gitApi();
+    var op = String(args.op || '');
+    var out = { ok: true, value: '', oid: '' };
+
+    if (op === 'fetch') {
+      if (!repoInitialized()) {
+        throw bridgeError('E_GIT', '本机仓库尚未初始化：请先拉取克隆仓库');
+      }
+      await ensureRemote(git, config);
+      await git.fetch({
+        fs: session.fs, http: session.http, dir: root,
+        remote: 'origin', ref: 'main', singleBranch: true, onAuth: makeOnAuth(config)
+      });
+      return out;
+    }
+    if (op === 'resolveRef') {
+      out.oid = await v2OidOf(git, String(args.ref || 'HEAD'));
+      return out;
+    }
+    if (op === 'currentBranch') {
+      out.value = await currentBranchOf(git);
+      return out;
+    }
+    if (op === 'listDays') {
+      // 远端有 records.json 的合法日目录（与 syncProtocolStore.remoteDates 同口径）。
+      var files = await git.listFiles({ fs: session.fs, dir: root, ref: 'origin/main' });
+      var days = [];
+      for (var d = 0; d < files.length; d++) {
+        var m = /^timeline\/(\d{4}-\d{2}-\d{2})\/records\.json$/.exec(files[d]);
+        if (m) { days.push(m[1]); }
+      }
+      days.sort();
+      out.value = JSON.stringify(days);
+      return out;
+    }
+    if (op === 'readBlob') {
+      var oid = await v2OidOf(git, String(args.ref || 'origin/main'));
+      if (oid.length === 0) {
+        return out;
+      }
+      try {
+        var blob = await git.readBlob({
+          fs: session.fs, dir: root, oid: oid, filepath: String(args.path || '')
+        });
+        out.value = new TextDecoder('utf-8').decode(blob.blob);
+      } catch (error) {
+        // 远端缺该文件 = 空文本（与 syncProtocolStore.remoteText 的口径一致）
+        out.value = '';
+      }
+      return out;
+    }
+    if (op === 'mergeBase') {
+      var a = await v2OidOf(git, String(args.a || ''));
+      var b = await v2OidOf(git, String(args.b || ''));
+      if (a.length === 0 || b.length === 0) {
+        return out;
+      }
+      if (a === b) {
+        out.oid = a;
+        return out;
+      }
+      if (typeof git.findMergeBase === 'function') {
+        try {
+          var bases = await git.findMergeBase({
+            fs: session.fs, dir: root, oids: [a, b]
+          });
+          if (bases && bases.length > 0) {
+            out.oid = String(bases[0]);
+          }
+        } catch (error) {
+          // 无共同祖先 → 空 oid，ArkTS 侧判为分叉（fail-closed）
+        }
+      }
+      return out;
+    }
+    if (op === 'fastForward') {
+      var target = await v2OidOf(git, 'refs/remotes/origin/main');
+      if (target.length === 0) {
+        throw bridgeError('E_GIT', '缺少 origin/main，无法快进');
+      }
+      await git.merge({
+        fs: session.fs, dir: root, oid: target,
+        fastForwardOnly: true, author: authorOf(config)
+      });
+      return out;
+    }
+    if (op === 'addCommit') {
+      var paths = [];
+      try { paths = JSON.parse(String(args.paths || '[]')); } catch (error) { paths = []; }
+      // 只接受 timeline/** 路径：任何 devices/** 或仓库外路径都被拒（契约：devices/ 零写入）。
+      for (var i = 0; i < paths.length; i++) {
+        if (typeof paths[i] !== 'string' || paths[i].indexOf('timeline/') !== 0 ||
+            paths[i].indexOf('..') >= 0) {
+          throw bridgeError('E_GIT', 'v2 提交路径越界：' + String(paths[i]));
+        }
+        await git.add({ fs: session.fs, dir: root, filepath: paths[i] });
+      }
+      try {
+        out.oid = String(await git.commit({
+          fs: session.fs, dir: root,
+          message: String(args.message || '[v2] sync'), author: authorOf(config)
+        }));
+      } catch (error) {
+        // 没有改动可提交是合法 no-op（commit 路径为空时 ArkTS 侧本就不调用本 op）
+        if (!isNothingToCommit(error)) {
+          throw error;
+        }
+      }
+      return out;
+    }
+    if (op === 'push') {
+      await ensureRemote(git, config);
+      var pushResult = await git.push({
+        fs: session.fs, http: session.http, dir: root,
+        remote: 'origin', ref: 'main', force: false, onAuth: makeOnAuth(config)
+      });
+      out.ok = !(pushResult && pushResult.ok === false);
+      return out;
+    }
+    if (op === 'resetHard') {
+      // 本地分支指回 origin/main 并刷新工作副本；不删任何远端文件、不改写远端历史。
+      var originSha = await v2OidOf(git, 'refs/remotes/origin/main');
+      if (originSha.length === 0) {
+        throw bridgeError('E_GIT', '缺少 origin/main，无法 reset');
+      }
+      var branch = await currentBranchOf(git);
+      await git.writeRef({
+        fs: session.fs, dir: root,
+        ref: 'refs/heads/' + (branch || 'main'), value: originSha, force: true
+      });
+      await git.checkout({ fs: session.fs, dir: root, ref: 'HEAD', force: true });
+      out.oid = originSha;
+      return out;
+    }
+    throw bridgeError('E_GIT', 'v2Git 不支持的操作：' + op);
+  }
+
   // ---------------------------------------------------------------- zip（按天附件包）
   //
   // 附件打包走 WebView 里的 JSZip：`@ohos.zlib` 是 OHOS 专有 API，**Android 侧没有**，
@@ -2170,6 +2328,7 @@
     log: opLog,
     currentBranch: opCurrentBranch,
     resolveRef: opResolveRef,
+    v2Git: opV2Git,
     zipUpsert: opZipUpsert,
     zipList: opZipList,
     zipRead: opZipRead

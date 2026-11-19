@@ -247,21 +247,32 @@ test('13 recordWriter 的三个 v2 分支零 scheduleStore.appendRecord（无静
   assert.match(code, /useV2\(\): boolean \{\s*return timelineStore\.useV2\(\);/);
 });
 
-test('14 失败路径：先 makeIntentId + outboxStore.enqueue 停放，再抛 E_V2_WRITE_PARKED（中文原因 + 已存入待同步队列）', () => {
+test('14 失败路径：意图先落盘再写（writeV2），失败留停放 + typed 抛出，成功出队（P1-1）', () => {
   const code = stripComments(readSrc(WRITER_SVC));
-  const { body } = methodBody(code, 'parkAndThrow');
-  const intentAt = body.indexOf('makeIntentId(');
-  const enqueueAt = body.indexOf('outboxStore.enqueue(');
-  const throwAt = body.indexOf('E_V2_WRITE_PARKED');
-  assert.ok(intentAt > 0 && enqueueAt > intentAt && throwAt > enqueueAt,
-    '顺序必须是 构造意图 → 停放 → 抛出');
+  // 锚定声明：方法体里传了闭包，methodBody() 会先命中调用点的回调花括号。
+  const declaration = /private writeV2\([^)]*\): void \{/.exec(code);
+  assert.ok(declaration, 'writeV2 声明未找到');
+  const open = code.indexOf('{', declaration.index + declaration[0].length - 1);
+  const [start, end] = matchBrace(code, open);
+  const body = code.slice(start, end);
+  const buildAt = body.indexOf('this.buildIntent(');
+  const enqueueAt = body.indexOf('outboxStore.enqueue(entry)');
+  const applyAt = body.indexOf('apply();');
+  const updateAt = body.indexOf('outboxStore.updateLastError(');
+  const syncAt = body.indexOf('this.triggerSync()');
+  const removeAt = body.indexOf('outboxStore.remove(entry.intentId)');
+  assert.ok(buildAt > 0 && enqueueAt > buildAt && applyAt > enqueueAt,
+    '顺序必须是 构造意图 → 停放落盘 → v2 写尝试（durable before write）');
+  assert.ok(updateAt > applyAt && syncAt > updateAt,
+    '失败路径：记 typed 原因 → 仍触发同步（让新日期进周期 days）');
+  assert.ok(removeAt > 0, '成功路径出队停放意图');
   assert.match(body, /E_V2_WRITE_PARKED: v2 写入失败（\$\{reason\}）/);
   assert.match(body, /已存入待同步队列/);
-  assert.doesNotMatch(body, /scheduleStore|appendRecord|timelineWriteStore/, '停放函数内无任何写回落');
-  // 三个 v2 catch 都调用 parkAndThrow，无吞错分支。
+  assert.doesNotMatch(body, /scheduleStore\.appendRecord/, 'v2 路径无任何写回落');
+  // 三个 v2 入口都经 writeV2 统一编排。
   for (const name of ['writeRecord', 'deleteRecord', 'restoreRecord']) {
     const m = methodBody(code, name).body;
-    assert.match(m, /catch \(error\) \{\s*this\.parkAndThrow\(/, `${name} 的 catch 必须停放并抛出`);
+    assert.match(m, /this\.writeV2\(/, `${name} 必须经 writeV2`);
   }
 });
 
@@ -314,7 +325,10 @@ test('17b 第二道闸：未激活（默认）时即使 schema=v2 也不翻转�
   const setAt = apply.indexOf("setReadMode('v2')");
   assert.ok(gateAt > 0 && setAt > gateAt, '激活闸必须在 setReadMode 之前');
   assert.match(apply, /E_V2_WRITE_NOT_ACTIVATED/);
-  assert.match(code, /V2_WRITE_ENABLED_KEY: string = 'timeline\.v2WriteEnabled'/);
+  // P1-5：字面量收敛到 model/persistentSettings.ts（单一真值），服务从它 import。
+  assert.match(code, /V2_WRITE_ENABLED_KEY: string = PERSISTENT_V2_WRITE_KEY/);
+  assert.match(stripComments(readSrc('model/persistentSettings.ts')),
+    /PERSISTENT_V2_WRITE_KEY: string = 'timeline\.v2WriteEnabled'/);
   assert.match(code, /AppStorage\.get<boolean>\(V2_WRITE_ENABLED_KEY\) === true/);
   // 默认缺失 = 未激活：没有任何地方写入该键（只能由显式激活流程写）。
   assert.equal((code.match(/setOrCreate[^\n]*V2_WRITE_ENABLED_KEY/g) || []).length, 0,

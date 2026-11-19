@@ -19,6 +19,7 @@ import { timelineWriteStore } from './timelineWriteStore';
 import { outboxStore } from './outboxStore';
 import { decideMode } from '../model/timelineMode';
 import type { ModeDecision } from '../model/timelineMode';
+import { PERSISTENT_V2_WRITE_KEY } from '../model/persistentSettings';
 
 const ROOT_DIR_NAME: string = 'git-repo';
 const SCHEMA_FILE_NAME: string = 'schema.json';
@@ -28,7 +29,11 @@ const SCHEMA_FILE_NAME: string = 'schema.json';
  * 即使仓库已是 v2 结构也不许翻转，否则记录只会落在本地 timeline/ 而永远不会 commit/push，
  * 违反契约 §9「不得静默本地未提交」。默认缺失 = 未激活。
  */
-export const V2_WRITE_ENABLED_KEY: string = 'timeline.v2WriteEnabled';
+/**
+ * 第二道闸键；键与缺省值由 model/persistentSettings.ts 统一定义，EntryAbility 启动时
+ * 用 PersistentStorage.persistProp 绑定（P1-5：重启后仍是用户的显式选择）。
+ */
+export const V2_WRITE_ENABLED_KEY: string = PERSISTENT_V2_WRITE_KEY;
 
 export interface ModeApplyResult {
   mode: 'v1' | 'v2';

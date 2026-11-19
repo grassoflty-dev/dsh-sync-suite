@@ -349,6 +349,18 @@ export function markAttempt(entry: OutboxEntry, error: string): OutboxEntry {
   };
 }
 
+/**
+ * P1-2「重试」的唯一复位语义：attempts=0 / state=pending / 清 typed 原因，
+ * payload（line / date / id / ts / enqueuedAt / intentId）**完全不变**。
+ * 纯函数，便于 Node 断言「failed → retry → 可再次重放」。
+ */
+export function resetForRetry(entry: OutboxEntry): OutboxEntry {
+  return {
+    intentId: entry.intentId, op: entry.op, date: entry.date, id: entry.id, ts: entry.ts,
+    line: entry.line, enqueuedAt: entry.enqueuedAt, attempts: 0, state: 'pending', lastError: ''
+  };
+}
+
 /** 可重放入队：pending / syncing 且 attempts < MAX，严格 FIFO（保持入参顺序）。 */
 export function replayable(entries: OutboxEntry[]): OutboxEntry[] {
   const out: OutboxEntry[] = [];
@@ -864,7 +876,9 @@ export function outboxAfterReplay(
   appliedIds: string[],
   failedIds: string[],
   droppedIds: string[],
-  now: Date
+  now: Date,
+  /** failed 终态的 typed 原因；缺省为通用拒推文案（cheap extra：保留原始 push 错误）。 */
+  reason: string = SYNC_RETRY_ERROR
 ): OutboxEntry[] {
   const applied = new Set<string>(appliedIds);
   const failed = new Set<string>(failedIds);
@@ -880,7 +894,7 @@ export function outboxAfterReplay(
       enqueuedAt: entry.enqueuedAt.length > 0 ? entry.enqueuedAt : now.toISOString(),
       attempts: entry.attempts, state: entry.state, lastError: entry.lastError
     };
-    out.push(failed.has(entry.intentId) ? markAttempt(normalized, SYNC_RETRY_ERROR) : normalized);
+    out.push(failed.has(entry.intentId) ? markAttempt(normalized, reason) : normalized);
   }
   return out;
 }

@@ -25,6 +25,8 @@ const SERVICE = readFileSync(join(APP, 'entry', 'src', 'main', 'ets', 'services'
 const INDEX = readFileSync(join(APP, 'entry', 'src', 'main', 'ets', 'pages', 'Index.ets'), 'utf8');
 const SERVICE_CODE = stripComments(SERVICE);
 const INDEX_CODE = stripComments(INDEX);
+const PERSISTENT_CODE = stripComments(readFileSync(
+  join(APP, 'entry', 'src', 'main', 'ets', 'model', 'persistentSettings.ts'), 'utf8'));
 
 /** 取「有返回类型 + 花括号」的方法声明体（避开 this.reload() 之类的调用点）。 */
 function methodBody(code, name) {
@@ -115,7 +117,9 @@ test('setReadMode() 只接受 v1/v2，非法值直接忽略', () => {
 });
 
 test('读模式键名与 useV2() 组合条件逐字符匹配契约', () => {
-  assert.match(SERVICE_CODE, /TIMELINE_READ_MODE_KEY:\s*string\s*=\s*'timeline\.readMode'/);
+  // P1-5：键字面量收敛到 model/persistentSettings.ts 单一真值；服务从它 import。
+  assert.match(PERSISTENT_CODE, /PERSISTENT_READ_MODE_KEY: string = 'timeline\.readMode'/);
+  assert.match(SERVICE_CODE, /TIMELINE_READ_MODE_KEY:\s*string\s*=\s*PERSISTENT_READ_MODE_KEY/);
   const body = methodBody(SERVICE_CODE, 'useV2');
   assert.match(body, /return this\.isV2\(\) && this\.readMode\(\) === 'v2'/);
 });

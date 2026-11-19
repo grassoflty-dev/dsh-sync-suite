@@ -62,6 +62,11 @@ import { openIndexStore } from '../services/openIndexStore';
 import { timelineStore } from '../services/timelineStore';
 import { recordWriter } from '../services/recordWriter';
 import { timelineModeSwitch } from '../services/timelineModeSwitch';
+import { syncProtocolStore } from '../services/syncProtocolStore';
+import { bridgeGitRunner } from '../services/gitRunner';
+import { syncStatusStore } from '../services/syncStatusStore';
+import type { SyncStatusView } from '../services/syncStatusStore';
+import { outboxStore } from '../services/outboxStore';
 import { summaryStore } from '../services/summaryStore';
 import { settingsStore } from '../services/settingsStore';
 import { deviceTimeZone, summarize } from '../services/deepseek';
@@ -134,6 +139,8 @@ struct Index {
   /** 列表数据（每次操作后重读存储，保证跨设备/追加语义一致）。 */
   @State records: ScheduleRecord[] = [];
   @State statusText: string = '';
+  /** v2 同步三态（已同步·时间 / N 条待同步·最近失败 / 只读·原因），来自 syncStatusStore。 */
+  @State syncStatus: SyncStatusView = syncStatusStore.snapshot();
   /** 下拉刷新中的转圈状态（`Refresh` 组件用 `$$` 双向绑定）。 */
   @State refreshing: boolean = false;
   @State ready: boolean = false;
@@ -268,10 +275,37 @@ struct Index {
     }
   }
 
+  /**
+   * P1-2 用户「重试同步」：把 failed 意图原子复位（attempts=0, state=pending）后，
+   * 用真实 ctx 跑一次周期（runConfiguredCycle(ctx) → runCycle(ctx) → wired 周期），
+   * 结果交三态行显示。pending 但未 failed 的意图无需复位（预算未耗尽）。
+   */
+  private async retrySync(): Promise<void> {
+    try {
+      for (const entry of outboxStore.list()) {
+        if (entry.state === 'failed') {
+          outboxStore.retry(entry.intentId);
+        }
+      }
+      const ctx = syncProtocolStore.wiredContext(getContext(this) as common.UIAbilityContext);
+      const result = await syncProtocolStore.runConfiguredCycle(ctx);
+      if (result !== null) {
+        this.syncStatus = syncStatusStore.fromCycle(result, new Date());
+      } else {
+        this.syncStatus = syncStatusStore.snapshot();
+      }
+    } catch (error) {
+      this.syncStatus = syncStatusStore.setPending(
+        0, error instanceof Error ? error.message : String(error));
+    }
+  }
+
   /** 从编辑页/设置页返回时重新加载（追加写语义下必须重读）。 */
   onPageShow(): void {
     // 「含其他设备」开关归设置页管，回来时同步一次
     this.syncHomeFilter();
+    // 从设置页开关 v2 回来后刷新三态行（状态来自 syncStatusStore）
+    this.syncStatus = syncStatusStore.snapshot();
     if (this.ready) {
       const saved: SavedMarker | null = this.consumeSavedMarker();
       if (saved !== null) {
@@ -361,6 +395,25 @@ struct Index {
           promptAction.showToast({ message: modeResult.reason, duration: toastMsFor(true) });
         }
       }
+      // mod-v2-sync-wiring：绑定真实 GitRunner（isomorphic-git 桥），并让周期服务记住 filesDir。
+      // 未激活 v2 时周期保持惰性；激活后 recordWriter 写成功即触发同步。
+      syncProtocolStore.setRunner(bridgeGitRunner);
+      await syncProtocolStore.ensureReadyForBootstrap(getContext(this) as common.UIAbilityContext);
+      await outboxStore.ensureReady(getContext(this) as common.UIAbilityContext);
+      this.syncStatus = syncStatusStore.snapshot();
+      if (!timelineStore.useV2()) {
+        syncStatusStore.setReadOnly('v2 写入未启用，当前使用 v1 日程路径（在设置页显式开启）');
+        this.syncStatus = syncStatusStore.snapshot();
+      } else {
+        // P1-2/P2-5：带残留 outbox 启动时也要显示「N 条待同步」并暴露「重试同步」入口。
+        const parked = outboxStore.list();
+        if (parked.length > 0) {
+          const failed: number = parked.filter((e): boolean => e.state === 'failed').length;
+          syncStatusStore.setPending(
+            parked.length, failed > 0 ? '上次同步失败，点重试继续' : '等待重试');
+          this.syncStatus = syncStatusStore.snapshot();
+        }
+      }
       // 启动自愈：「全部未完成」读索引，这里先把索引与最近 30 天分片对齐（无漂移则不写盘）
       // v2 模式下启动不得写 v1 索引：reconcile 会重写 devices/<id>/open.jsonl，仅 v1 默认路径执行
       if (!timelineStore.useV2()) { openIndexStore.reconcile(); }
@@ -393,7 +446,7 @@ struct Index {
           : timelineStore.readDay(this.selectedDate); // 已用 visibleRecords 过滤删除账本
         this.statusText = this.records.length === 0
           ? (this.showAllPending ? '所有日程都已完成' : '这一天还没有日程')
-          : `共 ${this.records.length} 条${this.showAllPending ? '未完成' : ''}（v2 时间线，只读）`;
+          : `共 ${this.records.length} 条${this.showAllPending ? '未完成' : ''}（v2 时间线，自动同步）`;
       } else if (this.showAllPending) {
         // 数据源：每台设备读自己的 open.jsonl（N 台设备 = N 个小文件）；某台设备缺索引时
         // 在内存里用它的分片重建，绝不写别人的设备目录（契约：每台设备只写自己的目录）。
@@ -1615,6 +1668,47 @@ struct Index {
     .alignItems(VerticalAlign.Center)
   }
 
+  /**
+   * v2 同步三态行（mod-v2-sync-wiring）：已同步·时间 / N 条待同步·最近失败 / 只读·原因。
+   * 数据只来自 syncStatusStore.snapshot()（last result + outbox count + 激活/门禁原因）。
+   */
+  @Builder
+  SyncStatusRow() {
+    Row({ space: SPACING.xs }) {
+      Text(this.syncStatus.label)
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor(this.syncStatus.state === 'synced'
+          ? $r('app.color.success')
+          : (this.syncStatus.state === 'pending' ? $r('app.color.warning') : $r('app.color.text_secondary')))
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      Text('·')
+        .fontSize(FONT.caption)
+        .fontColor($r('app.color.text_secondary'))
+      Text(this.syncStatus.text.slice(this.syncStatus.label.length + 1))
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor($r('app.color.text_secondary'))
+        .layoutWeight(1)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      // P1-2：pending（含 failed 终态）时给用户一个真实可点的重放入口。
+      if (this.syncStatus.state === 'pending') {
+        Text('重试同步')
+          .fontSize(FONT.caption)
+          .fontColor($r('app.color.warning'))
+          .padding({ left: SPACING.xs, right: SPACING.xs })
+          .onClick(() => {
+            this.retrySync();
+          })
+      }
+    }
+    .width('100%')
+    .height(TOUCH_MIN)
+    .alignItems(VerticalAlign.Center)
+  }
+
   /** 列表行（两条断点共用；行自带 1vp 分割线，所以 List space 为 0）。 */
   @Builder
   ListRows() {
@@ -1721,6 +1815,7 @@ struct Index {
       this.DateBlock()
       this.ModeTabs()
       this.SearchFilterBar()
+      this.SyncStatusRow()
       Divider()
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
@@ -1764,6 +1859,7 @@ struct Index {
         this.DateBlock()
         this.ModeTabs()
         this.SearchFilterBar()
+        this.SyncStatusRow()
         Divider()
           .strokeWidth(DIVIDER)
           .color($r('app.color.divider'))

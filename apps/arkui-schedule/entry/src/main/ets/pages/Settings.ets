@@ -171,6 +171,9 @@ import type { PlatformResolution } from '../model/gitAuth';
 import { describeClaimOutcome } from '../model/deviceRegistry';
 import { gitExtrasStore } from '../services/syncController';
 import type { GitSyncExtras } from '../services/syncController';
+import { v2ActivationService } from '../services/v2ActivationService';
+import type { ActivationDecision } from '../model/v2Activation';
+import { syncStatusStore } from '../services/syncStatusStore';
 import { PageLayout } from '../components/PageLayout';
 // A2 拆分：五个 section 组件（页面只做装配；共享字段构件在 SettingsBits）
 import { SyncSection } from '../components/settings/SyncSection';
@@ -344,6 +347,11 @@ struct Settings {
   /** 首页是否展示其他设备的只读记录（写 AppStorage，首页读取）。 */
   @State includeOtherDevices: boolean = false;
 
+  // v2 写入显式激活（mod-v2-sync-wiring）：开关只是 UI，真正翻转要过预检 + 确认。
+  @State v2WriteEnabled: boolean = false;
+  @State v2ActivationReason: string = '';
+  @State v2ActivationNextStep: string = '';
+
   /**
    * 导出 / 导入面板的展示状态（`components/ExportImportPanel.ets` 的 `@Prop state`）。
    *
@@ -466,6 +474,7 @@ struct Settings {
    */
   onPageShow(): void {
     this.refreshRemoteLastOk();
+    this.refreshV2Activation();
   }
 
   /** 只刷新重连记录：绝不用 applySettings 整表 reload，否则会覆盖用户正在编辑的表单。 */
@@ -478,6 +487,96 @@ struct Settings {
       this.remoteLastOk = settings.remoteLastOk;
     } catch {
       // 纯展示状态：读失败就当没有新记录，不打扰用户
+    }
+  }
+
+  /** 刷新激活开关与预检原因（进页面 / 每次显示时读一次，绝不自动激活）。 */
+  private async refreshV2Activation(): Promise<void> {
+    const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+    this.v2WriteEnabled = v2ActivationService.isActivated();
+    const decision: ActivationDecision = await v2ActivationService.decide(context);
+    if (this.disposed) {
+      return;
+    }
+    this.v2ActivationReason = decision.allowed ? '' : decision.reason;
+    this.v2ActivationNextStep = decision.allowed ? '' : decision.nextStep;
+  }
+
+  /**
+   * 显式激活/关闭 v2 写入：开启前必跑预检 + 确认弹层；关闭无条件回到 v1。
+   *
+   * 两种确认**文案不同**（Lead 要求并存必须显式裁决，不能静默偏好 timeline/）：
+   * - 单态（只有 timeline/，无 devices/）：原普通确认框「确认启用」；
+   * - `needsConfirm=true`（devices/ + 有数据的 timeline/ 并存）：专用确认框，逐字写明
+   *   「以 timeline/ 为权威并停用 v1 写入、v1 文件不删除」，确认后服务层写
+   *   AppStorage['timeline.v1Retained']='1' 作为裁决记录，之后不再重问。
+   *
+   * 另外两类拒绝（schema 非 v2 / 并存但 timeline 空 / 周期不可用）直接展示原因和下一步。
+   */
+  private async toggleV2Write(isOn: boolean): Promise<void> {
+    if (!isOn) {
+      v2ActivationService.deactivate();
+      this.v2WriteEnabled = false;
+      this.v2ActivationReason = '';
+      this.v2ActivationNextStep = '';
+      syncStatusStore.setReadOnly('v2 写入已关闭，当前使用 v1 日程路径');
+      promptAction.showToast({
+        message: '已关闭 v2 写入，回到 v1（v1 数据未删除）', duration: toastMsFor(true)
+      });
+      return;
+    }
+    const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+    const precheck: ActivationDecision = await v2ActivationService.decide(context);
+    if (!precheck.allowed && !precheck.needsConfirm) {
+      this.v2ActivationReason = precheck.reason;
+      this.v2ActivationNextStep = precheck.nextStep;
+      promptAction.showToast({ message: precheck.reason, duration: toastMsFor(true) });
+      return;
+    }
+    // needsConfirm 是「可裁决的待确认态」，不是错误：先把错误行清空，取消时再恢复说明。
+    const isBothConfirm: boolean = precheck.needsConfirm;
+    if (isBothConfirm) {
+      this.v2ActivationReason = '';
+      this.v2ActivationNextStep = '';
+    }
+    try {
+      const response = await promptAction.showDialog({
+        title: isBothConfirm ? 'v1 / v2 数据并存：需要显式裁决' : '启用 v2 时间线写入',
+        message: isBothConfirm
+          ? '检测到 v1（devices/）与 v2（timeline/）数据并存：确认以 timeline/ 为权威并停用 v1 写入？v1 文件不会被删除。'
+          : '仓库已迁移到 timeline/ 结构后才可开启；开启后新记录写入 timeline/ 并自动同步；关闭即回到 v1，v1 数据不会被删除。',
+        buttons: [
+          { text: '取消', color: $r('app.color.text_secondary') },
+          { text: isBothConfirm ? '确认以 timeline/ 为权威' : '确认启用', color: $r('app.color.brand') }
+        ]
+      });
+      if (response.index !== 1) {
+        if (isBothConfirm) {
+          this.v2ActivationReason = precheck.reason;
+          this.v2ActivationNextStep = precheck.nextStep;
+        }
+        return;
+      }
+      const applied: ActivationDecision = isBothConfirm
+        ? await v2ActivationService.activate(context, true)
+        : await v2ActivationService.activate(context);
+      if (!applied.allowed) {
+        this.v2ActivationReason = applied.reason;
+        this.v2ActivationNextStep = applied.nextStep;
+        return;
+      }
+      this.v2WriteEnabled = true;
+      this.v2ActivationReason = '';
+      this.v2ActivationNextStep = '';
+      promptAction.showToast({
+        message: isBothConfirm
+          ? '已启用 v2 时间线写入：以 timeline/ 为权威，v1 文件保留'
+          : '已启用 v2 时间线写入：新记录将写入 timeline/ 并自动同步',
+        duration: toastMsFor(true)
+      });
+    } catch (error) {
+      // 用户取消确认弹层也走这里：开关不变、不伪造成功，原因如实展示。
+      this.v2ActivationReason = error instanceof Error ? error.message : String(error);
     }
   }
 
@@ -519,6 +618,7 @@ struct Settings {
       }
       this.ready = true;
       this.storageHint = `日程目录：${scheduleStore.deviceRoot()}/schedules/`;
+      this.refreshV2Activation();
       // 主表单没有用户名字段：进页面就按仓库地址推断一次（Gitee = owner），推不出来会展开「高级」
       this.ensureGiteeUsernameResolved();
       this.configure();
@@ -2318,6 +2418,9 @@ struct Settings {
       saveHint: this.saveHint,
       issuesSummary: this.issuesSummary,
       includeOtherDevices: this.includeOtherDevices,
+      v2WriteEnabled: this.v2WriteEnabled,
+      v2ActivationReason: this.v2ActivationReason,
+      v2ActivationNextStep: this.v2ActivationNextStep,
       pushBlockedReason: (): string => this.pushBlockedReason(),
       authBlocker: (): string => this.authBlocker(),
       gitUsernamePlaceholder: (): string => this.gitUsernamePlaceholder(),
@@ -2350,6 +2453,9 @@ struct Settings {
       onToggleIncludeOtherDevices: (isOn: boolean): void => {
         this.includeOtherDevices = isOn;
         AppStorage.setOrCreate<boolean>(HOME_INCLUDE_OTHER_KEY, isOn);
+      },
+      onToggleV2Write: (isOn: boolean): void => {
+        this.toggleV2Write(isOn);
       },
       runAction: (action: string): void => {
         this.runAction(action);

@@ -246,9 +246,13 @@ v2 替换的是 v1 的**日程时间线域**：`devices/<deviceId>/schedules/*.j
 
 客户端读取开关：`AppStorage` 键 `timeline.readMode`（`'v1'` 默认 / `'v2'`）。仅当 `<repo>/timeline/schema.json` 为 `schemaVersion:2` **且** 开关为 `'v2'` 时才走 v2 只读路径；否则一律走 v1 原路径（`timeline/` 缺失、`schema.json` 缺失/坏/版本不符时同样降级，只多一行 `[tl]` 日志）。本开关不写默认值，回退到 v1 不需要清理任何持久状态。
 
+**P1-5 显式选择的跨重启持久化（mod-v2-sync-wiring 修复）**：三个用户选择键 `timeline.readMode`（默认 `'v1'`）、`timeline.v2WriteEnabled`（默认 `false`）、`timeline.v1Retained`（默认 `''`，确认并存裁决后为 `'1'`）在 `EntryAbility.onCreate()`、**页面加载前**用 ArkUI 全局 `PersistentStorage.persistProp<T>(key, default)` 绑定（本 SDK 中 `PersistentStorage` 不是 `@kit.ArkUI` 导出，直接用全局名）。键与默认值唯一真值在 `model/persistentSettings.ts`；`AppStorage.setOrCreate` 的写入自动回写磁盘，`deactivate()` 必须显式写 `false` / `'v1'`。重启时 persistProp 先把磁盘值 hydrate 回 AppStorage，故激活 / 并存裁决 / 读模式不再回退 v1；`v1Retained` 在关闭 v2 时仍保留（裁决是事实记录）。
+
 实现见 `mod-v2-sync-protocol`：`assertWritable()` 先校验 schema=2 / 分支 `main` / HEAD==`origin/main`，失败即零写入；周期为 fetch → 读远端与本地 → unionDay → 原子写 → commit → push，**仅**在 push 被拒后才 `reset --hard origin/main` 并重放 outbox（≤4 次生命周期上限）；outbox 在 `<filesDir>/sync-outbox.json`（不进仓库）；**永不 force-push、不改写远端历史、不删除远端文件**。
 
 写入切换见 `mod-v2-dual-write-off`：仅当 `timeline/schema.json` 解析为 `schemaVersion:2` 时才把客户端 `timeline.readMode` 置 `'v2'`，否则保持 `'v1'` 并给出 typed 原因（`E_SCHEMA_MISSING`/`E_SCHEMA_UNKNOWN`）；七处写入经 `recordWriter` 分流；v2 写入失败时把意图停放进 outbox 并抛 `E_V2_WRITE_PARKED`，**绝不回落到 v1 写入**（避免双存储分叉）；另有**第二道显式激活闸** `AppStorage['timeline.v2WriteEnabled']`（默认缺失=false）：同步周期（`syncProtocolStore.runCycle`）接线并验证前不得激活，否则记录只落本地 `timeline/` 而不 commit/push，违反「不得静默本地未提交」。`devices/**` 在本阶段只读保留，物理退役另行决定。
+
+激活与两库并存：v2 写入只能由用户在设置页**显式**开启（`timeline.v2WriteEnabled`），代码不得自动激活；`devices/` 与 `timeline/` 并存且 `timeline/` 至少有一个有效日时，必须弹专用确认（以 timeline/ 为权威、v1 文件不删除），确认结果记 `timeline.v1Retained`；`timeline/` 无有效日时拒绝激活（`E_MIGRATION_EMPTY`）。三态展示：已同步 / N 条待同步·最近失败 / 只读·原因。
 
 ## 10. 兼容与迁移
 

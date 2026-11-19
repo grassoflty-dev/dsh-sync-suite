@@ -6,12 +6,14 @@
  * - 文件形态是 JSON 数组，条目形状复用 `model/syncProtocol.ts` 的 `OutboxEntry`；
  * - 原子替换：同目录写 tmp → 回读逐字校验 → rename，**不删除唯一副本、不删除任何历史意图**；
  * - `enqueue` 按 `intentId` 去重（同 payload 重复停放不产生第二条）；
- * - 只提供 enqueue / list / remove / clear 四个操作，不实现同步周期（那是 syncProtocolStore）。
+ * - 操作面：enqueue / list / remove / clear + P1-2 `retry`（failed→pending，attempts=0）
+ *   与 `updateLastError`（回写 typed 原因）；不实现同步周期（那是 syncProtocolStore）。
  *
  * 硬约束：本文件不碰 `devices/**`、不写 AppStorage、不引入新依赖。
  */
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
+import { resetForRetry } from '../model/syncProtocol';
 import type { OutboxEntry } from '../model/syncProtocol';
 
 /** outbox 落在 filesDir 根，不在 git-repo/ 之内。 */
@@ -67,6 +69,50 @@ export class OutboxStore {
       // 坏文件按空处理；下一次写入会用合法数组覆盖，不丢任何已成功落盘的意图。
     }
     return [];
+  }
+
+  /**
+   * P1-2 用户「重试」：把一条 failed 意图原子复位为 `attempts=0, state=pending`。
+   * 复用纯函数 `resetForRetry`（payload 不可变）；id 不存在返回 false、零写盘。
+   * 这是 §9 P1-1「只有用户在 UI 点重试才原子重新入队」的唯一入口。
+   */
+  retry(intentId: string): boolean {
+    this.requireReady();
+    const entries: OutboxEntry[] = this.list();
+    const next: OutboxEntry[] = [];
+    let changed: boolean = false;
+    for (const entry of entries) {
+      if (entry.intentId === intentId) {
+        next.push(resetForRetry(entry));
+        changed = true;
+      } else {
+        next.push(entry);
+      }
+    }
+    if (!changed) {
+      return false;
+    }
+    this.writeOutbox(next);
+    return true;
+  }
+
+  /** 回填写失败 / 推送失败的 typed 原因（payload 不变，attempts 不变）。 */
+  updateLastError(intentId: string, reason: string): void {
+    this.requireReady();
+    const entries: OutboxEntry[] = this.list();
+    const next: OutboxEntry[] = [];
+    for (const entry of entries) {
+      if (entry.intentId === intentId) {
+        next.push({
+          intentId: entry.intentId, op: entry.op, date: entry.date, id: entry.id, ts: entry.ts,
+          line: entry.line, enqueuedAt: entry.enqueuedAt, attempts: entry.attempts,
+          state: entry.state, lastError: reason
+        });
+      } else {
+        next.push(entry);
+      }
+    }
+    this.writeOutbox(next);
   }
 
   /** 按 intentId 出队；不存在时 no-op（不产生 IO 之外的副作用）。 */

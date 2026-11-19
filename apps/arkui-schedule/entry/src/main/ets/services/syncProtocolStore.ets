@@ -38,9 +38,11 @@ import {
   outboxAfterReplay, isApplied, MAX_ATTEMPTS, SYNC_RETRY_ERROR
 } from '../model/syncProtocol';
 import type {
-  OutboxEntry, DayUnion, DayTexts, WriteGateInput, WriteGateCode, WriteGateResult
+  OutboxEntry, DayUnion, DayTexts, WriteGateInput, WriteGateResult
 } from '../model/syncProtocol';
 import type { ScheduleRecord } from '../model/types';
+import { runCyclePure } from '../model/syncCycle';
+import type { GitPort, CycleOutcome, DayRead, DayWriteTexts, WritePort } from '../model/syncCycle';
 
 /** git 命令执行器：接收参数数组，返回 stdout；非 0 退出由 runner 抛错。 */
 export type GitRunner = (args: string[]) => Promise<string>;
@@ -50,10 +52,14 @@ export interface SyncCycleContext {
   git: GitRunner;
 }
 
-/** typed 周期结果：失败时 code/message 可直接驱动 §9 的三态 UI。 */
+/**
+ * typed 周期结果：失败时 code/message 可直接驱动 §9 的三态 UI。
+ * code 保留全部 typed 码（门禁四码 + E_PUSH_REJECTED / E_CORRUPT / push 原始 E_AUTH·E_IO 等），
+ * 不再在转换处收窄（P2-1 cheap extra）。
+ */
 export interface CycleResult {
   ok: boolean;
-  code: WriteGateCode | 'E_PUSH_REJECTED';
+  code: string;
   message: string;
   days: number;
   conflicts: number;
@@ -107,10 +113,27 @@ export class SyncProtocolStore {
   private ready: boolean = false;
   private sequence: number = 0;
   private instanceTag: string = Math.random().toString(36).slice(2, 10);
+  /** mod-v2-sync-wiring：注入的 GitPort（未注入时保留原有 GitRunner 裸周期路径）。 */
+  private runner: GitPort | null = null;
 
   /** 唯一开关：与写入服务共用 timelineStore 的组合判定；本方法不执行任何 IO。 */
   isEnabled(): boolean {
     return timelineStore.useV2();
+  }
+
+  /** 注入真实 git 绑定（页面 bootstrap 调一次）；未注入时周期保持 inert。 */
+  setRunner(port: GitPort): void {
+    this.runner = port;
+  }
+
+  /** 周期是否可用（显式激活闸的第三个拒绝理由来源）。 */
+  hasRunner(): boolean {
+    return this.runner !== null;
+  }
+
+  /** 页面 bootstrap 调用的公开初始化（只取 filesDir，不执行任何 git / 写盘）。 */
+  async ensureReadyForBootstrap(ability: common.UIAbilityContext): Promise<void> {
+    await this.ensureReady(ability);
   }
 
   /**
@@ -119,6 +142,11 @@ export class SyncProtocolStore {
   async runCycle(ctx: SyncCycleContext): Promise<CycleResult> {
     this.requireEnabled();
     await this.ensureReady(ctx.ability);
+    // mod-v2-sync-wiring：注入 GitPort 后周期改走纯决策层 runCyclePure（outbox 文件仍在本服务）。
+    // 未注入时保留原有 GitRunner 路径，老调用点语义不变。
+    if (this.runner !== null) {
+      return await this.runWiredCycle();
+    }
     const git: GitRunner = ctx.git;
     const now = new Date();
     let outbox: OutboxEntry[] = this.readOutbox();
@@ -200,6 +228,117 @@ export class SyncProtocolStore {
       dropped: droppedReported,
       pending: this.pendingCount(parked), failed: this.failedCount(parked), attempts: attempts
     };
+  }
+
+  // ------------------------------------------------------------------ 接线后的纯周期（mod-v2-sync-wiring）
+
+  /**
+   * 构造 wired 周期的 ctx（P1-2）：注入 GitPort 后 `runCycle` 走 `runWiredCycle`，
+   * 完全不使用 ctx.git；该字段保留仅为满足既有签名，误用即 typed 抛错、绝不假同步。
+   */
+  wiredContext(ability: common.UIAbilityContext): SyncCycleContext {
+    return {
+      ability: ability,
+      git: (args: string[]): Promise<string> => {
+        void args;
+        throw new Error('E_SYNC_UNAVAILABLE: wired 周期不使用 ctx.git（GitPort 已注入）');
+      }
+    };
+  }
+
+  /**
+   * 配置好的周期入口：recordWriter 写成功后无参调用（fire-and-forget）；
+   * UI「重试同步」传入 ctx → 经 `runCycle(ctx)`（P2-5：runCycle 在 App 中的真实调用点）
+   * 再分派到同一 wired 周期。两者语义一致：未就绪返回 null，不伪造成功。
+   */
+  async runConfiguredCycle(ctx?: SyncCycleContext): Promise<CycleResult | null> {
+    if (this.runner === null || this.filesDir.length === 0 || !this.isEnabled()) {
+      return null;
+    }
+    if (ctx !== undefined) {
+      return await this.runCycle(ctx);
+    }
+    return await this.runWiredCycle();
+  }
+
+  /** 把 GitPort 绑定到本服务的文件 IO 后交给 runCyclePure；outbox 仍由本服务原子落盘。 */
+  private async runWiredCycle(): Promise<CycleResult> {
+    const port: GitPort = this.runner as GitPort;
+    const now: Date = new Date();
+    const outbox: OutboxEntry[] = this.readOutbox();
+    const remoteDays: string[] = port.listRemoteDays === undefined ? [] : await port.listRemoteDays();
+    // P1-1：停放意图自身的 date 必须进周期 days。否则「新日期首次写盘就失败」的意图
+    // 既不在 localDates()（本地没有 records.json）也不在 remoteDays（远端也没有），
+    // 任何后续周期都取不到它 → 永久滞留，构成 §9 禁止的「静默本地未推提交」。
+    const parkedDays: string[] = [];
+    for (const entry of outbox) {
+      parkedDays.push(entry.date);
+    }
+    const days: string[] = this.mergeDates(this.localDates(), remoteDays.concat(parkedDays));
+    const readDay = async (date: string): Promise<DayRead> => {
+      const read: DayRead = {
+        remote: await port.showMain(`timeline/${date}/records.json`),
+        local: this.readText(this.recordsPath(date)),
+        deleted: this.readText(this.timelineFilePath(date, DELETED_FILE_NAME)),
+        restore: this.readText(this.timelineFilePath(date, RESTORE_FILE_NAME)),
+        remoteDeleted: await port.showMain(`timeline/${date}/${DELETED_FILE_NAME}`),
+        remoteRestore: await port.showMain(`timeline/${date}/${RESTORE_FILE_NAME}`)
+      };
+      return read;
+    };
+    const write: WritePort = {
+      writeDay: async (date: string, texts: DayWriteTexts): Promise<void> => {
+        this.writeDayTexts(date, texts);
+      },
+      // P1-3：纯决策层每次失败尝试后当场落盘 attempts/state，崩溃不重置跨会话预算。
+      writeOutbox: async (entries: OutboxEntry[]): Promise<void> => {
+        this.writeOutbox(entries);
+      }
+    };
+    const outcome: CycleOutcome = await runCyclePure(port, days, readDay, outbox, now, write);
+    this.writeOutbox(outcome.resultOutbox);
+    return this.outcomeToResult(outcome);
+  }
+
+  /** union 结果的单日落盘：records 原子替换 + 账本只追加（前缀守卫）+ conflicts 去重追加。 */
+  private writeDayTexts(date: string, texts: DayWriteTexts): void {
+    const recordsPath: string = this.recordsPath(date);
+    const localRecords: string = this.readText(recordsPath);
+    if (texts.records.length > 0 && texts.records !== localRecords) {
+      this.atomicReplaceText(recordsPath, texts.records);
+    }
+    if (texts.conflicts.length > 0) {
+      this.appendDedupLines(
+        this.timelineFilePath(date, CONFLICTS_FILE_NAME), texts.conflicts,
+        (line: string): string => this.conflictKey(line));
+    }
+    const deletedPath: string = this.timelineFilePath(date, DELETED_FILE_NAME);
+    const localDeleted: string = this.readText(deletedPath);
+    if (texts.deleted !== localDeleted) {
+      if (!texts.deleted.startsWith(localDeleted)) {
+        throw new Error('E_LEDGER_APPEND: 删除账本并集破坏只追加前缀不变量，现场保留');
+      }
+      this.atomicReplaceText(deletedPath, texts.deleted);
+    }
+    const restorePath: string = this.timelineFilePath(date, RESTORE_FILE_NAME);
+    const localRestore: string = this.readText(restorePath);
+    if (texts.restore !== localRestore) {
+      if (!texts.restore.startsWith(localRestore)) {
+        throw new Error('E_LEDGER_APPEND: 撤销账本并集破坏只追加前缀不变量，现场保留');
+      }
+      this.atomicReplaceText(restorePath, texts.restore);
+    }
+  }
+
+  /** CycleOutcome → CycleResult：typed code/message 原样透传（E_CORRUPT / E_AUTH / E_IO 不再塌缩）。 */
+  private outcomeToResult(outcome: CycleOutcome): CycleResult {
+    const result: CycleResult = {
+      ok: outcome.ok, code: outcome.code, message: outcome.message,
+      days: outcome.days.length, conflicts: outcome.conflicts, added: outcome.added,
+      dropped: outcome.droppedIds, pending: outcome.pending, failed: outcome.failed,
+      attempts: outcome.attempts
+    };
+    return result;
   }
 
   // ------------------------------------------------------------------ 门禁与初始化

@@ -208,6 +208,13 @@ interface BridgeCallRequest {
   args: Record<string, string>;
 }
 
+/** v2Git 薄桥的返回形状（显式接口：ArkTS 禁止把对象字面量当类型）。 */
+export interface V2GitResult {
+  ok: boolean;
+  value: string;
+  oid: string;
+}
+
 interface BridgeHttpOptions {
   url?: string;
   method?: string;
@@ -1225,6 +1232,34 @@ export class GitSyncService {
   /** 桥字段 → 数字：非有限数字一律回落。 */
   private static numberOf(value: number | null | undefined, fallback: number): number {
     return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+  }
+
+  // -------------------------------------------------------------- v2 同步周期薄桥（mod-v2-sync-wiring）
+
+  /**
+   * 单一薄桥：v2 同步周期（services/gitRunner.ets 实现的 GitPort）经此调用 isomorphic-git。
+   * 与 v1 的 pull/push 完全隔离：不写 devices/、不带设备范围、分支恒为 main、force 恒为 false。
+   * 返回 `{ok,value,oid}`；桥报错（含 push 被拒）由 callBridge 以 SyncError 抛出。
+   */
+  async v2Git(op: string, args: Record<string, string>): Promise<V2GitResult> {
+    const payload: Record<string, string> = this.configArgs();
+    payload['op'] = op;
+    const keys: string[] = Object.keys(args);
+    for (let index = 0; index < keys.length; index++) {
+      payload[keys[index]] = args[keys[index]];
+    }
+    const event: BridgeEvent = await this.callBridge('v2Git', payload);
+    const data: V2GitResult = event.data === undefined
+      ? { ok: true, value: '', oid: '' }
+      : event.data as V2GitResult;
+    const ok: boolean = data.ok !== false;
+    const value: string = typeof data.value === 'string' ? data.value : '';
+    const oid: string = typeof data.oid === 'string' ? data.oid : '';
+    if (!ok) {
+      throw new Error(`v2Git(${op}) 失败`);
+    }
+    const result: V2GitResult = { ok: ok, value: value, oid: oid };
+    return result;
   }
 
   // -------------------------------------------------------------- 宿主代理：事件回传
