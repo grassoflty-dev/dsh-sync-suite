@@ -479,6 +479,17 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 >
 > **提交由 Lead 统一做**，规划者/执行子代理都不 commit。
 
+### 交付模式：模块化自治（2026-11-19 起）
+
+> **唯一索引：`docs/MODULES.md`。** 下面各批清单是历史记录，按原文保留，不再改写。
+
+- 用户离开期间进入自治模式：总设计师决策并执行，不向用户求批准；按「最易回滚」的方案落地，并写下决策理由与被否掉的替代方案。
+- **一个功能 = 一个模块 = 一个批次 = 一个提交**；提交 subject 以模块 id 前缀 `[mod-<id>] <模块名>: <一句话>` 开头，一批不混两个无关功能；共享文件触碰登记在 `docs/MODULES.md` §2。
+- 每个模块自带测试、文档章节与回滚路径；每批都要更新 `docs/MODULES.md`（状态、提交哈希、回滚方式），哈希由 Lead 提交后回填，执行子代理不得猜。
+- 只有 Lead 提交/打标签（`mod-<id>` 可选）；总设计师与执行子代理不 commit、不 push、不改 `.git`。阻塞项标注原因后跳过，不卡住整批。
+- 汇报结构：模块 id / 改动文件 / 门闸原始输出尾部 / 评审结论 / 回滚路径 / `unverified` 项 / 下一模块。回滚后必须再跑一次全绿全量（见 `docs/MODULES.md` §4）。
+- 用户离开期间按模块自治交付，每批一模块一提交；报告含 module id / 文件 / 门闸 / 评审 / 回滚路径 / unverified / 下一模块。
+
 ### B3 批已提交清单（已随提交 `9fa9277` 入库，保留便于查历史）
 
 | 文件 | 性质 | 一句话 |
@@ -510,6 +521,11 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 
 ### 待提交清单（B4 收窄：日期仅新建时可选，HEAD `14b181a` 之上的工作树）
 
+> **交付模式变更（2026-11-19 起）**：从现在起每个批次就是一个独立模块提交，subject 带 `[mod-<id>] …` 前缀；
+> 模块 id / 目的 / 状态 / 提交哈希 / 回滚方式统一登记在 `docs/MODULES.md`，**提交哈希由 Lead 提交后回填该表**
+> （目前该表「提交」列仍为「（Lead 填）」的项，如 `mod-v2-contract`，待 Lead 提交后填写）。
+> 本节及以下各批清单均为新增模式之前的历史记录，按原文保留、不改写。
+
 | 文件 | 性质 | 一句话 |
 | --- | --- | --- |
 | `apps/arkui-schedule/entry/src/main/ets/components/RecordEditorView.ets` | 改 | 保存改走 `resolveSaveTs`；`dateEditable()` 让已有记录日期行只读（「创建时选定，不可改」），仅新建时展开 `CalendarPicker`；`!plan.ok` 早退在写之前；移除 `softDeleteRecord` import，删除跨日迁移与更早日期拒绝分支 |
@@ -535,11 +551,15 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 | 便捷性（B4 收窄，待提交） | 用户 2026-11-19 拍板「日期只在新建时选一次」：**B4 已提交的改期机制（跨日 live + 旧日清理、更早日期拒绝）全部删除**，新增纯逻辑 `model/recordSaveTs.ts`（`tsForDate` / `resolveSaveTs`），编辑器日期行对已有记录只读并显示「创建时选定，不可改」，仅新建时弹 `CalendarPicker`；已有记录保存只在原日期追加更晚版本 | 工作树未提交（见上「待提交清单（B4 收窄）」，6 路径 = 2 改 + 2 删 + 2 新增）；全量 **2306 例 / 2305 pass / 0 fail / 1 skip**（相对 2309 的 −3 是刻意删除测被移除功能的用例；新基线 `b4SaveTs` 20 + `b4DateUi` 21 + `b4CalendarWiring` 18 + `b4SavedRow` 14 = 73）；`validate-app` **8/8**；`tsc` exit 0；删除 diff 的独立只读评审 `docs/REVIEW-b4-narrow.md` |
 
 **当前基线**：全量 `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"`
-**2306 例 / 2305 pass / 0 fail / 1 skip**（上一基线 B4 批 **2309 / 2308 / 0 / 1**；**−3** 是收窄时
-**刻意删除**测被移除功能的用例——净变化为 `b4DateMove.test.mjs` 整文件 −19、`b4DateUi` 25→21 −4、
+**2348 例 / 2347 pass / 0 fail / 1 skip**（相对 2306 基线的 **+40**：`mod-v2-migration` 的
+`v2Migration.test.mjs` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` 的 `handwritingToolbar.test.mjs` **+1**；
+skip 数未变，仍是既有那条 fetch 直连用例；数字随模块加入而变动。再往前，B4 批 **2309 / 2308 / 0 / 1**，收窄时 **−3**
+是**刻意删除**测被移除功能的用例——`b4DateMove.test.mjs` 整文件 −19、`b4DateUi` 25→21 −4、
 新增 `b4SaveTs.test.mjs` +20；当前相关用例 `b4SaveTs` 20 + `b4DateUi` 21 + `b4CalendarWiring` 18 +
-`b4SavedRow` 14 = 73；skip 数未变，仍是既有那条 fetch 直连用例）；`validate-app` **8/8**；
+`b4SavedRow` 14 = 73）；`validate-app` **8/8**；
 `overlay applied=false`；`node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json` exit 0。
+真机验收（2026-11-19 晚，`mod-insert-page-count` 复验）：**15 PASS / 0 FAIL / 6 SKIP，exit 3**
+（exit 3 = 仅 SKIP 未覆盖、0 fail，非失败；详见 `docs/VERIFICATION.md` §14.10）。
 （B4 批 **2309 / 2308 / 0 / 1**、B3 批 **2233 / 2232 / 0 / 1**、B2 批 **2204 / 2203 / 0 / 1**、
 B 批 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
 
@@ -557,6 +577,11 @@ B 批 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
 2. **真机验收（全部挂起，`hdc list targets` = `[Empty]`）**：手写板 5 项（penOnly 挡手指、笔迹面板二级菜单、工具条两行、撤销重做可点、折叠布局画布高度）、chat 内嵌 Web 的 `ERR_WS_UPGRADE(-173)`、UU 两个实测点（入口形态 / WS 透传）。**设备没连上不许报“已验证”。**
 3. **模型路由**：`dsh-opencode-go/hy4-flash-free` 的允许清单是**会话启动快照**，改配置后需**重启 DSH + 新会话**才生效；当前会话只能用继承的 `deepseek-v4.1-flash`。重启后再验 `list_subagent_models(provider: "dsh-opencode-go")`。
 4. **后续排队**：类型注册表（`docs/SYNC-SCOPES.md`：6 项声明，无合并策略即拒绝接入）→ Git 接入向导（`docs/CONFIG-UX.md`）→ 远程连接收敛（`auto` 优先级 + 一键自检 + 二维码）；F 测试套件卫生；G 吞错审计；H 契约静态测试；E APK 收尾。
+
+- **v2 契约**：`docs/DATA-CONTRACT-v2.md`（v2-draft-2，359 行，15 节）已写完**待提交**；评审 `docs/REVIEW-v2-contract.md`（183 行，P0 2 / P1 7 / P2 11 已全部在 draft-2 处理）。
+- **迁移工具**：`tools/migrate-v1-to-v2.mjs`（804 行）+ `apps/arkui-schedule/tools/test/v2Migration.test.mjs`（41 例，30→39；评审 `docs/REVIEW-v2-migration-and-insert-page.md`，P0 1 / P1 4 / P2 3 已全部修复）已写完（含评审修复）**待提交**（只读 v1、不删 v1；本仓 `devices/` dry-run `days=0 records=0`，fixture dry-run `days=1 records=2 deletes=1 summaries=1 skipped=1`）。
+- **插入页真机缺陷**：`mod-insert-page-count` 已修复并复验（15 PASS / 0 FAIL / 6 SKIP，exit 3；真机 dump 进入 1/1、点 `+` 后 2/2，见 `docs/VERIFICATION.md` §14.10），**待提交**。
+- **待 Lead 提交（已就绪）**：`mod-v2-contract`（draft-2）、`mod-v2-migration`（含评审修复，41 例）、`mod-insert-page-count`（真机已复验）三者均**未提交、已就绪待 Lead 提交**；按 `docs/MODULES.md` 每个模块各自一笔独立提交，不混批，提交哈希由 Lead 提交后回填 `docs/MODULES.md` §1/§5。
 
 ### 派活模板要点（别漏）
 
