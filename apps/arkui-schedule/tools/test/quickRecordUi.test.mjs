@@ -150,11 +150,11 @@ describe('Index.ets：快捷记录只接在列表区，不动页头', () => {
     assert.equal((INDEX.match(/this\.QuickRecordRow\(\)/g) ?? []).length, 2, '两个断点各渲染一次');
   });
 
-  test('submitQuickRecord 先算 plan、先挡 !plan.ok，再 appendRecord', () => {
+  test('submitQuickRecord 先算 plan、先挡 !plan.ok，再 writeRecord', () => {
     const fn = bodyFrom(INDEX, 'private submitQuickRecord(');
     assert.match(fn, /planQuickRecord\(rawTitle, this\.selectedDate, new Date\(\)\)/);
     assert.match(fn, /if \(!plan\.ok\)/);
-    assert.ok(fn.indexOf('!plan.ok') < fn.indexOf('appendRecord'), '无效输入必须在写入前挡住');
+    assert.ok(fn.indexOf('!plan.ok') < fn.indexOf('writeRecord'), '无效输入必须在写入前挡住');
     assert.match(fn, /message: plan\.reason/);
     assert.match(fn, /scheduleStore\.isReady\(\)/);
   });
@@ -174,9 +174,9 @@ describe('Index.ets：快捷记录只接在列表区，不动页头', () => {
     assert.match(author, /return '我'/);
   });
 
-  test('appendRecord 出错有中文 toast；成功后刷新列表 + 汇总并提示已记下', () => {
+  test('writeRecord 出错有中文 toast；成功后刷新列表 + 汇总并提示已记下', () => {
     const fn = bodyFrom(INDEX, 'private submitQuickRecord(');
-    assert.match(fn, /scheduleStore\.appendRecord\(record\)/);
+    assert.match(fn, /recordWriter\.writeRecord\(record\)/);
     assert.match(fn, /保存失败：\$\{describeError\(error\)\}/);
     assert.match(fn, /this\.reload\(\)/);
     assert.match(fn, /this\.loadSummary\(\)/);
@@ -215,12 +215,12 @@ describe('Index.ets：快捷记录只接在列表区，不动页头', () => {
     assert.ok(toastAt >= 0 && returnAt > toastAt, 'catch 内顺序必须是 toast → return false');
   });
 
-  test('store-not-ready 守卫：文案 + return false 位于首次 appendRecord 之前', () => {
+  test('store-not-ready 守卫：文案 + return false 位于首次 writeRecord 之前', () => {
     const fn = bodyFrom(INDEX, 'private submitQuickRecord(');
     const notReady = bodyFrom(fn, 'if (!scheduleStore.isReady())');
     assert.match(notReady, /存储尚未就绪/, '未就绪分支必须有中文提示');
     assert.match(notReady, /return false;/, '未就绪分支必须 return false');
-    const firstAppend = fn.indexOf('appendRecord(');
+    const firstAppend = fn.indexOf('writeRecord(');
     assert.ok(firstAppend >= 0, '必须存在写入调用');
     assert.ok(fn.indexOf('if (!scheduleStore.isReady())') < firstAppend, '未就绪守卫必须在首次写入之前');
   });
@@ -230,7 +230,7 @@ describe('Index.ets：快捷记录只接在列表区，不动页头', () => {
     assert.equal((fn.match(/this\.quickBusy = true;/g) ?? []).length, 1, '写入前恰好置一次 true');
     assert.equal((fn.match(/this\.quickBusy = false;/g) ?? []).length, 2, '恰好两处复位：catch 与成功路径');
     const trueAt = fn.indexOf('this.quickBusy = true;');
-    const appendAt = fn.indexOf('appendRecord(record)');
+    const appendAt = fn.indexOf('writeRecord(record)');
     assert.ok(trueAt >= 0 && appendAt > trueAt, '必须先置 busy=true 再写入');
     const resets = [...fn.matchAll(/this\.quickBusy = false;/g)].map((m) => m.index);
     const catchStart = fn.indexOf('catch (error)');

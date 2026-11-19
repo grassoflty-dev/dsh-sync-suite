@@ -213,14 +213,14 @@ describe('B4 收窄：formDate 初值与已有记录日期来源', () => {
 // C. 保存路径：先拒绝，再写唯一一条新版本
 // ---------------------------------------------------------------------------
 describe('B4 收窄：save() 的 ts 决策与单一成功提示', () => {
-  test('B4-11 save() 先算 resolveSaveTs，!plan.ok 拦截块在第一次 appendRecord 之前', () => {
+  test('B4-11 save() 先算 resolveSaveTs，!plan.ok 拦截块在第一次 writeRecord 之前', () => {
     assert.ok(SAVE_CODE.includes('resolveSaveTs(this.originalTs, this.formDate'), 'save() 必须调用 resolveSaveTs');
     const planAt = SAVE_CODE.indexOf('const plan: SaveTsPlan = resolveSaveTs(');
     const guardAt = SAVE_CODE.indexOf('if (!plan.ok) {');
-    const firstAppendAt = SAVE_CODE.indexOf('appendRecord(');
+    const firstAppendAt = SAVE_CODE.indexOf('writeRecord(');
     assert.ok(planAt >= 0, '缺 const plan: SaveTsPlan = resolveSaveTs(...)');
     assert.ok(guardAt > planAt, '!plan.ok 拦截必须紧随计划');
-    assert.ok(firstAppendAt > guardAt, '拒绝分支必须排在第一次 appendRecord 之前（不写半条记录）');
+    assert.ok(firstAppendAt > guardAt, '拒绝分支必须排在第一次 writeRecord 之前（不写半条记录）');
     assert.match(PLAN_GUARD, /return;/);
     assert.match(PLAN_GUARD, /plan\.reason/);
     assert.match(PLAN_GUARD, /toastMsFor\(true\)/);

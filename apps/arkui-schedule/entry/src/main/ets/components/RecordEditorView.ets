@@ -39,6 +39,7 @@ import type { EditorDraft, EditorText } from '../model/editorDraft';
 import { SAVED_MARKER_KEY, encodeSavedMarker } from '../model/homeRefresh';
 import type { SavedMarker } from '../model/homeRefresh';
 import { newRecordId, resolveRecordDate, scheduleStore, describeError } from '../services/scheduleStore';
+import { recordWriter } from '../services/recordWriter';
 import { settingsStore } from '../services/settingsStore';
 import { attachmentStore, parseAttachmentList } from '../services/attachmentStore';
 import { draftStore } from '../services/draftStore';
@@ -660,7 +661,8 @@ export struct RecordEditorView {
     }
     this.saving = true;
     try {
-      scheduleStore.appendRecord(record);
+      // 分流写入：v2 走 timeline，失败停放 outbox 并抛 E_V2_WRITE_PARKED；v1 走原 appendRecord
+      recordWriter.writeRecord(record);
     } catch (error) {
       this.saving = false;
       promptAction.showToast({ message: `保存失败：${describeError(error)}`, duration: toastMsFor(true) });

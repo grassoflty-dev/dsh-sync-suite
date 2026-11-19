@@ -34,11 +34,27 @@ import { common } from '@kit.AbilityKit';
 import { timelineStore } from './timelineStore';
 import { parseTimelineDay, parseLedger, visibleRecords, timelineDayPath } from '../model/timeline';
 import type { TimelineRecord, TimelineMedia } from '../model/timeline';
-import type { ScheduleRecord } from '../model/types';
+import type { ScheduleRecord, Attachment } from '../model/types';
 import {
   planUpsert, planRemove, ledgerDeleteLine, ledgerRestoreLine,
   tsMillis, isValidTsShape, isNewerSummaryText, canPurge
 } from '../model/timelineWrite';
+
+/**
+ * 入站记录视图：静态类型是 ScheduleRecord，但读侧原样带出的 v2 对象运行时仍带扩展字段。
+ * 这些字段全部可选，访问后一律用 typeof 收窄——ArkTS 禁用 any / unknown / 索引签名。
+ */
+interface IncomingRecord extends ScheduleRecord {
+  opened_at?: string;
+  closed_at?: string;
+  media?: TimelineMedia[];
+}
+
+/** 账本行的已知字段；坏行可能缺字段，故全部可选，读取时用 typeof 收窄。 */
+interface LedgerRowShape {
+  id?: string;
+  ts?: string;
+}
 
 const ROOT_DIR_NAME: string = 'git-repo';
 const TIMELINE_DIR_NAME: string = 'timeline';
@@ -288,10 +304,10 @@ export class TimelineWriteStore {
 
   /** v1 ScheduleRecord → v2 TimelineRecord：补 media / opened_at / closed_at，未知字段原样尾随。 */
   private toTimelineRecord(record: ScheduleRecord, existing: TimelineRecord | null): TimelineRecord {
-    const src = record as unknown as Record<string, unknown>;
-    const incomingOpened: unknown = src.opened_at;
-    const openedAt: string = typeof incomingOpened === 'string' && (incomingOpened as string).length > 0
-      ? incomingOpened as string
+    const src: IncomingRecord = record as IncomingRecord;
+    const incomingOpened: string | undefined = src.opened_at;
+    const openedAt: string = typeof incomingOpened === 'string' && incomingOpened.length > 0
+      ? incomingOpened
       : (existing !== null ? existing.opened_at : record.ts);
     const out: TimelineRecord = {
       id: record.id,
@@ -300,7 +316,7 @@ export class TimelineWriteStore {
       body: record.body,
       author: record.author,
       done: record.done,
-      media: this.mediaOf(src),
+      media: this.mediaOf(src.media, record.attachments),
       ai_processed: record.ai_processed,
       opened_at: openedAt
     };
@@ -313,34 +329,66 @@ export class TimelineWriteStore {
     if (record.ocr_time !== undefined) {
       out.ocr_time = record.ocr_time;
     }
-    const closed: unknown = src.closed_at;
-    if (typeof closed === 'string' && (closed as string).length > 0) {
-      out.closed_at = closed as string;
+    const closed: string | undefined = src.closed_at;
+    if (typeof closed === 'string' && closed.length > 0) {
+      out.closed_at = closed;
     } else if (record.done) {
       // v1 没有 closed_at；勾选完成等价于关闭当前会话（§6 open 谓词只看 closed_at）。
       out.closed_at = record.ts;
     }
-    for (const key of Object.keys(src)) {
-      if (!(key in out)) {
-        out[key] = src[key];
+    // 未知字段原样尾随：src 与 record 是同一对象，借 TimelineRecord 的声明形状逐键搬运；
+    // 用显式字段名集合替代被 ArkTS 禁用的 in / hasOwnProperty.call（只枚举自有可枚举键）。
+    const tailSource: TimelineRecord = record as TimelineRecord;
+    const written: Set<string> = this.writtenFieldNames(out);
+    for (const key of Object.keys(tailSource)) {
+      if (!written.has(key)) {
+        out[key] = tailSource[key];
       }
     }
     return out;
   }
 
-  /** 已是 v2 media 原样用；否则把 v1 attachments 映射为 <sha16>.jpg 占位（解包归独立模块）。 */
-  private mediaOf(src: Record<string, unknown>): TimelineMedia[] {
+  /** out 上已写入的字段名：必写字段 + 本次实际带出的可选字段（不用 in / 原型方法）。 */
+  private writtenFieldNames(out: TimelineRecord): Set<string> {
+    const names: Set<string> = new Set<string>();
+    names.add('id');
+    names.add('ts');
+    names.add('title');
+    names.add('body');
+    names.add('author');
+    names.add('done');
+    names.add('media');
+    names.add('ai_processed');
+    names.add('opened_at');
+    if (out.ocr_text !== undefined) {
+      names.add('ocr_text');
+    }
+    if (out.ai_structured !== undefined) {
+      names.add('ai_structured');
+    }
+    if (out.ocr_time !== undefined) {
+      names.add('ocr_time');
+    }
+    if (out.closed_at !== undefined) {
+      names.add('closed_at');
+    }
+    return names;
+  }
+
+  /**
+   * 已是 v2 media 原样用；否则把 v1 attachments 映射为 <sha16>.jpg 占位（解包归独立模块）。
+   * 入参全是声明过形状的字段；运行时仍用 typeof / Array.isArray 收窄，畸形数据只跳过坏条目。
+   */
+  private mediaOf(incomingMedia: TimelineMedia[] | undefined, attachments: Attachment[] | undefined): TimelineMedia[] {
     const out: TimelineMedia[] = [];
-    const rawMedia: unknown = src.media;
-    if (Array.isArray(rawMedia)) {
-      for (const item of rawMedia) {
+    if (Array.isArray(incomingMedia)) {
+      for (const item of incomingMedia) {
         if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
-          out.push(item as TimelineMedia);
+          out.push(item);
         }
       }
       return out;
     }
-    const attachments: unknown = src.attachments;
     if (!Array.isArray(attachments)) {
       return out;
     }
@@ -348,13 +396,12 @@ export class TimelineWriteStore {
       if (item === null || typeof item !== 'object' || Array.isArray(item)) {
         continue;
       }
-      const att = item as Record<string, unknown>;
-      const sha: unknown = att.sha256;
-      if (typeof sha !== 'string' || !MEDIA_SHA_RE.test(sha as string)) {
+      const sha: string = item.sha256;
+      if (typeof sha !== 'string' || !MEDIA_SHA_RE.test(sha)) {
         continue;
       }
-      const lower: string = (sha as string).toLowerCase();
-      const page: unknown = att.pageIndex;
+      const lower: string = sha.toLowerCase();
+      const page: number = item.pageIndex;
       const pageIndex: number = typeof page === 'number' && Number.isInteger(page) && page >= 0 ? page : 0;
       out.push({ file: `${lower.slice(0, 16)}.jpg`, sha256: lower, pageIndex: pageIndex });
     }
@@ -391,11 +438,10 @@ export class TimelineWriteStore {
       return null;
     }
     try {
-      const parsed: unknown = JSON.parse(line);
-      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        const obj = parsed as Record<string, unknown>;
-        if (typeof obj.id === 'string' && typeof obj.ts === 'string') {
-          return `${obj.id}\u0000${obj.ts}`;
+      const row: LedgerRowShape = JSON.parse(line);
+      if (row !== null && typeof row === 'object' && !Array.isArray(row)) {
+        if (typeof row.id === 'string' && typeof row.ts === 'string') {
+          return `${row.id}\u0000${row.ts}`;
         }
       }
     } catch {

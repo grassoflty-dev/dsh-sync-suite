@@ -248,6 +248,8 @@ v2 替换的是 v1 的**日程时间线域**：`devices/<deviceId>/schedules/*.j
 
 实现见 `mod-v2-sync-protocol`：`assertWritable()` 先校验 schema=2 / 分支 `main` / HEAD==`origin/main`，失败即零写入；周期为 fetch → 读远端与本地 → unionDay → 原子写 → commit → push，**仅**在 push 被拒后才 `reset --hard origin/main` 并重放 outbox（≤4 次生命周期上限）；outbox 在 `<filesDir>/sync-outbox.json`（不进仓库）；**永不 force-push、不改写远端历史、不删除远端文件**。
 
+写入切换见 `mod-v2-dual-write-off`：仅当 `timeline/schema.json` 解析为 `schemaVersion:2` 时才把客户端 `timeline.readMode` 置 `'v2'`，否则保持 `'v1'` 并给出 typed 原因（`E_SCHEMA_MISSING`/`E_SCHEMA_UNKNOWN`）；七处写入经 `recordWriter` 分流；v2 写入失败时把意图停放进 outbox 并抛 `E_V2_WRITE_PARKED`，**绝不回落到 v1 写入**（避免双存储分叉）；另有**第二道显式激活闸** `AppStorage['timeline.v2WriteEnabled']`（默认缺失=false）：同步周期（`syncProtocolStore.runCycle`）接线并验证前不得激活，否则记录只落本地 `timeline/` 而不 commit/push，违反「不得静默本地未提交」。`devices/**` 在本阶段只读保留，物理退役另行决定。
+
 ## 10. 兼容与迁移
 
 **v1 检测优先级（P2-8）**：`timeline/schema.json` 存在且 `schemaVersion === 2` → v2，无论 `devices/` 是否存在（迁移提交只新增 `timeline/` 不删 `devices/`，故"两者并存"是迁移后常态）；标记存在但版本不认识 → 只读（`E_SCHEMA_UNKNOWN`）；标记缺失但 `devices/` 存在 → v1、需迁移（`E_MIGRATION_REQUIRED`）；两者都不存在 → 空仓库，按 v2 初始化并写标记。可测：四种 (标记, devices/) 组合 → 四个确定分支。

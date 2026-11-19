@@ -41,6 +41,16 @@ const DATE_KEY_RE: RegExp = /^\d{4}-\d{2}-\d{2}$/;
 /** 读模式在 AppStorage 里的键；取值仅 'v1' | 'v2'，缺省视作 'v1'。 */
 export const TIMELINE_READ_MODE_KEY: string = 'timeline.readMode';
 
+/**
+ * 一日三文件的解析结果（loadDay 的返回类型）。
+ * ArkTS 不允许把对象字面量直接当类型声明，故显式声明本接口。
+ */
+interface LoadedDay {
+  day: TimelineDay;
+  deleted: LedgerEntry[];
+  restored: LedgerEntry[];
+}
+
 export class TimelineStore {
   private filesDir: string = '';
   private ready: boolean = false;
@@ -268,7 +278,7 @@ export class TimelineStore {
   }
 
   /** 一日的三个文件一次性读入并交给纯函数；顶层坏文件返回 null（不抛）。 */
-  private loadDay(date: string): { day: TimelineDay; deleted: LedgerEntry[]; restored: LedgerEntry[] } | null {
+  private loadDay(date: string): LoadedDay | null {
     const parsed = parseTimelineDay(this.readText(this.dayRecordsPath(date)), date);
     if (parsed.day === null) {
       return null;
@@ -279,12 +289,17 @@ export class TimelineStore {
     if (parsed.errors.length > 0) {
       console.info('[tl] ' + date + ' 有 ' + parsed.errors.length + ' 行坏行（已跳过）');
     }
-    return { day: parsed.day, deleted: deleted, restored: restored };
+    const loaded: LoadedDay = { day: parsed.day, deleted: deleted, restored: restored };
+    return loaded;
   }
 
-  /** 原样带出 v2 记录的全部字段（包括未知字段），只做类型视图转换，不拷贝、不裁剪。 */
+  /**
+   * 原样带出 v2 记录的全部字段（包括未知字段），只做类型视图转换，不拷贝、不裁剪。
+   * TimelineRecord 结构上是 ScheduleRecord 的扩展（同名同类型字段 + 额外字段），
+   * 因此可直接按结构赋值；返回同一个对象引用，未知字段原样随对象带出。
+   */
   private asScheduleRecord(record: TimelineRecord): ScheduleRecord {
-    return record as unknown as ScheduleRecord;
+    return record;
   }
 
   private asScheduleRecords(records: TimelineRecord[]): ScheduleRecord[] {

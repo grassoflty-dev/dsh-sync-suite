@@ -17,6 +17,7 @@ import { buildAiPayload } from '../model/aiPayload';
 import type { Attachment, ScheduleRecord } from '../model/types';
 import { cloneRecord } from '../model/types';
 import { describeError, scheduleStore } from '../services/scheduleStore';
+import { recordWriter } from '../services/recordWriter';
 import { settingsStore } from '../services/settingsStore';
 import { attachmentStore } from '../services/attachmentStore';
 import { deviceTimeZone, summarize } from '../services/deepseek';
@@ -190,7 +191,7 @@ export struct RecordDetailView {
     next.ai_structured = text;
     next.ai_processed = true;
     try {
-      scheduleStore.appendRecord(next);
+      recordWriter.writeRecord(next);
     } catch (error) {
       promptAction.showToast({ message: `保存失败：${describeError(error)}`, duration: toastMsFor(true) });
       return;

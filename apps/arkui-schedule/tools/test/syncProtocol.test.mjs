@@ -550,7 +550,7 @@ test('51 outbox path is <filesDir>/sync-outbox.json, outside git-repo/', () => {
 test('52 outbox writes use atomic tmp + readback + rename', () => {
   const body = methodBody(SERVICE_CODE, 'writeOutbox');
   assert.match(body, /TMP_INFIX/);
-  assert.match(body, /fs\.writeTextSync\(tmp, text\)/);
+  assert.match(body, /this\.writeTextToFile\(tmp, text\)/);
   assert.match(body, /fs\.readTextSync\(tmp\) !== text/);
   assert.match(body, /fs\.renameSync\(tmp, path\)/);
   assert.doesNotMatch(body, /unlinkSync\(path\)/);

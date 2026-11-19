@@ -60,6 +60,8 @@ import { redactSecrets } from '../model/syncError';
 import { describeError, newRecordId, scheduleStore } from '../services/scheduleStore';
 import { openIndexStore } from '../services/openIndexStore';
 import { timelineStore } from '../services/timelineStore';
+import { recordWriter } from '../services/recordWriter';
+import { timelineModeSwitch } from '../services/timelineModeSwitch';
 import { summaryStore } from '../services/summaryStore';
 import { settingsStore } from '../services/settingsStore';
 import { deviceTimeZone, summarize } from '../services/deepseek';
@@ -350,6 +352,15 @@ struct Index {
       await timelineStore.ensureReady(getContext(this) as common.UIAbilityContext);
       await summaryStore.ensureReady(getContext(this) as common.UIAbilityContext);
       await openIndexStore.ensureReady(getContext(this) as common.UIAbilityContext);
+      // mod-v2-dual-write-off：只有 schema.json 明确为 v2 才翻转开关；否则保持 v1。
+      // 配置了仓库才提示一次（避免未配置仓库的新用户被打扰），原因文案来自纯决策函数。
+      const modeResult = await timelineModeSwitch.applyMode(getContext(this) as common.UIAbilityContext);
+      if (modeResult.mode === 'v1' && modeResult.code !== 'ok') {
+        const cachedSettings = settingsStore.cached();
+        if (cachedSettings !== null && cachedSettings.repoUrl.trim().length > 0) {
+          promptAction.showToast({ message: modeResult.reason, duration: toastMsFor(true) });
+        }
+      }
       // 启动自愈：「全部未完成」读索引，这里先把索引与最近 30 天分片对齐（无漂移则不写盘）
       // v2 模式下启动不得写 v1 索引：reconcile 会重写 devices/<id>/open.jsonl，仅 v1 默认路径执行
       if (!timelineStore.useV2()) { openIndexStore.reconcile(); }
@@ -541,7 +552,8 @@ struct Index {
     };
     this.quickBusy = true;
     try {
-      scheduleStore.appendRecord(record);
+      // 分流写入：v2 走 timeline，失败停放 outbox 并抛 E_V2_WRITE_PARKED；v1 走原 appendRecord
+      recordWriter.writeRecord(record);
     } catch (error) {
       this.quickBusy = false;
       promptAction.showToast({ message: `保存失败：${describeError(error)}`, duration: toastMsFor(true) });
@@ -819,7 +831,7 @@ struct Index {
     next.ts = nextTsSameDate(target.ts);
     next.done = done;
     try {
-      scheduleStore.appendRecord(next);
+      recordWriter.writeRecord(next);
     } catch (error) {
       promptAction.showToast({ message: `保存失败：${describeError(error)}` });
     }
@@ -915,7 +927,7 @@ struct Index {
     }
     const tombstone: ScheduleRecord = softDeleteRecord(target, nextTsSameDate(target.ts));
     try {
-      scheduleStore.appendRecord(tombstone);
+      recordWriter.deleteRecord(tombstone);
     } catch (error) {
       promptAction.showToast({ message: `删除失败：${describeError(error)}` });
       return;
@@ -947,7 +959,7 @@ struct Index {
     }
     const restored: ScheduleRecord = restoreRecord(tombstone, nextTsSameDate(tombstone.ts));
     try {
-      scheduleStore.appendRecord(restored);
+      recordWriter.restoreRecord(restored);
       promptAction.showToast({ message: '已撤销删除', duration: 2000 });
     } catch (error) {
       promptAction.showToast({ message: `撤销失败：${describeError(error)}`, duration: 3000 });
@@ -1090,7 +1102,7 @@ struct Index {
       for (const record of updated) {
         if (processedIds.indexOf(record.id) >= 0) {
           // 保留原 ts（记录仍归属原日期文件），只追加 ai_structured / ai_processed 变化
-          scheduleStore.appendRecord(record);
+          recordWriter.writeRecord(record);
         }
       }
       this.aiResultText = structured;

@@ -95,6 +95,13 @@ const DISABLED_MESSAGE: string = 'timeline v2 同步未启用';
 /** F1：快进失败（本地分叉）时的 typed 文案；零写入。 */
 const FF_DIVERGED_MESSAGE: string = '本地与 origin/main 已分叉，请先手工处理';
 
+/** 冲突行解析形状（只读 id/ts/dedupeKey；未知字段忽略）。 */
+interface ConflictRowShape {
+  id?: string;
+  ts?: string;
+  dedupeKey?: string;
+}
+
 export class SyncProtocolStore {
   private filesDir: string = '';
   private ready: boolean = false;
@@ -389,8 +396,8 @@ export class SyncProtocolStore {
   private reapplyIntents(outbox: OutboxEntry[]): void {
     for (const entry of replayable(outbox)) {
       if (entry.op === 'upsert') {
-        const obj: unknown = JSON.parse(entry.line);
-        this.timelineWriteStoreAppend(obj as ScheduleRecord, entry.date);
+        const obj: ScheduleRecord = JSON.parse(entry.line);
+        this.timelineWriteStoreAppend(obj, entry.date);
       } else if (entry.op === 'delete') {
         timelineWriteStore.scheduleDelete(entry.id, entry.date, entry.ts);
       } else if (entry.op === 'restore') {
@@ -426,9 +433,9 @@ export class SyncProtocolStore {
       return [];
     }
     try {
-      const parsed: unknown = JSON.parse(fs.readTextSync(path));
+      const parsed: OutboxEntry[] = JSON.parse(fs.readTextSync(path));
       if (Array.isArray(parsed)) {
-        return parsed as OutboxEntry[];
+        return parsed;
       }
     } catch {
       // 坏文件按空处理；下一步写入会以合法数组覆盖，但不猜测任何历史意图内容。
@@ -441,7 +448,7 @@ export class SyncProtocolStore {
     const path = this.outboxPath();
     const tmp = `${path}${TMP_INFIX}${this.instanceTag}-${Date.now()}-${this.nextSequence()}`;
     const text = JSON.stringify(entries);
-    fs.writeTextSync(tmp, text);
+    this.writeTextToFile(tmp, text);
     if (fs.readTextSync(tmp) !== text) {
       throw new Error('E_OUTBOX_ATOMIC: outbox 临时文件回读不一致，现场保留');
     }
@@ -530,12 +537,9 @@ export class SyncProtocolStore {
   /** 冲突行去重键：(id, ts, dedupeKey)（与 §4 / 迁移工具一致）。 */
   private conflictKey(line: string): string {
     try {
-      const obj: unknown = JSON.parse(line);
-      if (obj !== null && typeof obj === 'object' && !Array.isArray(obj)) {
-        const row = obj as Record<string, unknown>;
-        if (typeof row.id === 'string' && typeof row.ts === 'string' && typeof row.dedupeKey === 'string') {
-          return `${row.id}\u0000${row.ts}\u0000${row.dedupeKey}`;
-        }
+      const row: ConflictRowShape = JSON.parse(line);
+      if (typeof row.id === 'string' && typeof row.ts === 'string' && typeof row.dedupeKey === 'string') {
+        return `${row.id}\u0000${row.ts}\u0000${row.dedupeKey}`;
       }
     } catch {
       // 坏行退化为整行比较
@@ -575,11 +579,21 @@ export class SyncProtocolStore {
     const dir = slash >= 0 ? path.slice(0, slash) : path;
     this.ensureDir(dir);
     const tmp = `${path}${TMP_INFIX}${this.instanceTag}-${Date.now()}-${this.nextSequence()}`;
-    fs.writeTextSync(tmp, text);
+    this.writeTextToFile(tmp, text);
     if (fs.readTextSync(tmp) !== text) {
       throw new Error(`E_SYNC_ATOMIC: 临时文件回读不一致（${path}），现场保留`);
     }
     fs.renameSync(tmp, path);
+  }
+
+  /** 写文本到指定路径（ArkTS 无 fs.writeTextSync；与 draftStore 同一写法）。 */
+  private writeTextToFile(path: string, text: string): void {
+    const file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(file.fd, text);
+    } finally {
+      fs.closeSync(file);
+    }
   }
 
   private ensureDir(dir: string): void {
