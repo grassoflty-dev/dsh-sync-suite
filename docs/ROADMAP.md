@@ -433,10 +433,10 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 >
 > 要求：**可复现**——别人照 ① 重跑必须能得到 ②；"贴一段没有命令的 `BUILD SUCCESSFUL`"不算证据。
 
-- **并行上限本项目约定为 5**（2026-11-18 用户确认）：同一时刻最多 5 个执行子代理在跑，
+- **并行上限本项目约定为 5**（2026-11-18 首次约定 3，**2026-11-19 用户提高到 5**）：同一时刻最多 5 个执行子代理在跑，
   达到 5 个就排队，短任务优先、交付即回收。
-  这是**本工作区的软约束**，不改 DSH 配置（`subagent.maxActiveSubagents` 保持默认 8），
-  其它工作区不受影响。
+  这是**本项目的记录/软约束**（写在本文件与 `CLAUDE.md` 的三层协作节），**不改 DSH 配置**
+  （`subagent.maxActiveSubagents` 保持默认 8），其它工作区不受影响。
 - **模型分工**（2026-11-18 用户确认，写进每次派活的 prompt）——同为**软约束，不改配置**：
   - 主会话与**总设计师**：`dsh-opencode-go / deepseek-v4.1-flash / high`；
     总设计师**不传** provider/model，直接继承主会话（最稳）；
@@ -455,13 +455,14 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
   其余任务在后台跑，等独占方结束再入场。
 - 规划子代理每轮向主会话汇报三行：完成 / 进行中含 owner / 阻塞或需决策。
 
-## 交接：当前状态与下一步（2026-11-18 22:00 起笔，23:10 收口 B 批；2026-11-19 追加 B2 批、B3 批、B4 批）
+## 交接：当前状态与下一步（2026-11-18 22:00 起笔，23:10 收口 B 批；2026-11-19 追加 B2 批、B3 批、B4 批与 B4 收窄）
 
 > 用途：换会话/重启后**先读这一节**，不用问人。
-> **HEAD = main 顶端 `9fa9277`**（B3 批已提交）：A 批 / C 批 / B 批（一键重连 + chat 出口）/
-> B2 批（导出 chip + 设置页锚点）/ B3 批（路径 1 / 路径 2 落盘改造 + D1-P2）都已提交；
-> **B4 批（D5 可指定日期 + D7 首页日历接线 + B3 评审 P2-1）已写完，工作树待 Lead 提交**
-> （清单见下「待提交清单（B4 批）」，共 **11 个文件** = 3 改 + 5 新增（1 纯逻辑 + 4 测试）+ 3 文档）。
+> **HEAD = main 顶端 `14b181a`**（B4 批已提交）：A 批 / C 批 / B 批（一键重连 + chat 出口）/
+> B2 批（导出 chip + 设置页锚点）/ B3 批（路径 1 / 路径 2 落盘改造 + D1-P2）/ B4 批
+> （D5 可指定日期 + D7 首页日历接线 + B3 评审 P2-1）都已提交。
+> **B4 收窄（日期仅新建时可选，用户 2026-11-19 拍板）尚未提交**：工作树 **6 个路径** =
+> **2 改 + 2 删 + 2 新增**（清单见下「待提交清单（B4 收窄：日期仅新建时可选）」）。
 > 除此之外 `git status` 无其他改动。
 >
 > **2026-11-19 历史清理（重要，读下面这段再查哈希）**：为把仓库做成可公开的
@@ -493,7 +494,7 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 | `apps/arkui-schedule/tools/test/b3HandwritingAutoSave.test.mjs` | 新增（10 例） | 路径 2 生产者/消费者契约（一次性键、四类早退、`discardDraft` 顺序） |
 | `docs/UX-STEPS.md`、`docs/ROADMAP.md`、`docs/REVIEW-b3-batch.md` | 文档 | 本文件的 §4.3 / 交接节 / 独立评审 |
 
-### 待提交清单（B4 批，HEAD `9fa9277` 之上的工作树）
+### B4 批已提交清单（已随提交 `14b181a` 入库，保留便于查历史；随后又被收窄，见下一节）
 
 | 文件 | 性质 | 一句话 |
 | --- | --- | --- |
@@ -507,6 +508,17 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 | `apps/arkui-schedule/tools/test/b4CalendarWiring.test.mjs` | 新增（18 例） | D7 接线静态断言：首页无 `DatePicker(`、两处复用 `CalendarPicker`、`pickDate` 五动作有序、`‹/今天/›` 入口未丢、无假入口 |
 | `docs/UX-STEPS.md`、`docs/ROADMAP.md`、`docs/REVIEW-b4-batch.md` | 文档 | 本文件的 §4.4（含 4.4.1 `ts`/分片/合并语义、4.4.2 落点、4.4.3 已知限制）/ 交接节 / 独立评审（P0 0 / P1 0 / P2 6，不阻塞） |
 
+### 待提交清单（B4 收窄：日期仅新建时可选，HEAD `14b181a` 之上的工作树）
+
+| 文件 | 性质 | 一句话 |
+| --- | --- | --- |
+| `apps/arkui-schedule/entry/src/main/ets/components/RecordEditorView.ets` | 改 | 保存改走 `resolveSaveTs`；`dateEditable()` 让已有记录日期行只读（「创建时选定，不可改」），仅新建时展开 `CalendarPicker`；`!plan.ok` 早退在写之前；移除 `softDeleteRecord` import，删除跨日迁移与更早日期拒绝分支 |
+| `apps/arkui-schedule/tools/test/b4DateUi.test.mjs` | 改（25 → 21 例） | 删除 4 条测被移除功能的用例，改写为「已有记录日期只读 + 新建可选 + 单条 toast + marker 无条件」断言 |
+| `apps/arkui-schedule/entry/src/main/ets/model/recordDateMove.ts` | 删 | 原 D5 跨日迁移决策模块（`planDateMove` 六分支 + 旧日 `deleted:true` 行 + 更早日期拒绝）整体删除 |
+| `apps/arkui-schedule/tools/test/b4DateMove.test.mjs` | 删（19 例） | 随 `recordDateMove.ts` 一并删除的纯逻辑测试 |
+| `apps/arkui-schedule/entry/src/main/ets/model/recordSaveTs.ts` | 新增（纯逻辑，90 行） | `SaveTsPlan` / `tsForDate()` / `resolveSaveTs()`：新建按选定日期分片，已有记录忽略 `chosenDate` 同日 `nextTsSameDate`，非法新建日期 / 不可解析原 ts fail-closed |
+| `apps/arkui-schedule/tools/test/b4SaveTs.test.mjs` | 新增（20 例） | `tsForDate` 字节等价 / 非法日 / 闰日，`resolveSaveTs` 新建 / 同日 / 忽略 chosenDate / 两条 fail-closed 路径 |
+
 ### 已交付（本轮及之前）
 
 | 块 | 内容 | 证据 |
@@ -519,25 +531,29 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 | 便捷性（B 批，**部分**） | D1 远程地址归一 + **一键重连**（`settingsStore.remoteLastOk` + `RemoteControl.onPageEnd` 记「最近成功」→ 设置页 `重新连接 <host:port>`）；D2 P1 **chat 详情页「在电脑上继续」**跳转出口（只读纪律不变，无输入框） | 提交 `8f34418`（11 文件 / **+1122 −45**）；全量 **2179 例 / 2178 pass / 0 fail / 1 skip**；`validate-app` **8/8**；独立评审 `docs/REVIEW-b-batch.md`（P0 0 / P1 1 / P2 2）+ Lead 复审追加 P2-3，四条 P1/P2 已修、P2-2 列为已知限制；`docs/UX-STEPS.md` §4.1（N→M） |
 | 便捷性（B2 批） | **D4 导出区间快捷 chip**（今天 / 本周 / 近 7 天；「本周」周一为首日、手改后以手改为准、不新增 @State）；**D6 设置页紧凑屏组锚点**（同步 / AI / 远程 / 数据 / 关于；`pageScroller.scrollTo` 真跳转，未测量时 toast 原因，宽屏不做） | 提交 `37a602d`（8 文件 / **+1377 −19**，含评审与文档）；全量 **2204 例 / 2203 pass / 0 fail / 1 skip**（B2 新增 25 例）；`validate-app` **8/8**；独立评审 `docs/REVIEW-b2-batch.md`（P0 0 / P1 1 / P2 4，不阻塞；P1-1 与 P2-1/P2-3 已补钉，见该文 §6 复审）；`docs/UX-STEPS.md` §4.2（路径 3 10→7、路径 4 8→7 / 7→6、路径 5 10→8 / 5′ 12→10；合计 43→37，承接 §4.1 口径 42→36） |
 | 便捷性（B3 批） | **路径 1**：新建记录 `defaultFocus` 自动聚焦标题（省 1 tap）+ 保存返回首页改**局部刷新**（一次性标记 → `reload()` + 单行对账，不再全量对账/重读汇总，省 1 wait）；**路径 2**：「完成」即回编辑页并**自动保存**（`handwriting.autosave` 一次性键；空笔迹/无标题/未就绪/写盘失败全部给原因、不写半条记录），省 1 tap + 1 wait；**D1-P2**：远程地址失焦即归一 + 一次性提示（0 步，只提前暴露问题） | 提交 `9fa9277`（B3 清单 9 个文件 + 评审/文档）；全量 **2233 例 / 2232 pass / 0 fail / 1 skip**（B3 新增 29 例：`b3Batch.test.mjs` +19、`b3HandwritingAutoSave.test.mjs` +10）；`validate-app` **8/8**；`tsc` exit 0；独立评审 `docs/REVIEW-b3-batch.md`（P0 0 / P1 0 / P2 6，**不阻塞**；6 条 P2 已登记进 `docs/UX-STEPS.md` §4.3「已知限制」）；`docs/UX-STEPS.md` §4.3（路径 1 **7→5**、路径 2 **8→6**；合计 37→33 / 首算 43→33） |
-| 便捷性（B4 批，**待提交**） | **D5 记录可指定日期**（新记录按 `defaultDate`/今天生成 `ts`；已有记录可改到**更晚**一天：目标日 live 版本 + 旧日片 `deleted:true` 墓碑，无幽灵副本；改到**更早**一天按契约**明确拒绝**并说明原因）；**D7 首页日期条换 `CalendarPicker`**（月视图替代系统三列滚轮，与编辑器日期入口复用同一组件，跨月改期 3 scroll → 0）；**B3 评审 P2-1**（保存行对账判据放宽为「同 id 且 ts 不早于标记 ts」，不再因详情页二次写 ts 误报「没读到刚保存的日程」） | 工作树未提交（见上「待提交清单（B4 批）」）；全量 **2309 例 / 2308 pass / 0 fail / 1 skip**（B4 新增 76 例：`b4DateMove` 19 + `b4DateUi` 25 + `b4SavedRow` 14 + `b4CalendarWiring` 18）；`validate-app` **8/8**；`tsc` exit 0；独立评审 `docs/REVIEW-b4-batch.md`（P0 0 / P1 0 / P2 6，**不阻塞**，D5 `ts`/分片/合并语义判 **accepted-with-limits**）；`docs/UX-STEPS.md` §4.4（D5/D7 都**不减少**五条基准路径合计：33→33，P1 目标 26 仍差 7 步） |
+| 便捷性（B4 批，提交 `14b181a`，历史） | **D5 记录可指定日期**（新记录按 `defaultDate`/今天生成 `ts`；已有记录可改到**更晚**一天：目标日 live 版本 + 旧日片 `deleted:true` 墓碑，无幽灵副本；改到**更早**一天按契约**明确拒绝**并说明原因）；**D7 首页日期条换 `CalendarPicker`**（月视图替代系统三列滚轮，与编辑器日期入口复用同一组件，跨月改期 3 scroll → 0）；**B3 评审 P2-1**（保存行对账判据放宽为「同 id 且 ts 不早于标记 ts」，不再因详情页二次写 ts 误报「没读到刚保存的日程」）。**此行为已被下一行收窄，仅作历史保留** | 已随提交 `14b181a` 入库（见上「B4 批已提交清单」）；当时全量 **2309 例 / 2308 pass / 0 fail / 1 skip**（B4 新增 76 例：`b4DateMove` 19 + `b4DateUi` 25 + `b4SavedRow` 14 + `b4CalendarWiring` 18）；`validate-app` **8/8**；`tsc` exit 0；独立评审 `docs/REVIEW-b4-batch.md`（P0 0 / P1 0 / P2 6，**不阻塞**，D5 `ts`/分片/合并语义判 **accepted-with-limits**）；`docs/UX-STEPS.md` §4.4（D5/D7 都**不减少**五条基准路径合计：33→33，P1 目标 26 仍差 7 步） |
+| 便捷性（B4 收窄，待提交） | 用户 2026-11-19 拍板「日期只在新建时选一次」：**B4 已提交的改期机制（跨日 live + 旧日清理、更早日期拒绝）全部删除**，新增纯逻辑 `model/recordSaveTs.ts`（`tsForDate` / `resolveSaveTs`），编辑器日期行对已有记录只读并显示「创建时选定，不可改」，仅新建时弹 `CalendarPicker`；已有记录保存只在原日期追加更晚版本 | 工作树未提交（见上「待提交清单（B4 收窄）」，6 路径 = 2 改 + 2 删 + 2 新增）；全量 **2306 例 / 2305 pass / 0 fail / 1 skip**（相对 2309 的 −3 是刻意删除测被移除功能的用例；新基线 `b4SaveTs` 20 + `b4DateUi` 21 + `b4CalendarWiring` 18 + `b4SavedRow` 14 = 73）；`validate-app` **8/8**；`tsc` exit 0；删除 diff 的独立只读评审 `docs/REVIEW-b4-narrow.md` |
 
 **当前基线**：全量 `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"`
-**2309 例 / 2308 pass / 0 fail / 1 skip**（B4 批新增 76 例：`b4DateMove.test.mjs` 19、
-`b4DateUi.test.mjs` 25、`b4SavedRow.test.mjs` 14、`b4CalendarWiring.test.mjs` 18；
-skip 数未增加，仍是既有那条 fetch 直连用例）；`validate-app` **8/8**；
+**2306 例 / 2305 pass / 0 fail / 1 skip**（上一基线 B4 批 **2309 / 2308 / 0 / 1**；**−3** 是收窄时
+**刻意删除**测被移除功能的用例——净变化为 `b4DateMove.test.mjs` 整文件 −19、`b4DateUi` 25→21 −4、
+新增 `b4SaveTs.test.mjs` +20；当前相关用例 `b4SaveTs` 20 + `b4DateUi` 21 + `b4CalendarWiring` 18 +
+`b4SavedRow` 14 = 73；skip 数未变，仍是既有那条 fetch 直连用例）；`validate-app` **8/8**；
 `overlay applied=false`；`node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json` exit 0。
-（B3 批基线 **2233 / 2232 / 0 / 1**、B2 批 **2204 / 2203 / 0 / 1**、B 批 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
+（B4 批 **2309 / 2308 / 0 / 1**、B3 批 **2233 / 2232 / 0 / 1**、B2 批 **2204 / 2203 / 0 / 1**、
+B 批 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
 
 ### 未完成（按优先级）
 
 1. **便捷性（B 批 / B2 批 / B3 批 / B4 批）**：D1-b（一键重连）、D2 P1（「在电脑上继续」跳转出口）已在 `8f34418`；
    D4（导出快捷 chip）与 D6（设置页组锚点）已提交 `37a602d`；路径 1/路径 2 落盘改造与 D1-P2 已提交 `9fa9277`；
-   **D5（可指定日期）与 D7（`CalendarPicker` 接线）已写完、待 Lead 提交**（见上表与 `docs/UX-STEPS.md` §4.4）。
+   **D5 与 D7 已随 B4 批提交 `14b181a`**（D5 已收窄为「仅新建时选日期，已有记录日期只读」，待提交的收窄改动见上
+   「待提交清单（B4 收窄）」与 `docs/UX-STEPS.md` §4.4）。
+   **不做改期（用户 2026-11-19 拍板）**：日期只在新建时选一次，已有记录永不换日；旧 id 换身份 / 加独立日期字段
+   等候选方案一并作废，不再是未决事项。
    **仍未完成**：D2 的 P2（真接管，要等 `CHAT-SYNC` §1/§5 的租约 + sha 校验）、首页底部「快捷记录」
    （不跳编辑页那条）、路径 1 的 bootstrap wait（需真机证明「进页即可输入」）；
    原 §4「P1 目标 26」**仍未达成**（当前 33 步，差 7 步，缺口全在未做项——D5/D7 买的是正确性，不是步数）。
-   **需决策**：D5 的「往更早的日期改」当前按契约拒绝，若要支持必须换身份（旧 id 墓碑 + 新 id 新建）
-   或改数据格式（加独立日期字段），两者都会动到跨设备/详情的既有语义，等用户拍板。
 2. **真机验收（全部挂起，`hdc list targets` = `[Empty]`）**：手写板 5 项（penOnly 挡手指、笔迹面板二级菜单、工具条两行、撤销重做可点、折叠布局画布高度）、chat 内嵌 Web 的 `ERR_WS_UPGRADE(-173)`、UU 两个实测点（入口形态 / WS 透传）。**设备没连上不许报“已验证”。**
 3. **模型路由**：`dsh-opencode-go/hy4-flash-free` 的允许清单是**会话启动快照**，改配置后需**重启 DSH + 新会话**才生效；当前会话只能用继承的 `deepseek-v4.1-flash`。重启后再验 `list_subagent_models(provider: "dsh-opencode-go")`。
 4. **后续排队**：类型注册表（`docs/SYNC-SCOPES.md`：6 项声明，无合并策略即拒绝接入）→ Git 接入向导（`docs/CONFIG-UX.md`）→ 远程连接收敛（`auto` 优先级 + 一键自检 + 二维码）；F 测试套件卫生；G 吞错审计；H 契约静态测试；E APK 收尾。
@@ -548,7 +564,9 @@ skip 数未增加，仍是既有那条 fetch 直连用例）；`validate-app` **
   `provider: "dsh-opencode-go"`、`model: "hy4-flash-free"`，**不传 `reasoning_effort`**（用该模型默认档）；
   总设计师用 `provider: "dsh-opencode-go"`、`model: "deepseek-v4.1-flash"`、`reasoning_effort: "high"`。
   只有被会话快照拒绝时才退回「不传 provider/model、让子代理继承」，**被拒不要重试轰炸，也不要改 profile**。
-- 并行 ≤**3** 个执行子代理（硬上限，超出排队补位）；执行子代理**不得再派生子代理**；同一文件不许双写。
+- 并行 ≤**5** 个执行子代理（本项目 2026-11-19 用户拍板，由 3 提到 **5**；这是**项目记录**，
+  不是 DSH 配置改动——不改 profile、不改 `subagent.maxActiveSubagents`）。超出排队补位；
+  执行子代理**不得再派生子代理**；同一文件不许双写（撞文件串行）。
 - 验收标准写进**初始 prompt**；交付带**证据三段式**（命令原文 / 原样输出 / 结论）。
 - 关键改动要独立只读评审，结论落 `docs/REVIEW-*.md`。
 - 跑测试前先 `overlay.mjs status`；构建期不跑全量测试。
@@ -572,18 +590,24 @@ skip 数未增加，仍是既有那条 fetch 直连用例）；`validate-app` **
   消费侧四类早退（无信号 / 无回填 / 未就绪 / 标题为空）全部给可读原因，**绝不**写半条坏记录。
   一次性键的清除要覆盖「退出」路径，否则上一次完成的信号会在下一次返回时误触发。
 - 静态断言现在盯的是 `ActionButton({ label: … })` 与 `ErrorState({…})`，**不再是** `Button('…')` / `Text('…')`——改 UI 时同步改断言并注明原因。
-- **「改日期」的写法（B4 批沉淀）**：`ts` 同时是分片键与版本序（`recordDateKey` / `foldById` / `applyRecordToIndex`），
+- **「改日期」的写法（B4 批沉淀；需求收窄后**已作废**，仅留历史，以「需求收窄时先删干净」条为准）**：`ts` 同时是分片键与版本序（`recordDateKey` / `foldById` / `applyRecordToIndex`），
   所以改日期只能靠「新版本 ts」表达：同日用 `nextTsSameDate()`；往后用 `tsForDate(目标日)` 的 live 版本 **+**
   旧日片 `deleted:true` 墓碑（`softDeleteRecord(编辑前快照, nextTsSameDate(原 ts))`），顺序**必须 live 先、墓碑后**
   （反过来一旦中断就是整条记录消失）；往早改**在本模型里做不到**（目标日 ts 必然更早，旧版本会赢），只能拒绝并解释，
   不许硬写。判定全部放纯逻辑（`model/recordDateMove.ts`，Node 可测），`.ets` 只接线；文本断言要钉
   「`!plan.ok` 的 `return` 在 `appendRecord` 之前」「墓碑 append 在 live append 之后」，只钉「调了 planDateMove」挡不住半条记录。
-- **「已经落盘的写不许当没写」（B4 评审沉淀）**：`appendRecord` 成功之后的收尾（快照/日期状态、草稿清理、一次性标记、
+- **「已经落盘的写不许当没写」（B4 评审沉淀；其中的「清理失败/`cleanupNote`」部分随收窄作废，「落盘后收尾无条件执行」通则仍成立）**：`appendRecord` 成功之后的收尾（快照/日期状态、草稿清理、一次性标记、
   `onSaved`）**一律无条件执行**；清理失败只改 toast 文案（`cleanupNote`），绝不 `return`、绝不回滚、绝不吞掉「已保存」——
   否则首页收不到标记、返回守卫还以为脏、再点保存会反复进同一分支（本批就踩过这个坑，评审前已修 + 补钉）。
 - **「放宽既有判据」的写法（B4 批沉淀）**：先查有没有既有测试钉死旧判据（如 `b3Batch.test.mjs` B3-05 用 `'t1'/'t2'` 占位串）。
   想不动既有测试就放宽，就让新逻辑在**任一侧不可解析时退回精确相等**（占位串行为逐字不变），新语义写进**新**测试文件；
   真要改断言只许**收紧**（例如把 `assert.match(…/return;/)` 反成 `doesNotMatch` 来禁止回归），不许放宽。
+- **「需求收窄时先删干净」（B4n 沉淀）**：功能已提交后再去范围，必须用一个**专门的小提交**把机制代码 + 它的测试 +
+  文档里的相关行/表格行一并删净（本次删 `recordDateMove.ts` + `b4DateMove.test.mjs` + §4.4 的两条路径行与
+  「旧日清理 / 钳位 / 清理失败」等条目），不在保存路径里留 `if` 死分支、不留任何拒绝文案或不可达 import；
+  基线下降要在交接节写明是**刻意**的（多少例、为什么），并在同一批更新
+  `C:\Users\GWL\Desktop\itwillclaude\项目理解.md`。判定「删干净」：`git status` 只剩预期的改/删/增文件，
+  旧术语在文档里只出现在历史描述中。
 
 
 > **提交标签事故记录**：`55c9303` 提交信息写的是 docs，实际混入了 `apps/arkui-schedule/entry/src/main/ets/components/settings/SyncSection.ets`
