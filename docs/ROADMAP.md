@@ -552,7 +552,7 @@ WS /api/remote.mux 带 cookie -> 101（服务端支持 WS，参考实现的旁�
 | 便捷性（B4 收窄，待提交） | 用户 2026-11-19 拍板「日期只在新建时选一次」：**B4 已提交的改期机制（跨日 live + 旧日清理、更早日期拒绝）全部删除**，新增纯逻辑 `model/recordSaveTs.ts`（`tsForDate` / `resolveSaveTs`），编辑器日期行对已有记录只读并显示「创建时选定，不可改」，仅新建时弹 `CalendarPicker`；已有记录保存只在原日期追加更晚版本 | 工作树未提交（见上「待提交清单（B4 收窄）」，6 路径 = 2 改 + 2 删 + 2 新增）；全量 **2306 例 / 2305 pass / 0 fail / 1 skip**（相对 2309 的 −3 是刻意删除测被移除功能的用例；新基线 `b4SaveTs` 20 + `b4DateUi` 21 + `b4CalendarWiring` 18 + `b4SavedRow` 14 = 73）；`validate-app` **8/8**；`tsc` exit 0；删除 diff 的独立只读评审 `docs/REVIEW-b4-narrow.md` |
 
 **当前基线**：全量 `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"`
-**2711 例 / 2710 pass / 0 fail / 1 skip**（+26 = `mod-export-import-v2` 的 `exportImportV2.test.mjs` 26；相对 2670 基线的 **+44**：`mod-v2-sync-wiring` 的 `syncWiring.test.mjs` 44；相对 2607 基线的 **+18**：`mod-v2-dual-write-off` 的 `dualWriteOff.test.mjs` **18**；相对 2536 基线的 **+56**：`mod-v2-sync-protocol` 的 `syncProtocol.test.mjs` **56**；相对 2485 基线的 **+51**：`mod-v2-write-service` 的 `timelineWrite.test.mjs` **32**；相对 2459 基线的 **+23**：`mod-v2-read-service` 的 `timelineService.test.mjs` **23**；相对 2425 基线的 **+34**：`mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` **31**；相对 2391 基线的 **+30**：`mod-quick-record` 的
+**2774 例 / 2773 pass / 0 fail / 1 skip**（+3 = `mod-push-detail` 的 `contractGaps.test.mjs` C14/C15/C16，contractGaps 28/28；相对 2771 基线的 **+25** = `mod-v2-contract-tests` 的 `contractGaps.test.mjs` 25；此前 +26 = `mod-export-import-v2` 的 `exportImportV2.test.mjs` 26；相对 2670 基线的 **+44**：`mod-v2-sync-wiring` 的 `syncWiring.test.mjs` 44；相对 2607 基线的 **+18**：`mod-v2-dual-write-off` 的 `dualWriteOff.test.mjs` **18**；相对 2536 基线的 **+56**：`mod-v2-sync-protocol` 的 `syncProtocol.test.mjs` **56**；相对 2485 基线的 **+51**：`mod-v2-write-service` 的 `timelineWrite.test.mjs` **32**；相对 2459 基线的 **+23**：`mod-v2-read-service` 的 `timelineService.test.mjs` **23**；相对 2425 基线的 **+34**：`mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` **31**；相对 2391 基线的 **+30**：`mod-quick-record` 的
 `quickRecord.test.mjs` **16** + `quickRecordUi.test.mjs` **14**；相对 2348 基线的 **+42**：`mod-v2-read-timeline` 的
 `timelineRead.test.mjs` **+42**；再往前相对 2306 基线的 **+40**：`mod-v2-migration` 的
 `v2Migration.test.mjs` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` 的 `handwritingToolbar.test.mjs` **+1**；
@@ -599,6 +599,7 @@ B 批 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
 - mod-export-import-v2 已写完（v2 导出/导入，五个 typed 拒绝，未删 v1），待提交；真机未验（无设备连接）
 - mod-state-summary 一页现状文档已写完（`docs/STATE-OF-PROJECT.md`，6 节）：默认 v1 / v2 显式激活、交付模块与哈希、保证与不保证、未验证边界、若用户回来的下一步；纯文档、只读既有模块文档，提交哈希由 Lead 回填（`MODULES.md` §1/§5 登记为「（Lead 填）」）
 - mod-v2-contract-tests 已写完（契约缺口 25 例，假 IO 媒体预检 / shipped dedupe / 未测契约规则），待提交；评审 P1 登记已补；发现 typedPushError 丢细节（P2，记录不修）
+- mod-push-detail 已完成（修 `typedPushError`：带细节的 `E_PUSH_REJECTED` 逐字保真进 message + lastError，裸码 / 非 E_ 错误行为不变；C12 空断言已修 + C14/C15/C16，contractGaps 28/28），待提交；**当前为干净停止点**：在不具备 (a) 平板上配置好仓库、(b) chat 租约/sha 规格、(c) DSH 重启 之前，没有可推进的模块。
 
 ### 派活模板要点（别漏）
 

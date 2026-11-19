@@ -150,16 +150,32 @@ function corruptOutcome(reason: string, outbox: OutboxEntry[]): CycleOutcome {
   };
 }
 
+/** push 失败的可诊断结果：code 用于分类、message 给用户、lastError 原样留存细节。 */
+interface TypedPushError {
+  code: string;
+  message: string;
+  lastError: string;
+}
+
 /**
  * push 失败类型的保真（cheap extra）：`E_AUTH` / `E_IO` 等原始 typed 原因不再被
- * 一律收窄成 E_PUSH_REJECTED；已经是 E_PUSH_REJECTED 的保持原逐字文案（兼容既有断言）。
+ * 一律收窄成 E_PUSH_REJECTED；`E_PUSH_REJECTED` 带附加细节（码后仍有非空文本，
+ * 如 `E_PUSH_REJECTED: rival advanced first (non-fast-forward)`）时逐字保留原文，
+ * 让非快进等真实原因既进入用户可见 message，也进入 lastError；
+ * 只有裸码（或普通传输错误）才折叠成通用中文下一步文案（兼容既有断言）。
  */
-function typedPushError(text: string): { code: string; message: string } {
+function typedPushError(text: string): TypedPushError {
   const matched: RegExpExecArray | null = /^(E_[A-Z_]+)/.exec(text);
   if (matched !== null && matched[1] !== 'E_PUSH_REJECTED') {
-    return { code: matched[1], message: `${SYNC_RETRY_ERROR}（${text}）` };
+    // E_AUTH / E_IO 等：typed 码 + 原文细节均保留，行为不变。
+    return { code: matched[1], message: `${SYNC_RETRY_ERROR}（${text}）`, lastError: text };
   }
-  return { code: 'E_PUSH_REJECTED', message: SYNC_RETRY_ERROR };
+  // E_PUSH_REJECTED 且码后还有细节：逐字保真，不再塌缩成通用文案。
+  if (matched !== null && text.slice(matched[1].length).trim().length > 0) {
+    return { code: 'E_PUSH_REJECTED', message: `${SYNC_RETRY_ERROR}（${text}）`, lastError: text };
+  }
+  // 裸 E_PUSH_REJECTED / 非 E_ 传输错误：通用中文原因 + 下一步，行为不变。
+  return { code: 'E_PUSH_REJECTED', message: SYNC_RETRY_ERROR, lastError: text };
 }
 
 /** 把当前 outbox 立刻原子落盘（P1-3：崩溃不重置跨会话预算）。 */
@@ -425,8 +441,9 @@ export async function runCyclePure(
   for (const entry of replayable(current)) {
     failedIds.push(entry.intentId);
   }
-  const typed: { code: string; message: string } = typedPushError(lastPushError);
-  current = outboxAfterReplay(current, [], failedIds, allDropped, now, typed.message);
+  const typed: TypedPushError = typedPushError(lastPushError);
+  // lastError 用原文（含码 + 细节），message 才带中文下一步；二者都保真原始拒推原因。
+  current = outboxAfterReplay(current, [], failedIds, allDropped, now, typed.lastError);
   // 终态（failed）也当场落盘；调用方末尾的兜底写入只是幂等冗余。
   await persistOutbox(write, current);
   return {

@@ -39,6 +39,7 @@
 | `mod-runbook` | 运维手册：v1→v2 迁移、激活/关闭、按 tag 从右往左回滚、七类拒绝与 outbox 处置、激活后验收、未验证边界 | 已提交 | 9904161 | 提交前回滚 = 删除 `docs/RUNBOOK.md`；提交后 `git revert <hash>`（纯文档，另需撤销本文件 §1/§5 与 `docs/ROADMAP.md` 交接节的三处登记） | 无代码依赖（只读既有模块文档）；引用 `mod-v2-*` 模块 | `docs/RUNBOOK.md`（6 节，126 行） |
 | `mod-state-summary` | 项目现状一页纸：今天做什么/默认开关、模块与哈希表、v2 默认行为、保证与不保证、未验证、下一步 | 已提交 | 2a475e0 | 提交前回滚 = 删除 `docs/STATE-OF-PROJECT.md`；提交后 `git revert <hash>`（纯文档，另需撤销本文件 §1/§5 与 `docs/ROADMAP.md` 交接节的三处登记） | 无代码依赖（只读既有模块文档）；引用 `mod-v2-*` 与 §1/§5 哈希 | `docs/STATE-OF-PROJECT.md`（6 节，一页） |
 | `mod-v2-contract-tests` | 契约缺口测试（假 IO 媒体预检、shipped dedupe、R<D/摘要/maxAttempts/未知 schema/4× 推送拒绝） | 已提交 | 58caeb2 | `git revert <hash>`（仅新增 1 个测试文件） | 独立；覆盖 mod-v2-export-import-v2 / mod-v2-hardening 的已记录 P2 | `tools/test/contractGaps.test.mjs`（520 行，25 例） |
+| `mod-push-detail` | 修复 `typedPushError` 丢细节：带细节的 `E_PUSH_REJECTED` 逐字保真进 message + lastError；裸码 / 非 E_ 传输错误仍折叠成通用中文文案 | 已交付，待提交 | （Lead 填） | 提交前回滚 = 撤销 `model/syncCycle.ts`、`contractGaps.test.mjs`、`syncWiring.test.mjs` 三处改动；提交后 `git revert <hash>` | **独立叶子，无被依赖**；只改纯模型 + 测试，不进依赖回滚链 | `docs/REVIEW-contract-tests.md` §3（P2 缺陷）；`tools/test/contractGaps.test.mjs`（C12 修正 + C14/C15/C16，共 28 例） |
 
 `mod-v2-dual-read` 已被 `mod-v2-dual-write-off` 取代，见契约 §13。
 
@@ -55,6 +56,8 @@ mod-v2-contract
  ├─ mod-v2-write-service ────────────────────────┼─ mod-v2-dual-write-off ─ mod-v2-sync-wiring ─ mod-export-import-v2
  └─ mod-v2-sync-protocol ────────────────────────┘
 ```
+
+`mod-push-detail` 是**独立叶子**（无被依赖、无下游），不在上面的回滚链里：只改 `model/syncCycle.ts` 的 `typedPushError` 及两个测试文件（`contractGaps.test.mjs` / `syncWiring.test.mjs`），回滚独立、不影响任何 v2 模块。
 
 回滚必须从右往左（先回滚依赖方）；单独回滚 `mod-v2-read-service` 而保留 `mod-v2-dual-write-off` 会让已迁移仓库没有读取方（见 ROADMAP 的排序风险）。`mod-v2-sync-wiring` 是激活环节，**单独回滚它只让应用回到「v2 写入未激活」状态（安全，v1 数据未删）**；但若先回滚 `mod-v2-dual-write-off` 而保留 sync-wiring，接线会悬空（`runCycle`/激活闸失去分流基础），故二者必须按此顺序回滚。新增 `mod-export-import-v2` 位于依赖链最右端（依赖 sync-wiring）；**回滚顺序固定为：先回滚 `mod-export-import-v2`（导出/导入），再回滚 `mod-v2-sync-wiring`，最后回滚 `mod-v2-dual-write-off`**，不可颠倒——先回滚下游会让仍在线的导出/导入失去分流基础。
 
@@ -97,7 +100,7 @@ mod-v2-contract
 2. **执行 revert**：一次只回滚一个模块；同一提交捆绑多个模块时，按登记的补救方案处理，不拿 `git revert <hash>` 一把梭。
 3. **跑门闸并记录原始输出**（工作目录 `dsh-sync-suite`）：
    - `node tools/overlay.mjs status` → 期望 `applied=false`；
-   - `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"` → 当前基线 **2711 例 / 2710 pass / 0 fail / 1 skip**（+26 = `mod-export-import-v2` 的 `exportImportV2.test.mjs` 26；相对 2670 基线的 **+44 = `mod-v2-sync-wiring` 的 `syncWiring.test.mjs` 44**；相对 2607 基线的 **+18 = `mod-v2-dual-write-off` 的 `dualWriteOff.test.mjs` 18**；相对 2536 基线的 **+56 = `mod-v2-sync-protocol` 的 `syncProtocol.test.mjs` 56**；相对 2485 基线的 **+51 = `mod-v2-write-service` 的 `timelineWrite.test.mjs` 32**；相对 2459 基线的 **+23 = `mod-v2-read-service` 的 `timelineService.test.mjs` 23**；相对 2425 基线的 **+34 = `mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` 31**；相对 2391 基线的 **+30 = `mod-quick-record` 的 `quickRecord.test.mjs` 16 + `quickRecordUi.test.mjs` 14**；`mod-settings-lean` 原地改测 4 个既有测试文件、用例数不变，delta 0，基线不动；相对 2348 基线：`mod-v2-read-timeline` **+42**；再往前相对 2306 基线：`mod-v2-migration` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` **+1**；`cec3c93` 之后；数字随模块加入而变动；回滚 D5 相关模块时，因删除的旧用例被恢复，数字会变化，须在批次记录里写明变化原因）；
+   - `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"` → 当前基线 **2774 例 / 2773 pass / 0 fail / 1 skip**（+3 = `mod-push-detail` 的 `contractGaps.test.mjs` C14/C15/C16，contractGaps 28/28；相对 2771 的 +25 = `mod-v2-contract-tests`；此前 +26 = `mod-export-import-v2` 的 `exportImportV2.test.mjs` 26；相对 2670 基线的 **+44 = `mod-v2-sync-wiring` 的 `syncWiring.test.mjs` 44**；相对 2607 基线的 **+18 = `mod-v2-dual-write-off` 的 `dualWriteOff.test.mjs` 18**；相对 2536 基线的 **+56 = `mod-v2-sync-protocol` 的 `syncProtocol.test.mjs` 56**；相对 2485 基线的 **+51 = `mod-v2-write-service` 的 `timelineWrite.test.mjs` 32**；相对 2459 基线的 **+23 = `mod-v2-read-service` 的 `timelineService.test.mjs` 23**；相对 2425 基线的 **+34 = `mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` 31**；相对 2391 基线的 **+30 = `mod-quick-record` 的 `quickRecord.test.mjs` 16 + `quickRecordUi.test.mjs` 14**；`mod-settings-lean` 原地改测 4 个既有测试文件、用例数不变，delta 0，基线不动；相对 2348 基线：`mod-v2-read-timeline` **+42**；再往前相对 2306 基线：`mod-v2-migration` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` **+1**；`cec3c93` 之后；数字随模块加入而变动；回滚 D5 相关模块时，因删除的旧用例被恢复，数字会变化，须在批次记录里写明变化原因）；
    - `node apps/arkui-schedule/tools/validate-app.mjs` → **8/8**；
    - `node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json` → **exit 0**。
 4. **判定「回滚干净」**：0 fail、skip 数未异常增加、8/8、tsc exit 0、`overlay applied=false` 五项同时成立；任何一项不满足即为未回滚干净，不许在 §1 把状态改回「已回滚」。
@@ -130,6 +133,7 @@ mod-v2-contract
 | 2026-11-20 | `mod-state-summary` | 已完成并提交 | 文档门闸（无代码门闸；`docs/STATE-OF-PROJECT.md` 6 节，一页） | — | 一页现状：默认 v1 / v2 显式激活 / 模块与哈希（含 `1b79790`/`1447b0f`/`9904161`/`c41c3c5`）/ 保证与不保证 / unverified / 下一步；§1 与 ROADMAP 交接节各加一行登记；提交：2a475e0 |
 
 | 2026-11-20 | `mod-v2-contract-tests` | 已完成，待提交 | 全量 2771/2770/0/1；validate 8/8；tsc 0 | `docs/REVIEW-contract-tests.md`（P1 登记已补，P2 记录） | 契约缺口 25 例；发现 typedPushError 细节丢失（P2，未修） |
+| 2026-11-20 | `mod-push-detail` | 已完成，待提交 | 全量 **2774/2773/0/1**（+3，contractGaps **28/28**）；validate 8/8；tsc 0 | `docs/REVIEW-contract-tests.md` §3（P2 缺陷已修）；`syncWiring.test.mjs` 旧断言同步更新 | 闭合上一行记录的 P2：带细节的 `E_PUSH_REJECTED` 逐字保真进 message + lastError；C12 保真断言不再恒真 + C14/C15/C16；裸码 / 非 E_ 传输错误仍通用 |
 
 ## 6. 追加批次（2026-11-20 之后，Lead 提交时登记）
 
@@ -138,6 +142,7 @@ mod-v2-contract
 | mod-v2-hardening | 双设备收敛模拟 26 例；并修出 syncProtocol.ts 重放决胜的顺序依赖（真 P1） | 已提交 | 1447b0f | git revert 1447b0f（与 mod-v2-sync-protocol 同链，逆序回滚） |
 | mod-export-import-v2（修复批次） | 导入媒体 sha256 完整性 preflight（E_MEDIA_CORRUPT）、sha16 撞名拒绝（E_MEDIA_COLLISION）、删死路径 V2_NOT_WIRED | 已提交 | 1b79790 | git revert 1b79790（纯增量） |
 | mod-runbook | docs/RUNBOOK.md 运维手册（迁移/激活/按 tag 逆序回滚/故障处置/验收/unverified 边界） | 已提交 | 9904161 | git revert 9904161（纯文档） |
+| mod-push-detail | 修 `typedPushError` 丢细节（P2）：带细节的 `E_PUSH_REJECTED` 逐字保真进 message + lastError；C12 改非空断言 + C14/C15/C16 | 待提交 | （Lead 填） | 提交前回滚 = 撤销 `model/syncCycle.ts` + `contractGaps.test.mjs` + `syncWiring.test.mjs` 三处改动；提交后 `git revert <hash>`（叶子，无下游） |
 
 > 三批的独立只读评审见 docs/REVIEW-three-batches.md（A/B/C 均判「可以提交」，P0 0）。
 

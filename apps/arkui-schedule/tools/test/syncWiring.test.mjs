@@ -321,7 +321,11 @@ test('7 push always rejected: E_PUSH_REJECTED, MAX_ATTEMPTS, failed=1, pending=0
   const result = await run(fake, [upsertIntent()]);
   assert.equal(result.ok, false);
   assert.equal(result.code, 'E_PUSH_REJECTED');
-  assert.equal(result.message, SYNC_RETRY_ERROR);
+  // mod-push-detail: FakeGit throws a detail-bearing 'E_PUSH_REJECTED: push rejected by test';
+  // that raw detail now survives into the reason (generic Chinese next-step still kept).
+  assert.ok(result.message.includes('E_PUSH_REJECTED: push rejected by test'),
+    'detail-bearing rejection keeps its raw text in the user-visible reason');
+  assert.ok(result.message.startsWith(SYNC_RETRY_ERROR), 'generic Chinese next-step still present');
   assert.equal(result.attempts, MAX_ATTEMPTS);
   assert.equal(result.failed, 1);
   assert.equal(result.pending, 0);

@@ -485,13 +485,16 @@ test('C11 assertWritable returns typed E_SCHEMA_* for unknown / missing version'
 test('C12 four consecutive push rejections -> E_PUSH_REJECTED detail preserved, intent failed, no force-push', async () => {
   const port = new OkPort();
   port.rejectCount = 4;
-  port.pushError = SYNC_RETRY_ERROR; // verbatim E_PUSH_REJECTED detail
+  // Inject a DETAIL-BEARING rejection: setting pushError to SYNC_RETRY_ERROR itself made the
+  // old "verbatim detail" assertion vacuous (generic message == injected message).
+  const detail = 'E_PUSH_REJECTED: rival advanced first (non-fast-forward); remote gained 3 commits';
+  port.pushError = detail;
   const log = { days: [], outbox: [] };
   const intent = upsert(rec({ id: 'push-me' }), 'push-exhaust');
   const result = await runCyclePure(port, [DAY], emptyReadDay, [intent], NOW, recordingWrite(log));
   assert.equal(result.ok, false);
   assert.equal(result.code, 'E_PUSH_REJECTED');
-  assert.equal(result.message, SYNC_RETRY_ERROR, 'typed detail preserved verbatim');
+  assert.ok(result.message.includes(detail), 'typed detail preserved verbatim in user-visible reason');
   assert.equal(result.attempts, 4);
   assert.equal(result.failed, 1);
   assert.equal(result.pending, 0, 'failed terminal is not pending / not auto-replayed');
@@ -501,7 +504,7 @@ test('C12 four consecutive push rejections -> E_PUSH_REJECTED detail preserved, 
   assert.equal(result.resultOutbox.length, 1);
   assert.equal(result.resultOutbox[0].state, 'failed');
   assert.equal(result.resultOutbox[0].attempts, 4);
-  assert.equal(result.resultOutbox[0].lastError, SYNC_RETRY_ERROR);
+  assert.equal(result.resultOutbox[0].lastError, detail, 'raw rejection detail survives to lastError');
 });
 
 test('C13 push error typed fidelity: E_AUTH detail is preserved, not collapsed to E_PUSH_REJECTED', async () => {
@@ -517,4 +520,45 @@ test('C13 push error typed fidelity: E_AUTH detail is preserved, not collapsed t
   assert.equal(result.failed, 1);
   assert.equal(result.resultOutbox[0].state, 'failed');
   assert.equal(port.forcePushCalls, 0);
+});
+
+// ================================================================ P2 fix (mod-push-detail): typedPushError fidelity
+
+const PUSH_DETAIL = 'E_PUSH_REJECTED: rival advanced first (non-fast-forward)';
+
+test('C14 detail-bearing E_PUSH_REJECTED keeps code + full detail in message and lastError', async () => {
+  const port = new OkPort();
+  port.rejectCount = 4;
+  port.pushError = PUSH_DETAIL;
+  const log = { days: [], outbox: [] };
+  const result = await runCyclePure(port, [DAY], emptyReadDay,
+    [upsert(rec({ id: 'detail-push' }), 'detail-push')], NOW, recordingWrite(log));
+  assert.equal(result.code, 'E_PUSH_REJECTED', 'typed code stays E_PUSH_REJECTED');
+  assert.ok(result.message.includes(PUSH_DETAIL), 'user-visible reason keeps code + detail');
+  assert.equal(result.resultOutbox.length, 1);
+  assert.ok(result.resultOutbox[0].lastError.includes(PUSH_DETAIL), 'lastError keeps code + detail');
+});
+
+test('C15 bare E_PUSH_REJECTED collapses to the generic Chinese message', async () => {
+  const port = new OkPort();
+  port.rejectCount = 4;
+  port.pushError = 'E_PUSH_REJECTED';
+  const log = { days: [], outbox: [] };
+  const result = await runCyclePure(port, [DAY], emptyReadDay,
+    [upsert(rec({ id: 'bare-push' }), 'bare-push')], NOW, recordingWrite(log));
+  assert.equal(result.code, 'E_PUSH_REJECTED');
+  assert.equal(result.message, SYNC_RETRY_ERROR, 'bare code -> generic Chinese next-step');
+  assert.match(result.message, /[\u4e00-\u9fa5]/);
+});
+
+test('C16 non-E_ transport error stays generic (unchanged)', async () => {
+  const port = new OkPort();
+  port.rejectCount = 4;
+  port.pushError = 'socket hang up (ECONNRESET)';
+  const log = { days: [], outbox: [] };
+  const result = await runCyclePure(port, [DAY], emptyReadDay,
+    [upsert(rec({ id: 'transport' }), 'transport')], NOW, recordingWrite(log));
+  assert.equal(result.code, 'E_PUSH_REJECTED');
+  assert.equal(result.message, SYNC_RETRY_ERROR, 'non-E_ error remains generic');
+  assert.equal(result.failed, 1);
 });
