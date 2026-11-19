@@ -811,3 +811,27 @@ test('71 model decidedAtOf has no wall-clock fallback (F5)', () => {
   assert.doesNotMatch(decided, /now\.toISOString\(\)/);
   assert.match(MODEL, /export const E_TS_SHAPE: string = 'E_TS_SHAPE'/);
 });
+
+// ---------------------------------------------------------------- §4 replay tie-break（S3-e 回归）
+
+test('72 unionDay replay same-(id,ts): incoming byte-larger replaces merged, byte-smaller keeps existing', () => {
+  const smaller = rec({ id: 'tie', ts: T1000, body: 'a' });
+  const larger = rec({ id: 'tie', ts: T1000, body: 'z' });
+  const up = (r) => entry('upsert', {
+    intentId: `up-${r.body}`, line: canonicalRecordLine(r), id: r.id, ts: r.ts
+  });
+
+  // 同 (id,ts)：incoming 'z' 字节较大 → 必须替换远端已有的 'a'，胜者 body='z'。
+  const largerWins = unionDay(DAY, dt(dayText([smaller])), dt(), [up(larger)], NOW);
+  assert.equal(parseTimelineDay(largerWins.text, DAY).day.allRecords[0].body, 'z');
+  assert.equal(largerWins.conflicts.length, 1);
+  assert.equal(JSON.parse(largerWins.conflicts[0]).losingLine, canonicalRecordLine(smaller));
+  assert.equal(largerWins.added, 1, '替换既有行计入 added');
+
+  // 反向：incoming 'a' 字节较小 → 保留远端已有的 'z'，胜者仍是 body='z'。
+  const existingWins = unionDay(DAY, dt(dayText([larger])), dt(), [up(smaller)], NOW);
+  assert.equal(parseTimelineDay(existingWins.text, DAY).day.allRecords[0].body, 'z');
+  assert.equal(existingWins.conflicts.length, 1);
+  assert.equal(JSON.parse(existingWins.conflicts[0]).losingLine, canonicalRecordLine(smaller));
+  assert.equal(existingWins.added, 0, 'incoming 较小不替换，added 为 0');
+});

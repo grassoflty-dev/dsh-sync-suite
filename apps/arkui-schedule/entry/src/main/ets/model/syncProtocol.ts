@@ -708,14 +708,28 @@ export function unionDay(
       const incomingLine = canonicalRecordLine(normalized);
       const existing = merged.get(record.id);
       if (existing !== undefined) {
-        const olderOrEqual = compareTs(tsOfLine(existing), record.ts) >= 0;
-        if (existing === incomingLine || olderOrEqual) {
-          // P1-2：相同字节，或同 (id,ts) 按 §4 裁决（胜败均视为已应用，出队）。
-          if (existing !== incomingLine && compareTs(tsOfLine(existing), record.ts) === 0) {
-            addConflict(record.id, record.ts, loserLine(existing, incomingLine));
-          }
+        const delta = compareTs(tsOfLine(existing), record.ts);
+        if (existing === incomingLine) {
+          // P1-2：逐字节相同 → no-op，视为已应用，不记冲突。
           applied.push(entry.intentId);
           continue;
+        }
+        if (delta > 0) {
+          // 既有版本 ts 严格更晚：later-ts-wins 静默保留既有（§4），视为已应用。
+          applied.push(entry.intentId);
+          continue;
+        }
+        if (delta === 0) {
+          // 同 (id,ts) 不同字节：§4 UTF-8 字节较大者胜。败者（字节较小者）落审计；
+          // 胜败均视为已应用（§9 P1-2）。修复：incoming 字节较大时必须替换 merged，
+          // 否则会显示败者、审计却把显示行命名为败者，且收敛随到达顺序而变。
+          addConflict(record.id, record.ts, loserLine(existing, incomingLine));
+          if (byteCompare(incomingLine, existing) <= 0) {
+            // incoming 字节较小：既有行是胜者，保持不动。
+            applied.push(entry.intentId);
+            continue;
+          }
+          // incoming 字节较大：落到下方替换 merged（计入 added）。
         }
       }
       merged.set(record.id, incomingLine);
