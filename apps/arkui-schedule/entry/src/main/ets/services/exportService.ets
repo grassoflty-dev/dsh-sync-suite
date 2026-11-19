@@ -25,11 +25,13 @@ import { nowIso } from '../common/date';
 import {
   EXPORT_FORMAT_JSON,
   V2_REFUSAL_BUNDLE_CORRUPT,
-  V2_REFUSAL_MEDIA_MISSING,
+  V2_REFUSAL_MEDIA_CORRUPT,
+  V2_REFUSAL_MEDIA_COLLISION,
   V2_REFUSAL_TARGET_BUSY,
   V2_REFUSAL_V1_TARGET,
   buildV2Manifest,
   buildV2RecordsText,
+  checkV2MediaIntegrity,
   decodeUtf8,
   exportFileName,
   exportFileStamp,
@@ -579,7 +581,13 @@ function applyImportPlanOnce(plan: ImportPlan): ImportApplyResult {
 // - 导出：读侧复用 timelineStore.readDay（已套用 deleted/restore 优先级）+ readSummaryText，
 //   日文件字节由 model/timelineWrite.buildRecordsText 生成（按 ts,id 排序 + 自检）；
 // - 导入：先 dry-run（planV2Import，默认不写），`applyV2Import` 必须显式调用才落盘；
-//   落盘前再查一次门禁（dry-run 到确认之间状态可能变了），并逐条复核「绝不覆盖更晚版本」。
+//   落盘前再查一次门禁（dry-run 到确认之间状态可能变了），并逐条复核「绝不覆盖更晚版本」；
+// - 媒体完整性（P1-1 / P2 碰撞）：**任何写入之前**统一跑 `checkV2MediaIntegrity`：
+//   * 内容 sha256 不符 / 读不出 → E_MEDIA_CORRUPT；
+//   * 同日同名不同内容（含目标已有错误旧图） → E_MEDIA_COLLISION；
+//   选 "fail closed before any write" 而非"逐日回滚"：records/summary 与 media 分属不同文件，
+//   没有跨文件事务；回滚要处理已 rename 的原子写，复杂且易错。预检失败 = 整包零写入。
+//   校验读到的字节原样写入，避免"验完再读"的竞态；已存在且内容一致的同名媒体只增不覆盖。
 
 /** v2 bundle 目录前缀（沙箱 exports/ 下，与 v1 的 schedule-*.md/json 并列）。 */
 const V2_BUNDLE_DIR_PREFIX: string = 'v2-';
@@ -687,6 +695,40 @@ function v2CopyBinary(src: string, dest: string): void {
     if (reader !== null) {
       fs.closeSync(reader);
     }
+  }
+}
+
+/**
+ * 读一个媒体文件的全部字节（**只供落盘前 sha256 预检**；不可读 / 过大抛中文 Error，
+ * 由 `checkV2MediaIntegrity` 收窄为 E_MEDIA_CORRUPT）。
+ */
+function v2ReadBinary(path: string): Uint8Array {
+  const file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+  try {
+    const size: number = fs.statSync(file.fd).size;
+    if (size < 0 || size > MAX_IMPORT_BYTES) {
+      throw new Error(`媒体文件过大（${size} 字节，上限 ${MAX_IMPORT_BYTES} 字节）`);
+    }
+    const buffer = new ArrayBuffer(size);
+    let read: number = 0;
+    if (size > 0) {
+      read = fs.readSync(file.fd, buffer);
+    }
+    return new Uint8Array(buffer, 0, read);
+  } finally {
+    fs.closeSync(file);
+  }
+}
+
+/** 写入**已通过 sha256 预检**的媒体字节（只在目标不存在时调用；不 TRUNC、不覆盖、不删）。 */
+function v2WriteBinary(dest: string, bytes: Uint8Array): void {
+  const file = fs.openSync(dest, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE);
+  try {
+    const exact = new ArrayBuffer(bytes.length);
+    new Uint8Array(exact).set(bytes);
+    fs.writeSync(file.fd, exact);
+  } finally {
+    fs.closeSync(file);
   }
 }
 
@@ -941,6 +983,21 @@ function applyV2ImportOnce(plan: V2ImportPlan | null, bundleDir: string): V2Appl
   let skipped: number = 0;
   const files: string[] = [];
   const repoRoot = `${scheduleStore.getFilesDir()}/${V2_REPO_RELATIVE}`;
+
+  // 落盘前媒体完整性预检（fail closed）：失败即 typed 拒绝，整个 bundle 一个字节都不写。
+  // 放在所有 records.json / summary.json / media 写入之前，是 P1-1 的核心保证。
+  const mediaCheck = checkV2MediaIntegrity(plan, {
+    targetExists: (date: string, file: string): boolean =>
+      fileExists(`${repoRoot}/${date}/${V2_MEDIA_DIR}/${file}`),
+    readTarget: (date: string, file: string): Uint8Array =>
+      v2ReadBinary(`${repoRoot}/${date}/${V2_MEDIA_DIR}/${file}`),
+    readSource: (date: string, file: string): Uint8Array =>
+      v2ReadBinary(`${bundleDir}/timeline/${date}/${V2_MEDIA_DIR}/${file}`)
+  });
+  if (!mediaCheck.ok) {
+    return v2ApplyFailure(mediaCheck.code, mediaCheck.reason);
+  }
+
   for (const day of plan.days) {
     let existing: ScheduleRecord[] = [];
     try {
@@ -975,18 +1032,24 @@ function applyV2ImportOnce(plan: V2ImportPlan | null, bundleDir: string): V2Appl
       }
     }
     const destMediaDir = `${repoRoot}/${day.date}/${V2_MEDIA_DIR}`;
-    const srcMediaDir = `${bundleDir}/timeline/${day.date}/${V2_MEDIA_DIR}`;
-    for (const name of day.mediaFiles) {
-      const dest = `${destMediaDir}/${name}`;
+    for (const item of mediaCheck.verified) {
+      if (item.date !== day.date) {
+        continue;
+      }
+      const dest = `${destMediaDir}/${item.file}`;
       if (fileExists(dest)) {
-        // 媒体只增：同名文件已存在就直接跳过，绝不覆盖、绝不删除。
+        // 媒体只增：预检已确认同名内容一致（不一致的碰撞已提前 typed 拒绝）；再守一次，不覆盖、不删。
         continue;
       }
       try {
         ensureDir(destMediaDir);
-        v2CopyBinary(`${srcMediaDir}/${name}`, dest);
+        // 写入的是预检时那一份已校验字节，不二次读源文件，避免验后被换。
+        v2WriteBinary(dest, item.bytes);
       } catch (error) {
-        return v2ApplyFailure(V2_REFUSAL_MEDIA_MISSING, `搬运媒体 ${name} 失败：${describeError(error)}`);
+        return v2ApplyFailure(
+          V2_REFUSAL_MEDIA_CORRUPT,
+          `搬运媒体 ${item.file} 失败：${describeError(error)}`
+        );
       }
       media += 1;
     }

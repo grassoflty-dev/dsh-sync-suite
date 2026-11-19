@@ -92,7 +92,6 @@ const V2_CANCEL_LABEL: string = '取消 v2 导入';
 const V2_EMPTY_TITLE: string = '还没有 v2 导入计划';
 const V2_EMPTY_DETAIL: string = '选一份 v2 备份的 manifest.json，先算出计划再决定要不要写入';
 const V2_EMPTY_ACTION: string = '去选备份';
-const V2_NOT_WIRED: string = '该操作尚未在当前页面接入，请先在设置页完成接线';
 const V2_BUSY: string = 'v2 备份正在处理，请稍候';
 
 @Component
@@ -223,13 +222,14 @@ export struct ExportImportPanel {
     return timelineStore.useV2();
   }
 
-  /** 按钮不可用原因：忙碌优先，其次「尚未接入」；没有任何理由时说明可点。 */
-  private v2BlockedReason(handler: (() => void) | null): string {
+  /**
+   * 按钮不可用原因：当前只有「忙碌」一种。
+   * 四个 v2 回调在设置页全部接线（onV2Export / onV2Pick / onV2Apply / onV2Cancel），
+   * 回调缺失时的不可达文案分支已删除；`v2CanTap` 仍保留 null 检查作防御，不会误调用。
+   */
+  private v2BlockedReason(): string {
     if (this.v2Busy) {
       return V2_BUSY;
-    }
-    if (handler === null) {
-      return V2_NOT_WIRED;
     }
     return '';
   }
@@ -244,9 +244,9 @@ export struct ExportImportPanel {
     return this.v2CanTap(this.onV2Apply) && this.v2PlanReady && this.v2PlanText.length > 0;
   }
 
-  /** 确认导入的不可用原因：先解释忙碌 / 未接入，其次「还没试算」。 */
+  /** 确认导入的不可用原因：先解释忙碌，其次「还没试算」。 */
   private v2ApplyBlockedReason(): string {
-    const blocked: string = this.v2BlockedReason(this.onV2Apply);
+    const blocked: string = this.v2BlockedReason();
     if (blocked.length > 0) {
       return blocked;
     }
@@ -612,7 +612,7 @@ export struct ExportImportPanel {
         ActionButton({
           label: V2_EXPORT_LABEL,
           actionEnabled: this.v2CanTap(this.onV2Export),
-          disabledReason: this.v2BlockedReason(this.onV2Export),
+          disabledReason: this.v2BlockedReason(),
           busy: this.v2Busy,
           variant: 'secondary',
           block: false,
@@ -627,7 +627,7 @@ export struct ExportImportPanel {
         ActionButton({
           label: V2_PICK_LABEL,
           actionEnabled: this.v2CanTap(this.onV2Pick),
-          disabledReason: this.v2BlockedReason(this.onV2Pick),
+          disabledReason: this.v2BlockedReason(),
           busy: this.v2Busy,
           variant: 'secondary',
           block: false,
@@ -688,7 +688,7 @@ export struct ExportImportPanel {
           ActionButton({
             label: V2_CANCEL_LABEL,
             actionEnabled: this.v2CanTap(this.onV2Cancel),
-            disabledReason: this.v2BlockedReason(this.onV2Cancel),
+            disabledReason: this.v2BlockedReason(),
             busy: false,
             variant: 'secondary',
             block: true,

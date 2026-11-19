@@ -23,6 +23,7 @@ import type { Attachment, ScheduleRecord } from './types';
 import { buildRecordsText } from './timelineWrite';
 import { parseTimelineDay } from './timeline';
 import type { TimelineMedia, TimelineRecord } from './timeline';
+import { sha256Hex } from './sha256';
 
 /** 导出格式：Markdown。 */
 export const EXPORT_FORMAT_MARKDOWN: string = 'markdown';
@@ -1383,6 +1384,10 @@ export const V2_REFUSAL_BUNDLE_CORRUPT: string = 'E_BUNDLE_CORRUPT';
 export const V2_REFUSAL_MEDIA_MISSING: string = 'E_MEDIA_MISSING';
 export const V2_REFUSAL_V1_TARGET: string = 'E_V1_TARGET';
 export const V2_REFUSAL_TARGET_BUSY: string = 'E_TARGET_BUSY';
+/** 媒体内容 sha256 与 manifest 不符 / 读不出来 → fail-closed，整包零写入（DATA-CONTRACT-v2 §5）。 */
+export const V2_REFUSAL_MEDIA_CORRUPT: string = 'E_MEDIA_CORRUPT';
+/** 同日同名（sha16 前缀）不同内容 → 拒绝，不覆盖、不保留错误旧图（§14 开放项 1 的"拒绝"分支）。 */
+export const V2_REFUSAL_MEDIA_COLLISION: string = 'E_MEDIA_COLLISION';
 
 /** manifest 中「一天」的摘要。 */
 export interface V2BundleDay {
@@ -1941,6 +1946,131 @@ export function planV2Import(bundle: V2BundleInput, target: V2TargetState): V2Im
   return out;
 }
 
+// ---------------------------------------------------------------- 落盘前媒体完整性预检（P1-1 / P2 碰撞）
+
+/** 媒体预检所需的最小 IO：服务层注入真实 fileIo，Node 测试注入假读，不碰 SDK。 */
+export interface V2MediaCheckIo {
+  /** 目标日 media/ 下是否已有同名文件（只增不覆盖：已有就不复制）。 */
+  targetExists: (date: string, file: string) => boolean;
+  /** 读目标已有的同名媒体字节（仅 targetExists 为真时调用；不可读则抛）。 */
+  readTarget: (date: string, file: string) => Uint8Array;
+  /** 读 bundle 里的源媒体字节（不可读则抛）。 */
+  readSource: (date: string, file: string) => Uint8Array;
+}
+
+/** 通过预检、待复制到目标的媒体（bytes 就是已校验的那一份，避免"验完再读"被换掉）。 */
+export interface V2VerifiedMedia {
+  date: string;
+  file: string;
+  sha256: string;
+  bytes: Uint8Array;
+}
+
+/** `checkV2MediaIntegrity` 的结果（失败时 code 为 E_MEDIA_CORRUPT / E_MEDIA_COLLISION，verified 为空）。 */
+export interface V2MediaCheckResult {
+  ok: boolean;
+  code: string;
+  reason: string;
+  verified: V2VerifiedMedia[];
+}
+
+/**
+ * `applyV2Import` 的**落盘前媒体预检**（纯逻辑、零 IO；三个读能力由调用方注入）。
+ *
+ * 设计决策（P1-1）：选"**fail closed before any write**"，不做"逐日回滚"。
+ * records.json / summary.json 是原子替换，媒体是另一批文件，二者没有跨文件事务；
+ * 边写边校一旦发现坏图，当天（甚至前几天）的记录已经落盘，回滚还要处理已 rename 的
+ * 原子写，复杂且易错。这里把校验整体前移到任何写入之前：任何一张图坏 / 读不出 /
+ * 同名不同内容 → typed 拒绝，调用方一个字节都不写。代价只是把校验读到的字节原样交给
+ * 写入（不二次读），顺带消除"校验后文件被换掉"的竞态。
+ *
+ * 规则：
+ * 1. manifest.media[] 同一 (date,file) 声明两个不同 sha256 → E_MEDIA_COLLISION；
+ *    （同日 sha16 前缀碰撞：本实现选"拒绝"而非"延长前缀"，不改名、不覆盖、不留错误旧图。
+ *    理由：文件名由内容寻址 sha16 决定，改名要同步改记录里的 media[].file，牵动 bundle
+ *    字节契约；拒绝是 fail-closed 且改动面最小，符合 no-silent-failure 纪律。）
+ * 2. 目标已有同名文件：读其字节比对 manifest sha256，不同 → E_MEDIA_COLLISION（既不覆盖，
+ *    也不把错误旧图当成功）；相同 → 跳过复制（media 只增）；
+ * 3. 目标没有该文件：读 bundle 源字节算 sha256，不符 / 读失败 → E_MEDIA_CORRUPT；
+ * 4. 计划里有媒体文件却没有 manifest sha256 条目 → E_MEDIA_CORRUPT（无法校验就不搬）。
+ *
+ * 注：dry-run（planV2Import）只有文件名、没有字节，故不在这里校哈希；真正的字节校验在
+ * 用户确认后的 apply 阶段做，面板展示的计划不改变。
+ */
+export function checkV2MediaIntegrity(plan: V2ImportPlan, io: V2MediaCheckIo): V2MediaCheckResult {
+  const fail = (code: string, reason: string): V2MediaCheckResult => {
+    const out: V2MediaCheckResult = { ok: false, code: code, reason: reason, verified: [] };
+    return out;
+  };
+  const manifest: V2Manifest | null = plan !== null && plan.ok ? plan.manifest : null;
+  const expectedByKey = new Map<string, string>();
+  if (manifest !== null && Array.isArray(manifest.media)) {
+    for (const item of manifest.media) {
+      const key: string = `${item.date}/${item.file}`;
+      const known: string | undefined = expectedByKey.get(key);
+      if (known !== undefined && known !== item.sha256) {
+        return fail(
+          V2_REFUSAL_MEDIA_COLLISION,
+          `v2 备份同日媒体名碰撞：${key} 声明了两个不同的 sha256，拒绝导入且未写入任何内容`
+        );
+      }
+      expectedByKey.set(key, item.sha256);
+    }
+  }
+  const verified: V2VerifiedMedia[] = [];
+  const days: V2ValidatedDay[] = plan !== null && Array.isArray(plan.days) ? plan.days : [];
+  for (const day of days) {
+    for (const file of day.mediaFiles) {
+      const key: string = `${day.date}/${file}`;
+      const expected: string | undefined = expectedByKey.get(key);
+      if (expected === undefined || expected.length === 0) {
+        return fail(
+          V2_REFUSAL_MEDIA_CORRUPT,
+          `v2 备份媒体 ${key} 没有 manifest sha256 条目，无法校验，拒绝导入且未写入任何内容`
+        );
+      }
+      if (io.targetExists(day.date, file)) {
+        let targetBytes: Uint8Array;
+        try {
+          targetBytes = io.readTarget(day.date, file);
+        } catch (error) {
+          return fail(
+            V2_REFUSAL_MEDIA_CORRUPT,
+            `v2 目标媒体 ${key} 已存在但无法读取校验：${describe(error)}，拒绝导入且未写入任何内容`
+          );
+        }
+        if (sha256Hex(targetBytes) !== expected.toLowerCase()) {
+          return fail(
+            V2_REFUSAL_MEDIA_COLLISION,
+            `v2 目标媒体 ${key} 已存在但内容摘要与备份不符（sha16 碰撞：拒绝覆盖，也不保留错误旧图），未写入任何内容`
+          );
+        }
+        continue; // 内容一致：只增不覆盖，无需复制
+      }
+      let bytes: Uint8Array;
+      try {
+        bytes = io.readSource(day.date, file);
+      } catch (error) {
+        return fail(
+          V2_REFUSAL_MEDIA_CORRUPT,
+          `v2 备份媒体 ${key} 无法读取：${describe(error)}，拒绝导入且未写入任何内容`
+        );
+      }
+      const actual: string = sha256Hex(bytes);
+      if (actual !== expected.toLowerCase()) {
+        return fail(
+          V2_REFUSAL_MEDIA_CORRUPT,
+          `v2 备份媒体 ${key} 内容 sha256 不符（期望 ${clip(expected, 16)}…，实际 ${clip(actual, 16)}…），拒绝导入且未写入任何内容`
+        );
+      }
+      const item: V2VerifiedMedia = { date: day.date, file: file, sha256: expected, bytes: bytes };
+      verified.push(item);
+    }
+  }
+  const ok: V2MediaCheckResult = { ok: true, code: '', reason: '', verified: verified };
+  return ok;
+}
+
 /** dry-run 计划的中文展示行（面板逐字显示）。 */
 export function v2PlanSummary(plan: V2ImportPlan): string {
   if (!plan.ok) {
@@ -1968,6 +2098,12 @@ export function v2RefusalNext(code: string): string {
   }
   if (code === V2_REFUSAL_TARGET_BUSY) {
     return '稍后重试，或到设置页检查 v2 写入是否已显式激活';
+  }
+  if (code === V2_REFUSAL_MEDIA_CORRUPT) {
+    return '重新导出并完整搬运 media/，确认散图未被改动后再导入（坏图不会写盘）';
+  }
+  if (code === V2_REFUSAL_MEDIA_COLLISION) {
+    return '重新导出该日媒体后重试；同名不同内容不覆盖、不保留错误旧图，需人工核对 sha16 碰撞';
   }
   return '检查备份与仓库状态后重试';
 }

@@ -8,7 +8,9 @@
 // 2. 导入 validate + dry-run 的五类类型化拒绝（E_SCHEMA_UNKNOWN / E_BUNDLE_CORRUPT /
 //    E_MEDIA_MISSING / E_V1_TARGET / E_TARGET_BUSY）与 plan(days/records/media/bytes)；
 // 3. 落点只经 timelineWriteStore（源码级断言），不写 devices/**、不删媒体；
-// 4. UI 只在 timelineStore.useV2() 时显示 v2 节，禁用按钮必须有中文原因（无假入口）。
+// 4. UI 只在 timelineStore.useV2() 时显示 v2 节，禁用按钮必须有中文原因（无假入口）；
+// 5. 落盘前媒体 sha256 预检：篡改 / 读不出 → E_MEDIA_CORRUPT，同名不同内容 → E_MEDIA_COLLISION，
+//    失败时零写入；四个 v2 回调已全部接线，无「未接入」死路径（review follow-up）。
 //
 // v1 行为不改：本文件不改也不削弱 exportImport.test.mjs 的任何用例。
 
@@ -41,6 +43,8 @@ const {
   V2_BUNDLE_KIND,
   V2_BUNDLE_SCHEMA_VERSION,
   V2_REFUSAL_BUNDLE_CORRUPT,
+  V2_REFUSAL_MEDIA_CORRUPT,
+  V2_REFUSAL_MEDIA_COLLISION,
   V2_REFUSAL_MEDIA_MISSING,
   V2_REFUSAL_SCHEMA_UNKNOWN,
   V2_REFUSAL_TARGET_BUSY,
@@ -48,6 +52,7 @@ const {
   asV2Record,
   buildV2Manifest,
   buildV2RecordsText,
+  checkV2MediaIntegrity,
   parseV2Manifest,
   planV2Import,
   validateV2Bundle,
@@ -61,6 +66,8 @@ const {
   visibleRecords
 } = await import('../.build/model/timeline.js');
 
+const { sha256Hex } = await import('../.build/model/sha256.js');
+
 const APP_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const SERVICE = readFileSync(
   new URL('../../entry/src/main/ets/services/exportService.ets', import.meta.url),
@@ -68,6 +75,10 @@ const SERVICE = readFileSync(
 ).replace(/\r\n/g, '\n');
 const PANEL = readFileSync(
   new URL('../../entry/src/main/ets/components/ExportImportPanel.ets', import.meta.url),
+  'utf8'
+).replace(/\r\n/g, '\n');
+const SETTINGS = readFileSync(
+  new URL('../../entry/src/main/ets/pages/Settings.ets', import.meta.url),
   'utf8'
 ).replace(/\r\n/g, '\n');
 
@@ -129,6 +140,51 @@ function makeBundle(options = {}) {
 }
 
 const V2_TARGET_OK = { repoIsV2: true, writeEnabled: true };
+
+/** 造一份「声明一张媒体」的合法 bundle：manifest 的 sha256 与 goodBytes 真值一致。 */
+function makeMediaBundle() {
+  const date = '2026-11-19';
+  const goodBytes = new TextEncoder().encode('good-jpeg-bytes-123');
+  const goodSha = sha256Hex(goodBytes);
+  const file = `${goodSha.slice(0, 16)}.jpg`;
+  const manifestText = buildV2Manifest({
+    from: date,
+    to: date,
+    exportedAt: `${date}T09:00:00+08:00`,
+    days: [{ date, recordCount: 1, hasSummary: false, media: [file] }],
+    media: [{ file, sha256: goodSha, bytes: goodBytes.length, date }]
+  });
+  const records = [
+    v2rec({ id: 'm', ts: `${date}T09:00:00+08:00`, media: [{ file, sha256: goodSha, pageIndex: 0 }] })
+  ];
+  const bundle = {
+    manifestText,
+    days: [
+      { date, recordsText: buildV2RecordsText(date, records), summaryText: '', mediaFiles: [file] }
+    ]
+  };
+  return { bundle, date, file, goodBytes, goodSha };
+}
+
+/** 假 IO：目标是否存在、读目标、读源都可注入；unreadable 系列模拟读失败。 */
+function mediaIo(bytes, options = {}) {
+  const io = {
+    targetExists: () => options.targetExists === true,
+    readTarget: () => {
+      if (options.unreadableTarget) {
+        throw new Error('target unreadable');
+      }
+      return options.targetBytes ?? bytes;
+    },
+    readSource: () => {
+      if (options.unreadableSource) {
+        throw new Error('source unreadable');
+      }
+      return bytes;
+    }
+  };
+  return io;
+}
 
 // ---------------------------------------------------------------- buildV2Manifest
 
@@ -360,10 +416,11 @@ describe('planV2Import：五类类型化拒绝（typed refusals）', () => {
     assert.ok(plan.reason.includes('写入'), '原因里要点名写入路径');
   });
 
-  test('五类拒绝都有中文「下一步」文案', () => {
+  test('七类拒绝都有中文「下一步」文案（含新增 E_MEDIA_CORRUPT / E_MEDIA_COLLISION）', () => {
     for (const code of [
       V2_REFUSAL_SCHEMA_UNKNOWN, V2_REFUSAL_BUNDLE_CORRUPT, V2_REFUSAL_MEDIA_MISSING,
-      V2_REFUSAL_V1_TARGET, V2_REFUSAL_TARGET_BUSY
+      V2_REFUSAL_V1_TARGET, V2_REFUSAL_TARGET_BUSY,
+      V2_REFUSAL_MEDIA_CORRUPT, V2_REFUSAL_MEDIA_COLLISION
     ]) {
       const next = v2RefusalNext(code);
       assert.ok(next.length > 0);
@@ -402,6 +459,94 @@ describe('planV2Import：成功路径给出 days / records / media / bytes', () 
   });
 });
 
+// ---------------------------------------------------------------- 落盘前媒体完整性（P1-1 / P2）
+
+describe('checkV2MediaIntegrity：sha256 校验与 sha16 碰撞（fail closed before any write）', () => {
+  test('valid bytes → ok，verified 携带已校验字节供复制', () => {
+    const { bundle, file, goodBytes, goodSha } = makeMediaBundle();
+    const plan = planV2Import(bundle, V2_TARGET_OK);
+    assert.equal(plan.ok, true, plan.reason);
+    const result = checkV2MediaIntegrity(plan, mediaIo(goodBytes));
+    assert.equal(result.ok, true, result.reason);
+    assert.equal(result.code, '');
+    assert.equal(result.verified.length, 1);
+    assert.equal(result.verified[0].file, file);
+    assert.equal(result.verified[0].sha256, goodSha);
+    assert.deepEqual(Array.from(result.verified[0].bytes), Array.from(goodBytes));
+  });
+
+  test('tampered bytes → E_MEDIA_CORRUPT，verified 为空（调用方据此零写入）', () => {
+    const { bundle } = makeMediaBundle();
+    const plan = planV2Import(bundle, V2_TARGET_OK);
+    const result = checkV2MediaIntegrity(plan, mediaIo(new TextEncoder().encode('TAMPERED')));
+    assert.equal(result.ok, false);
+    assert.equal(result.code, V2_REFUSAL_MEDIA_CORRUPT);
+    assert.deepEqual(result.verified, [], '坏图不得进入写入列表');
+    assert.match(result.reason, /[\u4e00-\u9fa5]/, '原因必须中文');
+    assert.ok(result.reason.includes('未写入任何内容'));
+    assert.match(v2RefusalNext(V2_REFUSAL_MEDIA_CORRUPT), /[\u4e00-\u9fa5]/, '下一步必须中文');
+  });
+
+  test('unreadable source → E_MEDIA_CORRUPT，verified 为空', () => {
+    const { bundle } = makeMediaBundle();
+    const plan = planV2Import(bundle, V2_TARGET_OK);
+    const result = checkV2MediaIntegrity(plan, mediaIo(new Uint8Array(), { unreadableSource: true }));
+    assert.equal(result.code, V2_REFUSAL_MEDIA_CORRUPT);
+    assert.deepEqual(result.verified, []);
+  });
+
+  test('计划有媒体但 manifest 无 sha256 条目 → E_MEDIA_CORRUPT（无法校验就不搬）', () => {
+    const { bundle } = makeMediaBundle();
+    const doc = JSON.parse(bundle.manifestText);
+    doc.media = [];
+    const plan = planV2Import({ ...bundle, manifestText: JSON.stringify(doc) }, V2_TARGET_OK);
+    assert.equal(plan.ok, true, plan.reason);
+    const result = checkV2MediaIntegrity(
+      plan,
+      mediaIo(new TextEncoder().encode('good-jpeg-bytes-123'))
+    );
+    assert.equal(result.code, V2_REFUSAL_MEDIA_CORRUPT);
+    assert.deepEqual(result.verified, []);
+  });
+
+  test('manifest 同一 (date,file) 两个不同 sha256 → E_MEDIA_COLLISION（选拒绝，不延长前缀）', () => {
+    const { bundle, date, file, goodBytes } = makeMediaBundle();
+    const doc = JSON.parse(bundle.manifestText);
+    doc.media.push({ file, sha256: SHA_2, bytes: 10, date });
+    const plan = planV2Import({ ...bundle, manifestText: JSON.stringify(doc) }, V2_TARGET_OK);
+    assert.equal(plan.ok, true, 'manifest 形状仍合法，碰撞在预检阶段拦截');
+    const result = checkV2MediaIntegrity(plan, mediaIo(goodBytes));
+    assert.equal(result.code, V2_REFUSAL_MEDIA_COLLISION);
+    assert.deepEqual(result.verified, []);
+    assert.match(v2RefusalNext(V2_REFUSAL_MEDIA_COLLISION), /[\u4e00-\u9fa5]/);
+  });
+
+  test('目标已有同名但内容不同 → E_MEDIA_COLLISION（不覆盖，也不留错误旧图）', () => {
+    const { bundle } = makeMediaBundle();
+    const plan = planV2Import(bundle, V2_TARGET_OK);
+    const result = checkV2MediaIntegrity(
+      plan,
+      mediaIo(new TextEncoder().encode('good-jpeg-bytes-123'), {
+        targetExists: true,
+        targetBytes: new TextEncoder().encode('WRONG-OLD-IMAGE')
+      })
+    );
+    assert.equal(result.code, V2_REFUSAL_MEDIA_COLLISION);
+    assert.deepEqual(result.verified, []);
+  });
+
+  test('目标已有同名且内容一致 → 跳过复制（media 只增不覆盖）', () => {
+    const { bundle, goodBytes } = makeMediaBundle();
+    const plan = planV2Import(bundle, V2_TARGET_OK);
+    const result = checkV2MediaIntegrity(
+      plan,
+      mediaIo(goodBytes, { targetExists: true })
+    );
+    assert.equal(result.ok, true, result.reason);
+    assert.deepEqual(result.verified, [], '已有正确文件不再复制');
+  });
+});
+
 // ---------------------------------------------------------------- 源码级接线断言
 
 /** 剥掉行注释（本测试只判可执行文本；注释里写「不写 devices/**」是纪律陈述，不是路径）。 */
@@ -435,6 +580,24 @@ describe('源码级：v2 落点只经原子写、不碰 devices、UI flag-gated'
     assert.equal(v2Code.includes('unlinkSync'), false, 'v2 段不得删除媒体或历史');
   });
 
+  test('applyV2Import：媒体预检早于一切写入，失败即 typed 拒绝（零写入）', () => {
+    const start = SERVICE.indexOf('function applyV2ImportOnce');
+    assert.ok(start > 0, '找不到 applyV2ImportOnce');
+    const apply = SERVICE.slice(start);
+    const preflightAt = SERVICE.indexOf('checkV2MediaIntegrity(', start);
+    const firstWrite = Math.min(
+      SERVICE.indexOf('timelineWriteStore.append(', start),
+      SERVICE.indexOf('timelineWriteStore.appendSummary(', start),
+      SERVICE.indexOf('v2WriteBinary(', start)
+    );
+    assert.ok(preflightAt > 0 && firstWrite > 0 && preflightAt < firstWrite,
+      '媒体预检必须发生在任何记录 / 汇总 / 媒体写入之前');
+    assert.ok(apply.includes('if (!mediaCheck.ok)'), '预检失败必须直接 typed 拒绝');
+    assert.ok(SERVICE.includes('V2_REFUSAL_MEDIA_CORRUPT'), '服务层必须能返回 E_MEDIA_CORRUPT');
+    assert.ok(SERVICE.includes('V2_REFUSAL_MEDIA_COLLISION'), '服务层必须能返回 E_MEDIA_COLLISION');
+    assert.equal(apply.includes('v2CopyBinary'), false, '导入不再二次读源字节（写入已校验字节）');
+  });
+
   test('v1 落盘路径未被改：TRUNC 仍只有导出 1 处，v1 三函数仍在', () => {
     const truncCount = (SERVICE.match(/OpenMode\.TRUNC/g) ?? []).length;
     assert.equal(truncCount, 1, 'v1 契约：TRUNC 只允许新建导出文件那一处');
@@ -447,7 +610,11 @@ describe('源码级：v2 落点只经原子写、不碰 devices、UI flag-gated'
     assert.match(PANEL, /timelineStore\.useV2\(\)/, 'v2 节必须由 timelineStore.useV2() flag gate');
     assert.match(PANEL, /if \(this\.v2Visible\(\)\)/, 'build() 里必须有 flag 条件');
     assert.match(PANEL, /this\.V2Section\(\)/, 'v2 节必须挂到渲染树');
-    assert.match(PANEL, /V2_NOT_WIRED/, '未接入的操作必须给「尚未接入」原因，不做假入口');
+    assert.equal(PANEL.includes('V2_NOT_WIRED'), false, '四个 v2 回调已全部接线，不得残留「未接入」死路径');
+    for (const cb of ['onV2Export', 'onV2Pick', 'onV2Apply', 'onV2Cancel']) {
+      assert.ok(PANEL.includes(`${cb}:`), `${cb} 必须在面板声明`);
+      assert.ok(SETTINGS.includes(`${cb}: (): void => {`), `${cb} 必须在设置页接线`);
+    }
     assert.match(PANEL, /V2_BUSY/, '忙碌按钮必须给原因');
     assert.equal((PANEL.match(/^\s*@State\b/gm) ?? []).length, 5, '面板不得新增 @State（保持纯展示）');
   });
