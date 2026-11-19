@@ -26,10 +26,10 @@
 | `mod-v2-contract` | 单时间线数据契约 v2 草案（两轮：初稿 + 按评审 P0/P1 修订） | 已提交 | 77df67a | 未提交前回滚 = 删除该文件；提交后 `git revert <hash>`（纯文档） | 被 `mod-v2-migration`/`mod-v2-media-migration`/`mod-v2-dual-write-off` 依赖 | `docs/DATA-CONTRACT-v2.md`（359 行，v2-draft-2）、评审 `docs/REVIEW-v2-contract.md`（276 行，P0 2 / P1 7 / P2 11；draft-2 已全部解决 P0/P1） |
 | `mod-v2-migration` | v1→v2 迁移工具（记录/摘要/删除账本；媒体另立模块） | 已提交（含评审修复） | 28b8592 | `git revert <hash>`；工具只读 v1、不删 v1 | 依赖 `mod-v2-contract`；被 `mod-v2-dual-write-off` 依赖 | `tools/migrate-v1-to-v2.mjs`（804 行）、测试 `apps/arkui-schedule/tools/test/v2Migration.test.mjs`（41 例，30→39→41）；评审 `docs/REVIEW-v2-migration-and-insert-page.md`（P0 1 / P1 4 / P2 3 已全部修复）；revert path 不变 |
 | `mod-v2-read-timeline` | v2 单时间线只读解析核心（纯模型，未接线） | 已提交 | 4377b19 | `git revert <hash>`（仅 2 个新文件，未接线，零运行时影响） | 依赖 `mod-v2-contract`；被下一模块（v2 读服务接线）依赖 | `apps/arkui-schedule/entry/src/main/ets/model/timeline.ts`（779 行）、测试 `timelineRead.test.mjs`（42 例）；模块规格写在该文件头注释 |
-| mod-settings-lean | 设置只留仓库地址 + 令牌（移除平台/分支/访问方式控件；引擎行为不变） | 已写完，待提交 | 4176654 | git revert <hash>（6 个文件，无 store/引擎改动） | 独立；remote-access 设置留给后续模块 | docs/REVIEW-settings-lean.mddocs/REVIEW-settings-lean.md（P0 0 / P1 1 / P2 3 已修复） |
+| mod-settings-lean | 设置只留仓库地址 + 令牌（移除平台/分支/访问方式控件；引擎行为不变） | 已提交 | 4176654 | git revert <hash>（6 个文件，无 store/引擎改动） | 独立；remote-access 设置留给后续模块 | docs/REVIEW-settings-lean.mddocs/REVIEW-settings-lean.md（P0 0 / P1 1 / P2 3 已修复） |
 | `mod-insert-page-count` | 修复真机「插入页 2/3 而非 2/2」：新建记录手写板草稿键串号 | 已提交（真机已验证 PASS） | 96d4435 | `git revert <hash>`（仅 `RecordEditorView.ets` + 1 个测试） | 跨模块触碰 `RecordEditorView.ets`（见 §2） | `docs/VERIFICATION.md` §14 更新段；真机 `device-accept` **15 PASS / 0 FAIL / 6 SKIP（exit 3 = 仅未覆盖）**；回归测试 `apps/arkui-schedule/tools/test/handwritingToolbar.test.mjs` |
-| mod-quick-record | 首页底部快捷记录（不跳编辑页，路径 1 5→3） | 已写完，待提交 | ff1560f | git revert <hash>（4 个新增文件：2 代码 + 2 测试；Index.ets 增量，页头未动） | 依赖 mod-d5-create-date（日期语义） | docs/UX-STEPS.md §4.5；测试 quickRecord.test.mjs（16）/ quickRecordUi.test.mjs（14） |
-| `mod-v2-media-migration` | v1 按天 zip → v2 `timeline/<date>/media/`（Node 内建 ZIP 读取，无新依赖） | 已写完，待提交 | 2f32752 | `git revert <hash>`（2 个新文件；不碰 devices/、不删 v1） | 依赖 `mod-v2-contract`、`mod-v2-migration`（需先有 `timeline/schema.json`） | `tools/migrate-media-v1-to-v2.mjs`（765 行）、测试 `v2MediaMigration.test.mjs`（34 例） |
+| mod-quick-record | 首页底部快捷记录（不跳编辑页，路径 1 5→3） | 已提交 | ff1560f | git revert <hash>（4 个新增文件：2 代码 + 2 测试；Index.ets 增量，页头未动） | 依赖 mod-d5-create-date（日期语义） | docs/UX-STEPS.md §4.5；测试 quickRecord.test.mjs（16）/ quickRecordUi.test.mjs（14） |
+| `mod-v2-media-migration` | v1 按天 zip → v2 `timeline/<date>/media/`（Node 内建 ZIP 读取，无新依赖） | 已提交 | 2f32752 | `git revert <hash>`（2 个新文件；不碰 devices/、不删 v1） | 依赖 `mod-v2-contract`、`mod-v2-migration`（需先有 `timeline/schema.json`） | `tools/migrate-media-v1-to-v2.mjs`（765 行）、测试 `v2MediaMigration.test.mjs`（34 例） |
 | mod-v2-read-service | v2 单时间线只读服务（timelineStore），开关控制、默认 v1、不写 v2 | 已写完，已提交 | c6f2935 | git revert <hash>（2 新增 + Index.ets 14 行；默认 v1，无持久状态） | 依赖 mod-v2-read-timeline、mod-v2-contract；被 mod-v2-dual-write-off 依赖 | services/timelineStore.ets（278 行）、测试 timelineService.test.mjs（26 例） |
 | mod-v2-write-service | v2 写入核心（原子替换 records.json + 追加式账本；开关关闭即抛错，默认不启用） | 已写完，已提交 | c5dc58c | git revert <hash>（3 个新文件；未接线，默认 v1） | 依赖 mod-v2-read-service、mod-v2-contract；被 mod-v2-dual-write-off 依赖 | model/timelineWrite.ts（302 行）、services/timelineWriteStore.ets（613 行）、测试 timelineWrite.test.mjs（639 行，51 例） |
 | mod-v2-sync-protocol | §9/§11 同步协议核心（assertWritable 门槛 + fetch→union→replay→commit→push + outbox；不 force-push、不改写远端历史） | 已写完，已提交 | e6c202b | git revert <hash>（3 个新文件；未接线，默认 v1） | 依赖 mod-v2-write-service、mod-v2-contract；被 mod-v2-dual-write-off 依赖 | model/syncProtocol.ts（887 行）、services/syncProtocolStore.ets（642 行）、测试 syncProtocol.test.mjs（814 行，71 例） |
@@ -39,7 +39,7 @@
 | `mod-runbook` | 运维手册：v1→v2 迁移、激活/关闭、按 tag 从右往左回滚、七类拒绝与 outbox 处置、激活后验收、未验证边界 | 已提交 | 9904161 | 提交前回滚 = 删除 `docs/RUNBOOK.md`；提交后 `git revert <hash>`（纯文档，另需撤销本文件 §1/§5 与 `docs/ROADMAP.md` 交接节的三处登记） | 无代码依赖（只读既有模块文档）；引用 `mod-v2-*` 模块 | `docs/RUNBOOK.md`（6 节，126 行） |
 | `mod-state-summary` | 项目现状一页纸：今天做什么/默认开关、模块与哈希表、v2 默认行为、保证与不保证、未验证、下一步 | 已提交 | 2a475e0 | 提交前回滚 = 删除 `docs/STATE-OF-PROJECT.md`；提交后 `git revert <hash>`（纯文档，另需撤销本文件 §1/§5 与 `docs/ROADMAP.md` 交接节的三处登记） | 无代码依赖（只读既有模块文档）；引用 `mod-v2-*` 与 §1/§5 哈希 | `docs/STATE-OF-PROJECT.md`（6 节，一页） |
 | `mod-v2-contract-tests` | 契约缺口测试（假 IO 媒体预检、shipped dedupe、R<D/摘要/maxAttempts/未知 schema/4× 推送拒绝） | 已提交 | 58caeb2 | `git revert <hash>`（仅新增 1 个测试文件） | 独立；覆盖 mod-v2-export-import-v2 / mod-v2-hardening 的已记录 P2 | `tools/test/contractGaps.test.mjs`（520 行，25 例） |
-| `mod-push-detail` | 修复 `typedPushError` 丢细节：带细节的 `E_PUSH_REJECTED` 逐字保真进 message + lastError；裸码 / 非 E_ 传输错误仍折叠成通用中文文案 | 已交付，待提交 | （Lead 填） | 提交前回滚 = 撤销 `model/syncCycle.ts`、`contractGaps.test.mjs`、`syncWiring.test.mjs` 三处改动；提交后 `git revert <hash>` | **独立叶子，无被依赖**；只改纯模型 + 测试，不进依赖回滚链 | `docs/REVIEW-contract-tests.md` §3（P2 缺陷）；`tools/test/contractGaps.test.mjs`（C12 修正 + C14/C15/C16，共 28 例） |
+| `mod-push-detail` | 修复 `typedPushError` 丢细节：带细节的 `E_PUSH_REJECTED` 逐字保真进 message + lastError；裸码 / 非 E_ 传输错误仍折叠成通用中文文案 | 已交付，待提交 | ea7b603 | 提交前回滚 = 撤销 `model/syncCycle.ts`、`contractGaps.test.mjs`、`syncWiring.test.mjs` 三处改动；提交后 `git revert <hash>` | **独立叶子，无被依赖**；只改纯模型 + 测试，不进依赖回滚链 | `docs/REVIEW-contract-tests.md` §3（P2 缺陷）；`tools/test/contractGaps.test.mjs`（C12 修正 + C14/C15/C16，共 28 例） |
 
 `mod-v2-dual-read` 已被 `mod-v2-dual-write-off` 取代，见契约 §13。
 
@@ -119,10 +119,10 @@ mod-v2-contract
 | 2026-11-19 | `mod-module-doctrine` | 已提交 | 文档一致性回读（无代码门闸） | — | `docs/MODULES.md` + `docs/ROADMAP.md` + `项目理解.md` §7；提交：a95ecaa |
 | 2026-11-19 | `mod-v2-contract` | 已提交（draft-2） | 文档门闸（无代码门闸；359 行） | `docs/REVIEW-v2-contract.md`（276 行，P0 2 / P1 7 / P2 11；draft-2 已全部解决 P0/P1） | `docs/DATA-CONTRACT-v2.md`（359 行，v2-draft-2）；提交：77df67a |
 | 2026-11-19 | `mod-v2-migration` + `mod-insert-page-count` | 已提交（含评审修复） | 全量 **2348 / 2347 / 0 / 1**；`validate-app` 8/8；`tsc` exit 0；`overlay applied=false`；真机 `device-accept` **15 PASS / 0 FAIL / 6 SKIP（exit 3 = 仅未覆盖）** | `docs/REVIEW-v2-migration-and-insert-page.md`（304 行，P0 1 / P1 4 / P2 3 已全部修复） | 迁移 **41 例**（30→39，含 +9 评审修复）/ 真机 **15P0F6S**；两个模块各自一笔提交，提交：28b8592 / 96d4435 |
-| 2026-11-19 | mod-v2-read-timeline | 已完成，待提交 | 全量 2386/2385/0/1；validate 8/8；tsc 0 | docs/REVIEW-v2-read-timeline.md（P0 0 / P1 2 / P2 5 已修复） | 未接线，零运行时影响 |
-| 2026-11-19 | `mod-settings-lean` | 已完成，待提交 | 全量 2391/2390/0/1（+1）；validate 8/8；tsc 0 | docs/REVIEW-settings-lean.md（P0 0 / P1 1 / P2 3 已修复） | 主表单=仓库地址+令牌；平台/分支/访问方式控件移除 |
-| 2026-11-19 | mod-quick-record | 已完成，待提交 | 全量 2421/2420/0/1；validate 8/8；tsc 0 | （评审后填） | 路径 1 5→3；页头零改动 |
-| 2026-11-20 | mod-v2-media-migration | 已完成，待提交 | 全量 2456/2455/0/1；validate 8/8；tsc 0 | （评审后填） | 无新依赖；v1 zip 不删不改；ZIP64/加密拒绝 |
+| 2026-11-19 | mod-v2-read-timeline | 已提交 | 全量 2386/2385/0/1；validate 8/8；tsc 0 | docs/REVIEW-v2-read-timeline.md（P0 0 / P1 2 / P2 5 已修复） | 未接线，零运行时影响 |
+| 2026-11-19 | `mod-settings-lean` | 已提交 | 全量 2391/2390/0/1（+1）；validate 8/8；tsc 0 | docs/REVIEW-settings-lean.md（P0 0 / P1 1 / P2 3 已修复） | 主表单=仓库地址+令牌；平台/分支/访问方式控件移除 |
+| 2026-11-19 | mod-quick-record | 已提交 | 全量 2421/2420/0/1；validate 8/8；tsc 0 | （评审后填） | 路径 1 5→3；页头零改动 |
+| 2026-11-20 | mod-v2-media-migration | 已提交 | 全量 2456/2455/0/1；validate 8/8；tsc 0 | （评审后填） | 无新依赖；v1 zip 不删不改；ZIP64/加密拒绝 |
 | 2026-11-20 | mod-v2-read-service | 已完成，已提交 | 全量 2482/2481/0/1；validate 8/8；tsc 0 | （评审后填） | 开关 timeline.readMode 默认 v1；无 timeline/ → v1 原路；v2 读不写 |
 | 2026-11-20 | mod-v2-write-service | 已完成，已提交 | 全量 2517/2516/0/1；validate 8/8；tsc 0 | （评审后填） | 关闭即抛错、无 IO；原子替换 + 追加账本；未接线；后续 `mod-v2-dual-write-off` 需路由的 v1 写调用点：`pages/Index.ets:544/822/918/950/1093`、`components/RecordEditorView.ets:663`、`components/RecordDetailView.ets:193`、`services/exportService.ets:456`、`services/summaryStore.ets`（RepoSummaryIO 写入）、`model/undoDelete.ts` `schedule()`、插件 `packages/dsh-dots` `bridge.ts` `ScheduleBridge.add` 及其余 `schedule_*` |
 | 2026-11-20 | mod-v2-sync-protocol | 已完成，已提交 | 全量 2592/2591/0/1；validate 8/8；tsc 0 | （评审后填） | 门槛= schema v2 + main + HEAD==origin/main；拒绝即零写入；不 force-push |
@@ -132,8 +132,8 @@ mod-v2-contract
 | 2026-11-20 | `mod-runbook` | 已完成并提交 | 文档门闸（无代码门闸；`docs/RUNBOOK.md` 6 节 220 行） | — | 运维手册：迁移 / 激活关闭 / 按 `module/mod-*` tag 右→左回滚 / 七类拒绝与 outbox 处置 / 激活后验收 / 未验证边界；§1 与 ROADMAP 交接节各加一行登记；提交：9904161 |
 | 2026-11-20 | `mod-state-summary` | 已完成并提交 | 文档门闸（无代码门闸；`docs/STATE-OF-PROJECT.md` 6 节，一页） | — | 一页现状：默认 v1 / v2 显式激活 / 模块与哈希（含 `1b79790`/`1447b0f`/`9904161`/`c41c3c5`）/ 保证与不保证 / unverified / 下一步；§1 与 ROADMAP 交接节各加一行登记；提交：2a475e0 |
 
-| 2026-11-20 | `mod-v2-contract-tests` | 已完成，待提交 | 全量 2771/2770/0/1；validate 8/8；tsc 0 | `docs/REVIEW-contract-tests.md`（P1 登记已补，P2 记录） | 契约缺口 25 例；发现 typedPushError 细节丢失（P2，未修） |
-| 2026-11-20 | `mod-push-detail` | 已完成，待提交 | 全量 **2774/2773/0/1**（+3，contractGaps **28/28**）；validate 8/8；tsc 0 | `docs/REVIEW-contract-tests.md` §3（P2 缺陷已修）；`syncWiring.test.mjs` 旧断言同步更新 | 闭合上一行记录的 P2：带细节的 `E_PUSH_REJECTED` 逐字保真进 message + lastError；C12 保真断言不再恒真 + C14/C15/C16；裸码 / 非 E_ 传输错误仍通用 |
+| 2026-11-20 | `mod-v2-contract-tests` | 已提交 | 全量 2771/2770/0/1；validate 8/8；tsc 0 | `docs/REVIEW-contract-tests.md`（P1 登记已补，P2 记录） | 契约缺口 25 例；发现 typedPushError 细节丢失（P2，未修） |
+| 2026-11-20 | `mod-push-detail` | 已提交 | 全量 **2774/2773/0/1**（+3，contractGaps **28/28**）；validate 8/8；tsc 0 | `docs/REVIEW-contract-tests.md` §3（P2 缺陷已修）；`syncWiring.test.mjs` 旧断言同步更新 | 闭合上一行记录的 P2：带细节的 `E_PUSH_REJECTED` 逐字保真进 message + lastError；C12 保真断言不再恒真 + C14/C15/C16；裸码 / 非 E_ 传输错误仍通用 |
 
 ## 6. 追加批次（2026-11-20 之后，Lead 提交时登记）
 
@@ -142,8 +142,10 @@ mod-v2-contract
 | mod-v2-hardening | 双设备收敛模拟 26 例；并修出 syncProtocol.ts 重放决胜的顺序依赖（真 P1） | 已提交 | 1447b0f | git revert 1447b0f（与 mod-v2-sync-protocol 同链，逆序回滚） |
 | mod-export-import-v2（修复批次） | 导入媒体 sha256 完整性 preflight（E_MEDIA_CORRUPT）、sha16 撞名拒绝（E_MEDIA_COLLISION）、删死路径 V2_NOT_WIRED | 已提交 | 1b79790 | git revert 1b79790（纯增量） |
 | mod-runbook | docs/RUNBOOK.md 运维手册（迁移/激活/按 tag 逆序回滚/故障处置/验收/unverified 边界） | 已提交 | 9904161 | git revert 9904161（纯文档） |
-| mod-push-detail | 修 `typedPushError` 丢细节（P2）：带细节的 `E_PUSH_REJECTED` 逐字保真进 message + lastError；C12 改非空断言 + C14/C15/C16 | 待提交 | （Lead 填） | 提交前回滚 = 撤销 `model/syncCycle.ts` + `contractGaps.test.mjs` + `syncWiring.test.mjs` 三处改动；提交后 `git revert <hash>`（叶子，无下游） |
+| mod-push-detail | 修 `typedPushError` 丢细节（P2）：带细节的 `E_PUSH_REJECTED` 逐字保真进 message + lastError；C12 改非空断言 + C14/C15/C16 | 待提交 | ea7b603 | 提交前回滚 = 撤销 `model/syncCycle.ts` + `contractGaps.test.mjs` + `syncWiring.test.mjs` 三处改动；提交后 `git revert <hash>`（叶子，无下游） |
 
 > 三批的独立只读评审见 docs/REVIEW-three-batches.md（A/B/C 均判「可以提交」，P0 0）。
 
 > 追加登记：mod-v2-contract-tests = 8caeb2（仅测试，25 例）；mod-state-summary = a475e0（文档）；两批评审见 docs/REVIEW-contract-tests.md（A 判可以提交 P1 已修、B 判可以提交）。
+
+> 追加登记：mod-push-detail = ea7b603（推送被拒保留原始细节；评审 GO，P0 0 / P1 0 / P2 3）。
