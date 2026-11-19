@@ -31,7 +31,7 @@
 | `mod-v2-dual-write-off` | 停止写 v1、保留一个 release 的只读回退（由 `mod-v2-dual-read` 改名而来） | 待开始 | — | — | 依赖 `mod-v2-contract`、`mod-v2-migration` | `docs/DATA-CONTRACT-v2.md` §10/§13 |
 | mod-quick-record | 首页底部快捷记录（不跳编辑页，路径 1 5→3） | 已写完，待提交 | ff1560f | git revert <hash>（4 个新增文件：2 代码 + 2 测试；Index.ets 增量，页头未动） | 依赖 mod-d5-create-date（日期语义） | docs/UX-STEPS.md §4.5；测试 quickRecord.test.mjs（16）/ quickRecordUi.test.mjs（14） |
 | `mod-v2-media-migration` | v1 按天 zip → v2 `timeline/<date>/media/`（Node 内建 ZIP 读取，无新依赖） | 已写完，待提交 | 2f32752 | `git revert <hash>`（2 个新文件；不碰 devices/、不删 v1） | 依赖 `mod-v2-contract`、`mod-v2-migration`（需先有 `timeline/schema.json`） | `tools/migrate-media-v1-to-v2.mjs`（765 行）、测试 `v2MediaMigration.test.mjs`（34 例） |
-| mod-v2-read-service | v2 单时间线只读服务（timelineStore），开关控制、默认 v1、不写 v2 | 已写完，待提交 | （Lead 填） | git revert <hash>（2 新增 + Index.ets 14 行；默认 v1，无持久状态） | 依赖 mod-v2-read-timeline、mod-v2-contract；被 mod-v2-dual-write-off 依赖 | services/timelineStore.ets（278 行）、测试 timelineService.test.mjs（26 例） |
+| mod-v2-read-service | v2 单时间线只读服务（timelineStore），开关控制、默认 v1、不写 v2 | 已写完，已提交 | c6f2935 | git revert <hash>（2 新增 + Index.ets 14 行；默认 v1，无持久状态） | 依赖 mod-v2-read-timeline、mod-v2-contract；被 mod-v2-dual-write-off 依赖 | services/timelineStore.ets（278 行）、测试 timelineService.test.mjs（26 例） |
 
 `mod-v2-dual-read` 已被 `mod-v2-dual-write-off` 取代，见契约 §13。
 
@@ -94,4 +94,4 @@
 | 2026-11-19 | `mod-settings-lean` | 已完成，待提交 | 全量 2391/2390/0/1（+1）；validate 8/8；tsc 0 | docs/REVIEW-settings-lean.md（P0 0 / P1 1 / P2 3 已修复） | 主表单=仓库地址+令牌；平台/分支/访问方式控件移除 |
 | 2026-11-19 | mod-quick-record | 已完成，待提交 | 全量 2421/2420/0/1；validate 8/8；tsc 0 | （评审后填） | 路径 1 5→3；页头零改动 |
 | 2026-11-20 | mod-v2-media-migration | 已完成，待提交 | 全量 2456/2455/0/1；validate 8/8；tsc 0 | （评审后填） | 无新依赖；v1 zip 不删不改；ZIP64/加密拒绝 |
-| 2026-11-20 | mod-v2-read-service | 已完成，待提交 | 全量 2482/2481/0/1；validate 8/8；tsc 0 | （评审后填） | 开关 timeline.readMode 默认 v1；无 timeline/ → v1 原路；v2 读不写 |
+| 2026-11-20 | mod-v2-read-service | 已完成，已提交 | 全量 2482/2481/0/1；validate 8/8；tsc 0 | （评审后填） | 开关 timeline.readMode 默认 v1；无 timeline/ → v1 原路；v2 读不写 |
