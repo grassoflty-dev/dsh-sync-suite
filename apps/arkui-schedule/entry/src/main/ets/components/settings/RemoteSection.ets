@@ -7,7 +7,8 @@
  * 契约：
  * - 「访问方式」六选一（顺序 = `REMOTE_MODE_ORDER`，`uu` 排末尾并标「不可用」）；
  * - 方式元数据（文案 / 字段 / 可用性 / 前置条件）全部来自 `model/remoteAccess.ts`，页面把
- *   派生方法以函数 props 传入，本组件不另写一套解释；
+ *   派生方法以函数 props 传入，本组件不另写一套解释；「前置条件」提示直接按当前方式查
+ *   `REMOTE_MODE_HINTS`（`remoteModeHint()`），不写死局域网文案，未知方式不渲染；
  * - 「访问令牌（可选）」只出现在 `lan` / `ipv6` / `tailscale`（判据来自方式的 `fields` 表）：
  *   输入框只存"这次想改成的值"，已保存的令牌**只打码显示、永不回填**；
  * - 「DSH 地址」那一行既是最终链接的预览（自动拼），也是 `manual` 方式的手输框；
@@ -25,7 +26,8 @@ import {
   REMOTE_MODE_LAN,
   REMOTE_MODE_MANUAL,
   REMOTE_MODE_TAILSCALE,
-  REMOTE_MODES
+  REMOTE_MODES,
+  remoteModeHint
 } from '../../model/remoteAccess';
 import type { RemoteModeSpec } from '../../model/remoteAccess';
 import {
@@ -345,8 +347,10 @@ export struct RemoteSection {
         .color($r('app.color.divider'))
       if (this.remoteUrlError.length > 0) {
         this.ErrorText(this.remoteUrlError)
-      } else {
-        this.HintLine('平板需与电脑在同一局域网；地址含 token，只存本机')
+      } else if (remoteModeHint(this.remoteMode).length > 0) {
+        // 前置条件提示按当前方式查 `REMOTE_MODE_HINTS` 表；组件里不写死任何方式的文案。
+        // 未知 / 新增未登记的方式返回空串 → 不渲染，绝不继承别的方式的提示。
+        this.HintLine(remoteModeHint(this.remoteMode))
       }
 
       // 缺 token：橙色次要提示（不是错误，DSH 仍可能直接可用）

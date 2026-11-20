@@ -344,3 +344,28 @@ VPN，beta），或自己构建（Go 核心能在鸿蒙上加载，已有人验�
     也都还是旧说法。
 - **方法教训**：官方 blog / 更新日志 / 开发者文档常常不在帮助中心目录里；判定「官方有没有某能力」
   时至少查四类入口——官网功能页、帮助中心、**官方 blog/公告**、客户端设置页实机确认。
+
+## 更新（2026-11-20）：App 端「前置条件」提示按方式唯一（`mod-remote-hints`）
+
+> 背景：App 设置页「远程控制」的方式选择器下方曾写死一句「平板需与电脑在同一局域网；地址含 token，只存本机」，
+> 于是选了 **网易 UU 远程** 的用户也会看到局域网前提——与本文 §2.6「**不是**同一局域网、也不需要端口映射」直接矛盾。
+> 本次修复：六种方式的提示逐字收敛为 `apps/arkui-schedule/entry/src/main/ets/model/remoteAccess.ts` 的
+> `REMOTE_MODE_HINTS` 表 + `remoteModeHint()` 纯函数（唯一事实来源），
+> `components/settings/RemoteSection.ets` 只做查表渲染 `this.HintLine(remoteModeHint(this.remoteMode))`。
+> 页面/组件里不再有写死的方式文案；未知或新增但未登记的方式返回空串（不渲染），**不会继承别的方式的提示**。
+
+| 方式 | App 提示（逐字，与代码表一致） |
+| --- | --- |
+| `lan` 局域网 | 平板与电脑在同一 Wi-Fi/局域网，填电脑的局域网 IP:端口。 |
+| `tailscale` | 两端都加入同一个 tailnet；平板侧必须用鸿蒙原生 Tailscale 客户端（卓易通不可用），填对方 100.x IPv4 地址；不需要端口映射。 |
+| `cloudflare` | 电脑侧 cloudflared 隧道已启动，填分配的 `*.trycloudflare.com`（或自定义域名）地址。 |
+| `ipv6` | 电脑有公网 IPv6 且防火墙放行该端口，填 `[地址]:端口`；平板需支持 IPv6。 |
+| `manual` 手动 URL | 填完整可访问地址（含协议）；地址与令牌会被校验，失败原因见红字。 |
+| `uu` 网易 UU 远程 | 电脑与平板都安装并登录 网易UU远程；在 UU 客户端里把电脑上的 DSH 端口做「端口映射」，再把 UU 给出的入口地址填到这里；不是同一局域网（也不用在路由器上做端口映射）。 |
+
+`apps/arkui-schedule/tools/test/remoteHints.test.mjs` 钉住三件事：① 表覆盖 `REMOTE_MODE_ORDER` 的**每一个**枚举值
+（以后新增方式忘记登记 → 测试失败，这是「新方式不能静默继承错误提示」的守卫）；② 每种方式只含自己的正向特征短语，
+不含其它方式的（UU 文案里的「局域网 / 端口映射」仅以**否定**形式出现，见 §2.6）；③ 渲染走表查找，
+`RemoteSection` / `Settings` 源码里没有写死的旧局域网文案。
+
+> 仍 `unverified`：真机（平板）设置页的提示块渲染与截图 —— `hdc list targets` = `[Empty]`，本轮未连接设备。

@@ -313,6 +313,39 @@ export const REMOTE_MODES: Record<string, RemoteModeSpec> = {
   }
 };
 
+/**
+ * 每种访问方式**唯一**的「前置条件」提示（UI 唯一事实来源，见 `docs/REMOTE-ACCESS-OPTIONS.md` §3）。
+ *
+ * key = 方式枚举值，value = 逐字文案；`RemoteSection` 直接按当前方式查表渲染，
+ * **禁止**在页面/组件里另写一份同义字符串（那正是「选了 UU 还显示同一局域网」的 bug 根因）。
+ * 文案只描述该方式自己的前提，不夹带别的方式的前提（tailnet / 端口映射 / Wi-Fi 之类）。
+ *
+ * 新增方式时**必须**在这里加一条：漏加时 `remoteModeHint()` 返回空串（fail-closed，
+ * 宁可不显示也不继承别的方式的提示），且 `remoteHints.test.mjs` 的「覆盖每个枚举值」守卫会失败。
+ */
+export const REMOTE_MODE_HINTS: Record<string, string> = {
+  'lan': '平板与电脑在同一 Wi-Fi/局域网，填电脑的局域网 IP:端口。',
+  'tailscale': '两端都加入同一个 tailnet；平板侧必须用鸿蒙原生 Tailscale 客户端（卓易通不可用），填对方 100.x IPv4 地址；不需要端口映射。',
+  'cloudflare': '电脑侧 cloudflared 隧道已启动，填分配的 *.trycloudflare.com（或自定义域名）地址。',
+  'ipv6': '电脑有公网 IPv6 且防火墙放行该端口，填 [地址]:端口；平板需支持 IPv6。',
+  'manual': '填完整可访问地址（含协议）；地址与令牌会被校验，失败原因见红字。',
+  'uu': '电脑与平板都安装并登录 网易UU远程；在 UU 客户端里把电脑上的 DSH 端口做「端口映射」，再把 UU 给出的入口地址填到这里；不是同一局域网（也不用在路由器上做端口映射）。'
+};
+
+/**
+ * 按方式枚举值取前置条件提示；只认**精确**枚举值。
+ *
+ * 未知值 / 新增但未登记表的值 → 空串：绝不回落到 `lan` 或其它方式的提示
+ * （回落到别的方式正是本次 bug 的形态），调用方拿到空串就不渲染这一块。
+ */
+export function remoteModeHint(raw: string): string {
+  if (typeof raw !== 'string') {
+    return '';
+  }
+  const hint: string | undefined = REMOTE_MODE_HINTS[raw];
+  return hint === undefined ? '' : hint;
+}
+
 /** 按 UI 顺序列出方式元数据（返回新数组，调用方乱改不会污染常量表）。 */
 export function listRemoteModes(): RemoteModeSpec[] {
   const modes: RemoteModeSpec[] = [];
