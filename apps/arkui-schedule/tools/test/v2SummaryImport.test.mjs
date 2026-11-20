@@ -200,7 +200,8 @@ test('S6 夹具：已迁移仓库的汇总只落在 timeline/<date>/summary.json
 function v1ImportSection() {
   const text = code(EXPORT_SERVICE);
   const start = text.indexOf('function applyImportPlanOnce');
-  const end = text.indexOf('export function exportV2Timeline(');
+  // mod-export-json：导出要走 zip 桥，签名变 async；marker 同步 retarget（语义段边界不变）。
+  const end = text.indexOf('export async function exportV2Timeline(');
   assert.ok(start > 0 && end > start, '找不到 v1 格式导入实现段');
   return text.slice(start, end);
 }

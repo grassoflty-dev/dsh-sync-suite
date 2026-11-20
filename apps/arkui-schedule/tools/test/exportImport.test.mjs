@@ -37,13 +37,8 @@ registerHooks({
 });
 
 const {
-  EMPTY_RANGE_TEXT,
-  EXPORT_FORMAT_JSON,
-  EXPORT_FORMAT_MARKDOWN,
   EXPORT_VERSION,
-  NO_ATTACHMENT_TEXT,
   NO_IMPORTABLE_TEXT,
-  UNTITLED_TEXT,
   applyPlan,
   buildJsonExport,
   canConfirmImport,
@@ -59,12 +54,10 @@ const {
   importBlockedTip,
   importRecordProblem,
   isDryRunEmpty,
-  normalizeExportFormat,
   parseDateRange,
   parseJsonImport,
   planImport,
   reconcileBeforeAppend,
-  renderMarkdownExport,
   todayText,
   withExportPath,
   withImportFileName,
@@ -102,11 +95,6 @@ function bulk(index, extra = {}) {
 }
 
 const RANGE = { from: '2026-11-01', to: '2026-11-30' };
-
-/** 取 Markdown 的正文行（去掉首尾空行）。 */
-function mdLines(markdown) {
-  return markdown.split('\n');
-}
 
 // ---------------------------------------------------------------- parseDateRange
 
@@ -193,183 +181,9 @@ describe('todayText：面板空态的「填今天」必须落在本机当天', (
   });
 });
 
-// ---------------------------------------------------------------- Markdown 导出
-
-describe('renderMarkdownExport：空区间也必须产出文件', () => {
-  test('空数据：只有标题行 + 占位行，且以换行结尾', () => {
-    const markdown = renderMarkdownExport({ ...RANGE, records: [] });
-    assert.equal(markdown, `# 日程导出 2026-11-01 ~ 2026-11-30\n${EMPTY_RANGE_TEXT}\n`);
-    const lines = mdLines(markdown);
-    assert.equal(lines[0], '# 日程导出 2026-11-01 ~ 2026-11-30', '首行是区间标题');
-    assert.equal(lines[1], EMPTY_RANGE_TEXT, '第二行是占位文案');
-    assert.equal(lines[2], '', '末尾恰好一个换行（split 后最后一个空串）');
-    assert.equal(markdown.includes('## '), false, '空区间不该有日期小节');
-  });
-
-  test('区间外的记录不进文件（含首尾边界内才进）', () => {
-    const markdown = renderMarkdownExport({
-      from: '2026-11-02',
-      to: '2026-11-03',
-      records: [
-        rec({ id: 'a', ts: '2026-11-01T10:00:00+08:00' }),
-        rec({ id: 'b', ts: '2026-11-02T10:00:00+08:00' }),
-        rec({ id: 'c', ts: '2026-11-03T23:59:00+08:00' }),
-        rec({ id: 'd', ts: '2026-11-04T00:01:00+08:00' })
-      ]
-    });
-    assert.ok(markdown.includes('## 2026-11-02'), '起始日当天要包含');
-    assert.ok(markdown.includes('## 2026-11-03'), '结束日当天要包含');
-    assert.equal(markdown.includes('2026-11-01'), false, '区间前一日的记录不能进来');
-    assert.equal(markdown.includes('2026-11-04'), false, '区间后一日的记录不能进来');
-    assert.equal(markdown.includes('`id=a`'), false);
-    assert.equal(markdown.includes('`id=d`'), false);
-  });
-});
-
-describe('renderMarkdownExport：每条记录的形态', () => {
-  test('已完成 [x] / 未完成 [ ]、有 time 才写时间、日期带星期', () => {
-    const markdown = renderMarkdownExport({
-      ...RANGE,
-      records: [
-        rec({ id: 'abc123', ts: '2026-11-03T09:30:00+08:00', title: '写周报', done: false }),
-        rec({ id: 'def456', ts: '2026-11-03T14:00:00+08:00', title: '体检', done: true }),
-        rec({ id: 'ghi789', ts: '2026-11-03', title: '全天事项', done: false })
-      ]
-    });
-    const lines = mdLines(markdown);
-    assert.equal(lines[0], '# 日程导出 2026-11-01 ~ 2026-11-30');
-    assert.equal(lines[1], '', '标题与首个日期小节之间留一个空行');
-    assert.equal(lines[2], '## 2026-11-03（周二）', '日期小节带星期');
-    assert.ok(markdown.includes('- [ ] 09:30 写周报　`id=abc123`'), `实际：${markdown}`);
-    assert.ok(markdown.includes('- [x] 14:00 体检　`id=def456`'), '已完成用 [x]');
-    assert.ok(markdown.includes('- [ ] 全天事项　`id=ghi789`'), 'ts 只有日期时不写时间');
-    assert.equal(markdown.includes('（已完成）'), false, 'done 只由 [x] 表达，不重复写「（已完成）」');
-  });
-
-  test('日期升序、同日按 ts 升序（乱序输入也要排好）', () => {
-    const markdown = renderMarkdownExport({
-      ...RANGE,
-      records: [
-        rec({ id: 'd2', ts: '2026-11-05T08:00:00+08:00', title: '晚日期' }),
-        rec({ id: 'd1b', ts: '2026-11-03T18:00:00+08:00', title: '下午' }),
-        rec({ id: 'd1a', ts: '2026-11-03T07:05:00+08:00', title: '早上' }),
-        rec({ id: 'd0', ts: '2026-11-02T12:00:00+08:00', title: '最早日期' })
-      ]
-    });
-    const headings = markdown.split('\n').filter((line) => line.startsWith('## '));
-    assert.deepEqual(headings, ['## 2026-11-02（周一）', '## 2026-11-03（周二）', '## 2026-11-05（周四）']);
-    const order = ['最早日期', '早上', '下午', '晚日期'].map((title) => markdown.indexOf(title));
-    assert.deepEqual([...order].sort((a, b) => a - b), order, '记录顺序必须是 日期升序 + 同日 ts 升序');
-  });
-
-  test('标题里的换行被压成空格；空标题给兜底文案', () => {
-    const markdown = renderMarkdownExport({
-      ...RANGE,
-      records: [
-        rec({ id: 'nl', title: '第一行\n第二行' }),
-        rec({ id: 'empty', ts: '2026-11-04T09:00:00+08:00', title: '   ', done: false })
-      ]
-    });
-    assert.ok(markdown.includes('- [ ] 09:30 第一行 第二行　`id=nl`'), '换行必须压平，否则一条记录会裂成两行');
-    assert.ok(markdown.includes(`- [ ] 09:00 ${UNTITLED_TEXT}　\`id=empty\``), '空标题要有兜底');
-    assert.equal(markdown.split('\n').some((line) => line === '第二行'), false);
-  });
-
-  test('非法日期/推不出日期的记录不会产出假的日期小节', () => {
-    const markdown = renderMarkdownExport({
-      ...RANGE,
-      records: [rec({ id: 'bad', ts: 'not-a-date' }), rec({ id: 'ok', ts: '2026-11-06T09:00:00+08:00' })]
-    });
-    assert.equal(markdown.includes('not-a-date'), false);
-    assert.equal(markdown.includes('`id=bad`'), false, '推不出日期的记录不能进区间导出');
-    assert.ok(markdown.includes('## 2026-11-06（周五）'));
-  });
-});
-
-describe('renderMarkdownExport：includeAttachments / includeMeta 开关', () => {
-  const withAttachment = rec({
-    id: 'att',
-    ts: '2026-11-03T09:30:00+08:00',
-    title: '手写笔记',
-    attachments: [
-      {
-        sha256: 'a'.repeat(64),
-        name: 'page-1.png',
-        pageIndex: 0,
-        archive: '2026-11-03.zip',
-        entry: 'page-1-1a2b3c4d.jpg',
-        bytes: 20480
-      }
-    ]
-  });
-
-  test('默认不带附件清单', () => {
-    const markdown = renderMarkdownExport({ ...RANGE, records: [withAttachment] });
-    assert.equal(markdown.includes('## 附件清单'), false);
-    assert.equal(markdown.includes('page-1.png'), false);
-  });
-
-  test('includeAttachments=true：逐条列出 name / entry / 页 / bytes', () => {
-    const markdown = renderMarkdownExport({ ...RANGE, records: [withAttachment], includeAttachments: true });
-    assert.ok(markdown.includes('## 附件清单'), '必须有小节标题');
-    assert.ok(markdown.includes('page-1.png'), '要有 name');
-    assert.ok(markdown.includes('entry=page-1-1a2b3c4d.jpg'), '要有 entry');
-    assert.ok(markdown.includes('第 1 页'), 'pageIndex 0 要显示成「第 1 页」');
-    assert.ok(markdown.includes('bytes=20480'), '有 bytes 就写');
-    assert.ok(markdown.includes('- 2026-11-03'), '附件行要带记录日期');
-    assert.ok(markdown.indexOf('## 附件清单') > markdown.indexOf('## 2026-11-03'), '附件清单在文末');
-  });
-
-  test('includeAttachments=true 但没有附件：写「（无附件）」；空区间同样给占位', () => {
-    const noAttachment = renderMarkdownExport({
-      ...RANGE,
-      records: [rec({ id: 'plain' })],
-      includeAttachments: true
-    });
-    assert.ok(noAttachment.includes('## 附件清单'));
-    assert.ok(noAttachment.includes(NO_ATTACHMENT_TEXT));
-    const emptyRange = renderMarkdownExport({ ...RANGE, records: [], includeAttachments: true });
-    assert.ok(emptyRange.includes(EMPTY_RANGE_TEXT));
-    assert.ok(emptyRange.includes(NO_ATTACHMENT_TEXT), '空区间的附件清单也要有占位行');
-  });
-
-  test('includeMeta=false 默认没有元信息行', () => {
-    const markdown = renderMarkdownExport({ ...RANGE, records: [rec({ tags: ['会议'], device: 'pc-a' })] });
-    assert.equal(markdown.includes('  > '), false);
-    assert.equal(markdown.includes('tags='), false);
-  });
-
-  test('includeMeta=true：tags / author / 来源设备 各就各位，缺字段不写', () => {
-    const markdown = renderMarkdownExport({
-      ...RANGE,
-      records: [
-        rec({
-          id: 'meta',
-          tags: ['会议', '重要'],
-          author: '我',
-          device: 'pc-a',
-          ts: '2026-11-03T09:30:00+08:00'
-        }),
-        rec({
-          id: 'string-tags',
-          ts: '2026-11-04T09:30:00+08:00',
-          title: '只有标签',
-          tags: '随手记',
-          author: '',
-          sourceDevice: 'pad-b'
-        }),
-        rec({ id: 'bare', ts: '2026-11-05T09:30:00+08:00', title: '什么都没有', author: '' })
-      ],
-      includeMeta: true
-    });
-    const lines = mdLines(markdown);
-    assert.ok(lines.includes('  > tags=会议,重要 · author=我 · 来源设备=pc-a'), `实际：${JSON.stringify(lines)}`);
-    assert.ok(lines.includes('  > tags=随手记 · 来源设备=pad-b'), '字符串 tags + sourceDevice 也要认');
-    assert.equal(lines.filter((line) => line.startsWith('  > ')).length, 2, '三个字段都没有就不写元信息行');
-  });
-});
-
 // ---------------------------------------------------------------- JSON 导出
+// Markdown 导出随 mod-export-json 删除：原 3 个 describe / 11 个用例整体移除（格式不存在，
+// 不是覆盖削弱）；区间过滤仍由下方 buildJsonExport / exportRecordsInRange 用例钉住。
 
 describe('buildJsonExport：字段原样保留、可被导入原样吃回', () => {
   test('顶层结构：version/exportedAt/range/deviceId/records', () => {
@@ -793,13 +607,9 @@ describe('exportFileStamp / exportFileName：时间戳来自记录，不用随�
     assert.equal(exportFileStamp({ records: [], now: 'bad' }), '');
   });
 
-  test('文件名固定前缀与后缀；格式未知按 markdown；空时间戳用零值占位', () => {
-    assert.equal(exportFileName(EXPORT_FORMAT_MARKDOWN, '20261115-2305'), 'schedule-20261115-2305.md');
-    assert.equal(exportFileName(EXPORT_FORMAT_JSON, '20261115-2305'), 'schedule-20261115-2305.json');
-    assert.equal(exportFileName('nope', '20261115-2305'), 'schedule-20261115-2305.md');
-    assert.equal(exportFileName(EXPORT_FORMAT_JSON, ''), 'schedule-00000000-0000.json');
-    assert.equal(normalizeExportFormat('json'), 'json');
-    assert.equal(normalizeExportFormat(undefined), 'markdown');
+  test('文件名固定前缀与 .json 后缀（唯一格式）；空时间戳用零值占位', () => {
+    assert.equal(exportFileName('20261115-2305'), 'schedule-20261115-2305.json');
+    assert.equal(exportFileName(''), 'schedule-00000000-0000.json');
   });
 });
 
@@ -829,13 +639,11 @@ describe('decodeUtf8：给「用户选的文件」做字节→文本（不依赖
 // ---------------------------------------------------------------- 面板状态助手
 
 describe('面板状态助手：dry-run 文案与「确认导入」可用条件', () => {
-  test('默认状态：区间空、格式 markdown、两个开关关、没有结果、不忙', () => {
+  test('默认状态：区间空、无格式开关、没有结果、不忙', () => {
     const state = defaultExportImportState();
     assert.equal(state.fromText, '');
     assert.equal(state.toText, '');
-    assert.equal(state.format, EXPORT_FORMAT_MARKDOWN);
-    assert.equal(state.includeAttachments, false);
-    assert.equal(state.includeMeta, false);
+    assert.equal('format' in state, false, 'Markdown/JSON 格式开关已删除');
     assert.equal(state.dryRunReady, false);
     assert.equal(state.busy, false);
     assert.equal(state.message, '');

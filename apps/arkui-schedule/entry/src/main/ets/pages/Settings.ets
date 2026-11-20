@@ -79,7 +79,7 @@ import { normalizeDeviceId, settingsStore } from '../services/settingsStore';
 import type { ScheduleSettings, SettingsPatch, SyncStatePatch } from '../services/settingsStore';
 import { describeError, scheduleStore } from '../services/scheduleStore';
 import { GitSyncService } from '../services/GitSyncService';
-import type { GitSyncConfig, GitSyncResult } from '../services/GitSyncService';
+import type { GitSyncConfig, GitSyncResult, ZipWriteBundleInput } from '../services/GitSyncService';
 import { describeRepoProbe, repoProbeUrl, validateRepoUrl } from '../model/repoUrl';
 import type { RepoUrlCheck } from '../model/repoUrl';
 import { normalizeRemoteUrl, routeToRemote } from '../model/remoteUrl';
@@ -218,7 +218,10 @@ import type {
   ImportPlanResult,
   V2ApplyResult,
   V2ExportResult,
-  V2ImportPlanResult
+  V2ImportPlanResult,
+  V2ZipBridge,
+  V2ZipEntry,
+  V2ZipWriteResult
 } from '../services/exportService';
 import { timelineStore } from '../services/timelineStore';
 import { timelineWriteStore } from '../services/timelineWriteStore';
@@ -259,6 +262,31 @@ const PANEL_REPO: string = 'repo';
  * 两份常量值必须一致（守卫测试会盯）。
  */
 const FIELD_GIT_USERNAME: string = 'gitUsername';
+
+/**
+ * exportService 与 GitSyncService 之间的显式适配器（ArkTS 禁止结构化类型，不能直接把
+ * GitSyncService 当 V2ZipBridge 用）。只做参数形状转换，不含任何 IO 决策。
+ */
+class SettingsZipBridge implements V2ZipBridge {
+  private service: GitSyncService;
+
+  constructor(service: GitSyncService) {
+    this.service = service;
+  }
+
+  zipWriteBundle(archivePath: string, entries: V2ZipEntry[]): Promise<V2ZipWriteResult> {
+    const inputs: ZipWriteBundleInput[] = [];
+    for (const entry of entries) {
+      const input: ZipWriteBundleInput = { name: entry.name, bytes: entry.bytes };
+      inputs.push(input);
+    }
+    return this.service.zipWriteBundle(archivePath, inputs);
+  }
+
+  zipRead(archivePath: string, entryName: string): Promise<Uint8Array | null> {
+    return this.service.zipRead(archivePath, entryName);
+  }
+}
 
 @Entry
 @Component
@@ -1061,10 +1089,7 @@ struct Settings {
     this.exportImport = withPanelMessage(this.exportImport, '', true);
     const input: ExportRequestInput = {
       from: request.fromText,
-      to: request.toText,
-      format: request.format,
-      includeAttachments: request.includeAttachments,
-      includeMeta: request.includeMeta
+      to: request.toText
     };
     try {
       const result: ExportFileResult = exportSchedules(input);
@@ -1248,18 +1273,12 @@ struct Settings {
     const dates: string[] = timelineStore.listDates();
     const from: string = dates.length > 0 ? dates[0] : todayText();
     const to: string = dates.length > 0 ? dates[dates.length - 1] : from;
-    const request: ExportRequestInput = {
-      from: from,
-      to: to,
-      format: this.exportImport.format,
-      includeAttachments: false,
-      includeMeta: false
-    };
+    const request: ExportRequestInput = { from: from, to: to };
     return request;
   }
 
   /** 导出 v2 备份：只读派生，成功后把 bundle 路径与计数写进 v2Message（不产出导入计划）。 */
-  private handleV2Export(): void {
+  private async handleV2Export(): Promise<void> {
     if (this.disposed) {
       return;
     }
@@ -1271,7 +1290,8 @@ struct Settings {
     this.v2PlanReady = false;
     this.v2PlanText = '';
     try {
-      const result: V2ExportResult = exportV2Timeline(this.v2ExportRequest());
+      const zip: V2ZipBridge = new SettingsZipBridge(this.sync);
+      const result: V2ExportResult = await exportV2Timeline(this.v2ExportRequest(), zip);
       if (this.disposed) {
         return;
       }
@@ -1371,7 +1391,8 @@ struct Settings {
         this.v2Message = '已取消导入 v2 备份（本机记录没有任何改动）';
         return;
       }
-      const result: V2ApplyResult = applyV2Import(plan, this.pendingV2BundleDir);
+      const zip: V2ZipBridge = new SettingsZipBridge(this.sync);
+      const result: V2ApplyResult = await applyV2Import(plan, this.pendingV2BundleDir, zip);
       if (this.disposed) {
         return;
       }

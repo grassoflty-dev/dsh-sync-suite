@@ -244,6 +244,12 @@ export interface ZipEntryInput {
   chunks: string[];
 }
 
+/** media.zip 整包重写的一个条目（调用方给原始字节，服务层负责分块 base64）。 */
+export interface ZipWriteBundleInput {
+  name: string;
+  bytes: Uint8Array;
+}
+
 /** zip 条目信息（`size` 是解压后字节数）。 */
 export interface ZipEntryInfo {
   name: string;
@@ -257,8 +263,25 @@ export interface ZipUpsertResult {
   entries: ZipEntryInfo[];
 }
 
+/**
+ * media.zip 的整包重写结果（导出 bundle 专用）。
+ *
+ * 与附件按天 zip 不同：这里不允许同名合并、不允许相对路径以外的名字，且使用固定 DOS 时间，
+ * 因此同一批条目重复写出的 zip 逐字节相同（manifest.mediaArchive.sha256 可审计）。
+ */
+export interface ZipWriteBundleResult {
+  archivePath: string;
+  bytes: number;
+  entries: number;
+}
+
 /** 桥调用的请求形状（显式接口：ArkTS 禁止内联对象类型）。 */
 interface ZipUpsertRequest {
+  archivePath: string;
+  entries: ZipEntryInput[];
+}
+
+interface ZipWriteBundleRequest {
   archivePath: string;
   entries: ZipEntryInput[];
 }
@@ -404,6 +427,8 @@ const BASELINE_FILE_NAME: string = 'sync-baseline.json';
 /** 被暂停推送的附件的临时隔离目录（本机 filesDir 下，不进仓库）。 */
 const QUARANTINE_DIR_NAME: string = 'sync-quarantine';
 const BRIDGE_PROXY_NAME: string = 'dshGitHost';
+/** zip 条目分块：192KB 原始 → base64 ≈256KB 文本（与桥内 ZIP_CHUNK_BYTES 一致）。 */
+const ZIP_CHUNK_BYTES: number = 192 * 1024;
 const DEVICE_ID_PATTERN: string = '^[a-z0-9][a-z0-9-]{0,31}$';
 /** 0o100644：普通文件 */
 const MODE_FILE: number = 33188;
@@ -715,6 +740,26 @@ export class GitSyncService {
     // 本机刚写出的版本就是「基线」：push 前据此判断远端这个 zip 后来有没有被别人改过
     this.rememberAttachmentBaseline(archivePath);
     return data;
+  }
+
+  /**
+   * media.zip 的整包重写（导出 bundle 专用）：固定 DOS 时间 + 排序条目 ⇒ 同数据逐字节相同。
+   *
+   * 条目名必须形如 `<date>/<sha16>.jpg`；桥会逐条校验，绝不走附件 zip 的「合并/覆盖」语义。
+   * 分块 base64 与 `zipUpsert` 一致（每块 ≤192KB 原始字节）。
+   */
+  async zipWriteBundle(archivePath: string, entries: ZipWriteBundleInput[]): Promise<ZipWriteBundleResult> {
+    const bridgeEntries: ZipEntryInput[] = [];
+    for (const item of entries) {
+      const chunks: string[] = [];
+      for (let offset = 0; offset < item.bytes.length; offset += ZIP_CHUNK_BYTES) {
+        const end: number = Math.min(offset + ZIP_CHUNK_BYTES, item.bytes.length);
+        chunks.push(GitSyncService.base64().encodeToStringSync(item.bytes.subarray(offset, end)));
+      }
+      bridgeEntries.push({ name: item.name, chunks: chunks });
+    }
+    const payload: ZipWriteBundleRequest = { archivePath: archivePath, entries: bridgeEntries };
+    return await this.callBridgeJson<ZipWriteBundleResult>('zipWrite', payload);
   }
 
   /**

@@ -30,8 +30,6 @@ import { loadingText } from '../common/copy';
 import { APP_VERSION } from '../common/version';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
 import {
-  EXPORT_FORMAT_JSON,
-  EXPORT_FORMAT_MARKDOWN,
   EMPTY_EXPORT_IMPORT_STATE,
   QUICK_RANGE_OPTIONS,
   canConfirmImport,
@@ -67,7 +65,7 @@ const CONFIRM_NEED_FILE: string = '先选择 JSON 文件（会先算一遍，不
 
 /** 空态：还没导出过时给一句说明 + 一个「填今天」的动作。 */
 const EMPTY_EXPORT_TITLE: string = '还没有导出记录';
-const EMPTY_EXPORT_DETAIL: string = '选好区间和格式后点「导出」';
+const EMPTY_EXPORT_DETAIL: string = '选好区间后点「导出」';
 const EMPTY_EXPORT_ACTION: string = '填今天';
 
 /** 错误态的三段式文案（面板拿不到设备号，诊断里的设备写「未登记」由 model 兜底）。 */
@@ -97,10 +95,10 @@ const V2_BUSY: string = 'v2 备份正在处理，请稍候';
 
 @Component
 export struct ExportImportPanel {
-  /** 展示状态（区间初值、格式、开关、dry-run 计数、导出路径、错误文案、忙碌标志）。 */
+  /** 展示状态（区间初值、dry-run 计数、导出路径、错误文案、忙碌标志）。 */
   @Prop state: ExportImportState = EMPTY_EXPORT_IMPORT_STATE;
   /**
-   * 导出回调：把用户当前选的区间/格式/开关原样交回页面。
+   * 导出回调：把用户当前选的区间原样交回页面。
    * 页面据此拼 `exportService.exportSchedules(request)`（无参实现也兼容：忽略入参即可）。
    */
   onExport: ((request: ExportRequest) => void) | null = null;
@@ -141,29 +139,18 @@ export struct ExportImportPanel {
 
   // 可编辑项在组件本地承接：`@Prop` 是单向的，输入框直接改父状态会来回抖动。
   // 初始值来自 `state`（`aboutToAppear` 同步一次），之后由用户输入主导并随 `onExport` 回传。
+  // 格式已固定为 JSON / git 格式 bundle，没有格式选择器。
   @State fromText: string = '';
   @State toText: string = '';
-  @State format: string = EXPORT_FORMAT_MARKDOWN;
-  @State includeAttachments: boolean = false;
-  @State includeMeta: boolean = false;
 
   aboutToAppear(): void {
     this.fromText = this.state.fromText;
     this.toText = this.state.toText;
-    this.format = this.state.format === EXPORT_FORMAT_JSON ? EXPORT_FORMAT_JSON : EXPORT_FORMAT_MARKDOWN;
-    this.includeAttachments = this.state.includeAttachments;
-    this.includeMeta = this.state.includeMeta;
   }
 
   /** 当前选择（回传给页面的导出请求）。 */
   private currentRequest(): ExportRequest {
-    const request: ExportRequest = {
-      fromText: this.fromText,
-      toText: this.toText,
-      format: this.format,
-      includeAttachments: this.includeAttachments,
-      includeMeta: this.includeMeta
-    };
+    const request: ExportRequest = { fromText: this.fromText, toText: this.toText };
     return request;
   }
 
@@ -461,44 +448,6 @@ export struct ExportImportPanel {
       })
   }
 
-  /**
-   * 格式切换（选中 = 品牌实底反白字，未选中 = 白底品牌字）。
-   *
-   * A 批：不再拿裸文本当按钮（`Text` 链 `onClick` 已禁），改用 `ActionButton`：
-   * 选中档 `primary`、未选中档 `ghost`，两种状态的视觉差异由组件统一保证（可点区仍是 `TOUCH_MIN`）。
-   */
-  @Builder
-  FormatRow() {
-    Row({ space: SPACING.sm }) {
-      ActionButton({
-        label: 'Markdown',
-        actionEnabled: true,
-        disabledReason: '',
-        busy: false,
-        variant: this.format === EXPORT_FORMAT_MARKDOWN ? 'primary' : 'ghost',
-        block: false,
-        onTap: (): void => {
-          this.format = EXPORT_FORMAT_MARKDOWN;
-        },
-        onBlockedTap: null
-      })
-      ActionButton({
-        label: 'JSON',
-        actionEnabled: true,
-        disabledReason: '',
-        busy: false,
-        variant: this.format === EXPORT_FORMAT_JSON ? 'primary' : 'ghost',
-        block: false,
-        onTap: (): void => {
-          this.format = EXPORT_FORMAT_JSON;
-        },
-        onBlockedTap: null
-      })
-    }
-    .width('100%')
-    .alignItems(VerticalAlign.Center)
-  }
-
   /** 三个快捷 chip：点一下把 from/to 写成对应区间（不触发导出、不碰 IO）。 */
   @Builder
   QuickRangeRow() {
@@ -746,48 +695,6 @@ export struct ExportImportPanel {
         this.ToInput()
       }
       .width('100%')
-      .alignItems(VerticalAlign.Center)
-
-      this.FormatRow()
-
-      Row({ space: SPACING.sm }) {
-        Checkbox({ name: 'export-attachments' })
-          .select(this.includeAttachments)
-          .selectedColor($r('app.color.brand'))
-          .width(TOUCH_MIN)
-          .height(TOUCH_MIN)
-          .onChange((value: boolean) => {
-            this.includeAttachments = value;
-          })
-        Text('Markdown 附带附件清单')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_primary'))
-          .layoutWeight(1)
-          .textAlign(TextAlign.Start)
-      }
-      .width('100%')
-      .height(TOUCH_MIN)
-      .alignItems(VerticalAlign.Center)
-
-      Row({ space: SPACING.sm }) {
-        Checkbox({ name: 'export-meta' })
-          .select(this.includeMeta)
-          .selectedColor($r('app.color.brand'))
-          .width(TOUCH_MIN)
-          .height(TOUCH_MIN)
-          .onChange((value: boolean) => {
-            this.includeMeta = value;
-          })
-        Text('Markdown 附带元信息（标签 / 作者 / 来源设备）')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_primary'))
-          .layoutWeight(1)
-          .textAlign(TextAlign.Start)
-      }
-      .width('100%')
-      .height(TOUCH_MIN)
       .alignItems(VerticalAlign.Center)
 
       ActionButton({

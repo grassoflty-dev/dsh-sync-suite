@@ -4,8 +4,8 @@
  * A2 拆分：内容从 `pages/Settings.ets` 的 `DataGroup()` 逐字搬出。页面持有 `exportImport`
  * 状态与本机 IO（`services/exportService.ets`），这里只收**单向 props + 回调**。
  *
- * 组内**只有** `ExportImportPanel` 一个组件：区间 / 格式 / 两个开关 / 导出按钮 / 选文件 /
- * dry-run 统计 / 确认 / 取消都在组件内部，这里再包一层控件就会变成两套语义。
+ * 组内**只有** `ExportImportPanel` 一个组件：区间 / 导出按钮 / 选文件 / dry-run 统计 /
+ * 确认 / 取消都在组件内部（格式已固定、Markdown 删除），这里再包一层控件就会变成两套语义。
  */
 import { FONT, LINE_HEIGHT, SPACING } from '../../common/uiTokens';
 import { ExportImportPanel } from '../ExportImportPanel';

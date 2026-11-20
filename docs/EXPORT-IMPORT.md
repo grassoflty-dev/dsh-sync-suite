@@ -1,99 +1,84 @@
 # 导出 / 导入契约（EXPORT-IMPORT）
 
-设置页的「导出 / 导入」：把本机日程导成 **Markdown / JSON** 文件，或把一份 JSON 导出文件
-**只追加**地导回本机。本文是唯一事实来源，实现见：
+**export format is the git format**：设置页的「v2 时间线备份」把共享时间线导成一份
+**repo-shaped bundle**（与 `timeline/**` 同构，`docs/DATA-CONTRACT-v2.md`），导入把它
+**只追加**地搬回 `timeline/<date>/`。**没有 Markdown 格式**——`mod-export-json` 已把格式选择器、
+Markdown 渲染代码、文案与测试整体删除；v1 兼容的 JSON 文本导入仍保留，但导出格式只有 bundle。
 
 | 层 | 文件 | 职责 |
 | --- | --- | --- |
-| 纯逻辑（零 SDK） | `entry/src/main/ets/model/exportImport.ts` | 区间校验、Markdown/JSON 渲染、`parseJsonImport`、`planImport`、**写前复核 `reconcileBeforeAppend`**、**落盘纯实现 `writePlan`**、UTF-8 解码、面板状态助手 |
-| 文件 IO | `entry/src/main/ets/services/exportService.ets` | 写导出文件、选文件读文本、**并发闸 + 复核 + 注入真实 IO** 执行 `writePlan`、维护未完成索引 |
-| UI | `entry/src/main/ets/components/ExportImportPanel.ets` | 纯展示 + 回调，不做 IO、不做路由 |
-| 测试 | `tools/test/exportImport.test.mjs` | 69 个用例钉住下面的规则（含 fake-IO 落盘契约） |
+| 纯逻辑（零 SDK） | `entry/src/main/ets/model/exportImport.ts` | 区间校验、bundle manifest 构建/解析/校验、账本并集、媒体 sha256 预检、v1 JSON 计划与复核、面板状态助手 |
+| 文件 IO + zip 桥 | `entry/src/main/ets/services/exportService.ets` | 写 bundle / media.zip（经 `GitSyncService.zipWriteBundle`）、选文件读文本、并发闸 + 写前复核 + 落盘 |
+| zip 桥实现 | `entry/src/main/resources/rawfile/git/git-bridge.js` | `zipWrite`（整包重写、固定 DOS 时间、条目 `<date>/<sha16>.jpg`）/ `zipList` / `zipRead` |
+| UI | `entry/src/main/ets/components/ExportImportPanel.ets` | 纯展示 + 回调，不做 IO、不做路由；无格式选择器 |
+| 测试 | `tools/test/{exportImport,exportImportV2,exportJson}.test.mjs` | v1 JSON 规则、v2 bundle/账本规则、本格式的端到端 round-trip |
 
-**不改既有契约**：日程 JSONL 仍是 `docs/DATA-CONTRACT.md` §3（一行一条、只追加），
-未完成索引仍是 §4bis；本功能不新增记录字段、不改字段名、不写 `summaries/`、不碰附件二进制。
+**不改既有契约**：`timeline/<date>/records.json` 仍是 `docs/DATA-CONTRACT-v2.md` §3 的规范字节，
+三本账本仍是 §7 的 append-only 原文；本功能不新增记录字段、不改字段名、不删任何历史。
 
 ---
 
 ## 1. 三条硬规则
 
-1. **导出是只读派生**：只读 `scheduleStore.readAll()`，产出文本写进沙箱 `exports/`，
-   **绝不动源文件**（不重写、不裁剪、不迁移）。
-2. **导入是 append-only**：只在用户确认后，把 `toAppend` 里那些「本机没有的新 id」追加到
-   `devices/<本机>/schedules/YYYY-MM-DD.jsonl` 末尾；历史行一个字节都不改，别的设备目录永不被写。
-   **写盘前必须再复核一次**（见 §3.3 第 2 道闸）：dry-run 到确认之间本机可能已被别的页面 /
-   另一次导入 / 另一台设备的 Git 同步写入了同 `id`，复核会把它们挡在写入之前。
+1. **导出是只读派生**：只读 `timelineStore.readDay()` / `readSummaryText()`，产出 bundle 写进沙箱
+   `<filesDir>/exports/v2-<stamp>/`，**绝不动源文件**（不重写、不裁剪、不迁移）。
+2. **导入是 append-only**：只在用户确认后，把记录经 `timelineWriteStore` 写进
+   `timeline/<date>/records.json`，媒体只增、账本只并集追加；历史字节一个都不改、不删。
+   **写盘前必须再复核一次**（见 §3.3）：dry-run 到确认之间本机可能已被别的页面 / 同步写入同 `id`，
+   复核会把它们挡在写入之前。
 3. **绝不覆盖 / fail-closed**：
    - 同 `id` 且导入记录**更新** → 只计入 `conflict`（统计并显示给人看），**不追加、不改既有行**；
    - 同 `id` 且**更旧或相同** → `skipped`；
-   - 任何一条记录非法 / 任何一次 JSON 解析失败 → 整批不写（连「写一半」都不允许）。
+   - 任何一条记录非法 / 任何一次 JSON 解析失败 / **任何一张媒体 sha256 不符** → 整包不写。
 
 ---
 
-## 2. 导出
+## 2. 导出（格式 = git 格式 bundle）
 
 ### 2.1 入口与参数
 
 ```ts
 // 纯函数（可 Node 跑）
-renderMarkdownExport({ from, to, records, includeAttachments?, includeMeta? }): string
-buildJsonExport({ from, to, deviceId, records, exportedAt? }): string
+buildV2Manifest({ from, to, exportedAt, days, media, mediaArchive? }): string
+buildV2RecordsText(date, records): string             // 规范字节
+parseV2Manifest(text): V2ManifestResult
 parseDateRange(fromText, toText): { ok, from, to, reason }
 
-// 真实落盘（需要 scheduleStore 已 ready）
-exportSchedules({ from, to, format, includeAttachments, includeMeta }): ExportFileResult
+// 真实落盘（v2；需要 timelineStore.isMigrated()）
+exportV2Timeline({ from, to }, zipBridge): Promise<V2ExportResult>
+// v1 兼容 JSON 文本入口仍在（落点同样是 timeline/），但没有 Markdown 分支
+exportSchedules({ from, to }): ExportFileResult
 ```
 
 - `from` / `to`：`YYYY-MM-DD`，**含首尾**，必须是真实存在的日期（`2026-02-30`、`2026-13-01`、`2026-1-1` 全部拒绝）；
   `from > to` 报错「开始日期不能晚于结束日期」；
-- `format`：`'markdown' | 'json'`，未知值按 `markdown`（人能直接读的那一种）；
-- `includeAttachments` / `includeMeta` 默认 **false**；
-- 空区间**也成功**，产出一份只有标题与占位行的文件。
+- **没有 `format` 参数**：Markdown 已删除；v2 用户得到 repo-shaped bundle，v1 兼容入口只产出 JSON；
+- `includeAttachments` / `includeMeta` 已随 Markdown 删除；媒体由 bundle 的 `media.zip` 统一搬运；
+- 空区间**也成功**（manifest `dayCount:0`、空的 `media.zip`）。
 
-### 2.2 Markdown 逐字格式
-
-```
-# 日程导出 2026-11-01 ~ 2026-11-30
-
-## 2026-11-03（周二）
-- [ ] 09:30 写周报　`id=abc123`
-- [x] 14:00 体检　`id=def456`
-```
-
-规则：
-
-| 规则 | 说明 |
-| --- | --- |
-| 已完成 / 未完成 | `[x]` / `[ ]`；**不再追加「（已完成）」**（复选框已经表达了，不重复） |
-| 时间 | 有 `HH:MM` 才写（`ts` 只有日期就不写）；时刻取自 `ts` 自带时区，**不做本机换算** |
-| id | 每行末尾全角空格 + `` `id=<记录 id>` ``（便于人回到原始 JSONL 行；示例里第二行省略只是排版简写） |
-| 排序 | 日期升序 → 同日 `ts` 升序 |
-| 星期 | `（周二）`；由 `model/calendar.ts` 的纯整数算法推得，不碰 `Date`/时区 |
-| 空数据 | 标题下一行 `（该区间没有记录）`，不输出任何 `##` 小节 |
-| 标题为空 | 渲染 `（无标题）`；标题里的换行压成空格（一条记录只能占一行） |
-| 非法日期记录 | 直接不进导出（不产出 `## 2026-02-30` 这种假日期小节） |
-
-`includeAttachments: true` 时文末追加：
+### 2.2 Bundle 布局（逐字契约，见 §7.3）
 
 ```
-## 附件清单
-- 2026-11-03 · 09:30 · 写周报 · page-1.png · 第 1 页 · entry=page-1-1a2b3c4d.jpg · bytes=20480
+v2-<stamp>/
+  manifest.json                 {bundleVersion:2, schemaVersion:2, kind:'dsh-schedule-v2',
+                                 range, exportedAt, dayCount,
+                                 days:[{date,recordCount,hasSummary,ledgers:[{name,bytes}×3]}],
+                                 media:[{file,sha256,bytes,date}],
+                                 mediaArchive:{name:'media.zip',sha256,bytes,entries}}
+  timeline/<date>/records.json   canonical bytes（与 git 仓库中的文件逐字节相同）
+  timeline/<date>/summary.json   仅 when present
+  timeline/<date>/deleted.jsonl  逐字节复制（空账本也建文件）
+  timeline/<date>/restore.jsonl
+  timeline/<date>/conflicts.jsonl
+  media.zip                      唯一归档，条目 <date>/<sha16>.jpg
 ```
 
-- `entry` / `bytes` **存在才写**（`bytes` 不是 `§3` 的契约字段，只有数据真带了数字才写，绝不写 `bytes=undefined`）；
-- 一条附件都没有 → 该小节下写 `（无附件）`。
+**为什么一个 bundle 一个 media.zip（设计决策）**：一个归档让整个 bundle 保持为单一可转移文件，
+媒体校验清单集中在一处可审计（manifest.media + mediaArchive.sha256），导入端一次预检即可在写盘前
+校验每张图；按天 zip 会重新引入 v2 媒体布局刚刚去掉的「按日归档耦合」，散图则让 bundle 分裂成
+一堆文件。zip 条目按 `(date,file)` 排序 + 固定 DOS 时间（1980-01-01），同数据重复导出逐字节相同。
 
-`includeMeta: true` 时每条记录后追加一行缩进元信息：
-
-```
-  > tags=会议,重要 · author=我 · 来源设备=pc-a
-```
-
-- `tags`（`string[]` 或 `string`）与「来源设备」（`device` / `sourceDevice` / `deviceId` 取第一个非空）
-  都**不是** `ScheduleRecord` 的必填字段：**有才写，没有就不猜**；
-- 三个字段都没有则整行不渲染。
-
-### 2.3 JSON 逐字结构
+### 2.3 v1 兼容 JSON 逐字结构（仅导入；导出不再产出 Markdown）
 
 ```json
 {
@@ -113,7 +98,7 @@ exportSchedules({ from, to, format, includeAttachments, includeMeta }): ExportFi
 ### 2.4 导出目录与文件名
 
 - 目录：`<filesDir>/exports/`（应用沙箱，**不在 `git-repo/` 里**，因此不会被 Git 同步推走）；
-- 文件名：`schedule-YYYYMMDD-HHmm.md` / `.json`；
+- v1 兼容 JSON 文件名：`schedule-YYYYMMDD-HHmm.json`；v2 bundle 目录名 `v2-YYYYMMDD-HHmm`；
 - **时间戳来自记录**：取本次导出记录里 `ts` 最新的那条的日期+时刻（保留记录自带时区），
   区间内没有可用 `ts` 时才退回当前时间；**不用随机数**，同一份数据重复导出得到同一个名字；
 - 同名（同一分钟内再次导出）：按 `-2` / `-3` … 递增（最多到 `-99`，再往后提示清理目录）；
@@ -228,7 +213,7 @@ appendImportPlan(plan): {
 | 属性 | 类型 | 说明 |
 | --- | --- | --- |
 | `state` | `@Prop ExportImportState` | 区间初值、格式、开关、dry-run 计数、导出路径、提示文案、`busy` |
-| `onExport` | `(request: ExportRequest) => void \| null` | 用户点「导出」；`ExportRequest` = `{fromText,toText,format,includeAttachments,includeMeta}` |
+| `onExport` | `(request: ExportRequest) => void \| null` | 用户点「导出」；`ExportRequest` = `{fromText,toText}`（格式固定为 JSON / git bundle，Markdown 与两个开关已删除） |
 | `onPickFile` | `(() => void) \| null` | 用户点「选择 / 重新选择 JSON 文件」 |
 | `onConfirmImport` | `(() => void) \| null` | 用户点「确认导入」（组件内部已用 `canConfirmImport` 挡住不可点的情形） |
 | `onCancel` | `(() => void) \| null` | 用户点「取消」 |
@@ -322,9 +307,9 @@ ExportImportPanel({
 
 | 不做 | 原因 |
 | --- | --- |
-| 不导出附件二进制 | 附件在 `attachments/<date>.zip`，属 §4ter；导出只列清单（`Markdown` 的附件小节 / JSON 的 `attachments` 字段原样） |
+| 不导出附件二进制 | v2 媒体统一进 `media.zip`（条目 `<date>/<sha16>.jpg`），不保留按天附件 zip 的耦合；v1 兼容 JSON 的 `attachments` 字段原样保留 |
 | 不导出 `summaries/`、`open.jsonl` | 它们是派生数据，可由日程重算；导出它们只会制造第二事实来源 |
-| 不导入 Markdown | Markdown 是给人看的；导入只认 `version:1` 的 JSON（文本解析出错就是脏数据） |
+| 不生成 Markdown | 格式已删除：v2 导出是 git 格式 bundle，v1 兼容文本导入只认 `version:1` 的 JSON |
 | 不做「同 id 覆盖」 | 覆盖 = 改历史语义；更新的记录只报告成 `conflict`，由人决定 |
 | 不写别的设备目录 | 只写 `<self>/schedules/`；跨设备数据靠 Git 同步，不靠导入 |
 | 不迁移旧数据 / 不改 schema | 导出导入不改 §3 的字段；旧记录（散图附件等）原样进原样出 |
@@ -336,7 +321,8 @@ ExportImportPanel({
 - 导出只覆盖**本机**记录（`scheduleStore.readAll()`）；「含其他设备」是首页的展示开关，不参与导出；
 - 导出不折叠 `id`：调用方应传已折叠列表（`readAll()` 就是）；手工传原始多版本会按版本各占一行；
 - 同名导出文件的序号后缀是**本地文件系统**层面的行为，不写进文件内容；
-- `includeMeta` 的 `tags` / 来源设备依赖记录上的扩展字段，现网数据如果没有就只写 `author`。
+- 导出格式固定为 JSON / git bundle（原 Markdown 导出与 `includeAttachments` / `includeMeta` 开关已删除）；
+  来源设备 / `tags` 等扩展字段若现网数据没有就不写，不虚构。
 
 ---
 
@@ -345,12 +331,15 @@ ExportImportPanel({
 ```bash
 cd apps/arkui-schedule
 node ..\..\node_modules\typescript\bin\tsc -p tools\tsconfig.json   # 纯逻辑层编译（exit 0）
-node --test tools\test\exportImport.test.mjs                        # 69 用例 / 全部通过
+node --test tools\test\exportImport.test.mjs                        # v1 JSON / 导入规则（Markdown 11 例已删）
+node --test tools\test\exportImportV2.test.mjs tools\test\exportJson.test.mjs  # v2 bundle + 本格式 round-trip
 node tools\validate-app.mjs                                         # 8/8
 ```
 
-测试覆盖（节选）：空区间导出、区间过滤与排序、`[x]/[ ]`、无 time、`includeAttachments`、
-`includeMeta`、JSON round-trip、`parseJsonImport` 的 12 类坏输入、`planImport` 的三种同 id 归属、
+测试覆盖（节选）：空区间导出、区间过滤与排序、JSON / git bundle round-trip（manifest + timeline/**
+逐字节相等 + 媒体 sha256 逐张相等）、确定性（两次导出逐字节相同）、`manifest.mediaArchive`
+整包 sha256 / 逐张 sha256 篡改零写入、旧 bundle 散图导入 + informational note、服务层同款 io
+构造（P1-1）、`parseJsonImport` 的 12 类坏输入、`planImport` 的三种同 id 归属、
 9 类非法字段、5000 条 < 2000ms 且保序、`exportFileStamp`、`decodeUtf8`、面板状态助手；
 **落盘契约（fake store / fake 写入器注入）**：只追加（无 `TRUNC`，历史行逐字节不变）、
 同一天多条只一次物理追加、第 2 个日期失败时 `ok:false` + `files` 只含已写文件 + 已写内容完整、
@@ -371,7 +360,7 @@ v2-<stamp>/
   timeline/<date>/deleted.jsonl        # 逐字节复制源仓库，空账本也建文件
   timeline/<date>/restore.jsonl
   timeline/<date>/conflicts.jsonl
-  timeline/<date>/media/<sha16>.jpg
+  media.zip                            # mod-export-json：唯一归档，条目 <date>/<sha16>.jpg
 ```
 
 - manifest 的 `days[]` 每天增 `ledgers: [{name, bytes}, …]`，恒三项、顺序固定 `deleted.jsonl` / `restore.jsonl` / `conflicts.jsonl`，`bytes` 为该账本 UTF-8 字节数（空账本为 0）；
@@ -392,4 +381,32 @@ v2-<stamp>/
 
 ### 7.2 验证（`tools/test/exportImportV2.test.mjs`）
 
-新增覆盖：v2 bundle 含三本账本（含空账本）与字节数声明、旧 bundle（缺字段/1）不拒绝且带 note、并集去重与不截断、未来版本 `E_BUNDLE_VERSION`、账本乱序声明仍确定性、round-trip（空目标账本逐字节相等；已有目标行并集 + 重放幂等）。v1 导出/导入测试 `exportImport.test.mjs` 一字未改。
+新增覆盖：v2 bundle 含三本账本（含空账本）与字节数声明、旧 bundle（缺字段/1）不拒绝且带 note、并集去重与不截断、未来版本 `E_BUNDLE_VERSION`、账本乱序声明仍确定性、round-trip（空目标账本逐字节相等；已有目标行并集 + 重放幂等）。v1 导出/导入测试 `exportImport.test.mjs` 只随 Markdown 删除做了定点删测（11 例）与格式默认值 retarget（2 例），JSON/导入规则用例保持原样。
+
+### 7.3 `mod-export-json`：repo-shaped bundle 的媒体布局与校验
+
+**布局与理由**（与 `model/exportImport.ts` v2 节头注释同源）：导出就是 git 格式——
+`manifest.json` + `timeline/<date>/{records.json,summary.json,deleted.jsonl,restore.jsonl,conflicts.jsonl}` +
+**一个** `media.zip`（条目 `<date>/<sha16>.jpg`）。manifest 顶层键序固定
+`bundleVersion, schemaVersion, kind, range, exportedAt, dayCount, days, media, mediaArchive`；
+`media[]` 逐张列 `{file,sha256,bytes,date}`，`mediaArchive` 列 `{name:'media.zip',sha256,bytes,entries}`。
+一个归档让 bundle 保持单一可转移文件、媒体校验清单集中一处可审计；按天 zip 会重新引入 v2 媒体布局
+刚刚去掉的「按日归档耦合」，散图会让 bundle 分裂成一堆文件。
+
+**确定性**：zip 条目按 `(date,file)` 排序，桥 `zipWrite` 用固定 DOS 时间（1980-01-01）+
+STORE 压缩，因此同一份数据两次导出的 manifest / media.zip / 日文件逐字节相同（测试钉死）。
+
+**Bundle/version compatibility（续 §7.1）**：
+- 新 bundle（有 `mediaArchive`）：从 `media.zip` 读媒体；旧 bundle（缺 `mediaArchive`，可能是按日 zip 或散图）
+  **不拒绝**，仍从旧位置读媒体并返回 informational note `V2_NOTE_MEDIA_ARCHIVE_ABSENT`，与账本 note 可并存。
+- `bundleVersion > 2` 仍 typed `E_BUNDLE_VERSION`；缺失/1 的旧 bundle note 规则不变。
+
+**媒体校验规则（fail-closed，零写入）**：
+1. dry-run 读回 `media.zip` 字节，先比对整包 `mediaArchive.sha256` / `bytes`；不符 → `E_MEDIA_CORRUPT`；
+2. 用户确认后，`applyV2Import` 用 zip 桥**异步预取全部条目字节**，任一条目读不出 / 缺失 → `E_MEDIA_CORRUPT`；
+3. 预取字节交给同步的 `checkV2MediaIntegrity`：逐张比对 manifest.sha256，不符 / 目标同名内容不同 →
+   `E_MEDIA_CORRUPT` / `E_MEDIA_COLLISION`；**所有校验发生在任何 records/summary/media/账本写入之前**；
+4. 校验通过的字节原样写入（不二次读源），消除「验完再读」的竞态；媒体只增，不覆盖、不删除。
+
+验证：`tools/test/exportJson.test.mjs`（真 zip 桥 + 两天 fixture）覆盖 round-trip 逐字节相等、
+篡改条目零写入、旧 bundle note、未来版本拒绝、确定性。真机 / 第二设备行为 `unverified`。

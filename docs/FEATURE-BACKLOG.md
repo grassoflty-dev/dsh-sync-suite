@@ -304,6 +304,10 @@
 
 ### 11. 导出/归档的用户侧入口 —— 1 天 / P2
 
+> **已作废（Markdown 部分）**：导出格式已固定为 JSON / git bundle（`mod-export-json`），
+> Markdown 导出与下列关于 `model/exportMarkdown.ts` / `*.md` 的改动面、验收项均不再适用；
+> 归档入口本身若仍需，按现有 JSON/git bundle 导出（`ExportImportPanel`）接。
+
 - **前置**：`docs/ROADMAP.md:126` 已有「Wave 3 导出/归档/分页/缩略图（待派）」。本条目**不重复设计导出内容**，
   只补"用户从哪儿点、失败怎么提示"。若 Wave 3 的实现口径与该入口冲突，以 Wave 3 为准。
 - **数据影响**：无 schema 变更。导出是派生视图：Markdown/CSV 由现有记录渲染，

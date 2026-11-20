@@ -226,7 +226,7 @@ describe('v2 导出 manifest：确定性 + 逐字节稳定', () => {
     assert.equal(doc.bundleVersion, V2_BUNDLE_VERSION);
     assert.equal(doc.schemaVersion, V2_BUNDLE_SCHEMA_VERSION);
     assert.equal(doc.kind, V2_BUNDLE_KIND);
-    assert.deepEqual(Object.keys(doc), ['bundleVersion', 'schemaVersion', 'kind', 'range', 'exportedAt', 'dayCount', 'days', 'media']);
+    assert.deepEqual(Object.keys(doc), ['bundleVersion', 'schemaVersion', 'kind', 'range', 'exportedAt', 'dayCount', 'days', 'media', 'mediaArchive']);
     assert.deepEqual(doc.range, { from: '2026-11-01', to: '2026-11-30' });
     assert.equal(doc.dayCount, 0);
     assert.equal(text.endsWith('\n'), true);
@@ -888,6 +888,10 @@ describe('源码级：v2 落点只经原子写、不碰 devices、UI flag-gated'
       assert.ok(SETTINGS.includes(`${cb}: (): void => {`), `${cb} 必须在设置页接线`);
     }
     assert.match(PANEL, /V2_BUSY/, '忙碌按钮必须给原因');
-    assert.equal((PANEL.match(/^\s*@State\b/gm) ?? []).length, 5, '面板不得新增 @State（保持纯展示）');
+    // mod-export-json 删除格式选择器与两个 Markdown 开关：@State 5 → 2（fromText / toText），
+    // 不是覆盖削弱——这些控件承载的格式已不存在。
+    assert.equal((PANEL.match(/^\s*@State\b/gm) ?? []).length, 2, '面板只保留 fromText / toText 两个 @State');
+    assert.equal(PANEL.includes('FormatRow'), false, '格式选择器必须删除');
+    assert.equal(PANEL.includes('Markdown'), false, '面板不得残留 Markdown 文案');
   });
 });

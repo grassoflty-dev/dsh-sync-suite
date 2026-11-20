@@ -161,11 +161,13 @@ describe('B2 面板 ExportImportPanel.ets：快捷 chip 的源码级契约', () 
     );
   });
 
-  test('B2-16 纯展示纪律：剥注释后无 new Date(，且 @State 行数仍是 5（未新增状态）', () => {
+  test('B2-16 纯展示纪律：剥注释后无 new Date(，且 @State 行数仍是 2（mod-export-json 删除格式状态）', () => {
     const code = stripComments(PANEL);
     assert.equal(code.includes('new Date('), false, '契约丢了：面板代码里不得自己构造 Date（今天走 model.todayText()）');
     const stateCount = (PANEL.match(/^\s*@State\b/gm) ?? []).length;
-    assert.equal(stateCount, 5, '契约丢了：面板不得新增 @State（chip 高亮现算、选择只写本地输入态）');
+    // 原 5 = fromText/toText/format/includeAttachments/includeMeta；后 3 个随 Markdown 删除，
+    // 不是覆盖削弱——格式与两个 Markdown 开关已经不存在（chip 高亮仍现算、选择只写本地输入态）。
+    assert.equal(stateCount, 2, '面板只应保留 fromText / toText 两个 @State（纯展示纪律不变）');
   });
 
   test('B2-17 QuickRangeRow 内每个 ActionButton 调用点都带 label / actionEnabled / disabledReason / onTap', () => {

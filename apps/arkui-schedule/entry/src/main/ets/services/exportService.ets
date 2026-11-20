@@ -26,41 +26,40 @@ import { fileIo as fs, picker } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import { nowIso } from '../common/date';
 import {
-  EXPORT_FORMAT_JSON,
   V2_LEDGER_CONFLICTS,
   V2_LEDGER_FILES,
   V2_LEDGER_RESTORE,
+  V2_MEDIA_ARCHIVE_NAME,
   V2_REFUSAL_BUNDLE_CORRUPT,
   V2_REFUSAL_MEDIA_CORRUPT,
   V2_REFUSAL_MEDIA_COLLISION,
   V2_REFUSAL_TARGET_BUSY,
   V2_REFUSAL_V1_TARGET,
   buildV2Manifest,
+  buildV2MediaCheckIo,
   buildV2RecordsText,
   checkV2MediaIntegrity,
   decodeUtf8,
   mergeV2LedgerText,
+  v2MediaEntryName,
   v2PlanNotes,
   v2Utf8ByteLength,
   exportFileName,
   exportFileStamp,
   exportRecordsInRange,
   buildJsonExport,
-  normalizeExportFormat,
   parseDateRange,
   parseJsonImport,
   parseV2Manifest,
   planImport,
   planV2Import,
   reconcileBeforeAppend,
-  renderMarkdownExport,
   v2PlanSummary
 } from '../model/exportImport';
 import type {
   ExportStampInput,
   ImportPlan,
   JsonExportInput,
-  MarkdownExportInput,
   ReconcileResult,
   V2BundleDay,
   V2BundleDayInput,
@@ -70,8 +69,11 @@ import type {
   V2LedgerKind,
   V2LedgerMeta,
   V2Manifest,
+  V2MediaArchive,
+  V2MediaCheckIo,
   V2TargetState
 } from '../model/exportImport';
+import { sha256Hex } from '../model/sha256';
 import type { ScheduleRecord } from '../model/types';
 import type { TimelineMedia } from '../model/timeline';
 import { NOT_MIGRATED_REASON } from '../model/migrationState';
@@ -94,12 +96,6 @@ export interface ExportRequestInput {
   from: string;
   /** 结束日期 `YYYY-MM-DD`（含）。 */
   to: string;
-  /** `markdown` / `json`（未知按 markdown）。 */
-  format: string;
-  /** 是否追加附件清单（仅 Markdown）。 */
-  includeAttachments: boolean;
-  /** 是否追加元信息行（仅 Markdown）。 */
-  includeMeta: boolean;
 }
 
 /** 一次导出的结果（失败也返回对象，`ok:false` + 中文 `reason`）。 */
@@ -228,10 +224,10 @@ function appendTextAtEnd(path: string, text: string): void {
 }
 
 /** 取一个未被占用的导出路径（同名按 `-2` / `-3` 递增；不用随机数，可复现）。 */
-function uniqueExportPath(format: string, stamp: string): string {
+function uniqueExportPath(stamp: string): string {
   const dir = exportsDirPath();
   ensureDir(dir);
-  const base = exportFileName(format, stamp);
+  const base = exportFileName(stamp);
   const first = `${dir}/${base}`;
   if (!fileExists(first)) {
     return first;
@@ -273,7 +269,6 @@ export function exportSchedules(request: ExportRequestInput): ExportFileResult {
   if (!range.ok) {
     return failed(range.reason);
   }
-  const format = normalizeExportFormat(request.format);
   let records: ScheduleRecord[] = [];
   try {
     records = scheduleStore.readAll();
@@ -284,32 +279,22 @@ export function exportSchedules(request: ExportRequestInput): ExportFileResult {
   const at = nowIso();
   let content: string = '';
   try {
-    if (format === EXPORT_FORMAT_JSON) {
-      const jsonInput: JsonExportInput = {
-        from: range.from,
-        to: range.to,
-        deviceId: scheduleStore.getDeviceId(),
-        records: inRange,
-        exportedAt: at
-      };
-      content = buildJsonExport(jsonInput);
-    } else {
-      const markdownInput: MarkdownExportInput = {
-        from: range.from,
-        to: range.to,
-        records: inRange,
-        includeAttachments: request.includeAttachments === true,
-        includeMeta: request.includeMeta === true
-      };
-      content = renderMarkdownExport(markdownInput);
-    }
+    // Markdown 已删除：唯一的 v1 兼容导出格式是 JSON（v2 用户走 repo-shaped bundle）。
+    const jsonInput: JsonExportInput = {
+      from: range.from,
+      to: range.to,
+      deviceId: scheduleStore.getDeviceId(),
+      records: inRange,
+      exportedAt: at
+    };
+    content = buildJsonExport(jsonInput);
   } catch (error) {
     return failed(`生成导出内容失败：${describeError(error)}`);
   }
   const stampInput: ExportStampInput = { records: inRange, now: at };
   const stamp = exportFileStamp(stampInput);
   try {
-    const path = uniqueExportPath(format, stamp);
+    const path = uniqueExportPath(stamp);
     writeTextFile(path, content);
     const fileName = path.slice(path.lastIndexOf('/') + 1);
     const ok: ExportFileResult = {
@@ -640,6 +625,34 @@ const V2_MANIFEST_FILE: string = 'manifest.json';
 const V2_RECORDS_FILE: string = 'records.json';
 const V2_SUMMARY_FILE: string = 'summary.json';
 const V2_MEDIA_DIR: string = 'media';
+/** ZIP 条目名合法形状（`<date>/<sha16>.jpg`）。 */
+const V2_ZIP_ENTRY_RE: RegExp = /^\d{4}-\d{2}-\d{2}\/[0-9a-f]{16}\.jpg$/;
+
+/**
+ * media.zip 所需的**最小 zip 桥**（由页面把 `GitSyncService` 传进来）。
+ *
+ * 写用一个「整包重写」op（固定 DOS 时间 + 排序条目 ⇒ 同数据逐字节相同），读复用既有
+ * `zipRead`（条目名带 `/` 本来就支持）。旧 bundle 没有 media.zip 时两个 op 都不调。
+ */
+export interface V2ZipBridge {
+  /** 整包重写 media.zip；entries 的 name 为 `<date>/<sha16>.jpg`，data 为原始字节。 */
+  zipWriteBundle(archivePath: string, entries: V2ZipEntry[]): Promise<V2ZipWriteResult>;
+  /** 读一个 zip 条目；不存在 / 读失败返回 null 或抛错（统一收窄成 E_MEDIA_CORRUPT）。 */
+  zipRead(archivePath: string, entryName: string): Promise<Uint8Array | null>;
+}
+
+/** 写一个 media.zip 条目（name = `<date>/<sha16>.jpg`）。 */
+export interface V2ZipEntry {
+  name: string;
+  bytes: Uint8Array;
+}
+
+/** 整包重写的结果（sha 由服务层读回文件字节计算，桥不依赖 crypto）。 */
+export interface V2ZipWriteResult {
+  archivePath: string;
+  bytes: number;
+  entries: number;
+}
 /** 仓库内 v2 时间线根（相对 filesDir）。 */
 const V2_REPO_RELATIVE: string = 'git-repo/timeline';
 /** 裸媒体文件名（与 model 的 V2_MEDIA_FILE_RE 同口径）。 */
@@ -834,9 +847,11 @@ function v2StampOf(latestTs: string): string {
 /**
  * v2 导出：把共享时间线搬运成一份**只读派生** bundle（不碰 timeline/ 源文件）。
  *
+ * 媒体先经 zip 桥写成**整个 bundle 唯一的 media.zip**（条目 `<date>/<sha16>.jpg`，固定 DOS 时间 +
+ * 排序 ⇒ 同数据逐字节相同），再把真实 sha256 / 字节数 / 条目数回填 manifest。
  * 未迁移（timeline/schema.json 非 v2）直接返回类型化拒绝；区间非法 / 读取失败都返回 ok:false + 中文原因。
  */
-export function exportV2Timeline(request: ExportRequestInput): V2ExportResult {
+export async function exportV2Timeline(request: ExportRequestInput, zip: V2ZipBridge): Promise<V2ExportResult> {
   const failed = (code: string, reason: string): V2ExportResult => {
     const result: V2ExportResult = {
       ok: false, code: code, reason: reason, dirPath: '', manifestPath: '',
@@ -863,6 +878,7 @@ export function exportV2Timeline(request: ExportRequestInput): V2ExportResult {
   const prepared: V2PreparedDay[] = [];
   const dayEntries: V2BundleDay[] = [];
   const mediaEntries: V2BundleMedia[] = [];
+  const zipEntries: V2ZipEntry[] = [];
   let latestTs: string = '';
   let totalRecords: number = 0;
   let totalBytes: number = 0;
@@ -896,9 +912,11 @@ export function exportV2Timeline(request: ExportRequestInput): V2ExportResult {
           // 未被引用的孤立散图不进 bundle（仓库里的媒体一个都不删）。
           continue;
         }
-        const size: number = fs.statSync(`${repoRoot}/${date}/${V2_MEDIA_DIR}/${name}`).size;
+        const bytes: Uint8Array = v2ReadBinary(`${repoRoot}/${date}/${V2_MEDIA_DIR}/${name}`);
+        const size: number = bytes.length;
         mediaEntries.push({ file: name, sha256: sha, bytes: size, date: date });
         mediaNames.push(name);
+        zipEntries.push({ name: v2MediaEntryName(date, name), bytes: bytes });
         totalBytes += size;
       }
       // 三本账本逐字节搬运（§7 P2-3：源文件 append-only、绝不重写历史行）。
@@ -921,17 +939,29 @@ export function exportV2Timeline(request: ExportRequestInput): V2ExportResult {
     return failed('', `读取 v2 时间线失败：${describeError(error)}`);
   }
 
-  let manifestText: string = '';
-  try {
-    manifestText = buildV2Manifest({
-      from: range.from, to: range.to, exportedAt: latestTs, days: dayEntries, media: mediaEntries
-    });
-  } catch (error) {
-    return failed('', `生成 v2 manifest 失败：${describeError(error)}`);
-  }
   try {
     const dir: string = uniqueV2BundleDir(v2StampOf(latestTs));
     ensureDir(dir);
+    // 一个 bundle 一个 media.zip：条目按 (date,file) 排好，桥内用固定 DOS 时间整包重写。
+    zipEntries.sort((left: V2ZipEntry, right: V2ZipEntry): number => {
+      if (left.name === right.name) {
+        return 0;
+      }
+      return left.name < right.name ? -1 : 1;
+    });
+    const archivePath = `${dir}/${V2_MEDIA_ARCHIVE_NAME}`;
+    const written = await zip.zipWriteBundle(archivePath, zipEntries);
+    const archiveBytes: Uint8Array = v2ReadBinary(archivePath);
+    const archive: V2MediaArchive = {
+      name: V2_MEDIA_ARCHIVE_NAME,
+      sha256: sha256Hex(archiveBytes),
+      bytes: archiveBytes.length,
+      entries: written.entries
+    };
+    const manifestText: string = buildV2Manifest({
+      from: range.from, to: range.to, exportedAt: latestTs, days: dayEntries, media: mediaEntries,
+      mediaArchive: archive
+    });
     writeTextFile(`${dir}/${V2_MANIFEST_FILE}`, manifestText);
     for (const day of prepared) {
       const dayDir = `${dir}/timeline/${day.date}`;
@@ -940,17 +970,9 @@ export function exportV2Timeline(request: ExportRequestInput): V2ExportResult {
       if (day.summaryText.length > 0) {
         writeTextFile(`${dayDir}/${V2_SUMMARY_FILE}`, day.summaryText);
       }
-      // 三本账本恒写出（空账本为空文件），字节与 manifest 声明逐字对应。
+      // 三本账本恒写出（空账本为空文件），字节与 manifest 声明逐字对应；媒体只进 media.zip。
       for (const ledger of day.ledgers) {
         writeTextFile(`${dayDir}/${ledger.name}`, ledger.text);
-      }
-      if (day.mediaNames.length > 0) {
-        const mediaDir = `${dayDir}/${V2_MEDIA_DIR}`;
-        ensureDir(mediaDir);
-        const srcDir = `${repoRoot}/${day.date}/${V2_MEDIA_DIR}`;
-        for (const name of day.mediaNames) {
-          v2CopyBinary(`${srcDir}/${name}`, `${mediaDir}/${name}`);
-        }
       }
     }
     const ok: V2ExportResult = {
@@ -981,6 +1003,11 @@ export function planV2ImportFromPicked(text: string, uri: string): V2ImportPlanR
   const manifest: V2Manifest = parsed.manifest;
   const bundleDir: string = v2DirOfUri(uri);
   const dayInputs: V2BundleDayInput[] = [];
+  // 归档级 sha256 在 dry-run 就读回校验：整包坏了不进计划（逐张校验仍在 apply 预检）。
+  let mediaArchiveBytes: Uint8Array | undefined = undefined;
+  if (manifest.mediaArchive !== undefined && fileExists(`${bundleDir}/${V2_MEDIA_ARCHIVE_NAME}`)) {
+    mediaArchiveBytes = v2ReadBinary(`${bundleDir}/${V2_MEDIA_ARCHIVE_NAME}`);
+  }
   try {
     for (const day of manifest.days) {
       const dayDir = `${bundleDir}/timeline/${day.date}`;
@@ -995,13 +1022,17 @@ export function planV2ImportFromPicked(text: string, uri: string): V2ImportPlanR
       }
       dayInputs.push({
         date: day.date, recordsText: recordsText, summaryText: summaryText,
-        mediaFiles: v2ListMedia(`${dayDir}/${V2_MEDIA_DIR}`), ledgers: ledgers
+        // 新 bundle 的媒体清单来自 manifest（字节在 media.zip 里）；旧 bundle 仍读按日 media/ 散图。
+        mediaFiles: manifest.mediaArchive !== undefined ? day.media.slice() : v2ListMedia(`${dayDir}/${V2_MEDIA_DIR}`),
+        ledgers: ledgers
       });
     }
   } catch (error) {
     return failed(V2_REFUSAL_BUNDLE_CORRUPT, `读取 v2 备份文件失败：${describeError(error)}`);
   }
-  const plan: V2ImportPlan = planV2Import({ manifestText: text, days: dayInputs }, v2TargetState());
+  const plan: V2ImportPlan = planV2Import(
+    { manifestText: text, days: dayInputs, mediaArchiveBytes: mediaArchiveBytes }, v2TargetState()
+  );
   // informational note（不是拒绝）：记日志 + 随计划行回给面板展示。
   const notes: string = v2PlanNotes(plan);
   if (notes.length > 0) {
@@ -1026,21 +1057,57 @@ function v2ApplyFailure(code: string, reason: string): V2ApplyResult {
   return result;
 }
 
-/** 确认导入：把 dry-run 计划显式落盘（必须用户确认后调用）。 */
-export function applyV2Import(plan: V2ImportPlan | null, bundleDir: string): V2ApplyResult {
+/**
+ * 确认导入：把 dry-run 计划显式落盘（必须用户确认后调用）。
+ *
+ * 新 bundle 先用 zip 桥**异步预取** media.zip 的全部条目字节（桥是异步的，`checkV2MediaIntegrity`
+ * 保持同步纯函数），任何条目读不出 / 缺失 → typed E_MEDIA_CORRUPT，整包零写入；预取后把字节
+ * 交给同步预检，就消除了「验完再读」的竞态。旧 bundle 不走 zip，仍读按日散图。
+ */
+export async function applyV2Import(
+  plan: V2ImportPlan | null, bundleDir: string, zip: V2ZipBridge
+): Promise<V2ApplyResult> {
   if (v2ImportInFlight) {
     return v2ApplyFailure('', '正在导入 v2 备份，请稍候');
   }
   v2ImportInFlight = true;
   try {
-    return applyV2ImportOnce(plan, bundleDir);
+    let prefetched: Map<string, Uint8Array> | null = null;
+    if (plan !== null && plan.ok && plan.manifest !== null && plan.manifest.mediaArchive !== undefined) {
+      prefetched = new Map<string, Uint8Array>();
+      const archivePath = `${bundleDir}/${V2_MEDIA_ARCHIVE_NAME}`;
+      for (const item of plan.manifest.media) {
+        const entry = v2MediaEntryName(item.date, item.file);
+        if (!V2_ZIP_ENTRY_RE.test(entry)) {
+          return v2ApplyFailure(V2_REFUSAL_MEDIA_CORRUPT, `v2 备份媒体条目名非法：${entry}`);
+        }
+        try {
+          const bytes: Uint8Array | null = await zip.zipRead(archivePath, entry);
+          if (bytes === null) {
+            return v2ApplyFailure(
+              V2_REFUSAL_MEDIA_CORRUPT,
+              `v2 备份 media.zip 缺少条目 ${entry}，拒绝导入且未写入任何内容`
+            );
+          }
+          prefetched.set(entry, bytes);
+        } catch (error) {
+          return v2ApplyFailure(
+            V2_REFUSAL_MEDIA_CORRUPT,
+            `v2 备份 media.zip 条目 ${entry} 无法读取：${describeError(error)}，拒绝导入且未写入任何内容`
+          );
+        }
+      }
+    }
+    return applyV2ImportOnce(plan, bundleDir, prefetched);
   } finally {
     v2ImportInFlight = false;
   }
 }
 
-/** `applyV2Import` 的单次实现（进入时并发闸已置位）。 */
-function applyV2ImportOnce(plan: V2ImportPlan | null, bundleDir: string): V2ApplyResult {
+/** `applyV2Import` 的单次实现（进入时并发闸已置位；prefetched 为预取的 zip 条目字节）。 */
+function applyV2ImportOnce(
+  plan: V2ImportPlan | null, bundleDir: string, prefetched: Map<string, Uint8Array> | null
+): V2ApplyResult {
   if (plan === null || !plan.ok) {
     const code: string = plan === null ? '' : plan.code;
     const reason: string = plan === null ? '没有待应用的 v2 导入计划' : plan.reason;
@@ -1063,14 +1130,19 @@ function applyV2ImportOnce(plan: V2ImportPlan | null, bundleDir: string): V2Appl
 
   // 落盘前媒体完整性预检（fail closed）：失败即 typed 拒绝，整个 bundle 一个字节都不写。
   // 放在所有 records.json / summary.json / media 写入之前，是 P1-1 的核心保证。
-  const mediaCheck = checkV2MediaIntegrity(plan, {
-    targetExists: (date: string, file: string): boolean =>
+  // 只有 prefetched !== null（bundle 带 media.zip）时才挂 readArchiveEntry；
+  // 旧 bundle（prefetched === null）故意不挂，让预检走 readSource 的散图 / 按日 zip 路径。
+  // 构造逻辑收在 model 的 buildV2MediaCheckIo，服务层与测试共用同一份（P1-1）。
+  const mediaIo: V2MediaCheckIo = buildV2MediaCheckIo(
+    (date: string, file: string): boolean =>
       fileExists(`${repoRoot}/${date}/${V2_MEDIA_DIR}/${file}`),
-    readTarget: (date: string, file: string): Uint8Array =>
+    (date: string, file: string): Uint8Array =>
       v2ReadBinary(`${repoRoot}/${date}/${V2_MEDIA_DIR}/${file}`),
-    readSource: (date: string, file: string): Uint8Array =>
-      v2ReadBinary(`${bundleDir}/timeline/${date}/${V2_MEDIA_DIR}/${file}`)
-  });
+    (date: string, file: string): Uint8Array =>
+      v2ReadBinary(`${bundleDir}/timeline/${date}/${V2_MEDIA_DIR}/${file}`),
+    prefetched
+  );
+  const mediaCheck = checkV2MediaIntegrity(plan, mediaIo);
   if (!mediaCheck.ok) {
     return v2ApplyFailure(mediaCheck.code, mediaCheck.reason);
   }

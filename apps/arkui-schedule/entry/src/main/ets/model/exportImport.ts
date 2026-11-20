@@ -1,14 +1,15 @@
 /**
  * 导出 / 导入的纯逻辑（**零 SDK import**，`tools/tsconfig.json` 可直接编到 `tools/.build/` 由 Node 跑）。
  *
- * 契约：`docs/EXPORT-IMPORT.md`（本文件的规格来源）与 `docs/DATA-CONTRACT.md` §3 / §4bis。
+ * 契约：`docs/EXPORT-IMPORT.md`（本文件的规格来源）与 `docs/DATA-CONTRACT-v2.md` §3 / §5 / §7 / §10。
+ * 导出格式**就是 git 格式**（repo-shaped bundle），Markdown 已随 `mod-export-json` 整体删除。
  * 三条硬约束：
- * 1. **导出是只读派生**：只读 `ScheduleRecord[]`、只产出文本，不碰任何源文件；
- * 2. **导入是 append-only**：本文件算「计划」（`ImportPlan`）+ 写盘前的**幂等复核**
- *    （`reconcileBeforeAppend`）+ 落盘的**纯实现**（`writePlan`，IO 由 `services/exportService.ets`
- *    注入真实文件系统）；绝不重写历史行、绝不写别的设备目录；
- * 3. **绝不覆盖**：同 `id` 且 incoming 的 `ts` 更新时只计入 `conflict`（不追加、不改既有行），
- *    让「谁更新」这件事被人看见，而不是被静默丢弃或静默覆盖。
+ * 1. **导出是只读派生**：只读时间线、只产出 bundle 文本与字节，不碰任何源文件；
+ * 2. **导入是 append-only**：本文件算「计划」（`ImportPlan` / `V2ImportPlan`）+ 写盘前的
+ *    **幂等复核**与**媒体 sha256 预检**，落盘 IO 由 `services/exportService.ets` 注入；
+ *    绝不重写历史行、绝不写别的设备目录；
+ * 3. **绝不覆盖 / fail-closed**：同 `id` 且 incoming 的 `ts` 更新时只计入 `conflict`
+ *    （不追加、不改既有行）；媒体不符 / 读不出 / 缺文件 → 整包零写入。
  *
  * 纯逻辑纪律（与 `model/calendar.ts` / `model/jsonl.ts` 一致）：
  * - 不 import `@ohos.*` / `@kit.*` / `$r()` / 页面组件，也不 `import` services（模型层必须能在 Node 跑）；
@@ -17,35 +18,23 @@
  *   只有「导出区间非法 / 缺 deviceId」这类**调用方编程错误**才抛中文 Error（区间必须先过 `parseDateRange`）。
  */
 import { localDateKey } from '../common/date';
-import { formatDateKey, monthGrid, parseDateKey } from './calendar';
+import { formatDateKey, parseDateKey } from './calendar';
 import { encodeRecord, recordDateKey, sortRecords } from './jsonl';
-import type { Attachment, ScheduleRecord } from './types';
+import type { ScheduleRecord } from './types';
 import { buildRecordsText } from './timelineWrite';
 import { parseTimelineDay } from './timeline';
 import type { TimelineMedia, TimelineRecord } from './timeline';
 import { sha256Hex } from './sha256';
 
-/** 导出格式：Markdown。 */
-export const EXPORT_FORMAT_MARKDOWN: string = 'markdown';
-/** 导出格式：JSON。 */
+/** 唯一的导出格式标记：JSON（保留常量供外部识别，已不是可选项；Markdown 已删除）。 */
 export const EXPORT_FORMAT_JSON: string = 'json';
 /**
  * JSON 导出文件的版本号。
  * **只认 1**：不认识就 fail-closed（`ok:false`），绝不「猜着导入」——猜错就是往历史日志里写脏行。
  */
 export const EXPORT_VERSION: number = 1;
-/** 空区间 Markdown 的占位行（逐字，测试钉住）。 */
-export const EMPTY_RANGE_TEXT: string = '（该区间没有记录）';
-/** 无附件时附件清单的占位行（逐字）。 */
-export const NO_ATTACHMENT_TEXT: string = '（无附件）';
-/** 空标题的兜底（避免出现 `- [ ] 　\`id=…\`` 这种空心行）。 */
-export const UNTITLED_TEXT: string = '（无标题）';
 /** 没有可导入记录时的提示（逐字）。 */
 export const NO_IMPORTABLE_TEXT: string = '没有可导入的记录';
-/** Markdown 导出里每条记录附带的 `id=` 引用（便于人肉回溯到原始 JSONL 行）。 */
-const ID_TAG_PREFIX: string = '`id=';
-/** 记录行里标题与 id 之间的分隔（全角空格，避免与标题里的半角空格混淆）。 */
-const ID_TAG_SEPARATOR: string = '　';
 
 /** 日期区间（`YYYY-MM-DD`，含首尾）。 */
 export interface ExportRange {
@@ -59,20 +48,6 @@ export interface DateRangeResult {
   from: string;
   to: string;
   reason: string;
-}
-
-/** Markdown 导出入参。 */
-export interface MarkdownExportInput {
-  /** 起始日期 `YYYY-MM-DD`（含）。 */
-  from: string;
-  /** 结束日期 `YYYY-MM-DD`（含）。 */
-  to: string;
-  /** 待导出的记录（调用方通常传 `foldById` 折叠后的列表）。 */
-  records: ScheduleRecord[];
-  /** 是否在文末追加「## 附件清单」（默认 false）。 */
-  includeAttachments?: boolean;
-  /** 是否在每条后追加缩进元信息行（默认 false）。 */
-  includeMeta?: boolean;
 }
 
 /** JSON 导出入参。 */
@@ -163,16 +138,13 @@ export interface JsonImportResult {
 /**
  * 设置页导出/导入面板的展示状态（纯数据，无观察者）。
  *
- * 组件（`components/ExportImportPanel.ets`）只读它渲染；区间/格式/开关这几项由组件本地
- * `@State` 承接用户输入并通过 `ExportRequest` 回传给页面——页面的这份 state 只负责
- * 「最近一次结果」与错误文案，避免 UI 与 IO 互相倒灌。
+ * 组件（`components/ExportImportPanel.ets`）只读它渲染；区间由组件本地 `@State` 承接用户输入
+ * 并通过 `ExportRequest` 回传给页面——页面的这份 state 只负责「最近一次结果」与错误文案，
+ * 避免 UI 与 IO 互相倒灌。格式已固定为 JSON（git 格式 bundle），不再有格式开关。
  */
 export interface ExportImportState {
   fromText: string;
   toText: string;
-  format: string;
-  includeAttachments: boolean;
-  includeMeta: boolean;
   /** 已选中的导入文件名（空串 = 还没选）。 */
   importFileName: string;
   /** 是否已有一次 dry-run 结果（false 时统计行不渲染）。 */
@@ -189,13 +161,10 @@ export interface ExportImportState {
   busy: boolean;
 }
 
-/** 组件回传给页面的导出请求（用户当前选的区间/格式/开关）。 */
+/** 组件回传给页面的导出请求（用户当前选的区间；格式固定为 JSON/git bundle）。 */
 export interface ExportRequest {
   fromText: string;
   toText: string;
-  format: string;
-  includeAttachments: boolean;
-  includeMeta: boolean;
 }
 
 /** 空结果的 `DateRangeResult`。 */
@@ -269,7 +238,7 @@ export function parseDateRange(fromText: string, toText: string): DateRangeResul
  * 取导出区间（非法即抛中文 Error）。
  *
  * 为什么这里抛而 `parseDateRange` 不抛：`parseDateRange` 是给 UI 的校验入口（要展示原因），
- * `renderMarkdownExport` / `buildJsonExport` 是「已经校验过」的渲染入口；渲染阶段再拿到非法区间
+ * `buildJsonExport` / `buildV2Manifest` 是「已经校验过」的渲染入口；渲染阶段再拿到非法区间
  * 说明调用方跳过了校验，此时静默产出半份文件比报错更危险。
  */
 function requireRange(from: string, to: string): ExportRange {
@@ -291,43 +260,6 @@ function dateKeyOf(record: ScheduleRecord): string {
     return '';
   }
   return recordDateKey(ts);
-}
-
-/** `ts` → 时刻文本 `HH:MM`（`2026-11-03` 这类只有日期的 `ts` 返回空串 = 不写时间）。 */
-function clockOf(record: ScheduleRecord): string {
-  const ts = typeof record.ts === 'string' ? record.ts : '';
-  const matched = /^\d{4}-\d{2}-\d{2}[T ](\d{2}):(\d{2})/.exec(ts);
-  if (matched === null) {
-    return '';
-  }
-  return `${matched[1]}:${matched[2]}`;
-}
-
-/** 标题渲染文本：换行压成空格、去首尾空白、空标题给兜底。 */
-function titleOf(record: ScheduleRecord): string {
-  const raw = typeof record.title === 'string' ? record.title : '';
-  const flat = raw.replace(/\r?\n/g, ' ').trim();
-  return flat.length === 0 ? UNTITLED_TEXT : flat;
-}
-
-/** 日期对应的星期后缀（形如 `（周二）`；推不出返回空串）。 */
-function weekdaySuffix(dateKey: string): string {
-  const parts = parseDateKey(dateKey);
-  if (parts === null) {
-    return '';
-  }
-  const names: string[] = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-  // 复用 `monthGrid` 的星期计算：日历模块用纯整数算法（不碰 Date / 时区），
-  // 这里只从 6×7 网格里取出该日期的 weekday，避免在导出模块里再抄一份 civil-from-days。
-  const grid = monthGrid(parts.year, parts.month, 1, '');
-  for (const week of grid.weeks) {
-    for (const cell of week) {
-      if (cell.dateKey === dateKey) {
-        return `（${names[cell.weekday]}）`;
-      }
-    }
-  }
-  return '';
 }
 
 /** 稳定升序：先按记录日期，再按 `ts`（同一日期内时刻早的在前，相同则保持输入顺序）。 */
@@ -377,174 +309,6 @@ export function exportRecordsInRange(records: ScheduleRecord[], from: string, to
     list.push(record);
   }
   return sortByDateThenTs(list);
-}
-
-/** 一条记录行的 Markdown 文本（`- [ ] 09:30 标题　\`id=…\``）。 */
-function renderRecordLine(record: ScheduleRecord): string {
-  const box = record.done === true ? '[x]' : '[ ]';
-  const clock = clockOf(record);
-  const title = titleOf(record);
-  const id = typeof record.id === 'string' ? record.id : '';
-  const head = clock.length > 0 ? `${box} ${clock} ${title}` : `${box} ${title}`;
-  return `- ${head}${ID_TAG_SEPARATOR}${ID_TAG_PREFIX}${id}\``;
-}
-
-/** 记录上的扩展 `tags` 字段（`string[]` 或 `string`；没有/非法返回空串）。 */
-function tagsText(record: ScheduleRecord): string {
-  const source = record as unknown as Record<string, unknown>;
-  const raw = source.tags;
-  if (typeof raw === 'string') {
-    return raw.trim();
-  }
-  if (Array.isArray(raw)) {
-    const parts: string[] = [];
-    for (const item of raw) {
-      if (typeof item === 'string' && item.trim().length > 0) {
-        parts.push(item.trim());
-      }
-    }
-    return parts.join(',');
-  }
-  return '';
-}
-
-/** 记录上的「来源设备」扩展字段（`device` / `sourceDevice` / `deviceId` 取第一个非空）。 */
-function sourceDeviceText(record: ScheduleRecord): string {
-  const source = record as unknown as Record<string, unknown>;
-  const keys: string[] = ['device', 'sourceDevice', 'deviceId'];
-  for (const key of keys) {
-    const value = source[key];
-    if (typeof value === 'string' && value.trim().length > 0) {
-      return value.trim();
-    }
-  }
-  return '';
-}
-
-/**
- * 元信息行（`  > tags=… · author=… · 来源设备=…`）。
- *
- * 三个字段都存在才成行；`tags` 与「来源设备」不是 `ScheduleRecord` 的必填字段
- * （`docs/DATA-CONTRACT.md` §3 的表格里没有），因此**有才写、没有就不猜**。
- */
-function renderMetaLine(record: ScheduleRecord): string {
-  const parts: string[] = [];
-  const tags = tagsText(record);
-  if (tags.length > 0) {
-    parts.push(`tags=${tags}`);
-  }
-  const author = typeof record.author === 'string' ? record.author.trim() : '';
-  if (author.length > 0) {
-    parts.push(`author=${author}`);
-  }
-  const device = sourceDeviceText(record);
-  if (device.length > 0) {
-    parts.push(`来源设备=${device}`);
-  }
-  if (parts.length === 0) {
-    return '';
-  }
-  return `  > ${parts.join(' · ')}`;
-}
-
-/** 附件清单行（`- 2026-11-03 · 09:30 · 写周报 · 图片.png · 第 1 页 · entry=… · bytes=…`）。 */
-function renderAttachmentLine(record: ScheduleRecord, item: Attachment): string {
-  const parts: string[] = [`- ${dateKeyOf(record)}`];
-  const clock = clockOf(record);
-  if (clock.length > 0) {
-    parts.push(clock);
-  }
-  parts.push(titleOf(record));
-  const name = typeof item.name === 'string' ? item.name : '';
-  parts.push(name.length > 0 ? name : '（未命名附件）');
-  if (typeof item.pageIndex === 'number' && Number.isFinite(item.pageIndex) && item.pageIndex >= 0) {
-    parts.push(`第 ${item.pageIndex + 1} 页`);
-  }
-  if (typeof item.entry === 'string' && item.entry.length > 0) {
-    parts.push(`entry=${item.entry}`);
-  }
-  // `bytes` 不是 `Attachment` 的契约字段（§3 只有 sha256/name/pageIndex[/archive/entry]）：
-  // 只有数据里真的带了数字才写，避免导出里出现「bytes=undefined」。
-  const bytes = (item as unknown as Record<string, unknown>).bytes;
-  if (typeof bytes === 'number' && Number.isFinite(bytes)) {
-    parts.push(`bytes=${bytes}`);
-  }
-  return parts.join(' · ');
-}
-
-/** 全部附件行（顺序 = 记录顺序 × 附件顺序）。 */
-function renderAttachmentLines(records: ScheduleRecord[]): string[] {
-  const lines: string[] = [];
-  for (const record of records) {
-    const items = record.attachments;
-    if (items === undefined || items.length === 0) {
-      continue;
-    }
-    for (const item of items) {
-      lines.push(renderAttachmentLine(record, item));
-    }
-  }
-  return lines;
-}
-
-/**
- * 渲染 Markdown 导出（纯函数，不写盘）。
- *
- * 形态（逐字契约见 `docs/EXPORT-IMPORT.md` §2）：
- * ```
- * # 日程导出 2026-11-01 ~ 2026-11-30
- *
- * ## 2026-11-03（周二）
- * - [ ] 09:30 写周报　`id=abc123`
- * - [x] 14:00 体检　`id=def456`
- * ```
- * - 已完成 `[x]`、未完成 `[ ]`；`done` 只由复选框表达，**不再追加「（已完成）」**（不重复）；
- * - 有 `HH:MM` 才写时间（`ts` 只有日期就不写）；
- * - 日期升序、同日按 `ts` 升序；空区间也产出文件（只有标题 + `（该区间没有记录）`）；
- * - `includeAttachments` / `includeMeta` 默认 false。
- *
- * 区间非法时抛中文 Error（见 `requireRange` 的注释）。
- */
-export function renderMarkdownExport(input: MarkdownExportInput): string {
-  const range = requireRange(input.from, input.to);
-  const includeAttachments = input.includeAttachments === true;
-  const includeMeta = input.includeMeta === true;
-  const records = exportRecordsInRange(input.records, range.from, range.to);
-  const lines: string[] = [];
-  lines.push(`# 日程导出 ${range.from} ~ ${range.to}`);
-  if (records.length === 0) {
-    lines.push(EMPTY_RANGE_TEXT);
-  } else {
-    let currentDate = '';
-    for (const record of records) {
-      const dateKey = dateKeyOf(record);
-      if (dateKey !== currentDate) {
-        currentDate = dateKey;
-        lines.push('');
-        lines.push(`## ${dateKey}${weekdaySuffix(dateKey)}`);
-      }
-      lines.push(renderRecordLine(record));
-      if (includeMeta) {
-        const meta = renderMetaLine(record);
-        if (meta.length > 0) {
-          lines.push(meta);
-        }
-      }
-    }
-  }
-  if (includeAttachments) {
-    lines.push('');
-    lines.push('## 附件清单');
-    const attachmentLines = renderAttachmentLines(records);
-    if (attachmentLines.length === 0) {
-      lines.push(NO_ATTACHMENT_TEXT);
-    } else {
-      for (const line of attachmentLines) {
-        lines.push(line);
-      }
-    }
-  }
-  return `${lines.join('\n')}\n`;
 }
 
 /**
@@ -617,17 +381,10 @@ export function exportFileStamp(input: ExportStampInput): string {
   return stampOfText(input.now);
 }
 
-/** 导出文件名：`schedule-<stamp>.<md|json>`（格式未知按 Markdown，时间戳为空用零值占位）。 */
-export function exportFileName(format: string, stamp: string): string {
-  const normalized = normalizeExportFormat(format);
-  const suffix = normalized === EXPORT_FORMAT_JSON ? 'json' : 'md';
+/** 导出文件名：`schedule-<stamp>.json`（唯一格式；时间戳为空用零值占位）。 */
+export function exportFileName(stamp: string): string {
   const safeStamp = typeof stamp === 'string' && stamp.length > 0 ? stamp : '00000000-0000';
-  return `schedule-${safeStamp}.${suffix}`;
-}
-
-/** 归一化导出格式（未知值回落 Markdown：它是人能直接读的那一种）。 */
-export function normalizeExportFormat(format: string): string {
-  return format === EXPORT_FORMAT_JSON ? EXPORT_FORMAT_JSON : EXPORT_FORMAT_MARKDOWN;
+  return `schedule-${safeStamp}.json`;
 }
 
 /**
@@ -1138,7 +895,7 @@ export function decodeUtf8(bytes: Uint8Array): string {
 // ---------------------------------------------------------------- 面板展示用纯助手
 
 /**
- * 面板初始状态（区间留空、格式 Markdown、两个开关关闭、没有结果）。
+ * 面板初始状态（区间留空、格式固定为 JSON、没有结果）。
  *
  * 导出成常量是为了给 `@Prop state: ExportImportState = EMPTY_EXPORT_IMPORT_STATE` 一个
  * 字段齐全的默认值（ArkUI 的 `@Prop` 需要本地初始化；组件里再抄一遍字段就会随字段增删漂移）。
@@ -1147,9 +904,6 @@ export function decodeUtf8(bytes: Uint8Array): string {
 export const EMPTY_EXPORT_IMPORT_STATE: ExportImportState = {
   fromText: '',
   toText: '',
-  format: EXPORT_FORMAT_MARKDOWN,
-  includeAttachments: false,
-  includeMeta: false,
   importFileName: '',
   dryRunReady: false,
   dryRunAdded: 0,
@@ -1171,9 +925,6 @@ export function copyExportImportState(source: ExportImportState): ExportImportSt
   const copy: ExportImportState = {
     fromText: source.fromText,
     toText: source.toText,
-    format: source.format,
-    includeAttachments: source.includeAttachments,
-    includeMeta: source.includeMeta,
     importFileName: source.importFileName,
     dryRunReady: source.dryRunReady,
     dryRunAdded: source.dryRunAdded,
@@ -1360,18 +1111,28 @@ export function importBlockedTip(state: ExportImportState): string {
 
 // ================================================================ v2 单时间线导出 / 导入（additive）
 //
-// 这一节只服务 `timelineStore.useV2()` 分支：v1 的 Markdown/JSON 导出与 append-only 导入
-// 一节不改（字节不变、测试不变）。全部是纯函数、零 SDK import，可由 `tools/tsconfig.json`
-// 直接编到 `.build/` 用 Node 跑；文件 IO 与原子写盘分别在 `services/exportService.ets`
-// 与 `services/timelineWriteStore.ets`。
+// 这一节服务 v2 单时间线的导出 / 导入。全部是纯函数、零 SDK import，可由 `tools/tsconfig.json`
+// 直接编到 `.build/` 用 Node 跑；文件 IO 与 zip 桥在 `services/exportService.ets`。
 //
 // v2 bundle（放在沙箱 `<filesDir>/exports/v2-<stamp>/`，**不在 git 仓库里**）的形状：
-//   manifest.json                       # {schemaVersion:2, kind, range, exportedAt, dayCount, days, media}
-//   timeline/<date>/records.json         # 当日可见记录（已套用 deleted/restore 账本优先级）
+//   manifest.json                       # {bundleVersion:2, schemaVersion:2, kind, range, exportedAt,
+//                                        #  dayCount, days:[{date,recordCount,hasSummary,ledgers}],
+//                                        #  media:[{file,sha256,bytes,date}],
+//                                        #  mediaArchive:{name,sha256,bytes,entries}}
+//   timeline/<date>/records.json         # 当日可见记录（canonical bytes，已套用账本优先级）
 //   timeline/<date>/summary.json         # 当日汇总原文（存在才导出）
-//   timeline/<date>/media/<sha16>.jpg    # 散图，内容寻址名原样保留
+//   timeline/<date>/deleted.jsonl        # 逐字节复制（append-only，空账本也建文件）
+//   timeline/<date>/restore.jsonl
+//   timeline/<date>/conflicts.jsonl
+//   media.zip                            # 整个 bundle 唯一的媒体归档，条目 <date>/<sha16>.jpg
+//
+// 为什么用「一个 bundle 一个 media.zip」而不再按日散图 / 按天 zip（设计决策，与
+// docs/EXPORT-IMPORT.md §7.3 同源）：一个归档让整个 bundle 保持为**单一可转移的整体**，媒体校验清单
+// 集中在一处可审计（manifest.media + mediaArchive.sha256），导入端一次预检即可在写盘前校验每张图；
+// 按天 zip 会重新引入 v2 媒体布局刚刚去掉的「按日归档耦合」，而散图会让 bundle 分裂成一堆文件。
+//
 // 确定性：days 按 date、records 按 (ts,id)（buildRecordsText）、media 按 (date,file) 排序；
-// 同一份数据重复导出得到逐字节相同的 manifest 与日文件。
+// zip 条目按 (date,file) 排序并用固定 DOS 时间，同一份数据重复导出逐字节相同。
 
 /** v2 bundle 的 schema 标记值（只认 2；其余按 E_SCHEMA_UNKNOWN 拒绝）。 */
 export const V2_BUNDLE_SCHEMA_VERSION: number = 2;
@@ -1406,6 +1167,24 @@ export type V2LedgerKind = 'delete' | 'restore' | 'conflict';
 export const V2_NOTE_LEDGERS_ABSENT: string =
   '旧版备份（bundleVersion=1）不含按日账本；已按旧规则导入记录/汇总/媒体，' +
   '未合并 deleted.jsonl / restore.jsonl / conflicts.jsonl（跨端删除与撤销状态未搬运）。';
+/** 旧 bundle 缺 media.zip（按日 zip 或散图）时的 informational note：照常导入、只提示。 */
+export const V2_NOTE_MEDIA_ARCHIVE_ABSENT: string =
+  '旧版备份没有 media.zip；已按旧规则从按日 zip / media 散图导入媒体，' +
+  '未做归档级 sha256 校验（每张媒体仍按 manifest 逐张校验）。';
+/** 整个 bundle 唯一的媒体归档名（与 docs/EXPORT-IMPORT.md §7.3 同源）。 */
+export const V2_MEDIA_ARCHIVE_NAME: string = 'media.zip';
+/** zip 内条目：`<date>/<sha16>.jpg`（date 必须是合法日历日前缀）。 */
+const V2_MEDIA_ARCHIVE_ENTRY_RE: RegExp = /^\d{4}-\d{2}-\d{2}\/[0-9a-f]{16}\.jpg$/;
+
+/** media.zip 的条目名（唯一拼法，服务层写包 / 读包与测试共用）。 */
+export function v2MediaEntryName(date: string, file: string): string {
+  return `${date}/${file}`;
+}
+
+/** 校验一个 media.zip 条目名是否为本契约的形状（防御性：不认识就不读、不写）。 */
+export function isV2MediaEntryName(entry: string): boolean {
+  return V2_MEDIA_ARCHIVE_ENTRY_RE.test(entry);
+}
 
 /** 五类类型化拒绝原因（对应 brief / DATA-CONTRACT-v2 §11 的写路径门禁）。 */
 export const V2_REFUSAL_SCHEMA_UNKNOWN: string = 'E_SCHEMA_UNKNOWN';
@@ -1447,6 +1226,14 @@ export interface V2BundleMedia {
   date: string;
 }
 
+/** manifest 中「唯一媒体归档」的声明（sha256 / 字节数让整包可审计）。 */
+export interface V2MediaArchive {
+  name: string;
+  sha256: string;
+  bytes: number;
+  entries: number;
+}
+
 /** v2 manifest 的逐字结构（键序即契约；bundleVersion 为最外层版本门槛）。 */
 export interface V2Manifest {
   bundleVersion: number;
@@ -1457,6 +1244,8 @@ export interface V2Manifest {
   dayCount: number;
   days: V2BundleDay[];
   media: V2BundleMedia[];
+  /** 旧 bundle 缺 media.zip 时缺席（仍是合法 bundle，只给 informational note）。 */
+  mediaArchive?: V2MediaArchive;
 }
 
 /** `buildV2Manifest` 入参。 */
@@ -1466,6 +1255,8 @@ export interface V2ManifestInput {
   exportedAt: string;
   days: V2BundleDay[];
   media: V2BundleMedia[];
+  /** 由服务层写完 media.zip 后回填真实摘要；缺省给「空归档」确定性占位（纯逻辑测试用）。 */
+  mediaArchive?: V2MediaArchive;
 }
 
 /** 裸媒体文件名：<sha256[0:16]>.jpg（与契约 §5 / P2-11 一致）。 */
@@ -1542,9 +1333,10 @@ function copyV2BundleMedia(item: V2BundleMedia): V2BundleMedia {
 /**
  * 构造 v2 manifest 文本（纯函数，不写盘）。
  *
- * - 顶层键序固定 `bundleVersion, schemaVersion, kind, range, exportedAt, dayCount, days, media`；
+ * - 顶层键序固定 `bundleVersion, schemaVersion, kind, range, exportedAt, dayCount, days, media, mediaArchive`；
  * - 每个 day 恒声明三本账本的字节数（空账本为 0，顺序 deleted/restore/conflicts）；
  * - days 按 date 升序、day.media 按文件名升序、media 按 (date, file) 升序；
+ * - `mediaArchive` 由服务层写入 media.zip 后回填真实 sha256/字节数/条目数；未传时给空归档确定性占位；
  * - 2 空格缩进 + 末尾一个换行；区间非法时抛中文 Error（与 v1 渲染入口同口径）。
  */
 export function buildV2Manifest(input: V2ManifestInput): string {
@@ -1574,6 +1366,13 @@ export function buildV2Manifest(input: V2ManifestInput): string {
     }
     return left.file < right.file ? -1 : 1;
   });
+  const suppliedArchive: V2MediaArchive | undefined = input.mediaArchive;
+  const archive: V2MediaArchive = suppliedArchive !== undefined
+    ? {
+        name: suppliedArchive.name, sha256: suppliedArchive.sha256,
+        bytes: suppliedArchive.bytes, entries: suppliedArchive.entries
+      }
+    : { name: V2_MEDIA_ARCHIVE_NAME, sha256: sha256Hex(new Uint8Array(0)), bytes: 0, entries: 0 };
   const doc: V2Manifest = {
     bundleVersion: V2_BUNDLE_VERSION,
     schemaVersion: V2_BUNDLE_SCHEMA_VERSION,
@@ -1582,7 +1381,8 @@ export function buildV2Manifest(input: V2ManifestInput): string {
     exportedAt: typeof input.exportedAt === 'string' ? input.exportedAt : '',
     dayCount: days.length,
     days: days,
-    media: media
+    media: media,
+    mediaArchive: archive
   };
   return `${JSON.stringify(doc, null, 2)}\n`;
 }
@@ -1759,6 +1559,27 @@ export function parseV2Manifest(text: string): V2ManifestResult {
   if (typeof declaredDayCount !== 'number' || declaredDayCount !== days.length) {
     return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, 'v2 备份 dayCount 与 days 数量不一致');
   }
+  // mediaArchive 缺席 = 旧 bundle（按日 zip / 散图）：不拒绝，交给 planV2Import 给 informational note。
+  let archive: V2MediaArchive | undefined = undefined;
+  if (doc.mediaArchive !== undefined) {
+    const rawArchive = doc.mediaArchive;
+    if (rawArchive === null || typeof rawArchive !== 'object' || Array.isArray(rawArchive)) {
+      return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, 'v2 备份 mediaArchive 必须是对象');
+    }
+    const archiveDoc = rawArchive as Record<string, unknown>;
+    const name = typeof archiveDoc.name === 'string' ? archiveDoc.name : '';
+    const sha = typeof archiveDoc.sha256 === 'string' ? archiveDoc.sha256 : '';
+    const size = archiveDoc.bytes;
+    const entries = archiveDoc.entries;
+    if (name !== V2_MEDIA_ARCHIVE_NAME || !V2_SHA256_RE.test(sha)) {
+      return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, 'v2 备份 mediaArchive 名称或摘要非法');
+    }
+    if (typeof size !== 'number' || !Number.isInteger(size) || size < 0 ||
+        typeof entries !== 'number' || !Number.isInteger(entries) || entries < 0) {
+      return v2ManifestFailure(V2_REFUSAL_BUNDLE_CORRUPT, 'v2 备份 mediaArchive 字节数 / 条目数非法');
+    }
+    archive = { name: name, sha256: sha, bytes: size, entries: entries };
+  }
   const exportedAt = typeof doc.exportedAt === 'string' ? doc.exportedAt : '';
   const result: V2Manifest = {
     bundleVersion: bundleVersion,
@@ -1768,7 +1589,8 @@ export function parseV2Manifest(text: string): V2ManifestResult {
     exportedAt: exportedAt,
     dayCount: days.length,
     days: days,
-    media: media
+    media: media,
+    mediaArchive: archive
   };
   const ok: V2ManifestResult = { ok: true, code: '', reason: '', manifest: result };
   return ok;
@@ -1891,6 +1713,11 @@ export interface V2BundleDayInput {
 export interface V2BundleInput {
   manifestText: string;
   days: V2BundleDayInput[];
+  /**
+   * media.zip 的原始字节（可选）：给出时先校验整包 sha256 / 字节数是否与 manifest.mediaArchive 一致；
+   * 旧 bundle 没有 media.zip 时不传，只按散图逐张校验。zip 条目的逐张 sha256 仍在落盘前预检里校验。
+   */
+  mediaArchiveBytes?: Uint8Array;
 }
 
 /** 校验通过的一日（records 为已折叠、已过滤账本的记录）。 */
@@ -1924,6 +1751,7 @@ function v2ValidationFailure(code: string, reason: string, manifest: V2Manifest 
  * - 天数 / 日期 / 记录数 / summary 标记与 manifest 不符：E_BUNDLE_CORRUPT；
  * - 某日 records.json 解析失败（顶层坏 / 有坏行）：E_BUNDLE_CORRUPT；
  * - manifest 里声明的媒体文件在某日 media/ 名单里缺失：E_MEDIA_MISSING；
+ * - mediaArchive 声明的整包 sha256 / 字节数与实际 media.zip 不符：E_MEDIA_CORRUPT（零写入）；
  * - bundleVersion>=2 且账本声明的字节数与实际账本原文不符 / 非空账本缺失：E_BUNDLE_CORRUPT
  *   （空账本允许原文缺席，按空串处理）；旧 bundle 跳过账本校验。
  */
@@ -1933,6 +1761,18 @@ export function validateV2Bundle(bundle: V2BundleInput): V2ValidationResult {
     return v2ValidationFailure(parsed.code, parsed.reason, null);
   }
   const manifest = parsed.manifest;
+  // 归档级 sha256：整包先校验，坏包在逐张校验之前就 typed 拒绝（read 不到由服务层抛错归一）。
+  if (manifest.mediaArchive !== undefined && bundle.mediaArchiveBytes !== undefined) {
+    const archiveBytes: Uint8Array = bundle.mediaArchiveBytes;
+    if (archiveBytes.length !== manifest.mediaArchive.bytes ||
+        sha256Hex(archiveBytes) !== manifest.mediaArchive.sha256.toLowerCase()) {
+      return v2ValidationFailure(
+        V2_REFUSAL_MEDIA_CORRUPT,
+        'v2 备份 media.zip 的整包 sha256 / 字节数与 manifest 声明不符，拒绝导入且未写入任何内容',
+        manifest
+      );
+    }
+  }
   const inputDays: V2BundleDayInput[] = Array.isArray(bundle.days) ? bundle.days : [];
   if (inputDays.length !== manifest.days.length) {
     return v2ValidationFailure(
@@ -2126,6 +1966,10 @@ export function planV2Import(bundle: V2BundleInput, target: V2TargetState): V2Im
   if (bundleVersion < 2) {
     notes.push(V2_NOTE_LEDGERS_ABSENT);
   }
+  if (checked.manifest !== null && checked.manifest.mediaArchive === undefined) {
+    // 旧 bundle（按日 zip / 散图）没有 media.zip：不拒绝，只记 informational note。
+    notes.push(V2_NOTE_MEDIA_ARCHIVE_ABSENT);
+  }
   const out: V2ImportPlan = {
     ok: true,
     code: '',
@@ -2230,14 +2074,52 @@ export function v2PlanNotes(plan: V2ImportPlan): string {
 
 // ---------------------------------------------------------------- 落盘前媒体完整性预检（P1-1 / P2 碰撞）
 
-/** 媒体预检所需的最小 IO：服务层注入真实 fileIo，Node 测试注入假读，不碰 SDK。 */
+/** 媒体预检所需的最小 IO：服务层注入真实 fileIo / zip 桥，Node 测试注入假读，不碰 SDK。 */
 export interface V2MediaCheckIo {
   /** 目标日 media/ 下是否已有同名文件（只增不覆盖：已有就不复制）。 */
   targetExists: (date: string, file: string) => boolean;
   /** 读目标已有的同名媒体字节（仅 targetExists 为真时调用；不可读则抛）。 */
   readTarget: (date: string, file: string) => Uint8Array;
-  /** 读 bundle 里的源媒体字节（不可读则抛）。 */
+  /** 旧 bundle 的源媒体字节（不可读则抛）。 */
   readSource: (date: string, file: string) => Uint8Array;
+  /**
+   * 新 bundle：从 media.zip 读一个 `<date>/<file>` 条目（不可读 / 条目缺失则抛）。
+   * 给出时优先于 readSource；服务层用 zip 桥异步预取后注入同步查找（旧 bundle 不传）。
+   */
+  readArchiveEntry?: (entry: string) => Uint8Array;
+}
+
+/**
+ * 构造媒体预检 IO 的**唯一入口**（服务层与测试共用，P1-1 回归的根）。
+ *
+ * `readArchiveEntry` 只在 `prefetched !== null`（bundle 真的带了 media.zip）时才挂上；
+ * 旧 bundle（散图 / 按日 zip，`prefetched === null`）不挂，让 `checkV2MediaIntegrity`
+ * 按接口契约走 `readSource`。绝不能无条件挂一个「旧 bundle 就抛」的回调：那样会
+ * 违反上面 `V2MediaCheckIo.readArchiveEntry` 的「旧 bundle 不传」约定，把本该照常
+ * 导入 + note 的旧包误判成 E_MEDIA_CORRUPT。
+ */
+export function buildV2MediaCheckIo(
+  targetExists: (date: string, file: string) => boolean,
+  readTarget: (date: string, file: string) => Uint8Array,
+  readSource: (date: string, file: string) => Uint8Array,
+  prefetched: Map<string, Uint8Array> | null
+): V2MediaCheckIo {
+  const io: V2MediaCheckIo = {
+    targetExists: targetExists,
+    readTarget: readTarget,
+    readSource: readSource
+  };
+  if (prefetched !== null) {
+    const archive: Map<string, Uint8Array> = prefetched;
+    io.readArchiveEntry = (entry: string): Uint8Array => {
+      const bytes: Uint8Array | undefined = archive.get(entry);
+      if (bytes === undefined) {
+        throw new Error(`media.zip 条目缺失：${entry}`);
+      }
+      return bytes;
+    };
+  }
+  return io;
 }
 
 /** 通过预检、待复制到目标的媒体（bytes 就是已校验的那一份，避免"验完再读"被换掉）。 */
@@ -2331,7 +2213,9 @@ export function checkV2MediaIntegrity(plan: V2ImportPlan, io: V2MediaCheckIo): V
       }
       let bytes: Uint8Array;
       try {
-        bytes = io.readSource(day.date, file);
+        // 新 bundle 从 media.zip 的 `<date>/<file>` 条目读；旧 bundle 走散图 / 按日 zip 的 readSource。
+        const entry: string = `${day.date}/${file}`;
+        bytes = io.readArchiveEntry !== undefined ? io.readArchiveEntry(entry) : io.readSource(day.date, file);
       } catch (error) {
         return fail(
           V2_REFUSAL_MEDIA_CORRUPT,
@@ -2388,7 +2272,7 @@ export function v2RefusalNext(code: string): string {
     return '稍后重试，或到设置页检查 v2 写入是否已显式激活';
   }
   if (code === V2_REFUSAL_MEDIA_CORRUPT) {
-    return '重新导出并完整搬运 media/，确认散图未被改动后再导入（坏图不会写盘）';
+    return '重新导出并完整搬运 media.zip（旧包为按日 media/ 散图），确认媒体未被改动后再导入（坏图零写入）';
   }
   if (code === V2_REFUSAL_MEDIA_COLLISION) {
     return '重新导出该日媒体后重试；同名不同内容不覆盖、不保留错误旧图，需人工核对 sha16 碰撞';

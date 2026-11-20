@@ -80,7 +80,8 @@
     'v2Git',
     'zipUpsert',
     'zipList',
-    'zipRead'
+    'zipRead',
+    'zipWrite'
   ];
 
   var DEVICE_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -2271,6 +2272,52 @@
   }
 
   /**
+   * media.zip 条目名：`<date>/<sha16>.jpg`（导出 bundle 专用，允许一层日期目录）。
+   * 与附件按天 zip 的 `page-<N>-<sha8>.jpg` 严格分开：两个命名域互不串用。
+   */
+  var MEDIA_ZIP_ENTRY_RE = /^\d{4}-\d{2}-\d{2}\/[0-9a-f]{16}\.jpg$/;
+
+  /** 固定 DOS 时间（本地 1980-01-01 00:00:00）：同数据重复打包逐字节相同，不引入当前时间。 */
+  function mediaZipFixedDate() {
+    return new Date(1980, 0, 1, 0, 0, 0);
+  }
+
+  /**
+   * `zipWrite(archivePath, entries)`：整包重写一个**新** zip（不读旧包、不合并、不覆盖已有条目）。
+   * 仅接受 media.zip 的 `<date>/<sha16>.jpg` 条目名；条目按名字排序、固定 DOS 时间、STORE 压缩。
+   * 返回 `{ archivePath, bytes, entries: [{name,size}] }`。供导出 bundle 的 media.zip 使用。
+   */
+  async function opZipWrite(args) {
+    var archivePath = normalizePath(String(args.archivePath || ''));
+    if (archivePath.length === 0) {
+      throw bridgeError('E_FS', 'zipWrite 需要 archivePath');
+    }
+    var entries = Array.isArray(args.entries) ? args.entries : [];
+    var zip = new (jszipApi())();
+    var sorted = entries.slice().sort(function (left, right) {
+      var a = String((left || {}).name || '');
+      var b = String((right || {}).name || '');
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+    for (var i = 0; i < sorted.length; i++) {
+      var item = sorted[i] || {};
+      var name = String(item.name || '');
+      if (!MEDIA_ZIP_ENTRY_RE.test(name)) {
+        throw bridgeError('E_FS', 'media.zip 条目名不合法：' + name);
+      }
+      var bytes = joinChunks(item.chunks, 8 * 1024 * 1024);
+      zip.file(name, bytes, { binary: true, date: mediaZipFixedDate() });
+    }
+    var out = await zip.generateAsync({
+      type: 'uint8array',
+      compression: 'STORE',
+      platform: 'UNIX'
+    });
+    writeFileBytes(archivePath, out);
+    return { archivePath: archivePath, bytes: out.length, entries: sorted.length };
+  }
+
+  /**
    * `zipList(archivePath)` → `{ archivePath, entries: [{name, size}] }`。
    * 包不存在返回空数组（不报错，调用方当「还没有附件」）。
    */
@@ -2331,7 +2378,8 @@
     v2Git: opV2Git,
     zipUpsert: opZipUpsert,
     zipList: opZipList,
-    zipRead: opZipRead
+    zipRead: opZipRead,
+    zipWrite: opZipWrite
   };
 
   // ---------------------------------------------------------------- 入口
@@ -2399,7 +2447,9 @@
     zipUpsert: opZipUpsert,
     zipList: opZipList,
     zipRead: opZipRead,
+    zipWrite: opZipWrite,
     zipChunkBytes: ZIP_CHUNK_BYTES,
+    mediaZipEntryRe: MEDIA_ZIP_ENTRY_RE,
     // 分支与同步状态（A2）：纯函数 + 需要真实仓库的两个 helper
     computeAheadBehind: computeAheadBehind,
     countConflicts: countConflicts,
