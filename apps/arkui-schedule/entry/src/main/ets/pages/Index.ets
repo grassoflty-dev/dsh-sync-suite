@@ -59,6 +59,7 @@ import type { SavedMarker } from '../model/homeRefresh';
 import { redactSecrets } from '../model/syncError';
 import { describeError, newRecordId, scheduleStore } from '../services/scheduleStore';
 import { timelineStore } from '../services/timelineStore';
+import { importV1Service } from '../services/importV1Service';
 import { recordWriter } from '../services/recordWriter';
 import {
   NOT_MIGRATED_BANNER, NOT_MIGRATED_REASON, NOT_MIGRATED_NEXT_STEP
@@ -139,6 +140,16 @@ struct Index {
   @State statusText: string = '';
   /** 未迁移（timeline/schema.json 非 v2）：首页唯一横幅 + 写入拒绝，v1 数据不删。 */
   @State unmigrated: boolean = false;
+  /** 迁移面板：横幅按钮只打开 dry-run 计划，apply 必须再点「确认迁移」。 */
+  @State migrationSheetOpen: boolean = false;
+  /** dry-run 计划逐行文案（含跳过原因 / 冲突 / 写序）。 */
+  @State migrationPlanLines: string[] = [];
+  /** 迁移结果 / 断点状态消息（逐字中文，绝不静默）。 */
+  @State migrationMessage: string = '';
+  /** 严格模式：坏行直接拒绝（默认宽松：跳过并逐行报告）。 */
+  @State migrationStrict: boolean = false;
+  /** 迁移执行中（防重复提交）。 */
+  @State migrationBusy: boolean = false;
   /** v2 同步三态（已同步·时间 / N 条待同步·最近失败 / 错误·原因），来自 syncStatusStore。 */
   @State syncStatus: SyncStatusView = syncStatusStore.snapshot();
   /** 下拉刷新中的转圈状态（`Refresh` 组件用 `$$` 双向绑定）。 */
@@ -589,6 +600,81 @@ struct Index {
     router.pushUrl({ url: 'pages/Settings' }).catch((error: Error) => {
       promptAction.showToast({ message: `打开设置页失败：${describeError(error)}` });
     });
+  }
+
+  // ------------------------------------------------------------------ v1 → v2 显式迁移（mod-v2-import-v1）
+
+  /**
+   * 横幅按钮：只打开迁移面板并计算 dry-run 计划，**不写任何文件**。
+   * 计划与 apply 共用 model/importV1 的同一套映射；拒绝码逐字展示原因与下一步。
+   */
+  private async openMigrationSheet(): Promise<void> {
+    this.migrationSheetOpen = true;
+    this.migrationBusy = true;
+    this.migrationMessage = '';
+    try {
+      await importV1Service.ensureReady(getContext(this) as common.UIAbilityContext);
+      const plan = await importV1Service.plan(this.migrationStrict);
+      this.migrationPlanLines = plan.lines.slice();
+      this.migrationMessage = plan.refusal === null
+        ? '这是只读计划；确认后才会写入 timeline/，旧数据目录原样保留。'
+        : `${plan.refusal.reason} 下一步：${plan.refusal.nextStep}`;
+    } catch (error) {
+      this.migrationPlanLines = [`读取迁移计划失败：${describeError(error)}`];
+      this.migrationMessage = '下一步：确认仓库可读后重试；本步骤零写入。';
+    } finally {
+      this.migrationBusy = false;
+    }
+  }
+
+  /**
+   * 「确认迁移」是**独立第二次确认**：先弹对话框，用户再点一次才真正落盘。
+   * 绝不把打开面板与 apply 合成一步。
+   */
+  private confirmMigrationPlan(): void {
+    if (this.migrationBusy) {
+      return;
+    }
+    promptAction
+      .showDialog({
+        title: '确认迁移旧数据？',
+        message: '将按上面的 dry-run 计划写入 timeline/；旧数据目录不会被删除或改写。marker 最后写入，中途失败可继续。',
+        buttons: [
+          { text: '取消', color: $r('app.color.text_primary') },
+          { text: '确认迁移', color: $r('app.color.selection_stroke') }
+        ]
+      })
+      .then((result: promptAction.ShowDialogSuccessResponse) => {
+        if (result.index === 1) {
+          this.applyMigration();
+        }
+      })
+      .catch(() => {
+        // 对话框失败：保持未写入状态
+      });
+  }
+
+  /** 真正执行迁移（只在第二次确认后调用）；完成后刷新未迁移横幅。 */
+  private async applyMigration(): Promise<void> {
+    this.migrationBusy = true;
+    try {
+      const result = await importV1Service.apply(this.migrationStrict);
+      this.migrationMessage = result.message;
+      if (result.migrated) {
+        this.unmigrated = false;
+        await timelineStore.ensureReady(getContext(this) as common.UIAbilityContext);
+      }
+    } catch (error) {
+      this.migrationMessage = `迁移失败：${describeError(error)}；schema 未写入时可继续重试。`;
+    } finally {
+      this.migrationBusy = false;
+    }
+  }
+
+  private closeMigrationSheet(): void {
+    if (!this.migrationBusy) {
+      this.migrationSheetOpen = false;
+    }
   }
 
   // ------------------------------------------------------------------ 主从布局交互（仅宽屏/横屏）
@@ -1646,13 +1732,19 @@ struct Index {
           .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.danger'))
           .width('100%')
-        Text('查看迁移步骤')
+        Text('迁移旧数据（先查看计划）')
           .fontSize(FONT.caption)
           .fontColor($r('app.color.brand'))
           .padding({ top: SPACING.xs, bottom: SPACING.xs })
           .onClick(() => {
-            promptAction.showToast({ message: NOT_MIGRATED_NEXT_STEP, duration: toastMsFor(true) });
+            // 只打开迁移面板算 dry-run；apply 需要面板里的独立「确认迁移」。
+            this.openMigrationSheet();
           })
+        Text(NOT_MIGRATED_NEXT_STEP)
+          .fontSize(FONT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .lineHeight(LINE_HEIGHT.caption)
+          .width('100%')
       }
       .width('100%')
       .padding(SPACING.sm)
@@ -1660,6 +1752,77 @@ struct Index {
       .borderRadius(RADIUS.sm)
       .alignItems(HorizontalAlign.Start)
     }
+  }
+
+  /**
+   * 迁移面板（mod-v2-import-v1）：先展示 dry-run 计划（天数/记录/媒体/字节/汇总/跳过/冲突），
+   * 再要求独立「确认迁移」；任何拒绝都逐字给出类型化原因 + 下一步，绝不静默跳过。
+   */
+  @Builder
+  MigrationSheet() {
+    Column({ space: SPACING.sm }) {
+      Text('迁移旧数据到 v2 时间线')
+        .fontSize(FONT.title)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+      Text('只读计划 · 旧数据目录不会被删除或改写 · schema 最后写入')
+        .fontSize(FONT.caption)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+      Scroll() {
+        Column({ space: SPACING.xs }) {
+          ForEach(this.migrationPlanLines, (line: string) => {
+            Text(line)
+              .fontSize(FONT.caption)
+              .lineHeight(LINE_HEIGHT.caption)
+              .fontColor($r('app.color.text_primary'))
+              .width('100%')
+          }, (line: string) => line)
+          if (this.migrationMessage.length > 0) {
+            Text(this.migrationMessage)
+              .fontSize(FONT.caption)
+              .lineHeight(LINE_HEIGHT.caption)
+              .fontColor($r('app.color.danger'))
+              .width('100%')
+          }
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+      }
+      .width('100%')
+      .layoutWeight(1)
+      Row({ space: SPACING.sm }) {
+        Text('严格模式（坏行直接拒绝）')
+          .fontSize(FONT.caption)
+          .fontColor($r('app.color.text_secondary'))
+        Checkbox({ name: 'migrationStrict', group: 'migrationGroup' })
+          .select(this.migrationStrict)
+          .selectedColor($r('app.color.brand'))
+          .onChange((value: boolean) => {
+            this.migrationStrict = value;
+            this.openMigrationSheet();
+          })
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+      Row({ space: SPACING.sm }) {
+        Button('取消')
+          .fontSize(FONT.caption)
+          .layoutWeight(1)
+          .onClick(() => this.closeMigrationSheet())
+        Button('确认迁移')
+          .fontSize(FONT.caption)
+          .layoutWeight(1)
+          .enabled(!this.migrationBusy)
+          .onClick(() => this.confirmMigrationPlan())
+      }
+      .width('100%')
+    }
+    .width('92%')
+    .height('80%')
+    .padding(SPACING.lg)
+    .backgroundColor($r('app.color.surface'))
+    .borderRadius(RADIUS.md)
   }
 
   /**
@@ -2151,6 +2314,14 @@ struct Index {
       }
       if (this.aiResultVisible) {
         this.AiResultPanel()
+      }
+      if (this.migrationSheetOpen) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor($r('app.color.scrim'))
+          .onClick(() => this.closeMigrationSheet())
+        this.MigrationSheet()
       }
       // 同步/附件 zip 的隐藏桥（1×1、全透明、不参与交互）；就绪后做一次启动 pull
       GitBridgeHost({

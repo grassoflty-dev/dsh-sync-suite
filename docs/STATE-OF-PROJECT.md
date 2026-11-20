@@ -6,7 +6,7 @@
 
 ## 1 一句话状态
 
-DSH-Dots = 平板 ArkUI-X 日程 App + PC 端 DSH 插件，用 Git 仓库做跨设备日程/手写/OCR/汇总同步，并在平板只读浏览 DSH 会话。**今天是 v2-only**（2026-11-20 订正）：唯一日程路径是 `timeline/` 单时间线，写 `timeline/<date>/` 并自动同步；激活开关、`timeline.readMode` / `timeline.v2WriteEnabled` / `timeline.v1Retained`、双库确认与 v1 读写兜底**已全部删除**，不存在默认 v1 或显式激活。仓库未迁移（缺 `timeline/schema.json` 且存在 `devices/`）→ **唯一一条** banner + typed `E_NOT_MIGRATED` 拒绝 + **零写入**；**`devices/**` 永不删除**。一次性迁移是用户的显式动作（`mod-v2-import-v1`，待交付），它最后写 `timeline/schema.json` 作为提交边界。另有两把**独立只读开发工具**（`mod-v2-doctor` / `mod-v2-media-gc`，默认零写入、无 app 运行时依赖）；v2 bundle 已带三本账本（`bundleVersion:2`）。chat 真接管、远程连接收敛仍未做或未验。（原「默认 v1 / 显式激活」口径作废，保留于本文 §3 历史折叠块作记录。）
+DSH-Dots = 平板 ArkUI-X 日程 App + PC 端 DSH 插件，用 Git 仓库做跨设备日程/手写/OCR/汇总同步，并在平板只读浏览 DSH 会话。**今天是 v2-only**（2026-11-20 订正）：唯一日程路径是 `timeline/` 单时间线，写 `timeline/<date>/` 并自动同步；激活开关、`timeline.readMode` / `timeline.v2WriteEnabled` / `timeline.v1Retained`、双库确认与 v1 读写兜底**已全部删除**，不存在默认 v1 或显式激活。仓库未迁移（缺 `timeline/schema.json` 且存在 `devices/`）→ **唯一一条** banner + typed `E_NOT_MIGRATED` 拒绝 + **零写入**；**`devices/**` 永不删除**。一次性迁移是用户的显式动作（`mod-v2-import-v1`，已写完待 Lead 提交），它最后写 `timeline/schema.json` 作为提交边界。另有两把**独立只读开发工具**（`mod-v2-doctor` / `mod-v2-media-gc`，默认零写入、无 app 运行时依赖）；v2 bundle 已带三本账本（`bundleVersion:2`）。chat 真接管、远程连接收敛仍未做或未验。（原「默认 v1 / 显式激活」口径作废，保留于本文 §3 历史折叠块作记录。）
 
 ## 2 已交付模块一览
 
@@ -44,6 +44,7 @@ DSH-Dots = 平板 ArkUI-X 日程 App + PC 端 DSH 插件，用 Git 仓库做跨�
 | `mod-export-v2-ledgers` | bundle 升 `bundleVersion:2` + 三本按日账本逐字节搬运；旧 bundle 导入给信息性 note；目标账本只并集追加、不截断 | 已提交 `25fd0f2`（tag `module/mod-export-v2-ledgers`） | `git revert`（增量；v1 导出导入不变） |
 | `mod-doctor-media-window` | 修 doctor 迁移窗口假阳性：空 `media/` + 引用全缺 → `W_MEDIA_NOT_MIGRATED` warning/exit 0；非空目录仍缺引用 → `E_MEDIA_MISSING` error/exit 2 | 已写完，待提交（哈希由 Lead 回填） | `git revert`（独立叶子；撤销 `checkMedia` 规则 + 测试 28/40/41 增量） |
 | `mod-v2-only` | v2-only 默认行为：删除激活开关 / `timeline.readMode` / `timeline.v2WriteEnabled` / `timeline.v1Retained` / 双库确认 / v1 读写兜底；未迁移仓库 = 一条 banner + typed `E_NOT_MIGRATED` + 零写入；`devices/**` 永不删除 | 已写完，待 Lead 提交（哈希 `（Lead 填）`） | `git revert`（独立叶子，哈希 `（Lead 填）`） |
+| `mod-v2-import-v1` | 应用内一次性迁移：dry-run 面板 + 独立确认；写序 records→summary→media→ledgers→schema（最后）；五类 typed 拒绝；`devices/**` 只读 | 已写完，待 Lead 提交（哈希 `（Lead 填）`） | `git revert`（独立叶子，撤销 3 新增代码 + 1 测试 + 两处增量） |
 
 > **2026-11-20 v2-only 订正**：上表 `mod-v2-dual-write-off` 与 `mod-v2-sync-wiring` 的**激活部分**已被
 > `mod-v2-only` 取代，两行作为历史记录保留，不再代表现行行为；二者提交列为历史哈希，不填新哈希。
@@ -58,7 +59,7 @@ DSH-Dots = 平板 ArkUI-X 日程 App + PC 端 DSH 插件，用 Git 仓库做跨�
 - **无开关、无回退**：`timeline.readMode` / `timeline.v2WriteEnabled` / `timeline.v1Retained` 均已删除；没有「启用」「关闭」「确认并存」步骤，也没有 v1 读 / 写兜底或双存储确认。
 - **未迁移拒绝**：缺 `timeline/schema.json` 且存在 `devices/` → **唯一一条** banner + typed `E_NOT_MIGRATED` + **零写入**（不建本地提交、不 push）。
 - **安全网**：`devices/**` 永不删除；迁移 commit 只新增 `timeline/` 与标记，不删改任何 v1 文件。
-- **一次性迁移**：由用户显式执行 `mod-v2-import-v1`（待交付），它最后写 `timeline/schema.json` 作为提交边界；迁移完成即生效，无需激活。
+- **一次性迁移**：`mod-v2-import-v1` 已写完（待 Lead 提交）：横幅打开 dry-run 计划、独立「确认迁移」才落盘；最后写 `timeline/schema.json` 作为提交边界，中断可续跑，迁移完成即生效，无需激活（`devices/**` 只读、永不删除；真机端侧 `unverified`）。
 
 <details><summary>历史记录（2026-11-20 之前，已作废，仅为存档保留）</summary>
 
@@ -91,10 +92,10 @@ DSH-Dots = 平板 ArkUI-X 日程 App + PC 端 DSH 插件，用 Git 仓库做跨�
 
 ## 6 下一步（三个阻塞项 + 一个待交付模块，若用户回来）
 
-> **2026-11-20 v2-only 订正**：`mod-v2-only` 已完成；下一待交付模块是 `mod-v2-import-v1`（一次性迁移的用户显式动作，pending），它最后写 `timeline/schema.json` 作为提交边界。原先「验激活弹层」改为「验未迁移 banner + `E_NOT_MIGRATED` 拒绝 + 零写入」。
+> **2026-11-20 v2-only 订正**：`mod-v2-only` 已完成；`mod-v2-import-v1`（一次性迁移的用户显式动作）已写完待 Lead 提交（不再是 pending），它最后写 `timeline/schema.json` 作为提交边界。原先「验激活弹层」改为「验未迁移 banner + `E_NOT_MIGRATED` 拒绝 + 零写入」；本模块真机 UI / zip 桥链路仍 `unverified`。
 
 - **(a) 在平板上配置好一个仓库**：解锁两个设备缺口（设备 + 第二设备）与 path-1 bootstrap 证据；随后才可能验未迁移 banner / `E_NOT_MIGRATED` 拒绝与零写入 / 真实写入 / push / 三态收敛与双端并集。
 - **(b) chat 租约/sha 规格**：定稿 `CHAT-SYNC.md` §1/§5 的 lease + sha 校验规范，解锁 D2-P2（chat 真接管 + 导入回 DSH 端到端）。
 - **(c) DSH 重启**：解锁 `mod-plugin-live` 的 live 验证（当前 RPC `getState` HTTP 405，bundle 行在启动时解析）。
 
-**当前为干净停止点**：在不具备 (a) 平板上配置好仓库、(b) chat 租约/sha 规格、(c) DSH 重启 之前，没有可推进的模块；`mod-v2-import-v1`（一次性迁移）为下一交付目标（pending）。
+**当前为干净停止点**：在不具备 (a) 平板上配置好仓库、(b) chat 租约/sha 规格、(c) DSH 重启 之前，没有可推进的模块；`mod-v2-import-v1`（一次性迁移）**已写完、待 Lead 提交与真机验证**，不再是 pending；下一步是提交本模块后在真机走一遍 banner → dry-run → 独立确认 → schema 落地。
