@@ -108,7 +108,8 @@ describe('设置页：远程控制组（DSH 地址 → 打开远程控制）', (
   test('一行灰字说明：按当前方式查 REMOTE_MODE_HINTS，不写死局域网文案', () => {
     // mod-remote-hints：旧的写死文案「平板需与电脑在同一局域网；地址含 token，只存本机」
     // 会让选了网易 UU 远程的用户仍看到局域网前提，故改为表驱动；这条断言随文案一并 retarget。
-    assert.match(REMOTE_GROUP, /this\.HintLine\(remoteModeHint\(this\.remoteMode\)\)/);
+    // mod-uu-hint-device：内联 Text 才会随 @Prop remoteMode 刷新；@Builder 按值传 str 会停在上一次的方式。
+    assert.match(REMOTE_GROUP, /Text\(remoteModeHint\(this\.remoteMode\)\)/);
     assert.equal(REMOTE_GROUP.includes('平板需与电脑在同一局域网'), false, '组件里不能再写死局域网文案');
   });
 

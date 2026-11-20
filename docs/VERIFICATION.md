@@ -1133,7 +1133,7 @@ PASS  完成反馈  编辑页显示「手迹 2 页」
 | 2 | 未迁移态 banner + 写拒绝 | **PASS** | dumpLayout 逐字 `错误 · E_NOT_MIGRATED: 时间线尚未初始化，请先迁移旧数据` + banner；点「保存」后 Toast 同码；sandbox 仍只有 `devices/`（零写入） |
 | 3 | 真实迁移（v1 → v2） | **FAILED** | `E_IO: 读取迁移输入失败：E_IO: 仅允许读取 v1 数据目录`（plan 与 apply 两次一致）；`timeline/` 未生成 |
 | 4 | v2 端到端同步 smoke | **BLOCKED** | 迁移失败 → 无 `timeline/schema.json`；设置页 `还没有配置同步仓库`；设备仓库无 `.git`，无 commit/push 链路 |
-| 5 | UI spot checks | **部分 PASS / 部分 FAILED** | 未完成 tab PASS；显示已完成开关 checked=false→true PASS；UU 提示 **FAILED**（仍显示 manual 文案）；计数行变更 **BLOCKED**（未渲染） |
+| 5 | UI spot checks | **PASS (fixed in mod-uu-hint-device)** —— 历史 FAILED 见 §15.6，修复证据见 §15.6.1 | 历史项：未完成 tab PASS；显示已完成开关 checked=false→true PASS。UU 提示 **PASS (fixed in mod-uu-hint-device)**：dumpLayout 逐字 = `REMOTE_MODE_HINTS.uu`，LAN 对照 = `REMOTE_MODE_HINTS.lan`，切回 UU + 强制重渲染后仍正确；计数行变更仍 **BLOCKED**（本次未覆盖，未渲染） |
 | 6 | 迁移中途打断 | **BLOCKED** | 与 #3 同因：apply 在写任何文件前即被 E_IO 拒绝，不存在可打断的部分态 |
 
 ### 15.2 #1 构建 / 签名 / 安装 / 启动（PASS）
@@ -1237,6 +1237,83 @@ apply 后面板同位置再显示该 E_IO；`ls git-repo/` 仍只有 `devices/`�
   `layout-toggle-done-20261120.json`）**都没有**任何 `条未完成` 文本节点；当前未迁移/空数据态下计数行不渲染，
   无法验证「计数行变化」。仅能确认开关自身状态改变。
 
+### 15.6.1 #5 UU 提示修复复验（2026-11-20，`mod-uu-hint-device`，PASS）
+
+> 上节 §15.6 的 FAILED 文字**保留为历史证据**，不改写。本节记录修复后的新证据，
+> §15.1 表格 item 5 据此翻转为 **PASS (fixed in mod-uu-hint-device)**。
+
+**根因（设备定位）**：
+
+1. `components/settings/RemoteSection.ets` 原有 `Text(this.remoteSpec().description)`，走函数 prop
+   `remoteSpec` 的旧状态（设备初始方式 = `manual`），显示 manual 的
+   `你自己已有一条能访问这台电脑的地址，App 只负责保存与归一。`，它排在查表提示之前、是选择器下方唯一
+   「一句话说明」，视觉上盖过提示表；
+2. 第一次只删掉该行后真机仍失败：选中 LAN 后提示仍是 manual 的
+   `填完整可访问地址（含协议）…`，说明**第二条根因**是 `this.HintLine(remoteModeHint(this.remoteMode))`
+   经全局 `@Builder HintLine(text: string)`（SettingsBits.ets:42）按值传参——ArkUI 不随
+   `@Prop remoteMode` 重建那个 Text，节点停在上一次的方式。`else if (remoteUrlError)` 又会在错误态
+   把提示整块吞掉。
+
+**修法**：删 `RemoteModeSpec.description` 字段与 6 条字面量（旧串 grep 全仓绝迹）、删描述行；
+方式提示改为**内联 `Text(remoteModeHint(this.remoteMode))`**（随 mode 刷新）；红字错误与提示拆成两条独立行。
+
+**构建 / 签名 / 安装 / 启动（两次，第二次为最终产物）**：
+
+```
+cd apps/arkui-schedule
+$env:DEVECO_CLI_STUDIO_PATH='D:\A-DevEco\DevEco Studio'; $env:DEVECO_SDK_HOME='D:\A-DevEco\DevEco Studio\sdk'
+powershell -ExecutionPolicy Bypass -File tools\build-harmony.ps1 -Cores 4 -Product default
+→ BUILD SUCCESSFUL in 22 s 148 ms（首次：删描述行）/ in 11 s 357 ms（最终：内联 Text）
+→ CompileArkTS 两次均实际执行（非 UP-TO-DATE）；✓ 产物验收通过；overlay(finally) applied=false
+$env:JAVA_HOME='D:\jdk17\jdk-17'; $env:SIGN_PASS='itwill123'
+powershell -ExecutionPolicy Bypass -File tools\sign-hap.ps1 -StorePass $env:SIGN_PASS -KeyPass $env:SIGN_PASS -Deliver
+→ Sign Hap success! / verify-app success；最终 HAP 4,798,631 B SHA256=DD327D875B9D8935AA78DAE157F0ECA6E37D2A909D934576006FA67F394911FF
+$hdc='D:\A-DevEco\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe'
+& $hdc -t 6MFBB25C27205131 install -r dist-harmony\arkui-schedule-harmony-debug-signed.hap
+→ install bundle successfully；& $hdc ... shell "aa start -a EntryAbility -b com.itwill.schedule" → start ability successfully
+```
+
+**UI 注入 + 截图 + 布局（全部为实际执行的命令，坐标来自前一次 dumpLayout，非盲点）**：
+
+```
+& $hdc shell "uitest uiInput click 2463 180"                       # 首页 → 设置
+& $hdc shell "uitest uiInput swipe 1300 1200 1300 500 800"         # 滚到远程控制
+& $hdc shell "uitest uiInput swipe 640 1100 640 700 700"
+& $hdc shell "uitest uiInput click 640 781"                        # 打开「访问方式」下拉
+& $hdc shell "uitest uiInput click 236 740"                        # 选「网易 UU 远程」
+& $hdc shell "uitest screenCap -p /data/local/tmp/uu-hint-fixed-uu-20261120.jpeg"
+& $hdc shell "uitest dumpLayout -p /data/local/tmp/uu-hint-fixed-uu-20261120.json"
+& $hdc file recv /data/local/tmp/uu-hint-fixed-uu-20261120.json .tmp\device-shots\layout-uu-hint-fixed-uu-20261120.json
+& $hdc shell "uitest uiInput click 236 170"                        # 改选「局域网直连」做对照
+& $hdc shell "uitest screenCap -p /data/local/tmp/uu-hint-fixed-lan-20261120b.png"
+& $hdc shell "uitest dumpLayout -p /data/local/tmp/uu-hint-fixed-lan-20261120b.json"
+& $hdc shell "uitest uiInput click 236 1468"                       # 再切回 UU
+& $hdc shell "uitest uiInput click 1382 777"                       # 「高级 ▸」强制父级重渲染
+& $hdc shell "uitest dumpLayout -p /data/local/tmp/n10.json"
+node .tmp\layout-nodes.mjs .tmp\device-shots\layout-uu-hint-fixed-uu-20261120.json
+```
+
+**dumpLayout 逐字文本节点（UU，最终产物）**：
+
+```
+Text click=false checked=false bounds=[57,1132][1222,1179] text=[电脑与平板都安装并登录 网易UU远程；在 UU 客户端里把电脑上的 DSH 端口做「端口映射」，再把 UU 给出的入口地址填到这里；不是同一局域网（也不用在路由器上做端口映射）。]
+```
+
+与 `model/remoteAccess.ts` 的 `REMOTE_MODE_HINTS.uu` **逐字节相等**；下拉框节点同份 dump 为
+`Select … text=[网易 UU 远程]`。对照（LAN）：
+`Text … bounds=[57,1209][1222,1256] text=[平板与电脑在同一 Wi-Fi/局域网，填电脑的局域网 IP:端口。]`
+= `REMOTE_MODE_HINTS.lan`。切回 UU 后同节点仍为 UU 文案；点「高级」后 `高级 ▾` 且 UU 文案不变。
+**旧 manual 描述串在两份最终 dump 中均不存在**。
+
+**截图**（`uitest screenCap` 实际写 PNG，故同时保留 `.png` 副本）：
+
+- `.tmp/device-shots/uu-hint-fixed-uu-20261120.png`（别名 `.jpeg`，2560×1600，259,223 B）—— UU 选中 + 提示行
+- `.tmp/device-shots/uu-hint-fixed-lan-20261120b.png`（2560×1600，232,401 B）—— LAN 对照
+- `.tmp/device-shots/uu-hint-fixed-uu-rerender-20261120.png`（2560×1600，295,196 B）—— 强制重渲染后
+- 对应 dump：`layout-uu-hint-fixed-uu-20261120.json`、`layout-uu-hint-fixed-lan-20261120b.json`、`layout-uu-hint-fixed-uu-rerender-20261120.json`
+
+**结论：PASS**（item 5 的 UU 提示部分）；计数行变更仍 BLOCKED（空数据态未渲染），不因本修复翻转。
+
 ### 15.7 #6 迁移中途打断（BLOCKED）
 
 与 #3 同因：`apply` 在生成/写入 timeline 之前即被 `E_IO: 仅允许读取 v1 数据目录` 拒绝，
@@ -1250,6 +1327,8 @@ apply 后面板同位置再显示该 E_IO；`ls git-repo/` 仍只有 `devices/`�
 
 **新增 FAIL（保持）**：应用内 v1→v2 迁移 `E_IO: 仅允许读取 v1 数据目录`（`importV1Service.ets:192` vs
 `importV1Reader.ets:56`）；UU 方式说明行不刷新（仍显示 manual 文案）。
+
+> 2026-11-20 订正（`mod-uu-hint-device`）：上面「UU 方式说明行不刷新」这条 FAIL 已由本模块修复并有真机新证据（§15.6.1），§15.1 item 5 已翻转为 PASS；本段历史文字保留留痕，不改写。迁移 `E_IO` 那条不因本模块变化。
 
 **STILL UNVERIFIED（本次未翻转）**：实际 v2 timeline 写入、`[v2] sync <n> days` 提交与 push、
 `已同步·HH:MM` 三态行、迁移后重启保留、双设备并发、OCR 端到端、远程 Web 连接、聊天「在电脑上继续」、

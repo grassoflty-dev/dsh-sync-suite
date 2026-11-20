@@ -57,6 +57,7 @@ const {
   normalizeRemoteAccessConfig,
   normalizeRemoteMode,
   normalizeRemotePort,
+  remoteModeHint,
   remoteModeUsable,
   serializeRemoteAccessConfig,
   validateRemoteToken
@@ -135,10 +136,10 @@ describe('方式元数据表：六种方式、可用性、字段键名', () => {
     assert.equal(spec.availability, REMOTE_AVAILABILITY_NEEDS_SETUP);
     assert.equal(spec.availability, 'needs-setup');
     assert.equal(spec.unavailableReason, '', 'uu 可用，unavailableReason 必须是空串');
-    assert.equal(
-      spec.description,
-      '用 UU 远程的图形化端口映射把本机 DSH 端口映射成对外入口，平板打开那个入口。'
-    );
+    // mod-uu-hint-device：方式级说明不再挂在 spec.description 上（那是真机 UU 文案
+    // 停住的第二渲染路径）；UU 的说明只能从 REMOTE_MODE_HINTS 查表得到。
+    assert.equal('description' in spec, false, 'spec 不得再携带 description（第二条渲染路径的根因）');
+    assert.match(remoteModeHint(REMOTE_MODE_UU), /「端口映射」/);
     assert.deepEqual(spec.requires, [
       '电脑装 UU 远程并登录（免费版含端口映射）',
       '在 UU 远程 →「图形化端口映射」里把内部端口设为 DSH 端口'
@@ -201,7 +202,10 @@ describe('方式元数据表：六种方式、可用性、字段键名', () => {
       'requires 必须逐字含「平板需装鸿蒙原生 Tailscale 客户端（如 HarmoTail，需侧载）」'
     );
     assert.ok(joined.includes('鸿蒙原生'), 'requires 要明写「鸿蒙原生」');
-    assert.ok(spec.description.includes('卓易通'), 'description 必须提醒卓易通里装的安卓 Tailscale 不能给本机 App 用');
+    assert.ok(
+      remoteModeHint(REMOTE_MODE_TAILSCALE).includes('卓易通'),
+      '唯一的方式级提示必须提醒卓易通里装的安卓 Tailscale 不能给本机 App 用'
+    );
     assert.equal(spec.requires[0], '平板需装鸿蒙原生 Tailscale 客户端（如 HarmoTail，需侧载）', 'UI 显示 requires[0]，必须是那条硬门槛');
     assert.ok(spec.steps.length >= 3, 'tailscale 要给操作步骤');
   });

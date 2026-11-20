@@ -164,13 +164,10 @@ export struct RemoteSection {
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
 
-      // 一句话说明 + 可用性（unsupported 显示原因、needs-setup 显示第一条前置条件）
-      Text(this.remoteSpec().description)
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.text_secondary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
+      // 方式说明**只**由下方 `remoteModeHint(this.remoteMode)` 那条内联 Text 渲染。
+      // 这里曾有一行读 `spec.description` 的 Text：它走函数 prop 的另一条状态路径，
+      // 真机选 UU 时停在 manual 文案且不会随模式刷新（docs/VERIFICATION.md §15 item 5）。
+      // 已整块删除，`RemoteModeSpec` 里对应的 description 字段也一并删除，杜绝第二条渲染路径。
       if (this.remoteAvailabilityHint().length > 0) {
         Text(this.remoteAvailabilityHint())
           .fontSize(FONT.caption)
@@ -345,12 +342,26 @@ export struct RemoteSection {
       Divider()
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
+      // 红字错误与方式提示是两条独立、各自有标签的行：错误态不能再吞掉方式提示
+      // （旧写法是 `else if`，一旦有红字就只剩一条过期说明，正是真机 UU bug 的可见形态）。
       if (this.remoteUrlError.length > 0) {
         this.ErrorText(this.remoteUrlError)
-      } else if (remoteModeHint(this.remoteMode).length > 0) {
-        // 前置条件提示按当前方式查 `REMOTE_MODE_HINTS` 表；组件里不写死任何方式的文案。
-        // 未知 / 新增未登记的方式返回空串 → 不渲染，绝不继承别的方式的提示。
-        this.HintLine(remoteModeHint(this.remoteMode))
+      }
+      // 前置条件提示按当前方式查 `REMOTE_MODE_HINTS` 表：每种方式恰好一条，逐字等于表里的文案。
+      // 组件里不写死任何方式的文案；未知 / 新增未登记的方式返回空串 → 不渲染，绝不继承别的方式的提示。
+      //
+      // **必须内联 Text，不能经 `this.HintLine(str)` 转发到全局 @Builder**：
+      // 全局 @Builder 的 `text: string` 是按值入参，ArkUI 不会在 `this.remoteMode` 变化时
+      // 重建那个 Text 节点，真机上永远停在上一次选的方式（§15 item 5 的真正根因）。
+      if (remoteModeHint(this.remoteMode).length > 0) {
+        Text(remoteModeHint(this.remoteMode))
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+          .textAlign(TextAlign.Start)
       }
 
       // 缺 token：橙色次要提示（不是错误，DSH 仍可能直接可用）

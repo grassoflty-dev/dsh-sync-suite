@@ -96,8 +96,6 @@ export interface RemoteModeSpec {
   mode: string;
   /** 方式名（下拉框里显示这一项）。 */
   label: string;
-  /** 一句话说明（下拉框下方）。 */
-  description: string;
   /** 可用性：`ready` / `needs-setup` / `unsupported`。 */
   availability: string;
   /** `unsupported` 时给用户看的中文原因；其余方式为空串。 */
@@ -156,7 +154,6 @@ export const REMOTE_MODES: Record<string, RemoteModeSpec> = {
   'lan': {
     mode: REMOTE_MODE_LAN,
     label: '局域网直连',
-    description: '平板和电脑连同一个 Wi-Fi，直接用局域网地址打开。',
     availability: REMOTE_AVAILABILITY_READY,
     unavailableReason: '',
     requires: ['平板和电脑在同一 Wi-Fi 或局域网里'],
@@ -179,8 +176,6 @@ export const REMOTE_MODES: Record<string, RemoteModeSpec> = {
   'tailscale': {
     mode: REMOTE_MODE_TAILSCALE,
     label: 'Tailscale 组网',
-    description:
-      '电脑和装了 Tailscale 的平板组成虚拟内网，走 100.x 地址；卓易通里装的安卓 Tailscale 不能给本机 App 用。',
     availability: REMOTE_AVAILABILITY_NEEDS_SETUP,
     unavailableReason: '',
     requires: [
@@ -209,7 +204,6 @@ export const REMOTE_MODES: Record<string, RemoteModeSpec> = {
   'ipv6': {
     mode: REMOTE_MODE_IPV6,
     label: '公网 IPv6 直连',
-    description: '家里宽带有公网 IPv6 时，平板用流量也能直接连到电脑。',
     availability: REMOTE_AVAILABILITY_NEEDS_SETUP,
     unavailableReason: '',
     requires: [
@@ -238,7 +232,6 @@ export const REMOTE_MODES: Record<string, RemoteModeSpec> = {
   'cloudflare': {
     mode: REMOTE_MODE_CLOUDFLARE,
     label: 'Cloudflare 隧道',
-    description: '电脑上跑 cloudflared，得到一个 https 网址，平板不用装东西。',
     availability: REMOTE_AVAILABILITY_NEEDS_SETUP,
     unavailableReason: '',
     requires: [
@@ -265,7 +258,6 @@ export const REMOTE_MODES: Record<string, RemoteModeSpec> = {
   'manual': {
     mode: REMOTE_MODE_MANUAL,
     label: '手动填地址',
-    description: '你自己已有一条能访问这台电脑的地址，App 只负责保存与归一。',
     availability: REMOTE_AVAILABILITY_READY,
     unavailableReason: '',
     requires: ['你自己已有的可用地址（如反向代理、花生壳）'],
@@ -285,7 +277,6 @@ export const REMOTE_MODES: Record<string, RemoteModeSpec> = {
   'uu': {
     mode: REMOTE_MODE_UU,
     label: '网易 UU 远程',
-    description: '用 UU 远程的图形化端口映射把本机 DSH 端口映射成对外入口，平板打开那个入口。',
     availability: REMOTE_AVAILABILITY_NEEDS_SETUP,
     // 可用（需准备）：官方 blog 明确「图形化端口映射」免费版包含，故不再有不可用原因。
     unavailableReason: '',
@@ -319,6 +310,10 @@ export const REMOTE_MODES: Record<string, RemoteModeSpec> = {
  * key = 方式枚举值，value = 逐字文案；`RemoteSection` 直接按当前方式查表渲染，
  * **禁止**在页面/组件里另写一份同义字符串（那正是「选了 UU 还显示同一局域网」的 bug 根因）。
  * 文案只描述该方式自己的前提，不夹带别的方式的前提（tailnet / 端口映射 / Wi-Fi 之类）。
+ *
+ * `RemoteModeSpec` 刻意**没有** `description` 字段：曾经组件里另画一行 `spec.description`
+ * （来自一份逐方式写死的说明），真机选 UU 时那一行停在上次渲染的 manual 文案上，
+ * 并从视觉上盖过本表 —— 见 `docs/VERIFICATION.md` §15 item 5。方式级说明只此一处。
  *
  * 新增方式时**必须**在这里加一条：漏加时 `remoteModeHint()` 返回空串（fail-closed，
  * 宁可不显示也不继承别的方式的提示），且 `remoteHints.test.mjs` 的「覆盖每个枚举值」守卫会失败。
