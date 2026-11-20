@@ -480,21 +480,6 @@ test('46 model contains no Date.now() and no SDK import', () => {
 
 // ---------------------------------------------------------------- 静态：服务契约（≥6）
 
-test('47 service disabled: requireEnabled is first statement and throws before any IO', () => {
-  const body = methodBody(SERVICE_CODE, 'runCycle');
-  const first = body.indexOf('this.requireEnabled();');
-  assert.ok(first >= 0, 'runCycle 未先调用 requireEnabled');
-  assert.match(SERVICE, /DISABLED_MESSAGE: string = NOT_MIGRATED_REASON/);
-  const guard = methodBody(SERVICE_CODE, 'requireEnabled');
-  assert.match(guard, /if \(!this\.isEnabled\(\)\)/);
-  assert.match(guard, /throw new Error\(DISABLED_MESSAGE\)/);
-  const ioAt = body.indexOf('await this.ensureReady');
-  assert.ok(ioAt > first, 'requireEnabled 必须早于任何 IO');
-  assert.match(methodBody(SERVICE_CODE, 'isEnabled'), /timelineStore\.isMigrated\(\)/);
-  assert.doesNotMatch(SERVICE, /useV2\(|setReadMode|readMode\(/);
-  assert.doesNotMatch(body, /AppStorage/);
-});
-
 test('48 service never force-pushes and never rewrites remote history', () => {
   const body = methodBody(SERVICE_CODE, 'runCycle');
   assert.match(body, /git\(\['push', 'origin', 'main'\]\)/);

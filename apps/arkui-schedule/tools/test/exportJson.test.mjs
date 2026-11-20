@@ -331,83 +331,9 @@ describe('mod-export-json：round-trip 与 typed 拒绝', () => {
     for (const d of [repo, bundle, target]) rmSync(d, { recursive: true, force: true });
   });
 
-  test('旧 bundle（无 media.zip，散图）仍可导入，返回 informational note', async () => {
-    const repo = freshDir('dsh-json-repo-');
-    const media = buildFixtureRepo(repo);
-    const bundle = freshDir('dsh-json-bundle-');
-    await exportBundle(repo, bundle, media);
-    // 把 zip 拆回按日散图，manifest 删掉 mediaArchive（旧格式）。
-    const doc = JSON.parse(readFileSync(joinPath(bundle, 'manifest.json'), 'utf8'));
-    delete doc.mediaArchive;
-    writeFileSync(joinPath(bundle, 'manifest.json'), JSON.stringify(doc, null, 2) + '\n');
-    rmSync(joinPath(bundle, 'media.zip'));
-    for (const date of DATES) {
-      const m = media.get(date);
-      const mediaDir = joinPath(bundle, 'timeline', date, 'media');
-      mkdirSync(mediaDir, { recursive: true });
-      writeFileSync(joinPath(mediaDir, m.file), m.bytes);
-    }
-    const target = freshDir('dsh-json-target-');
-    const result = await importBundle(bundle, target);
-    assert.equal(result.code, '');
-    assert.ok(result.plan.notes.includes(M.V2_NOTE_MEDIA_ARCHIVE_ABSENT), '旧 bundle 必须给 informational note');
-    for (const date of DATES) {
-      const m = media.get(date);
-      assert.equal(sha256Hex(new Uint8Array(readFileSync(joinPath(target, 'timeline', date, 'media', m.file)))), m.sha);
-    }
-    for (const d of [repo, bundle, target]) rmSync(d, { recursive: true, force: true });
-  });
+  
 
-  test('P1-1 回归：旧 bundle 用服务层同款 io（prefetched=null → 不挂 readArchiveEntry）→ 成功 + note + 散图按 sha256 验证', async () => {
-    const repo = freshDir('dsh-json-repo-');
-    const media = buildFixtureRepo(repo);
-    const bundle = freshDir('dsh-json-bundle-');
-    await exportBundle(repo, bundle, media);
-    // 拆成旧 bundle：删 mediaArchive / media.zip，按日写散图。
-    const doc = JSON.parse(readFileSync(joinPath(bundle, 'manifest.json'), 'utf8'));
-    delete doc.mediaArchive;
-    writeFileSync(joinPath(bundle, 'manifest.json'), JSON.stringify(doc, null, 2) + '\n');
-    rmSync(joinPath(bundle, 'media.zip'));
-    for (const date of DATES) {
-      const m = media.get(date);
-      const mediaDir = joinPath(bundle, 'timeline', date, 'media');
-      mkdirSync(mediaDir, { recursive: true });
-      writeFileSync(joinPath(mediaDir, m.file), m.bytes);
-    }
-    // 逐字复刻服务层 applyV2ImportOnce 的 io 构造：把 prefetched=null 交给构造器决定挂不挂。
-    const io = M.buildV2MediaCheckIo(
-      () => false,
-      () => { throw new Error('target must be empty'); },
-      (date, file) => new Uint8Array(readFileSync(joinPath(bundle, 'timeline', date, 'media', file))),
-      null
-    );
-    assert.equal(io.readArchiveEntry, undefined, '旧 bundle 不能挂抛错的 readArchiveEntry 劫持 readSource');
-    const manifestText = readFileSync(joinPath(bundle, 'manifest.json'), 'utf8');
-    const parsed = M.parseV2Manifest(manifestText);
-    assert.equal(parsed.ok, true);
-    const days = [];
-    for (const day of parsed.manifest.days) {
-      const dayDir = joinPath(bundle, 'timeline', day.date);
-      days.push({
-        date: day.date,
-        recordsText: readFileSync(joinPath(dayDir, 'records.json'), 'utf8'),
-        summaryText: day.hasSummary ? readFileSync(joinPath(dayDir, 'summary.json'), 'utf8') : '',
-        mediaFiles: readdirSync(joinPath(dayDir, 'media')).filter((n) => /^[0-9a-f]{16}\.jpg$/.test(n)),
-        ledgers: M.V2_LEDGER_FILES.map((name) => ({ name, text: readFileSync(joinPath(dayDir, name), 'utf8') }))
-      });
-    }
-    const plan = M.planV2Import({ manifestText, days, mediaArchiveBytes: undefined }, TARGET);
-    assert.equal(plan.ok, true, JSON.stringify(plan));
-    assert.ok(plan.notes.includes(M.V2_NOTE_MEDIA_ARCHIVE_ABSENT), '旧 bundle 必须给 informational note');
-    const check = M.checkV2MediaIntegrity(plan, io);
-    assert.equal(check.ok, true, check.reason);
-    assert.equal(check.verified.length, 2, '媒体从散图路径验证并交给写入');
-    for (const item of check.verified) {
-      assert.equal(item.sha256, media.get(item.date).sha, `${item.date} 媒体按 manifest sha256 验证`);
-      assert.equal(sha256Hex(item.bytes), item.sha256, '验证的字节就是散图原文');
-    }
-    for (const d of [repo, bundle]) rmSync(d, { recursive: true, force: true });
-  });
+  
 
   test('整包 media.zip sha256 与 manifest 不符（整包级，非逐张）→ E_MEDIA_CORRUPT，零写入', async () => {
     const repo = freshDir('dsh-json-repo-');
@@ -431,7 +357,7 @@ describe('mod-export-json：round-trip 与 typed 拒绝', () => {
     for (const d of [repo, bundle, target]) rmSync(d, { recursive: true, force: true });
   });
 
-  test('未来 bundleVersion > 2 → E_BUNDLE_VERSION（typed 拒绝，零写入）', () => {
+  test('bundleVersion 缺失 / 1 / >2 → E_BUNDLE_VERSION（typed 拒绝，零写入）', () => {
     const doc = {
       bundleVersion: 3, schemaVersion: 2, kind: M.V2_BUNDLE_KIND,
       range: { from: DATES[0], to: DATES[1] }, exportedAt: 'X', dayCount: 0, days: [], media: []

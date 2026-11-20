@@ -34,7 +34,6 @@ import {
   V2_REFUSAL_MEDIA_CORRUPT,
   V2_REFUSAL_MEDIA_COLLISION,
   V2_REFUSAL_TARGET_BUSY,
-  V2_REFUSAL_V1_TARGET,
   buildV2Manifest,
   buildV2MediaCheckIo,
   buildV2RecordsText,
@@ -76,7 +75,6 @@ import type {
 import { sha256Hex } from '../model/sha256';
 import type { ScheduleRecord } from '../model/types';
 import type { TimelineMedia } from '../model/timeline';
-import { NOT_MIGRATED_REASON } from '../model/migrationState';
 import { describeError, resolveRecordDate, scheduleStore } from './scheduleStore';
 import { timelineStore } from './timelineStore';
 import { timelineWriteStore } from './timelineWriteStore';
@@ -396,16 +394,6 @@ export async function pickImportFile(context: object): Promise<ImportFilePickRes
  * 文件本身不可用（空 / 不是 JSON / 版本不认识）时 `ok:false`，`plan` 为 null。
  */
 export function planImportFromText(text: string, fileName: string): ImportPlanResult {
-  // v2-only：未迁移在解析文件 / 读盘之前就给 typed 拒绝，零写入、无 v1 兜底。
-  if (!timelineStore.isMigrated()) {
-    const unmigrated: ImportPlanResult = {
-      ok: false,
-      plan: null,
-      fileName: fileName,
-      reason: NOT_MIGRATED_REASON
-    };
-    return unmigrated;
-  }
   if (!scheduleStore.isReady()) {
     const notReady: ImportPlanResult = {
       ok: false,
@@ -462,7 +450,7 @@ function noReconfirmed(): ReconfirmedCounts {
  * `devices/` 写入口（见 `docs/DATA-CONTRACT-v2.md` §9「outbox 唯一真值」）。
  *
  * 安全性质：
- * - **迁移门禁**：未迁移时在任何 IO（读盘 / 写盘）之前返回 typed `E_NOT_MIGRATED`，零写入；
+ * - **首用骨架**：空仓库照常导入，写入服务首用建 schema 与当日骨架；
  * - **并发闸**：在飞时再次调用直接返回 `ok:false`（`reason='正在导入中，请稍候'`），不排队；
  * - **写盘前复核**：用 `timelineStore.readAll()` 重读**此刻**的 v2 真值，再用
  *   `reconcileBeforeAppend` 过滤一次（按 id / 更晚 ts 去重），只有复核后的 `added` 才会被写；
@@ -508,10 +496,6 @@ function applyImportPlanOnce(plan: ImportPlan): ImportApplyResult {
     };
     return result;
   };
-  // v2-only 第一道闸：未迁移在任何读盘 / 写盘之前 typed 拒绝（与首页横幅同源）。
-  if (!timelineStore.isMigrated()) {
-    return failed(NOT_MIGRATED_REASON);
-  }
   if (!scheduleStore.isReady()) {
     return failed('日程存储尚未初始化：请先调用 scheduleStore.ensureReady(context)');
   }
@@ -600,7 +584,7 @@ function applyImportPlanOnce(plan: ImportPlan): ImportApplyResult {
 
 // ================================================================ v2 单时间线导出 / 导入（additive）
 //
-// 只在 `timelineStore.isMigrated()` 为真时可用；v1 的 exportSchedules / planImportFromText /
+// v2 唯一路径，空仓库也可用；v1 的 exportSchedules / planImportFromText /
 // appendImportPlan 一节一行未改。v2 bundle 落在沙箱 `<filesDir>/exports/v2-<stamp>/`，
 // **不在 git 仓库里**；导入只经 `timelineWriteStore`（原子写 records.json / summary.json）
 // 与 media/ 只增复制，绝不写 devices/、绝不删媒体；三本账本按 bundleVersion 做**并集追加**
@@ -815,10 +799,10 @@ function uniqueV2BundleDir(stamp: string): string {
   throw new Error(`v2 备份目录里同名目录太多（${base}），请先清理 ${parent}`);
 }
 
-/** 从 timelineStore / timelineWriteStore 读取当前门禁状态。 */
+/** v2 唯一路径：空仓库也是合法目标（首用建骨架），写路径始终可用。 */
 function v2TargetState(): V2TargetState {
   const state: V2TargetState = {
-    repoIsV2: timelineStore.isV2(),
+    repoIsV2: true,
     writeEnabled: timelineWriteStore.isEnabled()
   };
   return state;
@@ -849,7 +833,7 @@ function v2StampOf(latestTs: string): string {
  *
  * 媒体先经 zip 桥写成**整个 bundle 唯一的 media.zip**（条目 `<date>/<sha16>.jpg`，固定 DOS 时间 +
  * 排序 ⇒ 同数据逐字节相同），再把真实 sha256 / 字节数 / 条目数回填 manifest。
- * 未迁移（timeline/schema.json 非 v2）直接返回类型化拒绝；区间非法 / 读取失败都返回 ok:false + 中文原因。
+ * 空仓库照常导出（可为空）；区间非法 / 读取失败都返回 ok:false + 中文原因。
  */
 export async function exportV2Timeline(request: ExportRequestInput, zip: V2ZipBridge): Promise<V2ExportResult> {
   const failed = (code: string, reason: string): V2ExportResult => {
@@ -859,9 +843,6 @@ export async function exportV2Timeline(request: ExportRequestInput, zip: V2ZipBr
     };
     return result;
   };
-  if (!timelineStore.isMigrated()) {
-    return failed(V2_REFUSAL_V1_TARGET, NOT_MIGRATED_REASON);
-  }
   if (!scheduleStore.isReady()) {
     return failed('', '日程存储尚未初始化：请先调用 scheduleStore.ensureReady(context)');
   }
@@ -1014,16 +995,12 @@ export function planV2ImportFromPicked(text: string, uri: string): V2ImportPlanR
       const recordsText: string = readTextFromUri(`${dayDir}/${V2_RECORDS_FILE}`);
       const summaryText: string = day.hasSummary ? readTextFromUri(`${dayDir}/${V2_SUMMARY_FILE}`) : '';
       const ledgers: V2LedgerInput[] = [];
-      // 旧 bundle（bundleVersion<2）没有账本文件；跳过读取，plan 会返回 informational note。
-      if (manifest.bundleVersion >= 2) {
-        for (const name of V2_LEDGER_FILES) {
-          ledgers.push({ name: name, text: v2ReadLedgerText(`${dayDir}/${name}`) });
-        }
+      for (const name of V2_LEDGER_FILES) {
+        ledgers.push({ name: name, text: v2ReadLedgerText(`${dayDir}/${name}`) });
       }
       dayInputs.push({
         date: day.date, recordsText: recordsText, summaryText: summaryText,
-        // 新 bundle 的媒体清单来自 manifest（字节在 media.zip 里）；旧 bundle 仍读按日 media/ 散图。
-        mediaFiles: manifest.mediaArchive !== undefined ? day.media.slice() : v2ListMedia(`${dayDir}/${V2_MEDIA_DIR}`),
+        mediaFiles: day.media.slice(),
         ledgers: ledgers
       });
     }
@@ -1033,11 +1010,6 @@ export function planV2ImportFromPicked(text: string, uri: string): V2ImportPlanR
   const plan: V2ImportPlan = planV2Import(
     { manifestText: text, days: dayInputs, mediaArchiveBytes: mediaArchiveBytes }, v2TargetState()
   );
-  // informational note（不是拒绝）：记日志 + 随计划行回给面板展示。
-  const notes: string = v2PlanNotes(plan);
-  if (notes.length > 0) {
-    console.info(`[export-v2-ledgers] ${notes}`);
-  }
   const result: V2ImportPlanResult = {
     ok: plan.ok,
     code: plan.code,
@@ -1113,11 +1085,8 @@ function applyV2ImportOnce(
     const reason: string = plan === null ? '没有待应用的 v2 导入计划' : plan.reason;
     return v2ApplyFailure(code, reason);
   }
-  // dry-run 到确认之间状态可能变了：落盘前再查一次门禁（失败即零写入）。
+  // dry-run 到确认之间状态可能变了：落盘前再查一次写路径门禁（失败即零写入）。
   const target: V2TargetState = v2TargetState();
-  if (!target.repoIsV2) {
-    return v2ApplyFailure(V2_REFUSAL_V1_TARGET, '目标已不是 v2 仓库：请先迁移，再导入 v2 备份');
-  }
   if (!target.writeEnabled) {
     return v2ApplyFailure(V2_REFUSAL_TARGET_BUSY, 'v2 写入路径当前不可用：请检查显式激活开关后重试');
   }
@@ -1209,9 +1178,8 @@ function applyV2ImportOnce(
         return v2ApplyFailure('', `写入 ${day.date} 的汇总失败：${describeError(error)}`);
       }
     }
-    // 账本并集（bundleVersion>=2 才有）：目标旧字节恒为新字节前缀，只追加备份里没有的新行。
-    // delete/restore 按 (id,ts)、conflicts 按 (id,ts,dedupeKey) 去重；绝不截断 / 重写目标账本。
-    if (plan.bundleVersion >= 2) {
+    // 账本并集：目标旧字节恒为新字节前缀，只追加备份里没有的新行。
+    {
       for (const ledger of day.ledgers) {
         const dest = `${repoRoot}/${day.date}/${ledger.name}`;
         let targetText: string = '';

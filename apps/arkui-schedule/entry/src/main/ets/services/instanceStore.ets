@@ -26,6 +26,8 @@ import {
   upsertInstance
 } from '../model/instances';
 import type { DsInstance, InstanceProblem, RedactedInstance } from '../model/instances';
+import { seedInstances } from '../model/instanceSeed';
+import type { LegacyInstanceSettings } from '../model/instanceSeed';
 
 /** 唯一持久键：JSON 字符串信封。 */
 const INSTANCE_STORAGE_KEY: string = 'instances.json';
@@ -101,6 +103,21 @@ export class InstanceStore {
   /** 当前实例表（返回副本；本机若有则由调用方用 `localInstance()` 决定如何呈现）。 */
   list(): DsInstance[] {
     return this.load().slice();
+  }
+
+  /**
+   * 首次进入实例页时播种 + 旧配置迁移（模块 `mod-instance-list`）。
+   *
+   * 由页面在读完 `settingsStore` 后调用一次；纯判定在 `model/instanceSeed.ts`。
+   * 内容没变就**不写盘**（第二次启动零 IO、零重复）；本机不可删、旧地址按 id 去重。
+   */
+  ensureSeeded(legacy: LegacyInstanceSettings): DsInstance[] {
+    const before: DsInstance[] = this.load();
+    const seeded: DsInstance[] = seedInstances(before, legacy);
+    if (encodeInstances(seeded) === encodeInstances(sortInstances(before))) {
+      return before.slice();
+    }
+    return this.commit(seeded);
   }
 
   /** typed 问题码：坏信封 / 存储不可用；UI 用 `problemText()` 转成中文。 */

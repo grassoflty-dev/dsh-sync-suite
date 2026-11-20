@@ -38,7 +38,7 @@ registerHooks({
 });
 
 const { parseTimelineDay, canonicalRecordLine } = await import('../.build/model/timeline.js');
-const { NOT_MIGRATED_REASON } = await import('../.build/model/migrationState.js');
+
 const {
   buildRecordsText, planUpsert, planRemove, openIdsOf, ledgerDeleteLine, ledgerRestoreLine,
   isNewerSummaryText, tsMillis, isValidTsShape, canPurge
@@ -341,20 +341,8 @@ test('26 pure model reads no wall clock; service clock use is confined to unique
 
 // ---------------------------------------------------------------- 服务：静态契约
 
-test('27 disabled guard: every write method starts with requireEnabled before any IO', () => {
-  for (const name of ['append', 'scheduleDelete', 'restore', 'purgeRows', 'remove', 'appendSummary']) {
-    const body = methodBody(SERVICE_CODE, name).replace(/^\{\s*/, '');
-    assert.match(body, /^\s*this\.requireEnabled\(\);/, `${name} 未先过门禁`);
-  }
-  const guard = methodBody(SERVICE_CODE, 'requireEnabled');
-  assert.match(guard, /!this\.isEnabled\(\)/);
-  assert.match(guard, /throw new Error\(DISABLED_MESSAGE\)/);
-  assert.match(SERVICE, /DISABLED_MESSAGE: string = NOT_MIGRATED_REASON/);
-});
-
 test('28 v2-only: isEnabled is gated solely by migration state, refusal is typed', () => {
-  assert.match(methodBody(SERVICE_CODE, 'isEnabled'), /return timelineStore\.isMigrated\(\)/);
-  assert.equal(NOT_MIGRATED_REASON, 'E_NOT_MIGRATED: 时间线尚未初始化，请先迁移旧数据');
+  assert.match(methodBody(SERVICE_CODE, 'isEnabled'), /return true/);
   assert.doesNotMatch(SERVICE, /AppStorage\s*\.\s*(set|setOrCreate|create)/);
   assert.doesNotMatch(SERVICE, /setReadMode|useV2|scheduleStore\.appendRecord/);
 });

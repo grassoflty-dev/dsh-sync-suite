@@ -225,7 +225,6 @@ import type {
 } from '../services/exportService';
 import { timelineStore } from '../services/timelineStore';
 import { timelineWriteStore } from '../services/timelineWriteStore';
-import { NOT_MIGRATED_REASON } from '../model/migrationState';
 import { DIVIDER, FONT, HOME_INCLUDE_OTHER_KEY, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
 import { applyThemeMode, isSystemDark } from '../common/themeApply';
 import { normalizeThemeMode, resolveTheme, themeModeHint, themeModeLabel } from '../model/theme';
@@ -1123,12 +1122,7 @@ struct Settings {
     if (this.disposed) {
       return;
     }
-    // v2-only：未迁移时连 dry-run 都不做（面板按钮已禁用，这里是第二道闸）。
-    if (!timelineStore.isMigrated()) {
-      this.pendingImport = null;
-      this.exportImport = withPanelMessage(this.exportImport, `导入不可用：${NOT_MIGRATED_REASON}`, false);
-      return;
-    }
+    // v2 唯一路径：空仓库照常 dry-run（落点由 writer 首用建骨架），无未迁移门槛。
     this.exportImport = withPanelMessage(this.exportImport, '', true);
     try {
       const context = getContext(this) as common.UIAbilityContext;
@@ -1172,11 +1166,6 @@ struct Settings {
    * 落盘后清掉 dry-run（避免同一份文件被连点两次追加两遍），提示里保留追加 / 跳过 / 冲突计数。
    */
   private handleConfirmImport(): void {
-    // v2-only：确认落盘前再查一次迁移门槛（dry-run 到确认之间仓库可能变了），零写入。
-    if (!timelineStore.isMigrated()) {
-      this.exportImport = withPanelMessage(this.exportImport, `导入不可用：${NOT_MIGRATED_REASON}`, false);
-      return;
-    }
     const plan: ImportPlan | null = this.pendingImport;
     if (plan === null) {
       if (this.disposed) {
@@ -2434,15 +2423,17 @@ struct Settings {
   }
 
   /**
-   * 「云端对话」入口（**只放一行入口**，列表与详情在独立页面）。
+   * 「远程实例与云端对话」入口（**只放一行入口**，列表在独立页面）。
    *
-   * 为什么不把会话列表塞进设置页：设置页是「改配置」的地方，会话列表是要反复来读的内容；
-   * 混在一起既撑长本页，也会让「列表 → 详情 → 返回」的路由栈压在设置页里。
+   * 设计稿 `docs/REMOTE-INSTANCES.md` §1 定的唯一入口：把原来的「云端对话（只读 ›）」
+   * 升级为本行，跳新建的顶层 `pages/Instances`（本机 + 远程实例列表）。
+   * 实例/会话是要反复来读的内容，不塞进「改配置」的设置页分组里；保留 `ChatEntryRow`
+   * 这个 builder 名与紧凑屏 / 宽屏两处裸调用，B2 的组锚点契约不受影响。
    */
   @Builder
   ChatEntryRow() {
     Row({ space: SPACING.sm }) {
-      Text('云端对话')
+      Text('远程实例与云端对话')
         .fontSize(FONT.body)
         .lineHeight(LINE_HEIGHT.body)
         .fontColor($r('app.color.text_primary'))
@@ -2450,7 +2441,7 @@ struct Settings {
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .textAlign(TextAlign.Start)
-      Text('只读 ›')
+      Text('›')
         .fontSize(FONT.caption)
         .lineHeight(LINE_HEIGHT.caption)
         .fontColor($r('app.color.text_secondary'))
@@ -2462,14 +2453,14 @@ struct Settings {
     .height(TOUCH_MIN)
     .alignItems(VerticalAlign.Center)
     .onClick(() => {
-      this.openChats();
+      this.openInstances();
     })
   }
 
-  /** 打开云端对话列表页（失败只 toast，不影响设置页任何状态）。 */
-  private openChats(): void {
-    router.pushUrl({ url: 'pages/Chats' }).catch((error: Error) => {
-      promptAction.showToast({ message: `打开云端对话失败：${describeError(error)}` });
+  /** 打开实例列表页（失败只 toast，不影响设置页任何状态）。 */
+  private openInstances(): void {
+    router.pushUrl({ url: 'pages/Instances' }).catch((error: Error) => {
+      promptAction.showToast({ message: `打开实例列表失败：${describeError(error)}` });
     });
   }
 
@@ -2800,7 +2791,7 @@ struct Settings {
       onCopyPath: (): void => {
         this.handleCopyPath();
       },
-      // v2 时间线备份：展示状态 + 四个回调全部接线（面板按 isMigrated() 自行隐藏这一节）。
+      // v2 时间线备份：空仓库也照常展示这一节（首用时由写入服务建骨架），四个回调全部接线。
       v2PlanReady: this.v2PlanReady,
       v2PlanText: this.v2PlanText,
       v2Message: this.v2Message,

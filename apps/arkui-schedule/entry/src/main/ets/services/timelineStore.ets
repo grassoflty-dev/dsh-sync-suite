@@ -1,19 +1,19 @@
 /**
- * v2 单时间线**只读**服务（mod-v2-only：v2 是唯一读写路径）。
+ * v2 单时间线**只读**服务（mod-drop-v1：空仓库即正常起点）。
  *
  * 职责边界（与契约 docs/DATA-CONTRACT-v2.md §2/§6/§7/§11 对齐）：
  * - 只读：本文件**从不写任何 v2 路径**，不提供任何写入口；唯一的持久化写入方
- *   是同步 / 写入服务，本服务连临时文件都不建。
- * - 门槛：ensureReady() 只读一次 `<filesDir>/git-repo/timeline/schema.json`，交给纯函数
- *   parseSchemaMarker 判定；`schemaVersion === 2` 才算已迁移。缺文件、坏 JSON、别的版本
- *   一律是**未迁移**状态：首页显示固定横幅，所有写入在任何 IO 之前抛 E_NOT_MIGRATED；
- *   本文件不修改任何标记、不迁移数据、不删 v1。
+ *   是同步 / 写入服务，本服务连临时文件都不建。仓库骨架由写入服务在首用时创建。
+ * - 门槛：ensureReady() 读一次 `<filesDir>/git-repo/timeline/schema.json`，只用来识别
+ *   **未来未知版本**（`E_SCHEMA_UNKNOWN`，保留只读门槛）。缺标记 = 空仓库正常起点：
+ *   返回空列表/空汇总，**没有** banner、没有 E_NOT_MIGRATED、没有迁移动作。
  * - 没有 open.jsonl、没有 reconcile、没有派生索引：v2 的「未完成」直接由记录内 closed_at
  *   缺省推导（model/timeline.ts 的 openRecords()），本服务只做文件字节与时机。
  * - 不自带解析器：records.json / 两本账本 / schema 标记全部交给 model/timeline.ts 的纯函数，
  *   本文件只负责定位路径、读文本、把纯函数结果转给调用方。
  * - 删撤销账本 visibleRecords() 是唯一的展示记录来源；day.allRecords 绝不外泄给页面。
- * - 没有 v1/v2 模式开关、没有读模式回退：任何读路径都直接查 v2 时间线；未迁移时返回空。
+ * - 没有 v1/v2 模式开关、没有读模式回退：任何读路径都直接查 v2 时间线。
+ * - 旧 `devices/**` 与旧 `open.jsonl` 一律忽略：不读、不写、不删。
  * - 任何读取异常都吞掉并记一条 `console.info('[tl] …')`，绝不抛给调用方；
  *   返回类型沿用页面既有的 ScheduleRecord，v2 的多余字段（media/opened_at/closed_at 等）
  *   随对象原样带出，不做字段裁剪。
@@ -21,13 +21,13 @@
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import {
-  parseSchemaMarker,
   parseTimelineDay,
   parseLedger,
   visibleRecords,
   openRecords,
   timelineDayPath
 } from '../model/timeline';
+import { decideFreshStart } from '../model/freshStart';
 import type { TimelineDay, TimelineRecord, LedgerEntry } from '../model/timeline';
 import type { ScheduleRecord } from '../model/types';
 
@@ -52,13 +52,14 @@ interface LoadedDay {
 export class TimelineStore {
   private filesDir: string = '';
   private ready: boolean = false;
-  /** schema 门槛结论；缺省 false，只有标记明确为 v2 时才翻成 true。 */
-  private v2: boolean = false;
+  /** 未来未知 schema 版本的 typed 只读门槛；空仓库 / v2 均为 ''。 */
+  private schemaProblem: string = '';
 
   /**
    * 初始化（幂等）：取 filesDir，读一次仓库级 schema 标记。
    *
-   * 任何异常都按「未迁移」处理并记日志，绝不抛；页面据此显示唯一横幅并拒绝写入。
+   * 缺标记 = 空仓库正常起点（读返回空、无 banner、无写入拒绝）；只有标记存在但版本
+   * 不认识才记 `E_SCHEMA_UNKNOWN` 只读门槛。任何异常都只记日志，绝不抛给页面。
    */
   async ensureReady(context: object): Promise<void> {
     if (this.ready) {
@@ -68,21 +69,17 @@ export class TimelineStore {
     this.filesDir = abilityContext.filesDir;
     try {
       const markerPath = this.schemaPath();
-      if (!this.fileExists(markerPath)) {
-        console.info('[tl] 缺少 timeline/schema.json，按未迁移处理');
-      } else {
-        const marker = parseSchemaMarker(fs.readTextSync(markerPath));
-        // 门槛：parseSchemaMarker(...).ok !== true → 未迁移（缺字段 / 坏 JSON / 其他版本一律拒绝写入）
-        if (marker.ok !== true) {
-          console.info('[tl] schema 标记不是 v2，按未迁移处理：' + marker.reason);
-          this.v2 = false;
-        } else {
-          this.v2 = true;
-        }
+      const markerText: string = this.fileExists(markerPath) ? fs.readTextSync(markerPath) : '';
+      const decision = decideFreshStart(markerText);
+      if (decision.unsupported) {
+        this.schemaProblem = 'E_SCHEMA_UNKNOWN';
+        console.info('[tl] timeline/schema.json 版本不认识，按只读处理');
+      } else if (decision.needSchema) {
+        console.info('[tl] 空仓库：写入服务首用时创建 timeline 骨架');
       }
     } catch (error) {
-      this.v2 = false;
-      console.info('[tl] 读取 schema 标记失败，按未迁移处理：' + this.errorText(error));
+      this.schemaProblem = 'E_SCHEMA_UNKNOWN';
+      console.info('[tl] 读取 schema 标记失败，按只读处理：' + this.errorText(error));
     }
     this.ready = true;
   }
@@ -91,20 +88,15 @@ export class TimelineStore {
     return this.ready;
   }
 
-  /** 仓库级 schema 标记是否明确为 v2（即迁移已完成）。 */
-  isV2(): boolean {
-    return this.ready && this.v2;
+  /** 未来未知 schema 版本的 typed 拒绝；空仓库返回空串（正常起点，不拒绝）。 */
+  schemaProblemText(): string {
+    return this.ready ? this.schemaProblem : '';
   }
 
-  /** v2 是唯一读写路径：迁移完成即可读写；未迁移时所有写入拒绝、读返回空。 */
-  isMigrated(): boolean {
-    return this.isV2();
-  }
-
-  /** 有 records.json 的合法日历日目录（升序）。未迁移时返回空。 */
+  /** 有 records.json 的合法日历日目录（升序）；空仓库返回空。 */
   listDates(): string[] {
     const dates: string[] = [];
-    if (!this.isV2()) {
+    if (!this.isReady()) {
       return dates;
     }
     try {
@@ -145,7 +137,7 @@ export class TimelineStore {
    * 未知日期 / 解析失败 / 任何异常都返回 [] 并只记一条 `[tl]` 日志，不外抛。
    */
   readDay(date: string): ScheduleRecord[] {
-    if (!this.isV2() || !this.isCalendarDate(date)) {
+    if (!this.isReady() || !this.isCalendarDate(date)) {
       return [];
     }
     try {
@@ -163,7 +155,7 @@ export class TimelineStore {
 
   /** 全部可见记录（跨日期拼接后按 ts 升序），非 v2 返回 []。 */
   readAll(): ScheduleRecord[] {
-    if (!this.isV2()) {
+    if (!this.isReady()) {
       return [];
     }
     try {
@@ -186,7 +178,7 @@ export class TimelineStore {
    * 按 ts 升序；非 v2 返回 []。这里不碰 openIndexStore，也不做 reconcile。
    */
   pendingRecords(): ScheduleRecord[] {
-    if (!this.isV2()) {
+    if (!this.isReady()) {
       return [];
     }
     try {
@@ -210,7 +202,7 @@ export class TimelineStore {
 
   /** 当日 summary.json 原文；缺文件 / 读失败返回 ''。 */
   readSummaryText(date: string): string {
-    if (!this.isV2() || !this.isCalendarDate(date)) {
+    if (!this.isReady() || !this.isCalendarDate(date)) {
       return '';
     }
     try {

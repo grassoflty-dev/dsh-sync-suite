@@ -44,8 +44,6 @@ import {
 import type { DateRangeResult, ExportImportState, ExportRequest, QuickRangeOption } from '../model/exportImport';
 import { formatDiagnostics } from '../model/stateView';
 import type { DiagnosticsInput } from '../model/stateView';
-import { NOT_MIGRATED_REASON } from '../model/migrationState';
-import { timelineStore } from '../services/timelineStore';
 import { ActionButton } from './ActionButton';
 import { EmptyState } from './state/EmptyState';
 import { ErrorState } from './state/ErrorState';
@@ -81,7 +79,7 @@ const PANEL_ERROR_NEXT: string = '检查日期区间与文件后重试';
  */
 const FAILURE_PREFIXES: string[] = ['导出失败', '导入失败', '选择文件失败', '无法读取导入文件', '复制路径失败', '没有待确认'];
 
-// ---- v2 时间线备份（只在 timelineStore.isMigrated() 时渲染，未迁移用户看不到这一节）----
+// ---- v2 时间线备份（空仓库也照常渲染；首用时由 write store 建骨架）----
 const V2_GROUP_TITLE: string = 'v2 时间线备份';
 const V2_HINT: string = '导出共享时间线（含媒体）为只读备份；导入先 dry-run，确认后才写入 timeline/';
 const V2_EXPORT_LABEL: string = '导出 v2 备份';
@@ -205,18 +203,14 @@ export struct ExportImportPanel {
 
   // ------------------------------------------------------------------ v2 时间线备份
 
-  /** v2 是唯一路径：迁移完成才显示这一节；未迁移用户只看到首页横幅，不看到 v2 备份。 */
+  /** v2 是唯一路径：空仓库也照常显示这一节（没有迁移门槛）。 */
   private v2Visible(): boolean {
-    return timelineStore.isMigrated();
+    return true;
   }
 
-  /**
-   * v1 格式导入节在 v2-only 里的门槛：未迁移时整节禁用并给出 typed 原因，
-   * 按钮点了也只展示同一句原因（不做「静默吞点击」），回调根本不会被触发，因此零写入。
-   * 已迁移时导入目标仍是 timeline/（由页面经 timelineWriteStore 落盘）。
-   */
+  /** 不再有未迁移禁用：导入目标始终是 timeline/（由页面经 timelineWriteStore 落盘）。 */
   private importDisabledReason(): string {
-    return this.v2Visible() ? '' : NOT_MIGRATED_REASON;
+    return '';
   }
 
   /**
@@ -540,7 +534,7 @@ export struct ExportImportPanel {
   }
 
   /**
-   * v2 时间线备份节：只在迁移完成（isMigrated()）时渲染。
+   * v2 时间线备份节：空仓库也照常渲染（骨架由写入服务首用创建）。
    *
    * 三态纪律（docs/STATE-UI.md）：没计划 → EmptyState 给「去选备份」；忙 → LoadingState；
    * 类型化拒绝文案走 v2Message + HintLine（不是静默吞点击）。按钮统一 ActionButton，

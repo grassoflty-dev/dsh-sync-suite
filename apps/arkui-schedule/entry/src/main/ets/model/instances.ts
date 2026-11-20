@@ -183,6 +183,20 @@ function findUrlToken(url: string): string {
   return '';
 }
 
+/**
+ * 剥离 URL 的 `#…` fragment：**只做一次字符串截取，不解析 / 不重序列化地址**。
+ *
+ * 为什么单独做这一步：`remoteUrl.stripRemoteToken()` 明确逐字保留 fragment
+ * （`remoteUrl.ts:558-560,586,588`），于是 `http://h/?k=S#token=S` 剥完 query 令牌后
+ * 仍留下 `#token=S`——明文进了持久 `url`，还被 `instanceIdFromUrl()` 一起哈希。
+ * 这里在落盘 / 哈希之前把整段 fragment 切掉：片段里的 `#token=` 被彻底丢弃（不是抽到
+ * `token` 字段，因为 `findUrlToken()` 按契约只读 query），地址形态保持与原归一结果一致。
+ */
+function stripUrlFragment(url: string): string {
+  const hash: number = url.indexOf('#');
+  return hash >= 0 ? url.slice(0, hash) : url;
+}
+
 /** 整个字符串兜底打码（覆盖 fragment 等 `sanitizeUrlForDisplay` 不管的位置）。 */
 const TOKEN_PAIR_RE: RegExp = /(^|[?&#])((?:token|k)=)([^&#]*)/gi;
 
@@ -312,7 +326,8 @@ export function instanceIdFromUrl(url: string): string {
   if (!check.ok || !check.hadScheme) {
     return '';
   }
-  const base: string = stripRemoteToken(check.url);
+  // 先剥 fragment 再剥 query 令牌再哈希：fragment 里的 token 不参与 id（P2-1）
+  const base: string = stripUrlFragment(stripRemoteToken(check.url));
   if (base.length === 0) {
     return '';
   }
@@ -370,7 +385,9 @@ export function normalizeInstance(raw: RawInstance | null | undefined): Instance
     if (!check.ok || !check.hadScheme) {
       return refused('E_INSTANCE_URL');
     }
-    url = stripRemoteToken(check.url);
+    // 与 instanceIdFromUrl 用同一条「剥 fragment」规则：带 #token= 的地址与干净地址
+    // 落盘成同一个 base，id 相等，且明文 token 永不进持久 url（P2-1）
+    url = stripUrlFragment(stripRemoteToken(check.url));
     if (url.length === 0) {
       return refused('E_INSTANCE_URL');
     }

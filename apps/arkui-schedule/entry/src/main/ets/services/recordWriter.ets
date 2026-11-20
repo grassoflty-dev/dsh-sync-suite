@@ -1,10 +1,10 @@
 /**
- * 写入统一门面（mod-v2-only）：所有日程写调用点都走这里，v2 是唯一写入路径。
+ * 写入统一门面（mod-drop-v1）：所有日程写调用点都走这里，v2 是唯一写入路径。
  *
  * 规则：
- * - 未迁移（timeline/schema.json 非 v2）→ 在任何 IO（含 outbox 停放）之前抛
- *   `E_NOT_MIGRATED: 时间线尚未初始化，请先迁移旧数据`，零写入、零伪造成功；
- * - 已迁移 → 一律走 `timelineWriteStore`：
+ * - 空仓库不是错误：没有 `timeline/schema.json` 也照常写，`timelineWriteStore` 在首用时
+ *   建仓库骨架与当日 `records.json`。**没有**任何 E_NOT_MIGRATED 拒绝或迁移动作；
+ * - 一律走 `timelineWriteStore`：
  *   - writeRecord → append(upsert)；
  *   - deleteRecord → scheduleDelete（§7 删除账本，不写墓碑版本）；
  *   - restoreRecord → restore（§7 撤销账本，ts 严格晚于删除）。
@@ -18,11 +18,9 @@
  * 这样「新日期首次写盘就失败」的意图不会永久滞留，§9「无静默本地未推提交」成立。
  * 停放本身失败也照样抛类型化错误并如实说明；**绝不回落到 v1 写**（避免双存储分叉）。
  *
- * 硬约束：本文件不写 AppStorage、不写 `devices/**`、不迁移数据、不引入新依赖。
+ * 硬约束：本文件不写 AppStorage；旧 `devices/**` 与 `open.jsonl` 一律忽略（不读、不写、不删）；不引入新依赖。
  */
-import { timelineStore } from './timelineStore';
 import { timelineWriteStore } from './timelineWriteStore';
-import { NOT_MIGRATED_REASON } from '../model/migrationState';
 import { outboxStore } from './outboxStore';
 import { makeIntentId } from '../model/syncProtocol';
 import { ledgerDeleteLine, ledgerRestoreLine } from '../model/timelineWrite';
@@ -68,16 +66,12 @@ export class RecordWriter {
   /**
    * v2 写的统一编排（P1-1）：**先停放、后写、成败都触发一次周期**。
    *
-   * 未迁移时第一句就抛 E_NOT_MIGRATED，**在 buildIntent / 停放 / 写 / 同步之前**，
-   * 因此未迁移仓库零写入（连仓库外的 outbox 也不碰）。
+   * 空仓库照常写：骨架创建由 write store 完成，这里不再有任何「未迁移」前置拒绝。
    * 停放发生在写尝试之前，因此进程在写盘中/写盘后崩溃都仍有 outbox 真值；
    * 写失败留停放并记 typed 原因；写成功出队。两条路径都 `triggerSync()`：
    * 失败路径也触发是为了让新日期进入周期 days、把停放意图真正重放掉。
    */
   private writeV2(op: ParkOp, record: ScheduleRecord, apply: V2Apply): void {
-    if (!timelineStore.isMigrated()) {
-      throw new Error(NOT_MIGRATED_REASON);
-    }
     const entry: OutboxEntry = this.buildIntent(op, record);
     let parkNote: string = '已存入待同步队列';
     try {

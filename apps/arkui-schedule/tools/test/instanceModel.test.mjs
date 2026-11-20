@@ -173,6 +173,15 @@ describe('normalizeInstance：字段校验与 typed 拒绝', () => {
     assert.equal(inst.url, '');
     assert.equal(inst.token, undefined);
   });
+
+  test('N-10 大写 ?TOKEN= 也抽到 token 字段，url 只留 base（P2 评审缺口）', () => {
+    const inst = normalized({
+      id: ID_A, name: 'x', url: `http://h/?TOKEN=${SECRET}&a=1`, mode: 'lan'
+    });
+    assert.equal(inst.token, SECRET);
+    assert.equal(inst.url, 'http://h/?a=1');
+    assert.equal(inst.url.includes(SECRET), false);
+  });
 });
 
 // ---------------------------------------------------------------- 打码
@@ -341,6 +350,26 @@ describe('持久化信封 {v:1,items:[...]}', () => {
     assert.equal(instanceIdFromUrl('ftp://h/'), '');
   });
 
+  test('E-07 fragment token 不参与哈希 / 不进持久 url：带 #token= 与干净地址同 id（P2-1）', () => {
+    const withFragment = `http://h/?k=${SECRET}#token=${SECRET}`;
+    const fragmentOnly = `http://h/#token=${SECRET}`;
+    const clean = `http://h/?k=${SECRET}`;
+    const idA = instanceIdFromUrl(withFragment);
+    const idB = instanceIdFromUrl(clean);
+    assert.match(idA, /^inst-[0-9a-f]{16}$/);
+    assert.equal(idA, idB, 'fragment 不能改变 id');
+    assert.equal(instanceIdFromUrl(fragmentOnly), instanceIdFromUrl('http://h/'), '只有 fragment token 也不改变 id');
+    const inst = normalized({ id: idA, name: 'x', url: withFragment, mode: 'lan' });
+    assert.equal(inst.url, 'http://h/', 'fragment 被定向剥离，明文不落盘');
+    assert.equal(inst.url.includes(SECRET), false);
+    assert.equal(inst.token, SECRET, 'query 里的 k 仍按原规则抽到 token');
+    const cleanInst = normalized({ id: idB, name: 'x', url: clean, mode: 'lan' });
+    assert.equal(encodeInstances([inst]), encodeInstances([cleanInst]));
+    const fragOnlyInst = normalized({ id: ID_A, name: 'x', url: fragmentOnly, mode: 'lan' });
+    assert.equal(fragOnlyInst.url, 'http://h/');
+    assert.equal(fragOnlyInst.token, undefined, 'fragment token 不抽到 token 字段，直接丢弃');
+  });
+
   test('E-05 instanceKey：只由合法 id 生成，脏 id 空串', () => {
     assert.equal(instanceKey(LOCAL_INSTANCE_ID), `${INSTANCE_KEY_PREFIX}${LOCAL_INSTANCE_ID}`);
     assert.equal(instanceKey(ID_A), `${INSTANCE_KEY_PREFIX}${ID_A}`);
@@ -361,6 +390,15 @@ describe('持久化信封 {v:1,items:[...]}', () => {
     assert.deepEqual(applyReachability([inst], ID_B, 'ok', 4000), [inst]);
     assert.deepEqual(applyReachability([inst], ID_A, 'weird', 4000), [inst]);
     assert.equal(inst.lastSeen, 1000, '入参不被修改');
+  });
+
+  test('E-08 非法 nowMs（NaN / 0 / 负数 / Infinity / 字符串）不得推进 lastSeen（P2 评审缺口）', () => {
+    const inst = normalized({ ...remoteInstance(), reachable: 'fail', lastSeen: 1000 });
+    for (const bad of [NaN, 0, -1, Infinity, '2000']) {
+      const next = applyReachability([inst], ID_A, 'ok', bad);
+      assert.equal(next[0].reachable, 'ok');
+      assert.equal(next[0].lastSeen, 1000, `非法 nowMs=${String(bad)} 仍推进了 lastSeen`);
+    }
   });
 });
 

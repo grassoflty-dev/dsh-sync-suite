@@ -1,8 +1,8 @@
 /**
- * v2 单时间线**写入**服务（mod-v2-only：v2 是唯一写入路径）。
- * 仓库标记明确为 v2（迁移完成）才允许落盘；未迁移时每个公开方法在**任何 IO 之前**
- * 抛出 `E_NOT_MIGRATED: 时间线尚未初始化，请先迁移旧数据`，绝不回落到 v1 写入、
- * 绝不静默写空 v2 仓库。本模块不接 UI、不迁移、不删 v1。
+ * v2 单时间线**写入**服务（mod-drop-v1：空仓库即正常起点）。
+ * 缺 `timeline/schema.json` 不再拒绝：首用时建仓库骨架（schema 标记），写第一条记录时
+ * 建当日目录与 `records.json`。只有**未来未知 schema 版本**才保留 `E_SCHEMA_UNKNOWN`
+ * 只读门槛。绝不回落到 v1 写入、绝不读写旧数据。
  *
  * 与契约 docs/DATA-CONTRACT-v2.md §3/§6/§7/§8/§11 对齐：
  * - records.json 原子替换：同目录临时文件 → `renameSync`，永不写半个文件、永不先删原文件；
@@ -14,10 +14,10 @@
  *   判定下沉到纯模型 `isNewerSummaryText`）；
  * - 读侧复用 model/timeline 的 parseTimelineDay / parseLedger / visibleRecords 做写前基线，
  *   已删记录不参与基线，绝不因一次保存把已删记录复活；
- * - 所有路径都由 model/timeline 的 timelineDayPath(date) 或其同级文件名派生，
- *   绝不触碰旧 v1 目录；本文件不写 AppStorage（只读开关）、不建 schema 标记。
+ * - 所有路径都由 model/timeline 的 timelineDayPath(date) 或其同级文件名派生；
+ *   旧设备目录与旧 open.jsonl 一律忽略——不读、不写、不删。本文件不写 AppStorage。
  *
- * **职责边界**：仓库级门禁 `assertWritable()`（schema + 分支 `main` + HEAD==origin/main）与
+ * **职责边界**：仓库级门禁 `assertWritable()`（分支 `main` + HEAD==origin/main）与
  * outbox / union / replay 同步周期是 `mod-v2-sync-protocol` 的职责；本模块只做**单进程原子写**
  * 与本地账本落盘，不实现分支断言、不跨设备收敛、不自动 commit / push。
  *
@@ -36,10 +36,7 @@ import { timelineStore } from './timelineStore';
 import { parseTimelineDay, parseLedger, visibleRecords, timelineDayPath } from '../model/timeline';
 import type { TimelineRecord, TimelineMedia } from '../model/timeline';
 import type { ScheduleRecord, Attachment } from '../model/types';
-import { NOT_MIGRATED_REASON } from '../model/migrationState';
-import { isCalendarDate, isMediaFileName } from '../model/importV1';
-import type { V1MediaWriteResult } from '../model/importV1';
-import { sha256Hex } from '../model/sha256';
+import { decideFreshStart, FRESH_SCHEMA_TEXT, freshDayText } from '../model/freshStart';
 import {
   planUpsert, planRemove, ledgerDeleteLine, ledgerRestoreLine,
   tsMillis, isValidTsShape, isNewerSummaryText, canPurge
@@ -76,9 +73,6 @@ const NEW_LINE: string = '\n';
 /** 本地媒体文件名：<sha256 前 16 位小写 hex>.jpg（与契约 §5 一致，非法附件跳过）。 */
 const MEDIA_SHA_RE: RegExp = /^[0-9a-fA-F]{64}$/;
 
-/** 未迁移时的唯一类型化中文拒绝原因（与首页横幅文案同源，见 model/migrationState）。 */
-const DISABLED_MESSAGE: string = NOT_MIGRATED_REASON;
-
 /** ts 形状错误的类型化文案（写侧删除相关入口 + append 共用）。 */
 const TS_SHAPE_ERROR: string = 'E_TS_SHAPE: 时间戳格式不合法（需 YYYY-MM-DDTHH:mm:ss 且可解析）';
 
@@ -106,17 +100,49 @@ export class TimelineWriteStore {
     const abilityContext = context as common.UIAbilityContext;
     this.filesDir = abilityContext.filesDir;
     this.ready = true;
+    // 空仓库即正常起点：首用（初始化）就建 timeline/ 与 schema 标记；旧设备目录不读不写。
+    this.ensureSkeleton();
   }
 
-  /** 唯一门槛：v2 是唯一路径，迁移完成即允许写；未迁移由 requireEnabled 抛类型化拒绝。 */
+  /** 写路径始终可用；空仓库由 ensureSkeleton/ensureDay 在首用时建骨架，不再有未迁移拒绝。 */
   isEnabled(): boolean {
-    return timelineStore.isMigrated();
+    return true;
   }
 
-  /** upsert：把一条 v1 形状记录规范化为 v2 记录后写入当日 records.json。 */
-  append(record: ScheduleRecord, date: string): void {
-    this.requireEnabled();
+  /**
+   * 首用骨架：确保 `<filesDir>/git-repo/timeline/` 与 `schema.json` 存在。
+   * 缺标记或空文件 → 写规范 v2 标记；标记存在但不是 v2 → 由 requireSchema 只读拒绝。
+   */
+  ensureSkeleton(): void {
     this.requireReady();
+    const root: string = this.timelineRoot();
+    this.ensureDirSync(root);
+    const markerPath: string = `${root}/${SCHEMA_FILE_NAME}`;
+    const markerText: string = this.readText(markerPath);
+    if (decideFreshStart(markerText).needSchema) {
+      this.atomicWriteIn(root, SCHEMA_FILE_NAME, FRESH_SCHEMA_TEXT);
+    }
+  }
+
+  /** 当日骨架：写第一条记录前建好日目录与空 `records.json`（日期非法时抛类型化错误）。 */
+  private ensureDay(date: string): void {
+    this.requireReady();
+    if (!this.isCalendarDate(date)) {
+      throw new Error(`E_DATE: 非法日期目录名（${date}）`);
+    }
+    const dir: string = this.dayDir(date);
+    this.ensureDirSync(dir);
+    const path: string = `${dir}/${RECORDS_FILE_NAME}`;
+    if (!this.fileExists(path)) {
+      this.writeTextSync(path, freshDayText(date));
+    }
+  }
+
+  /** upsert：把一条记录规范化为 v2 记录后写入当日 records.json。 */
+  append(record: ScheduleRecord, date: string): void {
+    this.requireReady();
+    this.requireSchema(); // 内含首用建仓库骨架
+    this.ensureDay(date);
     // N2：在任何 IO 之前校验 ts 形状；畸形 ts 抛 E_TS_SHAPE，绝不进入主写路径。
     this.requireTs(record.ts);
     const base: TimelineRecord[] = this.visibleOf(date);
@@ -134,8 +160,8 @@ export class TimelineWriteStore {
    * **records.json 行原样保留**，5 秒宽限期纯属 UI；账本立即落盘，远端立刻可见删除。
    */
   scheduleDelete(id: string, date: string, ts: string): void {
-    this.requireEnabled();
     this.requireReady();
+    this.requireSchema();
     this.requireTs(ts);
     const line: string = ledgerDeleteLine(id, ts, ts);
     if (line.length === 0) {
@@ -150,8 +176,8 @@ export class TimelineWriteStore {
    * （§7 读侧优先级 R > D），调用方会误以为撤销成功——这里 fail-closed。
    */
   restore(id: string, date: string, ts: string): void {
-    this.requireEnabled();
     this.requireReady();
+    this.requireSchema();
     this.requireTs(ts);
     const dir: string = this.dayDir(date);
     const deleted = parseLedger(this.readText(`${dir}/${DELETED_FILE_NAME}`)).entries;
@@ -183,8 +209,8 @@ export class TimelineWriteStore {
    * 只在确认后调用；id 不存在（或已被上一次清掉）时为幂等 no-op，不做任何 IO。
    */
   purgeRows(id: string, date: string, ts: string): void {
-    this.requireEnabled();
     this.requireReady();
+    this.requireSchema();
     this.requireTs(ts);
     const dir: string = this.dayDir(date);
     // N1：基线必须是**原始版本行**（allRecords），不能用账本过滤后的 visibleOf——
@@ -233,16 +259,16 @@ export class TimelineWriteStore {
    * 物理清行必须用 `purgeRows`；本包装**不可**用于需要 5 秒撤销的 UI 窗口。
    */
   remove(id: string, date: string, ts: string): void {
-    this.requireEnabled();
     this.requireReady();
+    this.requireSchema();
     this.requireTs(ts);
     this.scheduleDelete(id, date, ts);
   }
 
   /** 每日汇总：generatedAt 较新者胜，相等 / 更旧 / 坏候选保留现有文件字节（§8）。 */
   appendSummary(date: string, text: string): void {
-    this.requireEnabled();
     this.requireReady();
+    this.requireSchema();
     const dir: string = this.dayDir(date);
     const existing: string = this.readText(`${dir}/${SUMMARY_FILE_NAME}`);
     if (!isNewerSummaryText(existing, text)) {
@@ -251,168 +277,31 @@ export class TimelineWriteStore {
     this.atomicWriteIn(dir, SUMMARY_FILE_NAME, text);
   }
 
-  // ------------------------------------------------------------------ 迁移专用 IO（mod-v2-import-v1）
-
-  /*
-   * 以下方法**只**供 mod-v2-import-v1 的迁移服务调用，刻意不经过 requireEnabled()：
-   * 迁移的最后一步才写 timeline/schema.json，写 records/summary/media/ledgers 时仓库
-   * 按定义仍是「未迁移」，普通写入口必然拒绝。它们全部只解析 timeline/** 路径，
-   * 绝不接受设备目录或任意相对路径，也绝不移动 / 删除任何旧数据。
-   * 门禁（schema + 分支 + HEAD）仍由迁移服务在计划阶段与落标记前显式判定。
-   */
-
-  /** 迁移：读任意 timeline/** 下的文本（缺文件返回 ''），只读，不改任何字节。 */
-  migrationReadText(relPath: string): string {
-    return this.readText(this.migrationPath(relPath));
-  }
-
-  /** 迁移：列出 timeline/** 下某目录的直接项名（缺目录返回空）。 */
-  migrationListNames(relPath: string): string[] {
-    const dir: string = this.migrationPath(relPath);
-    try {
-      return this.fileExists(dir) ? fs.listFileSync(dir) : [];
-    } catch {
-      return [];
-    }
-  }
-
-  /** 迁移：判断 timeline/** 下某路径是否存在。 */
-  migrationFileExists(relPath: string): boolean {
-    return this.fileExists(this.migrationPath(relPath));
-  }
-
-  /** 迁移：best-effort 探测可用字节；SDK 不提供时为 null，核心跳过 E_NO_SPACE 并报告计划字节。 */
-  migrationAvailableBytes(): number | null {
-    try {
-      const stat: Object = fs.statSync(this.filesDir) as Object;
-      const map: Record<string, Object> = JSON.parse(JSON.stringify(stat)) as Record<string, Object>;
-      const space: Object | undefined = map['space'];
-      if (typeof space === 'number' && (space as number) > 0) {
-        return space as number;
-      }
-    } catch {
-      // best-effort：探测失败不阻断迁移
-    }
-    return null;
-  }
-
-  /** 迁移：原子写当日 records.json（整文件替换，先 tmp + 回读校验）。 */
-  migrationWriteRecords(date: string, text: string): void {
-    this.migrationDayDir(date);
-    this.atomicWriteIn(this.dayDir(date), RECORDS_FILE_NAME, text);
-  }
-
-  /** 迁移：原子写当日 summary.json（ newer-wins 由纯计划层判定，这里只落字节）。 */
-  migrationWriteSummary(date: string, text: string): void {
-    this.migrationDayDir(date);
-    this.atomicWriteIn(this.dayDir(date), SUMMARY_FILE_NAME, text);
-  }
-
-  /** 迁移：账本只追加；按 (id,ts) 去重，旧字节恒为新字节的严格前缀。 */
-  migrationAppendLedgers(date: string, deleted: string[], restored: string[], conflicts: string[]): void {
-    const dir: string = this.migrationDayDir(date);
-    for (let i = 0; i < deleted.length; i += 1) {
-      this.appendLedgerLine(dir, DELETED_FILE_NAME, deleted[i]);
-    }
-    for (let i = 0; i < restored.length; i += 1) {
-      this.appendLedgerLine(dir, RESTORE_FILE_NAME, restored[i]);
-    }
-    for (let i = 0; i < conflicts.length; i += 1) {
-      this.appendLedgerLine(dir, CONFLICTS_FILE_NAME, conflicts[i]);
-    }
-  }
-
-  /**
-   * 迁移：媒体只增不减。已存在同名文件先比对 sha256：相同记 already-present，
-   * 不同记 conflict 且**绝不覆盖**；写入走同目录 tmp + rename 原子替换。
-   */
-  migrationWriteMedia(date: string, fileName: string, bytes: Uint8Array): V1MediaWriteResult {
-    if (!isMediaFileName(fileName)) {
-      throw new Error(`E_MEDIA_NAME: 媒体文件名不合法（${fileName}）`);
-    }
-    const dir: string = this.migrationDayDir(date);
-    const mediaDir: string = `${dir}/media`;
-    const path: string = `${mediaDir}/${fileName}`;
-    if (this.fileExists(path)) {
-      let existing: Uint8Array;
-      try {
-        const stat: fs.Stat = fs.statSync(path);
-        const buffer: ArrayBuffer = new ArrayBuffer(stat.size);
-        const file: fs.File = fs.openSync(path, fs.OpenMode.READ_ONLY);
-        try {
-          fs.readSync(file.fd, buffer);
-        } finally {
-          fs.closeSync(file);
-        }
-        existing = new Uint8Array(buffer);
-      } catch {
-        return 'conflict'; // 读不出既有字节：fail-closed，绝不覆盖
-      }
-      if (sha256Hex(existing) === sha256Hex(bytes)) {
-        return 'already-present';
-      }
-      return 'conflict';
-    }
-    this.ensureDirSync(mediaDir);
-    const suffix: string = this.uniqueSuffix();
-    const tmpPath: string = `${path}${TMP_INFIX}${suffix}`;
-    try {
-      const buffer: ArrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-      let file: fs.File | null = null;
-      try {
-        file = fs.openSync(tmpPath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-        fs.writeSync(file.fd, buffer);
-      } finally {
-        if (file !== null) {
-          fs.closeSync(file);
-        }
-      }
-      if (sha256Hex(new Uint8Array(buffer)) !== sha256Hex(bytes)) {
-        throw new Error('E_ATOMIC_WRITE: 媒体临时文件回读校验失败，现场保留');
-      }
-      try {
-        fs.renameSync(tmpPath, path);
-      } catch (error) {
-        this.cleanupTemp(tmpPath);
-        throw new Error(`E_ATOMIC_WRITE: 媒体文件改名失败（${path}）：${this.errorText(error)}`);
-      }
-    } catch (error) {
-      throw new Error(`E_ATOMIC_WRITE: 媒体写入失败（${path}）：${this.errorText(error)}`);
-    }
-    return 'written';
-  }
-
-  /** 迁移：最后一步写仓库级 schema 标记（原子写，只新增 timeline/ 下的标记）。 */
-  migrationWriteSchema(text: string): void {
-    const dir: string = this.timelineRoot();
-    this.ensureDirSync(dir);
-    this.atomicWriteIn(dir, SCHEMA_FILE_NAME, text);
-  }
-
-  /** 迁移路径白名单：只接受 timeline/ 开头的仓库相对路径，拒绝任何上跳与设备路径。 */
-  private migrationPath(relPath: string): string {
-    const prefix: string = `${TIMELINE_DIR_NAME}/`;
-    if (!relPath.startsWith(prefix) || relPath.includes('..') || relPath.includes('\\')) {
-      throw new Error('E_MIGRATION_PATH: 仅允许读取 timeline/ 下的路径');
-    }
-    return `${this.filesDir}/${ROOT_DIR_NAME}/${relPath}`;
-  }
-
-  /** 迁移日目录校验：只接受真实日历日，畸形日期在任何 IO 之前拒绝。 */
-  private migrationDayDir(date: string): string {
-    if (!isCalendarDate(date)) {
-      throw new Error(`E_MIGRATION_DATE: 非法日期目录名（${date}）`);
-    }
-    return this.dayDir(date);
-  }
-
   // ------------------------------------------------------------------ 门禁与路径
 
-  /** 所有公开方法的第一句：未启用时在任何 IO 之前抛错。 */
-  private requireEnabled(): void {
-    if (!this.isEnabled()) {
-      throw new Error(DISABLED_MESSAGE);
+  /** 未来未知 schema 版本才拒绝（空仓库 / v2 均放行）；首用顺手建仓库骨架。 */
+  private requireSchema(): void {
+    const problem: string = timelineStore.schemaProblemText();
+    if (problem.length > 0) {
+      throw new Error(problem);
     }
+    this.ensureSkeleton();
+  }
+
+  /** 真实日历日校验（YYYY-MM-DD + 往返校验），防止畸形日期建出坏目录。 */
+  private isCalendarDate(date: string): boolean {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return false;
+    }
+    const year: number = Number(date.slice(0, 4));
+    const month: number = Number(date.slice(5, 7));
+    const day: number = Number(date.slice(8, 10));
+    if (year < 1 || year > 9999) {
+      return false;
+    }
+    const probe = new Date(year, month - 1, day);
+    probe.setFullYear(year);
+    return probe.getFullYear() === year && probe.getMonth() === month - 1 && probe.getDate() === day;
   }
 
   private requireReady(): void {

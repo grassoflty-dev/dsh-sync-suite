@@ -6,7 +6,7 @@
 
 ## 1 一句话状态
 
-DSH-Dots = 平板 ArkUI-X 日程 App + PC 端 DSH 插件，用 Git 仓库做跨设备日程/手写/OCR/汇总同步，并在平板只读浏览 DSH 会话。**今天是 v2-only**（2026-11-20 订正）：唯一日程路径是 `timeline/` 单时间线，写 `timeline/<date>/` 并自动同步；激活开关、`timeline.readMode` / `timeline.v2WriteEnabled` / `timeline.v1Retained`、双库确认与 v1 读写兜底**已全部删除**，不存在默认 v1 或显式激活。仓库未迁移（缺 `timeline/schema.json` 且存在 `devices/`）→ **唯一一条** banner + typed `E_NOT_MIGRATED` 拒绝 + **零写入**；**`devices/**` 永不删除**。一次性迁移是用户的显式动作（`mod-v2-import-v1`，已写完待 Lead 提交），它最后写 `timeline/schema.json` 作为提交边界。另有两把**独立只读开发工具**（`mod-v2-doctor` / `mod-v2-media-gc`，默认零写入、无 app 运行时依赖）；v2 bundle 已带三本账本（`bundleVersion:2`）。chat 真接管、远程连接收敛仍未做或未验。（原「默认 v1 / 显式激活」口径作废，保留于本文 §3 历史折叠块作记录。）
+DSH-Dots = 平板 ArkUI-X 日程 App + PC 端 DSH 插件，用 Git 仓库做跨设备日程/手写/OCR/汇总同步，并在平板只读浏览 DSH 会话。**今天是 v2-only**（2026-11-20 订正）：唯一日程路径是 `timeline/` 单时间线，写 `timeline/<date>/` 并自动同步；激活开关、`timeline.readMode` / `timeline.v2WriteEnabled` / `timeline.v1Retained`、双库确认与 v1 读写兜底**已全部删除**，不存在默认 v1 或显式激活。**`mod-drop-v1` 起无迁移态**：空仓库（缺 `timeline/` 或 `timeline/schema.json`）是正常起点——首页空列表、无 banner、无写入拒绝；首用建仓库骨架、首条记录建当日 `records.json`。旧设备目录与 `open.jsonl` 一律忽略（不读、不写、不删）。一次性迁移动作 `mod-v2-import-v1` 已**废弃 / superseded**。另有两把**独立只读开发工具**（`mod-v2-doctor` / `mod-v2-media-gc`，默认零写入、无 app 运行时依赖）；v2 bundle 已带三本账本（`bundleVersion:2`）。chat 真接管、远程连接收敛仍未做或未验。（原「默认 v1 / 显式激活」口径作废，保留于本文 §3 历史折叠块作记录。）
 
 ## 2 已交付模块一览
 
@@ -57,9 +57,9 @@ DSH-Dots = 平板 ArkUI-X 日程 App + PC 端 DSH 插件，用 Git 仓库做跨�
 
 - **唯一路径**：App 与插件启动后直接以 `timeline/` 为唯一日程真值，写 `timeline/<date>/`（records/summary/deleted/restore/conflicts/media），自动跑 fetch→union→replay→commit→push（提交 `[v2] sync <n> days`，`force:false`），outbox 是周期之间唯一本地真值。
 - **无开关、无回退**：`timeline.readMode` / `timeline.v2WriteEnabled` / `timeline.v1Retained` 均已删除；没有「启用」「关闭」「确认并存」步骤，也没有 v1 读 / 写兜底或双存储确认。
-- **未迁移拒绝**：缺 `timeline/schema.json` 且存在 `devices/` → **唯一一条** banner + typed `E_NOT_MIGRATED` + **零写入**（不建本地提交、不 push）。
+- **空仓库起点**：缺 `timeline/schema.json` 不再是拒绝；空列表 + 首用骨架，无 banner。未知 schema 版本仍是 `E_SCHEMA_UNKNOWN` 只读门槛。
 - **安全网**：`devices/**` 永不删除；迁移 commit 只新增 `timeline/` 与标记，不删改任何 v1 文件。
-- **一次性迁移**：`mod-v2-import-v1` 已写完（待 Lead 提交）：横幅打开 dry-run 计划、独立「确认迁移」才落盘；最后写 `timeline/schema.json` 作为提交边界，中断可续跑，迁移完成即生效，无需激活（`devices/**` 只读、永不删除；真机端侧 `unverified`）。
+- **无迁移入口**：`mod-v2-import-v1` 已废弃（superseded by `mod-drop-v1`）；旧设备数据仅忽略。
 
 <details><summary>历史记录（2026-11-20 之前，已作废，仅为存档保留）</summary>
 
@@ -75,11 +75,11 @@ DSH-Dots = 平板 ArkUI-X 日程 App + PC 端 DSH 插件，用 Git 仓库做跨�
 
 **今天成立（契约/设计已定；括号内为证据强度）**（2026-11-20 订正：原「激活后」口径已改为 v2-only）：不产生「本地已提交却从未推送成功且不告知」的静默提交（outbox 唯一真值 + `maxAttempts=4` 终态仅手动重试；代码 + 双端模拟）；同 `(id,ts)` 内容不同按规范行 UTF-8 字节序大者静默胜、败者进 `conflicts.jsonl`（纯逻辑 + `twoDevice.test.mjs`）；删除优先于恢复（`R>D` 才可见；纯逻辑已证 `R==D`/`R>D`）；写方式按契约：`records.json` 原子替换、三本账本只追加且旧字节为新字节严格前缀、summary newer-wins、media 只增（部分无测试见下）；不 force-push、不改写远端历史、不删远端文件（静态断言 + 评审）；`assertWritable()` 门槛零写入（契约 §11）。**v2 bundle 已闭合评审 P2-3**：`bundleVersion:2` + 三本按日账本逐字节搬运，旧 bundle（缺字段/1）仍导入并返回信息性 note、未来版本 `E_BUNDLE_VERSION` typed 拒绝；目标账本按 `(id,ts)` / `(id,ts,dedupeKey)` 只并集追加、绝不截断（纯模型 + Node 测试）。
 
-**今天不成立 / 未证**（2026-11-20 v2-only 订正）：两设备真实同步（只有内存模拟 + 纯逻辑，真 git 并发 / fetch 耗时 / 仓库体积未验）；「已迁移→杀进程→重启仍生效」的真机证明（三个持久键已删除，端侧未验）；真机未迁移 banner 渲染 / 设备写拒绝（`E_NOT_MIGRATED` + 零写入）/ 真实 push / outbox 全链路；插件 live RPC（HTTP 405，需 DSH 重启）；两把开发工具只在 Node / CLI 层验证（doctor 的 exit-1 未预期错误路径无注入用例，media-gc 的坏日文件保护与跨日同名语义未做真仓库演练）；bundle 账本并集跨**两台真实设备**的逐字节一致性未验（仅 Node 纯模型）；此前「契约规则无测试」清单已由 `mod-v2-contract-tests`（25 例）+ `mod-push-detail`（C12/C14–C16）覆盖，但只在 Node 跑纯模型 / 源码断言，服务级导入 IO 与真机 typed 详情文案仍 `unverified`。
+**今天不成立 / 未证**（2026-11-20 v2-only 订正）：两设备真实同步（只有内存模拟 + 纯逻辑，真 git 并发 / fetch 耗时 / 仓库体积未验）；「已迁移→杀进程→重启仍生效」的真机证明（三个持久键已删除，端侧未验）；空仓库首用骨架落盘与重启读回（真机端侧 unverified）/ 真实 push / outbox 全链路；插件 live RPC（HTTP 405，需 DSH 重启）；两把开发工具只在 Node / CLI 层验证（doctor 的 exit-1 未预期错误路径无注入用例，media-gc 的坏日文件保护与跨日同名语义未做真仓库演练）；bundle 账本并集跨**两台真实设备**的逐字节一致性未验（仅 Node 纯模型）；此前「契约规则无测试」清单已由 `mod-v2-contract-tests`（25 例）+ `mod-push-detail`（C12/C14–C16）覆盖，但只在 Node 跑纯模型 / 源码断言，服务级导入 IO 与真机 typed 详情文案仍 `unverified`。
 
 ## 5 未验证清单与原因
 
-- **设备上未配置数据仓库 / 未迁移拒绝**：**唯一一条 banner** 的真机渲染、未迁移仓库的 typed `E_NOT_MIGRATED` 拒绝与**零写入**、真实 `timeline/` 写入、真实 push、「建记录→自动同步→三态行变已同步」均无端到端证据（`RUNBOOK.md` §6 / `VERIFICATION.md` §14.8）。
+- **空仓库首用与骨架落盘**：真机上「无 banner 的空列表 → 首条记录建 `timeline/schema.json` + 当日 `records.json` → 重启读回」尚无端到端证据（端侧 `unverified`）。
 - **签名 / 安装 / 启动（v2-only 后）**：`hdc list targets` 为空，无法重新签名、安装并启动含 v2-only 改动的 HAP；banner 渲染与设备写拒绝因此端侧 `unverified`（§14.7）。
 - **无第二设备 / PC**：契约 §15 双端场景全部 `unverified`（同日各建、同 id 不同/相同 ts、A 删 + B 编辑、媒体占位双端一致）；bundle 账本跨两真设备并集同样未验。
 - **媒体占位渲染**：媒体占位图在真机上的显示/加载未验证（仅 Node 侧媒体名/碰撞/缺失的规则测试）。
@@ -92,10 +92,10 @@ DSH-Dots = 平板 ArkUI-X 日程 App + PC 端 DSH 插件，用 Git 仓库做跨�
 
 ## 6 下一步（三个阻塞项 + 一个待交付模块，若用户回来）
 
-> **2026-11-20 v2-only 订正**：`mod-v2-only` 已完成；`mod-v2-import-v1`（一次性迁移的用户显式动作）已写完待 Lead 提交（不再是 pending），它最后写 `timeline/schema.json` 作为提交边界。原先「验激活弹层」改为「验未迁移 banner + `E_NOT_MIGRATED` 拒绝 + 零写入」；本模块真机 UI / zip 桥链路仍 `unverified`。
+> **mod-drop-v1 订正**：`mod-v2-only` / `mod-v2-import-v1` 的未迁移拒绝与迁移入口已整体删除；空仓库首用是正常起点，真机端侧仍 `unverified`。
 
-- **(a) 在平板上配置好一个仓库**：解锁两个设备缺口（设备 + 第二设备）与 path-1 bootstrap 证据；随后才可能验未迁移 banner / `E_NOT_MIGRATED` 拒绝与零写入 / 真实写入 / push / 三态收敛与双端并集。
+- **(a) 在平板上配置好一个仓库**：解锁设备与 path-1 bootstrap 证据；随后验空列表 → 首条记录建骨架 → 重启读回 → 真实写入 / push / 三态收敛与双端并集。
 - **(b) chat 租约/sha 规格**：定稿 `CHAT-SYNC.md` §1/§5 的 lease + sha 校验规范，解锁 D2-P2（chat 真接管 + 导入回 DSH 端到端）。
 - **(c) DSH 重启**：解锁 `mod-plugin-live` 的 live 验证（当前 RPC `getState` HTTP 405，bundle 行在启动时解析）。
 
-**当前为干净停止点**：在不具备 (a) 平板上配置好仓库、(b) chat 租约/sha 规格、(c) DSH 重启 之前，没有可推进的模块；`mod-v2-import-v1`（一次性迁移）**已写完、待 Lead 提交与真机验证**，不再是 pending；下一步是提交本模块后在真机走一遍 banner → dry-run → 独立确认 → schema 落地。
+**当前为干净停止点**：在不具备 (a) 平板上配置好仓库、(b) chat 租约/sha 规格、(c) DSH 重启 之前，没有可推进的模块；`mod-v2-import-v1` 已 **superseded / removed**；`mod-drop-v1` 已写完（待 Lead 提交）；下一步是在真机走一遍空仓库 → 空列表 → 首条记录 → timeline 骨架落地 → 重启读回。

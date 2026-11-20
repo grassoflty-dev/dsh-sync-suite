@@ -37,7 +37,7 @@ registerHooks({
 const { isNewerSummaryText } = await import('../.build/model/timelineWrite.js');
 const { parseSummary, serializeSummary } = await import('../.build/model/dailySummary.js');
 const { reconcileBeforeAppend, groupImportByDate } = await import('../.build/model/exportImport.js');
-const { decideMigration, NOT_MIGRATED_REASON } = await import('../.build/model/migrationState.js');
+
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP = join(HERE, '..', '..');
@@ -96,7 +96,7 @@ function summaryText(date, generatedAt, headline) {
 test('S1 summaryStore 是薄 v2 适配器：唯一读口 timelineStore、唯一写口 timelineWriteStore', () => {
   const text = code(SUMMARY_STORE);
   for (const needle of [
-    'timelineStore.isMigrated()', 'NOT_MIGRATED_REASON', 'timelineStore.readSummaryText(',
+    'timelineStore.readSummaryText(',
     'parseSummary(', 'serializeSummary(', 'summaryFromReply(', 'timelineWriteStore.appendSummary('
   ]) {
     assert.ok(text.includes(needle), `summaryStore 缺少 v2 适配器要素：${needle}`);
@@ -109,19 +109,6 @@ test('S1 summaryStore 是薄 v2 适配器：唯一读口 timelineStore、唯一�
   assert.match(methodBody(text, 'read'), /timelineStore\.readSummaryText\(date\)/,
     'read() 必须读 timeline/<date>/summary.json');
   assert.doesNotMatch(methodBody(text, 'read'), /scheduleStore\./, 'read() 不再依赖任何 v1 存储');
-});
-
-test('S2 generate() 未迁移在任何 IO（AI / 写盘）之前 typed 拒绝', () => {
-  const body = methodBody(code(SUMMARY_STORE), 'generate');
-  const guardAt = body.indexOf('if (!timelineStore.isMigrated())');
-  const throwAt = body.indexOf('throw new Error(NOT_MIGRATED_REASON)');
-  const aiAt = body.indexOf('await summarize(');
-  const writeAt = body.indexOf('timelineWriteStore.appendSummary(');
-  assert.ok(guardAt >= 0 && throwAt > guardAt, '必须先判未迁移再抛类型化原因');
-  assert.ok(aiAt > throwAt && writeAt > throwAt,
-    'E_NOT_MIGRATED 必须排在 AI 请求与落盘之前（未迁移零 IO、零写入）');
-  assert.match(body, /timelineWriteStore\.appendSummary\(date, text\)/, '落盘调用必须带 date 与序列化文本');
-  assert.match(body, /timelineStore\.readSummaryText\(date\)/, '写后回读实际生效汇总');
 });
 
 test('S3 appendSummary 落点由 writer 路径常量钉死为 git-repo/timeline/<date>/summary.json', () => {
@@ -205,50 +192,6 @@ function v1ImportSection() {
   assert.ok(start > 0 && end > start, '找不到 v1 格式导入实现段');
   return text.slice(start, end);
 }
-
-test('I1 exportService：未迁移在任何读盘 / 写盘前 typed 拒绝，无 devices/** 写分支', () => {
-  const section = v1ImportSection();
-  const guardAt = section.indexOf('if (!timelineStore.isMigrated())');
-  const failAt = section.indexOf('return failed(NOT_MIGRATED_REASON)');
-  const readAt = section.indexOf('timelineStore.readAll()');
-  const writeAt = section.indexOf('timelineWriteStore.append(record, date)');
-  assert.ok(guardAt >= 0 && failAt > guardAt && readAt > failAt && writeAt > readAt,
-    'E_NOT_MIGRATED → 读 v2 → 复核 → 经 writer 落盘的顺序不可颠倒');
-  for (const forbidden of [/writePlan\(/, /importWriteIo\(/, /scheduleStore\.dayFilePath\(/, /devices\//]) {
-    assert.doesNotMatch(section, forbidden, `v1 格式导入残留 v1 写分支：${forbidden}`);
-  }
-  assert.match(section, /resolveRecordDate\(record\.ts\)/, '写入日期必须按记录的 ts 归属');
-  // dry-run 同样先看迁移门槛、再读 v2 真值。
-  const dryRun = methodBody(code(EXPORT_SERVICE), 'planImportFromText');
-  assert.match(dryRun, /if \(!timelineStore\.isMigrated\(\)\)/, 'dry-run 必须有未迁移拒绝');
-  assert.match(dryRun, /existing = timelineStore\.readAll\(\)/, 'dry-run 基线必须是 v2 真值');
-  assert.doesNotMatch(dryRun, /scheduleStore\.readAll\(|devices\//);
-});
-
-test('I2 面板导入节：未迁移整节禁用并展示 E_NOT_MIGRATED 原因', () => {
-  const text = code(PANEL);
-  assert.match(text, /import \{[\s\S]{0,200}NOT_MIGRATED_REASON[\s\S]{0,80}\} from '\.\.\/model\/migrationState'/,
-    '面板必须导入 typed 拒绝原因');
-  const reason = methodBody(text, 'importDisabledReason');
-  assert.match(reason, /return this\.v2Visible\(\) \? '' : NOT_MIGRATED_REASON/,
-    '未迁移时返回 E_NOT_MIGRATED，已迁移时可点');
-  const hits = (text.match(/this\.importDisabledReason\(\)\.length === 0/g) || []).length;
-  assert.ok(hits >= 3, `选择 / 确认 / 取消三个导入按钮都必须过门禁，实际 ${hits} 处`);
-  assert.match(text, /导入不可用：\$\{this\.importDisabledReason\(\)\}/, '未迁移时展示 typed 原因');
-  assert.match(text, /timeline\/<date>\/records\.json/, '已迁移时说明落点是 timeline');
-});
-
-test('I3 设置页：选择 / 确认导入回调各自有未迁移闸，且初始化 v2 写入口', () => {
-  const text = code(SETTINGS);
-  for (const name of ['handlePickImportFile', 'handleConfirmImport']) {
-    const body = methodBody(text, name);
-    assert.match(body, /if \(!timelineStore\.isMigrated\(\)\)/, `${name} 必须有未迁移闸`);
-    assert.match(body, /NOT_MIGRATED_REASON/, `${name} 必须给 typed 原因`);
-  }
-  assert.match(methodBody(text, 'bootstrap'), /timelineWriteStore\.ensureReady\(context\)/,
-    '导入落盘依赖的 writer 必须初始化');
-});
-
 test('I4 夹具：含 devices/** 的仓库，纯规划阶段不产生任何写入（timeline 日期归属正确）', () => {
   const repo = join(tmpdir(), `v2-import-fixture-${process.pid}-${Date.now()}`);
   try {
@@ -280,27 +223,6 @@ test('I4 夹具：含 devices/** 的仓库，纯规划阶段不产生任何写�
 
     assert.deepEqual(snapshot(repo), before, '纯规划阶段整棵仓库（含 devices/**）逐字节不变');
     assert.equal(readFileSync(v1Shard, 'utf8'), v1Bytes, 'v1 分片原样保留');
-  } finally {
-    if (existsSync(repo)) {
-      rmSync(repo, { recursive: true, force: true });
-    }
-  }
-});
-
-test('I5 未迁移 typed 拒绝 + 零写入夹具：无 schema.json 时只有 E_NOT_MIGRATED，不建 timeline', () => {
-  const decision = decideMigration({ schemaVersion: null, hasDevices: true });
-  assert.equal(decision.code, 'E_NOT_MIGRATED');
-  assert.equal(decision.reason, NOT_MIGRATED_REASON);
-  const repo = join(tmpdir(), `v2-unmigrated-fixture-${process.pid}-${Date.now()}`);
-  try {
-    const shard = join(repo, 'devices', 'tablet-1', 'schedules', '2026-11-19.jsonl');
-    mkdirSync(dirname(shard), { recursive: true });
-    const bytes = '{"id":"keep","ts":"2026-11-19T09:00:00+08:00","title":"旧数据"}\n';
-    writeFileSync(shard, bytes, 'utf8');
-    const before = snapshot(repo);
-    assert.equal(decision.migrated, false, '纯判定在 IO 之前完成，不接触仓库');
-    assert.deepEqual(snapshot(repo), before, '未迁移拒绝后整棵仓库逐字节不变');
-    assert.equal(existsSync(join(repo, 'timeline')), false, '不得自动建 timeline/');
   } finally {
     if (existsSync(repo)) {
       rmSync(repo, { recursive: true, force: true });

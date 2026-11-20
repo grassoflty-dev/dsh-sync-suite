@@ -5,6 +5,7 @@
     "pages/Detail",
     "pages/Settings",
     "pages/RemoteControl",
+    "pages/Instances",
     "pages/Chats",
     "pages/ChatDetail"
   ]

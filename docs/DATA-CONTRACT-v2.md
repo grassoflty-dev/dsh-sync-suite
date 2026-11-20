@@ -189,6 +189,8 @@ v2 替换的是 v1 的**日程时间线域**：`devices/<deviceId>/schedules/*.j
 
 ## 9. 同步协议（单一同步周期：union → replay）
 
+> **2026-11-20 `mod-drop-v1` 订正**：本节原「未迁移 banner + `E_NOT_MIGRATED` + 零写入」与一次性迁移流程已整体废止。空仓库（缺 `timeline/` 或 `timeline/schema.json`）是**正常起点**：首页空列表、无 banner、无拒绝；写入服务首用建 `timeline/schema.json` 骨架，写首条记录时建 `timeline/<date>/records.json`。旧设备目录与 `open.jsonl` 一律忽略（不读、不写、不删）。`E_SCHEMA_UNKNOWN`（未知版本标记）只读门槛保留。
+
 **总原则**：先取远端最新状态，在其上做**语义并集**，再应用本地意图，最后提交推送；任何失败都必须可见；**绝不允许产生一个停留在本地、从未推送成功却不告知用户的提交**（无静默本地未推提交）。
 
 **唯一门禁**：本周期任何写操作前必须调用 `assertWritable()`（§11），否则一个字节都不动。
@@ -256,6 +258,8 @@ v2 替换的是 v1 的**日程时间线域**：`devices/<deviceId>/schedules/*.j
 
 ## 10. 兼容与迁移
 
+> **2026-11-20 `mod-drop-v1` 订正**：本节原「未迁移 banner + `E_NOT_MIGRATED` + 零写入」与一次性迁移流程已整体废止。空仓库（缺 `timeline/` 或 `timeline/schema.json`）是**正常起点**：首页空列表、无 banner、无拒绝；写入服务首用建 `timeline/schema.json` 骨架，写首条记录时建 `timeline/<date>/records.json`。旧设备目录与 `open.jsonl` 一律忽略（不读、不写、不删）。`E_SCHEMA_UNKNOWN`（未知版本标记）只读门槛保留。
+
 > **2026-11-20 v2-only 订正**：原「v1 检测优先级」中「标记缺失但 `devices/` 存在 → v1、需迁移（`E_MIGRATION_REQUIRED`）」的 v1 分支已删除；不存在 v1 读写路径。
 
 **仓库检测（v2-only，P2-8 沿用）**：`timeline/schema.json` 存在且 `schemaVersion === 2` → 已迁移，走 v2（迁移提交只新增 `timeline/`、不删 `devices/`，故「两者并存」是迁移后常态，`devices/**` 永不删除）；标记存在但版本不认识 → 只读（`E_SCHEMA_UNKNOWN`）；标记缺失但 `devices/` 存在 → **未迁移**，typed `E_NOT_MIGRATED` + **唯一一条** banner + 零写入（无 v1 读 / 写回退，无需用户去开任何开关）；两者都不存在 → 空仓库，按 v2 初始化并写标记。可测：四种 (标记, devices/) 组合 → 四个确定分支。
@@ -277,6 +281,8 @@ v2 替换的是 v1 的**日程时间线域**：`devices/<deviceId>/schedules/*.j
 **回滚与模块（P2-9 / P1-7；2026-11-20 v2-only 订正）**：回滚 = `git revert` 迁移提交移除 `timeline/` 与标记，仓库回到未迁移态（`E_NOT_MIGRATED` + 一条 banner + 零写入）；**`devices/**` 在任何情况下都不删除**。既无「v1 读侧恢复」也**不引入双读**，也不把 v2 新数据反向合并回 v1。若已执行 §14 开放项 4 的 v1 清理提交，回滚必须先逆序 revert 清理提交、再 revert 迁移提交，否则只能恢复到 v2 状态。已删除的激活闸 / 持久键 / 双库确认 / v1 读写兜底（`mod-v2-dual-write-off` 激活部分、`mod-v2-sync-wiring` 激活部分）不参与任何回滚路径；被否决的 `mod-v2-dual-read` 同样不参与。
 
 ## 11. 兼容性门槛与唯一写入口（P0-2）
+
+> **2026-11-20 `mod-drop-v1` 订正**：本节原「未迁移 banner + `E_NOT_MIGRATED` + 零写入」与一次性迁移流程已整体废止。空仓库（缺 `timeline/` 或 `timeline/schema.json`）是**正常起点**：首页空列表、无 banner、无拒绝；写入服务首用建 `timeline/schema.json` 骨架，写首条记录时建 `timeline/<date>/records.json`。旧设备目录与 `open.jsonl` 一律忽略（不读、不写、不删）。`E_SCHEMA_UNKNOWN`（未知版本标记）只读门槛保留。
 
 - 仓库级标记 `timeline/schema.json` **至少**含 `{"schemaVersion": 2}`（允许额外非语义键，读侧只解析 `schemaVersion`，P2-4）。App 与插件各自必须在启动时、每次周期阶段 0、以及每次写盘 / `git commit` 之前调用**唯一门禁** `assertWritable()`（纯函数 + 一次标记读取），返回 `OK` / `E_SCHEMA_UNKNOWN` / `E_NOT_MIGRATED` / `E_BRANCH_MISMATCH`。
 - **规则（强制）**：`read timeline/schema.json` 必须发生在**打开任何 `timeline/**` 文件的写句柄之前**；未知版本 → `E_SCHEMA_UNKNOWN`；缺失但 `devices/` 存在（未迁移）→ `E_NOT_MIGRATED` + **唯一一条** banner；两种拒绝都**零写入**（一个字节都不动、不产生本地提交、不 push）。可测：把 schemaVersion 改为 99 后逐条触发下表所有写路径 → 每条都返回 typed 错误且仓库文件哈希 / mtime 不变；删掉标记但保留 `devices/` → 每条都返回 `E_NOT_MIGRATED` 且零写入。
@@ -368,7 +374,7 @@ v2 替换的是 v1 的**日程时间线域**：`devices/<deviceId>/schedules/*.j
 | 拉取策略（P1-6） | 只用 `fetch` + 语义并集，无 rebase / 无冲突标记；push 被拒 `reset --hard origin/main` 后重来 | `unverified` |
 | outbox 重试 / 幂等 / 重放（P1-1..3） | `maxAttempts=4` 跨会话累计、`failed` 终态仅手动重试；重复重放 no-op；schema/date/已删 id 三条 typed 失败 | 纯逻辑可测（待实现）；双端 `unverified` |
 | 写方式对照（P2-3） | records 原子替换、三本账本只追加且旧字节为新字节严格前缀、summary newer-wins、media 只增 | 纯逻辑可测（待实现） |
-| 迁移 | dry-run 无写、幂等、崩溃可重跑、逐字节校验通过、媒体占位正确、revert 回滚后 v1 可读且无双读 | `unverified` |
+| 迁移 | **superseded by `mod-drop-v1`**：旧版数据兼容已删除；空仓库首用骨架 / 重启读回的真机验证仍 `unverified` | — |
 | 模块口径（P1-7） | v2-only：无双读、无 v1 写回退、无激活开关；`devices/**` 永不删除；`mod-v2-media-migration` 独立登记 | 源码静态断言可测；端侧 `unverified` |
 
 此外仍需补齐的工程门（同样 `unverified`）：真实双端 git 并发下的并集稳定性、仓库体积增长对 fetch 耗时的影响、ArkTS 严格类型编译与 Node 纯逻辑测试在改动后的全绿（当前 v2 尚无实现，故无测试结果）。

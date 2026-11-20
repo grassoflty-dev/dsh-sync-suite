@@ -1,5 +1,5 @@
 /**
- * 主页：日期条 + 今日/未完成 两段 + 「显示已完成」开关（仅今日）+ 列表（左勾选 / 中标题+时间 / 右手迹）
+ * 主页：日期条 + 今日/未完成 两段 + 列表（左勾选 / 中标题+时间 / 右手迹）
  * + 「新建」主操作 + 页头唯一动作「⚙ 设置」。
  *
  * ## 页头 AI 汇总入口已删除（用户反馈：点了没反应，但图标还占着位置）
@@ -23,13 +23,13 @@
  * （`continuousTask`）+ 前台通知，或在到点拉起应用后由用户点触发。这里刻意不加
  * 「看起来能用、实际会被回收」的定时器。
  *
- * ## 搜索 / 筛选（Wave 2-A；控件在 mod-home-filters 收敛为 2 段 + 1 开关）
+ * ## 搜索 / 筛选（Wave 2-A；控件在 mod-home-filters 收敛为 2 段）
  * - 列表顶部：搜索框（标题/正文/OCR/作者，大小写不敏感、多关键词 AND）+ 作者 chips（来自 `authorsOf`）；
- *   原状态 chips 已删除：「全部 / 已完成」由今日 tab 的「显示已完成」开关取代，原跨日 tab 更名为「未完成」；
+ *   原状态 chips 与完成状态开关均已删除（今日 tab 显示当天全部记录，完成状态只看行上勾选）；
  * - **与 tab 正交**：先按 tab 取数（v2 `timelineStore.readDay` / `timelineStore.pendingRecords`），
- *   今日 tab 在开关关闭时先把已完成行挡掉，再 `applyQuery` 过滤（见 `model/query.ts`，纯逻辑可单测）；
- * - 列表真正渲染的是 `visibleRecords`；`records` 始终是 **tab 级全量**（汇总块 / 计数 / AI 面板 /
- *   「显示已完成」开关都基于它），所以开关不改变「今天还剩几条」的计数。
+ *   今日 tab 显示当天全部记录（已完成 + 未完成，只靠行上的勾选状态区分），再 `applyQuery` 过滤
+ *   （见 `model/query.ts`，纯逻辑可单测）；
+ * - 列表真正渲染的是 `visibleRecords`；`records` 始终是 **tab 级全量**（汇总块 / 计数 / AI 面板都基于它）。
  *
  * ## 删除 + 5 秒撤销（Wave 2-A）
  * - 入口：行尾「删除」按钮（`RecordRow.onDelete`）+ 右栏详情的「删除」（`RecordDetailView.onDelete`）；
@@ -60,11 +60,7 @@ import type { SavedMarker } from '../model/homeRefresh';
 import { redactSecrets } from '../model/syncError';
 import { describeError, newRecordId, scheduleStore } from '../services/scheduleStore';
 import { timelineStore } from '../services/timelineStore';
-import { importV1Service } from '../services/importV1Service';
 import { recordWriter } from '../services/recordWriter';
-import {
-  NOT_MIGRATED_BANNER, NOT_MIGRATED_REASON, NOT_MIGRATED_NEXT_STEP
-} from '../model/migrationState';
 import { syncProtocolStore } from '../services/syncProtocolStore';
 import { bridgeGitRunner } from '../services/gitRunner';
 import { syncStatusStore } from '../services/syncStatusStore';
@@ -137,25 +133,11 @@ struct Index {
   @State selectedDate: string = localDateKey(new Date());
   /** 是否展开日期选择器。 */
   @State showDatePicker: boolean = false;
-  /** 两个 tab：today = 今日（默认）；pending = 跨日未完成。 */
+  /** 两个 tab：today = 今日（默认，当天全部记录）；pending = 跨日未完成。 */
   @State tab: HomeTab = 'today';
-  /** 「显示已完成」开关：默认关（今日只看未完成）；仅在今日 tab 生效。 */
-  @State showDone: boolean = false;
   /** 列表数据（每次操作后重读存储，保证追加语义一致）。 */
   @State records: ScheduleRecord[] = [];
   @State statusText: string = '';
-  /** 未迁移（timeline/schema.json 非 v2）：首页唯一横幅 + 写入拒绝，v1 数据不删。 */
-  @State unmigrated: boolean = false;
-  /** 迁移面板：横幅按钮只打开 dry-run 计划，apply 必须再点「确认迁移」。 */
-  @State migrationSheetOpen: boolean = false;
-  /** dry-run 计划逐行文案（含跳过原因 / 冲突 / 写序）。 */
-  @State migrationPlanLines: string[] = [];
-  /** 迁移结果 / 断点状态消息（逐字中文，绝不静默）。 */
-  @State migrationMessage: string = '';
-  /** 严格模式：坏行直接拒绝（默认宽松：跳过并逐行报告）。 */
-  @State migrationStrict: boolean = false;
-  /** 迁移执行中（防重复提交）。 */
-  @State migrationBusy: boolean = false;
   /** v2 同步三态（已同步·时间 / N 条待同步·最近失败 / 错误·原因），来自 syncStatusStore。 */
   @State syncStatus: SyncStatusView = syncStatusStore.snapshot();
   /** 下拉刷新中的转圈状态（`Refresh` 组件用 `$$` 双向绑定）。 */
@@ -164,7 +146,7 @@ struct Index {
   /** 快捷记录保存中（防重复提交；appendRecord 同步完成，正常一闪而过）。 */
   @State quickBusy: boolean = false;
 
-  // 搜索 / 筛选状态（与 tab 正交：tab + 开关决定数据源与未完成范围，这里只按关键词/作者过滤）
+  // 搜索 / 筛选状态（与 tab 正交：tab 决定数据源，这里只按关键词/作者过滤）
   /** 搜索框原始输入（匹配时才做 trim / 小写 / 空白折叠）。 */
   @State queryText: string = '';
   /** 作者筛选（空串 = 全部作者；再点一次同一个 chip 取消）。 */
@@ -327,9 +309,7 @@ struct Index {
         return;
       }
       this.reload();
-      if (!this.unmigrated) {
-        this.loadSummary();
-      }
+      this.loadSummary();
       this.paneTick = this.paneTick + 1;
       return;
     }
@@ -338,9 +318,7 @@ struct Index {
       .then(() => {
         this.ready = true;
         this.reload();
-        if (!this.unmigrated) {
-          this.loadSummary();
-        }
+        this.loadSummary();
         this.paneTick = this.paneTick + 1;
       })
       .catch((error: Error) => {
@@ -368,7 +346,7 @@ struct Index {
    * - 今日 tab 且保存的是别的日期：当前列表本就不该出现它；
    * - 列表里已有同 id 且 `ts` 不早于标记 ts 的新版本：数据已是刚保存的最新版。
    * 兜底（读不到刚保存的版本）才全量重建，并明确 toast 告知用户。
-   * `records` 是 tab 级全量（不受「显示已完成」开关影响），所以开关状态不改变这里的判断。
+   * `records` 是该 tab 的全量，列表渲染的只是它的过滤子集，这里按全量判断即可。
    */
   private reconcileSavedRow(saved: SavedMarker): void {
     if (this.tab === 'pending' && saved.done === true) {
@@ -392,34 +370,26 @@ struct Index {
     try {
       // summaryStore.ensureReady 内部会先 ensureReady(scheduleStore)，这里两处都调以保持幂等与顺序清晰
       await scheduleStore.ensureReady(getContext(this) as common.UIAbilityContext);
-      // v2 唯一路径：只读一次 schema 门槛；缺标记 / 坏标记 = 未迁移（横幅 + 写入拒绝）。
+      // v2 唯一路径：缺标记 = 空仓库正常起点；summaryStore.ensureReady 同时拉起
+      // timelineStore 与 timelineWriteStore，后者在首用时创建 timeline/ 与 schema 标记。
       await timelineStore.ensureReady(getContext(this) as common.UIAbilityContext);
       await summaryStore.ensureReady(getContext(this) as common.UIAbilityContext);
-      this.unmigrated = !timelineStore.isMigrated();
       // 绑定真实 GitRunner（isomorphic-git 桥），并让周期服务记住 filesDir。
-      // 未迁移时周期保持惰性；迁移后 recordWriter 写成功即触发同步。
       syncProtocolStore.setRunner(bridgeGitRunner);
       await syncProtocolStore.ensureReadyForBootstrap(getContext(this) as common.UIAbilityContext);
       await outboxStore.ensureReady(getContext(this) as common.UIAbilityContext);
-      if (this.unmigrated) {
-        // 唯一未迁移态：错误行如实给出类型化原因；横幅由 MigrationBanner 渲染。
-        this.syncStatus = syncStatusStore.setError(NOT_MIGRATED_REASON);
-      } else {
-        // P1-2/P2-5：带残留 outbox 启动时也要显示「N 条待同步」并暴露「重试同步」入口。
-        const parked = outboxStore.list();
-        if (parked.length > 0) {
-          const failed: number = parked.filter((e): boolean => e.state === 'failed').length;
-          syncStatusStore.setPending(
-            parked.length, failed > 0 ? '上次同步失败，点重试继续' : '等待重试');
-        }
-        this.syncStatus = syncStatusStore.snapshot();
+      // P1-2/P2-5：带残留 outbox 启动时显示「N 条待同步」并暴露「重试同步」入口。
+      const parked = outboxStore.list();
+      if (parked.length > 0) {
+        const failed: number = parked.filter((e): boolean => e.state === 'failed').length;
+        syncStatusStore.setPending(
+          parked.length, failed > 0 ? '上次同步失败，点重试继续' : '等待重试');
       }
-      // v2-only：绝不写 v1 索引（reconcile 会重写 devices/<id>/open.jsonl），旧数据只读保留。
+      this.syncStatus = syncStatusStore.snapshot();
+      // 旧设备目录与 open.jsonl 一律忽略：不读、不写、不删。
       this.ready = true;
       this.reload();
-      if (!this.unmigrated) {
-        this.loadSummary();
-      }
+      this.loadSummary();
     } catch (error) {
       this.ready = false;
       this.statusText = `存储初始化失败：${describeError(error)}`;
@@ -429,9 +399,9 @@ struct Index {
   /**
    * 读存储并刷新列表与状态文案。
    *
-   * 数据流：tab 取数（`records`，tab 级全量）→ 今日 tab 按「显示已完成」开关收敛可见范围 →
-   * 搜索/作者过滤（`visibleRecords`）。切 tab / 换日期只换数据源，搜索条件保留；
-   * 开关/搜索变化只重算 `visibleRecords`，不重读磁盘。
+   * 数据流：tab 取数（`records`，tab 级全量）→ 搜索/作者过滤（`visibleRecords`）。
+   * 今日 tab = 所选日期的全部记录（已完成 + 未完成，排序不变）；未完成 tab = 跨日未完成。
+   * 切 tab / 换日期只换数据源，搜索条件保留；搜索变化只重算 `visibleRecords`，不重读磁盘。
    */
   private reload(): void {
     if (!this.ready) {
@@ -441,13 +411,13 @@ struct Index {
       // v2 是唯一读路径：无条件读 timelineStore，绝不碰 openIndexStore / reconcile / v1 分片。
       this.records = this.tab === 'pending'
         ? this.pendingSorted() // 跨日未完成（closed_at 派生），按日期再按 ts 升序
-        : timelineStore.readDay(this.selectedDate); // 今日 tab 取 tab 级全量（含已完成，计数需要它）
+        : timelineStore.readDay(this.selectedDate); // 今日 tab = 当天全部记录（含已完成），排序不变
       if (this.records.length === 0) {
         this.statusText = this.emptyCopy();
       } else if (this.tab === 'today') {
         this.statusText = this.todayCountText();
       } else {
-        this.statusText = `共 ${this.records.length} 条未完成（v2 时间线，自动同步）`;
+        this.statusText = `未完成 ${this.records.length} 条（v2 时间线，自动同步）`;
       }
     } catch (error) {
       this.records = [];
@@ -457,25 +427,9 @@ struct Index {
     this.pruneSelection();
   }
 
-  /** tab 级全量里仍未完成的条数（今日计数用，与「显示已完成」开关无关）。 */
-  private pendingCountOf(records: ScheduleRecord[]): number {
-    let count: number = 0;
-    for (const record of records) {
-      if (record.done !== true) {
-        count += 1;
-      }
-    }
-    return count;
-  }
-
-  /**
-   * 今日 tab 的计数文案：主计数永远取未完成集合（与「显示已完成」开关无关），
-   * 「· 共 N 条」后缀只在开关开启时追加（N = tab 级全量，含已完成）。
-   * reload 与拨开关共用它，保证切换开关时后缀立即刷新，不会停留在上次 reload 的旧值。
-   */
+  /** 今日 tab 的计数文案：当天记录总数（已完成 + 未完成），不再区分完成状态、无「共 N 条」后缀。 */
   private todayCountText(): string {
-    return `今日 ${this.pendingCountOf(this.records)} 条未完成` +
-      (this.showDone ? ` · 共 ${this.records.length} 条` : '') + '（v2 时间线，自动同步）';
+    return `今日 ${this.records.length} 条（v2 时间线，自动同步）`;
   }
 
   /** 跨日未完成：按日期键、再按 ts 升序；返回新数组，不改动 store 的结果。 */
@@ -610,11 +564,8 @@ struct Index {
       promptAction.showToast({ message: plan.reason, duration: toastMsFor(true) });
       return false;
     }
-    if (!this.ready || !timelineStore.isMigrated()) {
-      promptAction.showToast({
-        message: this.unmigrated ? NOT_MIGRATED_REASON : '存储尚未就绪，请稍后重试',
-        duration: toastMsFor(true)
-      });
+    if (!this.ready) {
+      promptAction.showToast({ message: '存储尚未就绪，请稍后重试', duration: toastMsFor(true) });
       return false;
     }
     const record: ScheduleRecord = {
@@ -628,7 +579,7 @@ struct Index {
     };
     this.quickBusy = true;
     try {
-      // v2 唯一写入：失败停放 outbox 并抛 E_V2_WRITE_PARKED；未迁移则抛 E_NOT_MIGRATED（零写入）
+      // v2 唯一写入：失败停放 outbox 并抛 E_V2_WRITE_PARKED；空仓库由 write store 首用建骨架
       recordWriter.writeRecord(record);
     } catch (error) {
       this.quickBusy = false;
@@ -637,9 +588,7 @@ struct Index {
     }
     this.quickBusy = false;
     this.reload();
-    if (!this.unmigrated) {
-      this.loadSummary();
-    }
+    this.loadSummary();
     promptAction.showToast({ message: '已记下' });
     return true;
   }
@@ -649,81 +598,6 @@ struct Index {
     router.pushUrl({ url: 'pages/Settings' }).catch((error: Error) => {
       promptAction.showToast({ message: `打开设置页失败：${describeError(error)}` });
     });
-  }
-
-  // ------------------------------------------------------------------ v1 → v2 显式迁移（mod-v2-import-v1）
-
-  /**
-   * 横幅按钮：只打开迁移面板并计算 dry-run 计划，**不写任何文件**。
-   * 计划与 apply 共用 model/importV1 的同一套映射；拒绝码逐字展示原因与下一步。
-   */
-  private async openMigrationSheet(): Promise<void> {
-    this.migrationSheetOpen = true;
-    this.migrationBusy = true;
-    this.migrationMessage = '';
-    try {
-      await importV1Service.ensureReady(getContext(this) as common.UIAbilityContext);
-      const plan = await importV1Service.plan(this.migrationStrict);
-      this.migrationPlanLines = plan.lines.slice();
-      this.migrationMessage = plan.refusal === null
-        ? '这是只读计划；确认后才会写入 timeline/，旧数据目录原样保留。'
-        : `${plan.refusal.reason} 下一步：${plan.refusal.nextStep}`;
-    } catch (error) {
-      this.migrationPlanLines = [`读取迁移计划失败：${describeError(error)}`];
-      this.migrationMessage = '下一步：确认仓库可读后重试；本步骤零写入。';
-    } finally {
-      this.migrationBusy = false;
-    }
-  }
-
-  /**
-   * 「确认迁移」是**独立第二次确认**：先弹对话框，用户再点一次才真正落盘。
-   * 绝不把打开面板与 apply 合成一步。
-   */
-  private confirmMigrationPlan(): void {
-    if (this.migrationBusy) {
-      return;
-    }
-    promptAction
-      .showDialog({
-        title: '确认迁移旧数据？',
-        message: '将按上面的 dry-run 计划写入 timeline/；旧数据目录不会被删除或改写。marker 最后写入，中途失败可继续。',
-        buttons: [
-          { text: '取消', color: $r('app.color.text_primary') },
-          { text: '确认迁移', color: $r('app.color.selection_stroke') }
-        ]
-      })
-      .then((result: promptAction.ShowDialogSuccessResponse) => {
-        if (result.index === 1) {
-          this.applyMigration();
-        }
-      })
-      .catch(() => {
-        // 对话框失败：保持未写入状态
-      });
-  }
-
-  /** 真正执行迁移（只在第二次确认后调用）；完成后刷新未迁移横幅。 */
-  private async applyMigration(): Promise<void> {
-    this.migrationBusy = true;
-    try {
-      const result = await importV1Service.apply(this.migrationStrict);
-      this.migrationMessage = result.message;
-      if (result.migrated) {
-        this.unmigrated = false;
-        await timelineStore.ensureReady(getContext(this) as common.UIAbilityContext);
-      }
-    } catch (error) {
-      this.migrationMessage = `迁移失败：${describeError(error)}；schema 未写入时可继续重试。`;
-    } finally {
-      this.migrationBusy = false;
-    }
-  }
-
-  private closeMigrationSheet(): void {
-    if (!this.migrationBusy) {
-      this.migrationSheetOpen = false;
-    }
   }
 
   // ------------------------------------------------------------------ 主从布局交互（仅宽屏/横屏）
@@ -860,8 +734,7 @@ struct Index {
   /** 读当前日期的汇总（`aboutToAppear` / 换日期 / 换模式 都走它，单一数据源）。 */
   private loadSummary(): void {
     this.summaryError = '';
-    // 未迁移时 v1 汇总既不可读也不可写：只留空态，旧文件原样保留。
-    if (this.unmigrated || !this.ready) {
+    if (!this.ready) {
       this.applySummary(null);
       return;
     }
@@ -879,10 +752,6 @@ struct Index {
    * 失败时**不清空**：重新 `read()` 一次旧汇总继续显示，块内只多一行错误 + 重试。
    */
   private async generateSummary(): Promise<void> {
-    if (this.unmigrated) {
-      promptAction.showToast({ message: NOT_MIGRATED_REASON, duration: toastMsFor(true) });
-      return;
-    }
     if (this.aiBusy || this.records.length === 0) {
       return;
     }
@@ -992,16 +861,16 @@ struct Index {
 
   // ------------------------------------------------------------------ 搜索 / 筛选
 
-  /** 当前筛选条件（搜索框 + 作者 → 纯逻辑层 filter；状态恒为 all，由 tab/开关去管）。 */
+  /** 当前筛选条件（搜索框 + 作者 → 纯逻辑层 filter；状态恒为 all，完成状态不做筛选）。 */
   private currentFilter(): QueryFilter {
     return makeFilter(this.queryText, 'all', this.authorFilter);
   }
 
   /**
-   * 重算 `visibleRecords` 与作者 chips（tab 取数之后调用；改开关/筛选时只调它，不重读磁盘）。
+   * 重算 `visibleRecords` 与作者 chips（tab 取数之后调用；改筛选时只调它，不重读磁盘）。
    *
-   * 「显示已完成」只作用于今日 tab：关闭时先把已完成行挡在 `applyQuery` 之前；未完成 tab
-   * 的数据源本身就没有已完成行，所以开关在该 tab 永远不起作用。
+   * 今日 tab 显示当天全部记录（已完成 + 未完成），不再按完成状态过滤；未完成 tab 的数据源
+   * 本身就是跨日未完成。唯一过滤是用户主动输入的关键词 / 作者 chip。
    * 作者 chip 已不在当前数据里（换日期 / 切 tab / 记录被删）时自动取消作者筛选，
    * 否则会出现「筛选条件看得见、列表却永远为空」的怪异状态。
    */
@@ -1010,11 +879,8 @@ struct Index {
     if (this.authorFilter.length > 0 && this.authorChips.indexOf(this.authorFilter) < 0) {
       this.authorFilter = '';
     }
-    const source: ScheduleRecord[] = this.tab === 'today' && !this.showDone
-      ? this.records.filter((record: ScheduleRecord): boolean => record.done !== true)
-      : this.records;
     const filter: QueryFilter = this.currentFilter();
-    this.visibleRecords = applyQuery(source, filter);
+    this.visibleRecords = applyQuery(this.records, filter);
     this.hasSearchWord = hasKeyword(filter);
     this.hasActiveFilter = isFilterActive(filter);
   }
@@ -1022,16 +888,6 @@ struct Index {
   private onQueryTextChange(value: string): void {
     this.queryText = value;
     this.refreshQuery();
-  }
-
-  /** 「显示已完成」开关：只切可见范围并重算副标题后缀，不重读磁盘、不改今日未完成计数。 */
-  private onShowDoneChange(isOn: boolean): void {
-    this.showDone = isOn;
-    this.refreshQuery();
-    // 后缀依赖 showDone，必须随开关立即重算；空态/错误态文案不在此覆盖。
-    if (this.tab === 'today' && this.records.length > 0) {
-      this.statusText = this.todayCountText();
-    }
   }
 
   /** 作者 chip：再点一次同一个 author 取消筛选。 */
@@ -1156,10 +1012,6 @@ struct Index {
   // ------------------------------------------------------------------ AI 汇总
 
   private openAiPanel(): void {
-    if (this.unmigrated) {
-      promptAction.showToast({ message: NOT_MIGRATED_REASON, duration: toastMsFor(true) });
-      return;
-    }
     if (!this.ready) {
       promptAction.showToast({ message: '存储尚未就绪，请稍后再试' });
       return;
@@ -1364,9 +1216,10 @@ struct Index {
   }
 
   /**
-   * 两 tab + 一开关（mod-home-filters：原 5 个筛选控件 → 3 个）：
-   * - 今日（默认）：当日记录；开关关闭时只看未完成，开启才把已完成行也列出；
-   * - 未完成：跨日未完成（按日期再按 ts 升序），开关在该 tab 不渲染、不生效。
+   * 仅两个 tab（mod-home-filters / mod-home-filters-2：原 5 个筛选控件 → 2 个）：
+   * - 今日（默认）：当日全部记录（已完成 + 未完成），排序不变；
+   * - 未完成：跨日未完成（按日期再按 ts 升序）。
+   * 完成状态只由行上的勾选指示，不再提供第二个完成状态开关。
    */
   @Builder
   ModeTabs() {
@@ -1407,24 +1260,6 @@ struct Index {
         .layoutWeight(1)
       }
       .width('100%')
-
-      if (this.tab === 'today') {
-        Row({ space: SPACING.sm }) {
-          Text('显示已完成')
-            .fontSize(FONT.caption)
-            .lineHeight(LINE_HEIGHT.caption)
-            .fontColor($r('app.color.text_secondary'))
-            .layoutWeight(1)
-          Toggle({ type: ToggleType.Switch, isOn: this.showDone })
-            .selectedColor($r('app.color.brand'))
-            .onChange((isOn: boolean): void => {
-              this.onShowDoneChange(isOn);
-            })
-        }
-        .width('100%')
-        .height(TOUCH_MIN)
-        .alignItems(VerticalAlign.Center)
-      }
     }
     .width('100%')
   }
@@ -1613,7 +1448,7 @@ struct Index {
   // ------------------------------------------------------------------ 搜索 / 筛选 / 撤销（UI）
 
   /**
-   * 搜索框 + 作者 chips（状态 chips 已由「今日/未完成」+「显示已完成」取代）。
+   * 搜索框 + 作者 chips（状态 chips 与完成状态开关均已删除，完成状态只由行上勾选指示）。
    *
    * 两者互不干扰，任一变化都只重算 `visibleRecords`（不重读磁盘、不改 tab）。
    */
@@ -1778,112 +1613,6 @@ struct Index {
   }
 
   /**
-   * 未迁移唯一横幅（mod-v2-only）：只在 timeline/schema.json 缺失/非 v2 时渲染一次。
-   * 文案逐字来自 model/migrationState；按钮只给下一步提示，不执行迁移、不伪造成功。
-   */
-  @Builder
-  MigrationBanner() {
-    if (this.unmigrated) {
-      Column({ space: SPACING.xs }) {
-        Text(NOT_MIGRATED_BANNER)
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.danger'))
-          .width('100%')
-        Text('迁移旧数据（先查看计划）')
-          .fontSize(FONT.caption)
-          .fontColor($r('app.color.brand'))
-          .padding({ top: SPACING.xs, bottom: SPACING.xs })
-          .onClick(() => {
-            // 只打开迁移面板算 dry-run；apply 需要面板里的独立「确认迁移」。
-            this.openMigrationSheet();
-          })
-        Text(NOT_MIGRATED_NEXT_STEP)
-          .fontSize(FONT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .lineHeight(LINE_HEIGHT.caption)
-          .width('100%')
-      }
-      .width('100%')
-      .padding(SPACING.sm)
-      .backgroundColor($r('app.color.brand_soft'))
-      .borderRadius(RADIUS.sm)
-      .alignItems(HorizontalAlign.Start)
-    }
-  }
-
-  /**
-   * 迁移面板（mod-v2-import-v1）：先展示 dry-run 计划（天数/记录/媒体/字节/汇总/跳过/冲突），
-   * 再要求独立「确认迁移」；任何拒绝都逐字给出类型化原因 + 下一步，绝不静默跳过。
-   */
-  @Builder
-  MigrationSheet() {
-    Column({ space: SPACING.sm }) {
-      Text('迁移旧数据到 v2 时间线')
-        .fontSize(FONT.title)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-      Text('只读计划 · 旧数据目录不会被删除或改写 · schema 最后写入')
-        .fontSize(FONT.caption)
-        .fontColor($r('app.color.text_secondary'))
-        .width('100%')
-      Scroll() {
-        Column({ space: SPACING.xs }) {
-          ForEach(this.migrationPlanLines, (line: string) => {
-            Text(line)
-              .fontSize(FONT.caption)
-              .lineHeight(LINE_HEIGHT.caption)
-              .fontColor($r('app.color.text_primary'))
-              .width('100%')
-          }, (line: string) => line)
-          if (this.migrationMessage.length > 0) {
-            Text(this.migrationMessage)
-              .fontSize(FONT.caption)
-              .lineHeight(LINE_HEIGHT.caption)
-              .fontColor($r('app.color.danger'))
-              .width('100%')
-          }
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Start)
-      }
-      .width('100%')
-      .layoutWeight(1)
-      Row({ space: SPACING.sm }) {
-        Text('严格模式（坏行直接拒绝）')
-          .fontSize(FONT.caption)
-          .fontColor($r('app.color.text_secondary'))
-        Checkbox({ name: 'migrationStrict', group: 'migrationGroup' })
-          .select(this.migrationStrict)
-          .selectedColor($r('app.color.brand'))
-          .onChange((value: boolean) => {
-            this.migrationStrict = value;
-            this.openMigrationSheet();
-          })
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-      Row({ space: SPACING.sm }) {
-        Button('取消')
-          .fontSize(FONT.caption)
-          .layoutWeight(1)
-          .onClick(() => this.closeMigrationSheet())
-        Button('确认迁移')
-          .fontSize(FONT.caption)
-          .layoutWeight(1)
-          .enabled(!this.migrationBusy)
-          .onClick(() => this.confirmMigrationPlan())
-      }
-      .width('100%')
-    }
-    .width('92%')
-    .height('80%')
-    .padding(SPACING.lg)
-    .backgroundColor($r('app.color.surface'))
-    .borderRadius(RADIUS.md)
-  }
-
-  /**
    * v2 同步三态行（mod-v2-only）：已同步·时间 / N 条待同步·最近失败 / 错误·原因。
    * 数据只来自 syncStatusStore.snapshot()（last result + outbox count + typed 门禁原因）。
    */
@@ -1958,12 +1687,12 @@ struct Index {
   /**
    * tab 级空态（没有搜索/作者筛选时）：
    * - 未完成 tab 一条都没有 → 「没有未完成的日程」；
-   * - 今日 tab 当天全已完成、开关又关着 → 同样「没有未完成的日程」（不是「今天还没有日程」）；
-   * - 今日 tab 一条记录都没有 → 不在这里渲染，上方「✨ 今日汇总」块已有灰字「今天还没有日程」，避免同屏重复。
+   * - 今日 tab 一条记录都没有 → 不在这里渲染，上方「✨ 今日汇总」块已有灰字「今天还没有日程」，避免同屏重复；
+   *   今日有记录时全部可见（已完成 + 未完成），不会再出现「当天全已完成所以列表空」的情况。
    */
   @Builder
   TabEmpty() {
-    if (this.tab === 'pending' || this.records.length > 0) {
+    if (this.tab === 'pending') {
       Text('没有未完成的日程')
         .fontSize(FONT.body)
         .lineHeight(LINE_HEIGHT.body)
@@ -2052,7 +1781,6 @@ struct Index {
       this.ModeTabs()
       this.SearchFilterBar()
       this.SyncStatusRow()
-      this.MigrationBanner()
       Divider()
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
@@ -2097,8 +1825,7 @@ struct Index {
         this.ModeTabs()
         this.SearchFilterBar()
         this.SyncStatusRow()
-        this.MigrationBanner()
-        Divider()
+          Divider()
           .strokeWidth(DIVIDER)
           .color($r('app.color.divider'))
         Column() {
@@ -2393,14 +2120,6 @@ struct Index {
       }
       if (this.aiResultVisible) {
         this.AiResultPanel()
-      }
-      if (this.migrationSheetOpen) {
-        Column()
-          .width('100%')
-          .height('100%')
-          .backgroundColor($r('app.color.scrim'))
-          .onClick(() => this.closeMigrationSheet())
-        this.MigrationSheet()
       }
       // 同步/附件 zip 的隐藏桥（1×1、全透明、不参与交互）；就绪后做一次启动 pull
       GitBridgeHost({

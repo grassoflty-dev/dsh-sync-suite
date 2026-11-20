@@ -68,6 +68,17 @@ UI 文案写「本机（默认）」。
 
 > **实现落地（2026-11-20，`mod-instance-model`，零 UI）**：§2 模型已落成 `model/instances.ts` + `services/instanceStore.ets`（`DsInstance` 字段按本批任务书：`name` / `token` / `reachable:'unknown'|'ok'|'fail'`，id = `local` 或 `inst-<sha16>`；本机显式首行、URL 恒空串、能力集 `webUI:false` + RPC 回环；单键 `instances.json` 信封 `{v:1,items}`、坏值回落空表 + typed reason）；字段命名与本文 `displayName` / `tokenRef` / 布尔三态的差异以已落地的模型为准，后续模块直接消费它。
 
+**§2 字段映射表（P2-2，`mod-instance-list` 补；设计稿旧名 → 已落地真名）**
+
+| 设计稿 §2 / §3 旧名 | 已落地字段名 / 函数 | 规则 |
+| --- | --- | --- |
+| `displayName` | `name` | `DsInstance.name`；`RawInstance.name` 缺省才给默认值，显式空串 typed 拒绝。列表行直接渲染它。 |
+| `tokenRef` | `token` | secret，只存在于持久化信封内；归一时从 query `?token=`/`?k=` 抽出，渲染视图 `RedactedInstance` **没有这个字段**、只有 `tokenSet`。 |
+| `reachable: true/false/null`（布尔三态） | `reachable: 'unknown'\|'ok'\|'fail'` | `normalizeReachable()` 把 `true/'ok'→'ok'`、`false/'fail'→'fail'`、其余（含 `null`/`unknown`）→`'unknown'`；未知永不升成 `ok`。列表中文徽章见 `model/instanceSeed.ts` 的 `reachabilityLabel()`。 |
+| `urlMasked` | `redactUrl()` / `redactInstance().url` | 不落盘：存的是 token-free base，展示时先经 `redactInstance()`（store 的 `redacted()`）再过 `redactUrl()`；`pages/Instances.ets` 的 URL 行只走这条路径，绝不渲染真身 `url`。 |
+
+> `mod-instance-list` 接线：`model/instanceSeed.ts`（幂等播种 / 旧 `remoteUrl`/`remoteLastOk` 迁移 / 相对时间）+ `services/instanceStore.ets::ensureSeeded()`；`services/instanceStore.ets` 的 `list()/upsert()/remove()/markReachable()/redacted()` 仍是被后续模块消费的唯一入口。
+
 ## 3 协议
 
 **今天存在的 RPC**（`packages/dsh-dots/src/rpc.ts:677-730`，全部 `POST /dsh-dots/rpc`）：

@@ -8,124 +8,32 @@
 > 下文 `<repo>` 指待迁移的**数据仓库**；代码仓库工作目录固定为
 > `C:\Users\GWL\Desktop\itwillclaude\dsh-sync-suite`，两者不要混用。
 
-## 1. 迁移真实仓库（v1 → v2）
+## 1. Start fresh：把 App 指向一个仓库，它自己建时间线
 
-迁移一次性、单向、只新增：`tools/migrate-v1-to-v2.mjs` 只读 `devices/**`，写
-`<repo>/timeline/` 与 `timeline/schema.json`，**不删不改任何 v1 文件**；媒体 zip 由
-`tools/migrate-media-v1-to-v2.mjs` 单独搬运，v1 zip 同样不删不改（契约 §10）。
+**产品决定（mod-drop-v1）**：没有迁移流程、没有未迁移横幅、没有 E_NOT_MIGRATED。
+空仓库（没有 `timeline/` 或 `timeline/schema.json`）就是正常起点：
+- App 启动后显示**空日程列表**（没有横幅、没有拒绝、没有「查看迁移步骤」）；
+- 写入服务在**首用**（初始化）时创建 `<repo>/timeline/` 与规范 `schema.json`（`{"schemaVersion":2}`）；
+- 写第一条日程时创建 `timeline/<date>/records.json`（先建空骨架再原子写入该条记录）。
 
-### 1.1 备份 / 分支
+旧设备目录与旧 `open.jsonl` **一律忽略**：不读、不写、不删（仅保留一行说明；历史数据由用户自行处置，本项目不提供迁移入口）。
 
-先整目录复制 `<repo>` 作备份（带日期）；若 `<repo>` 是 git 仓库，`git -C <repo> status --porcelain`
-必须干净，可建 `git -C <repo> branch backup/v1-<date>` 作回滚锚点；代码仓库同样先
-`git status --porcelain` 确认干净。注意：v2 写操作断言分支固定 `main`（契约 §2/§11），
-**迁移必须在 `main` 上完成**（2026-11-20 订正：原「与激活」随激活流程删除而作废），backup 分支只是锚点，不是迁移落地分支。
+### 1.1 操作步骤
 
-- **成功信号**：备份目录可读；`status --porcelain` 无输出；当前分支 `main`。
-- **失败信号 + 处置**：工作区有改动 → 先由 Lead 处理或换用干净副本，不要在脏树上迁移；
-  分支不是 `main` → 切回 `main` 再开始；备份无法读取 → 停止，禁止进入下一步。
+1. 确认代码仓库工作目录干净：`git status --porcelain` 无输出。
+2. 在设置页填好数据仓库地址与令牌并保存（分支固定 `main`）。
+3. 回到首页：看到空列表即可开始记录；第一条日程保存后检查 `<repo>/timeline/schema.json` 与当日 `records.json` 已生成。
+4. 后续保存、勾选完成、删除 / 撤销、汇总都只写 `timeline/<date>/`，并随同步周期 commit + push（`[v2] sync <n> days`，`force:false`）。
 
-### 1.2 记录迁移 dry-run（不写）
+- **成功信号**：无横幅；空态文案「今天还没有日程」；首条保存后 `timeline/schema.json` 与 `timeline/<date>/records.json` 存在。
+- **失败信号 + 处置**：若出现 typed `E_SCHEMA_UNKNOWN`，说明标记存在但版本不认识 → 只读、零写入，检查标记内容；不要手改版本绕过。若无任何时间线文件且写入失败，检查本机存储可写与仓库地址配置。
 
-```
-node tools/migrate-v1-to-v2.mjs --repo <path> --dry-run
-```
+## 2. 空仓库与已有 v2 仓库的运行时行为
 
-`--repo` 可直接指向仓库根或它的 `devices/` 目录。重点读输出里的
-`[migrate] plan days=… records=… deletes=… summaries=… skipped=… duplicates=… conflicts=… restores=…`
-及各日 `[migrate] day <date> records=… deletes=… restores=… conflicts=… summaries=…` 行。
-
-- **成功信号**：exit 0；有 `days`/`records` 计数；末行 `[migrate] dry-run: 未写入任何文件`。
-  `conflicts` 非 0 表示同 `(id,ts)` 内容不同已被字节裁决，败者会在 `--apply` 时进当日 `conflicts.jsonl`，
-  属预期、不是失败；确认 `days`/`records` 与源 `devices/**/schedules/*.jsonl` 数量相称。
-- **失败信号 + 处置**：exit 2 = 参数/门槛拒绝（如找不到 `devices/`、参数冲突），先看 `拒绝：…` 文本，
-  修正 `--repo` 路径后重跑；exit 1 = 未预期错误，保留完整堆栈回报 Lead。
-  dry-run 零写入，可任意重跑；任何解析失败必须先暴露，不能带病进入 `--apply`（契约 §10 步骤 1）。
-
-### 1.3 记录迁移 apply（暂存 + 校验）
-
-```
-node tools/migrate-v1-to-v2.mjs --repo <path> --apply
-```
-
-工具先写 `timeline.tmp-<pid>/`，回读逐字节校验后原子落入 `timeline/`，最后写 `timeline/schema.json`。
-
-- **成功信号**：exit 0；`[migrate] verify ok days=… records=… deletes=… summaries=… skipped=… conflicts=… restores=…`
-  的计数与 dry-run 对齐；`timeline.tmp-<pid>/` 已被清理；`timeline/schema.json` 含 `schemaVersion: 2`。
-- **失败信号 + 处置**：exit 3 = 校验失败，输出 `[migrate] …；保留现场 <applied.site>`，**保留
-  `timeline.tmp-<pid>/` 现场**，不要手动删除；比对 `verify ok` 期望计数与 dry-run 的 days/records/deletes/
-  summaries/conflicts 差异，核对当日 `records.json` 的形状（§5），修正输入后用 `--out <path>` 输出到新目录，
-  或在确认现场可弃后清理暂存再试。exit 2「目标 timeline/ 已存在」→ 用 `--out <path>`，或确认只补缺失日时加
-  `--force`（**绝不覆盖已有 `records.json`**）。失败期间 v1 文件始终未动。
-
-### 1.4 媒体迁移 dry-run（不写）
-
-```
-node tools/migrate-media-v1-to-v2.mjs --repo <path> --dry-run
-```
-
-dry-run **不要求** `timeline/schema.json`。
-
-- **成功信号**：exit 0，产出媒体计划；不落任何媒体文件。
-- **失败信号 + 处置**：exit 2（缺 `devices/` 等门槛）→ 修正路径；ZIP64 / 多磁盘 / 加密条目按条报类型化拒绝
-  （exit 3）→ 记下受影响的 v1 zip，它们保持原样，对应记录由 App 显示占位文案 `媒体待迁移`（契约 §5）。
-
-### 1.5 媒体迁移 apply
-
-```
-node tools/migrate-media-v1-to-v2.mjs --repo <path> --apply
-```
-
-要求 `timeline/schema.json` 的 `schemaVersion=2`（即 1.3 必须先成功）。文件落
-`timeline/<date>/media/<sha16>.jpg`，按 sha256 同日去重、只增不减。
-
-- **成功信号**：exit 0；媒体文件出现在对应日 `media/`，记录 `media[].file` 是不含路径的裸文件名；
-  v1 `devices/**/attachments/*.zip` **不删不改**。
-- **失败信号 + 处置**：exit 2「需先运行记录迁移」/「schemaVersion 不是 2」→ 回到 1.3；
-  同名不同内容报 `E_MEDIA_SHA16_COLLISION` → 不覆盖，人工裁决；ZIP64/加密条目逐条拒绝、不落盘 → 保留 v1 zip，
-  按 §6 标注未迁移，不宣称媒体完整。
-
-### 1.6 提交迁移结果
-
-由 Lead 提交（执行子代理不 commit）：`git status --porcelain` 只应看到新增 `timeline/**`；
-`git add timeline/` → `git commit` → `git push origin main`。迁移提交**只新增** `timeline/` 与标记，
-不删除 v1 文件；禁止 force-push。
-
-- **成功信号**：push 成功，`origin/main` 前进，工作区干净。
-- **失败信号 + 处置**：push 非快进 → 不要强推，核对远端状态后由 Lead 决定常规收敛；
-  提交里混进 `devices/**` 删除 → 撤回重做，迁移提交不得删 v1（契约 §10）。
-
-### 1.7 迁移一次 → App 即用 timeline（无激活步骤）
-
-> **2026-11-20 v2-only 订正**：原「在 App 里显式激活」整节已废止删除——激活开关
-> `timeline.v2WriteEnabled`、预检服务 `v2ActivationService` 与设置页开关均不存在。
-
-§1.1–§1.6 的迁移提交一落地（`timeline/schema.json` 写明 `schemaVersion:2`），App 与插件即直接以
-`timeline/` 为唯一日程真值；没有开关、没有确认弹层、没有「回到 v1」的路径。
-
-- **成功信号**：不再显示未迁移 banner；新写入落到 `timeline/<date>/` 并随周期 commit + push；
-  `devices/**` 原样保留、未被删除。
-- **失败信号 + 处置**：出现**唯一一条**「仓库尚未迁移」banner 且 typed `E_NOT_MIGRATED` →
-  说明标记未落地（迁移未完成或已回滚），回到 §1.1–§1.6 执行一次性迁移；零写入是预期，
-  不要改仓库标记绕过门槛。
-
-## 2. 迁移一次 → App 使用 timeline（v2-only）
-
-> **2026-11-20 v2-only 订正**：原「激活与关闭」整节已废止删除——设置页没有「启用 v2 时间线写入」
-> 开关，也不存在 `v2ActivationService.decide()/activate()/deactivate()`、两库并存专用确认、
-> `timeline.v1Retained` / `timeline.readMode` / `timeline.v2WriteEnabled` 三个持久键，以及「关闭回到 v1」。
-> 以上均为历史记录，不再成立（契约 §9/§10/§11）。
-
-- **唯一路径**：迁移完成（`timeline/schema.json` 的 `schemaVersion=2`）后，App 与插件直接走 v2 单时间线：
-  `timeline/<date>/` 下 `records.json`、`summary.json?`、`deleted.jsonl`、`restore.jsonl`、
-  `conflicts.jsonl`、`media/` 与仓库级 `timeline/schema.json`。写入经 §9 同步周期自动 commit + push
-  （提交 `[v2] sync <n> days`，`force:false`，不改写远端历史、不删远端文件）。
-- **未迁移**：缺 `timeline/schema.json` 且存在 `devices/` → 界面显示**唯一一条** banner + typed
-  `E_NOT_MIGRATED` 拒绝，**零写入**（不建本地提交、不 push）；处置只有一条：由用户显式执行一次
-  `mod-v2-import-v1`（待交付）迁移。
-- **安全网**：`devices/**` 永不删除、保持原样；迁移只新增 `timeline/` 与标记，不删改任何 v1 文件。
-- **应看到**：首页三态行 `已同步·HH:MM`（`services/syncStatusStore.ets` 的 `lastAt` 本地时间，
-  `Index.ets` 的 `SyncStatusRow()`）；一次成功的 v2 周期提交（同上）。
+- **唯一路径**：App 与插件直接以 `timeline/` 为唯一日程真值；写 `timeline/<date>/`（records / summary / deleted / restore / conflicts / media），自动跑 fetch→union→replay→commit→push。
+- **没有开关 / 没有迁移**：`timeline.readMode` / `timeline.v2WriteEnabled` / `timeline.v1Retained` 与 `E_NOT_MIGRATED` 均已删除；没有「启用」「确认迁移」「回到 v1」入口。
+- **安全说明**：旧设备目录与 `open.jsonl` 不读、不写、不删；仓库里若残留这些文件会被原样忽略。
+- **应看到**：首页三态行 `已同步·HH:MM`（`services/syncStatusStore.ets` 的 `lastAt`，`Index.ets` 的 `SyncStatusRow()`）。
 
 ## 3. 回滚任一模块（按 tag，从右往左）
 
@@ -170,24 +78,20 @@ node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json 
 
 五项同时成立才算回滚干净；**回滚之后必须再跑一次全绿全量**（§4 第 5 步），没有这次绿灯不算回滚完成。
 
-## 4. 异常处置（原「激活失败 / 异常处置」）
+## 4. 异常处置（原「激活失败 / 异常处置」；**历史口径，未迁移项已被 mod-drop-v1 superseded**）
 
 > **2026-11-20 v2-only 订正**：原五类激活拒绝中的 `E_SCHEMA_MISSING` / `E_MIGRATION_EMPTY` /
 > `E_NEEDS_EXPLICIT_RESOLUTION` / `E_SYNC_UNAVAILABLE`（决策表 `model/v2Activation.ts`，评审
 > `REVIEW-sync-wiring.md` §4）随激活流程一并删除，不再存在；`E_SCHEMA_UNKNOWN` 保留为 schema 门禁拒绝。
-> 新增未迁移拒绝 `E_NOT_MIGRATED`。
-
-现有 typed 拒绝的现象与下一步（`assertWritable()` 门禁，契约 §9/§11）：
+> 新增未知版本只读拒绝 ，契约 §9/§11）：
 
 | code | 现象 | 下一步 |
 | --- | --- | --- |
-| `E_NOT_MIGRATED` | **唯一一条**「仓库尚未迁移到 v2 时间线」banner；`timeline/**` 写入零写入 | 由用户显式执行一次 `mod-v2-import-v1`（待交付）迁移，生成 `timeline/schema.json`；不要手改标记绕过门槛 |
+| `E_SCHEMA_UNKNOWN（未知版本标记）→ 只读、零写入，检查标记内容
 | `E_SCHEMA_UNKNOWN` | 「仓库结构版本不是 2（不认识）」，只读、零写入 | 核对标记内容，重跑一次性迁移；不要手改 schemaVersion 绕过 |
 
 三态行异常时先查什么：
 
-- **`未迁移 banner`**：先查 `timeline/schema.json` 是否存在、`schemaVersion` 是否 2；缺标记 + `devices/`
-  存在 → `E_NOT_MIGRATED` + 唯一一条 banner + 零写入，属预期，须显式迁移，不是故障。
 - **`只读`**：先查 `timeline/schema.json` 是否 2、分支是否 `main`（**不再查「开关是否真开启」**，开关已删除）；
   未知版本 → `E_SCHEMA_UNKNOWN`、零写入；门禁失败都会落这一态。
 - **`N 条待同步`**：先读「最近失败：<typed>」——是 `E_SCHEMA_UNKNOWN`/`E_BRANCH_MISMATCH` 一类门禁错，
@@ -200,19 +104,19 @@ node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json 
   **不要手改 payload（入队即不可变）也不要删条目**——outbox 是周期之间唯一本地真值，删了就丢数据；
   ④ 若远端坏文件报 `E_CORRUPT`，按契约 §9 整日不动、意图留 outbox，须先修远端再重试。
 
-## 5. 验收清单（迁移完成后）
+## 5. 验收清单（空仓库首用后）
 
 > **2026-11-20 v2-only 订正**：原「激活后验收」口径已改为「迁移完成后验收」；不再检查任何设置页开关。
 
 逐项打勾，任何一项不满足都不要宣告迁移成功：
 
-1. 建一条记录：无未迁移 banner（已迁移），三态行不再「只读」；`devices/**` 原样保留、未被删除。
+1. 建一条记录：空仓库正常起点（无 banner、无拒绝），三态行不再「只读」；旧设备数据原样保留、未被删除。
 2. 确认 commit + push：数据仓库 `git -C <repo> log -1 --oneline` 见 `[v2] sync <n> days`；
    `git -C <repo> status --porcelain` 干净；`origin/main` 前进；无 force-push。
 3. 重启 App：按 `docs/VERIFICATION.md` §14.9 的 hdc 路径
    （`D:\A-DevEco\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe`）停止进程后用
    `hdc -t <serial> shell "aa start -a EntryAbility -b com.itwill.schedule"` 重启。
-4. 记录仍在（列表与详情可见、未出现未迁移 banner / 未零写入）；注意「重启后仍生效」本身仍 `unverified`（§6），
+4. 记录仍在（列表与详情可见、无 banner / 无拒绝）；注意「重启后仍生效」本身仍 `unverified`（§6），
    这一步是现场核对，不是引用已有通过结论。
 5. `timeline/<date>/records.json` 形态正确：合法 JSON 对象，顶层仅 `date`/`open`/`records`，
    每条记录独占一行、键序符合契约 §3、末尾恰好一个换行，`date` == 目录名；
@@ -224,8 +128,7 @@ node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json 
 
 以下项当前明确为 `unverified`，本文任何步骤都**不能**被当作它们的通过证据：
 
-- **设备上未配置仓库 / 未迁移拒绝**：真机上「唯一一条 banner」的渲染、对未迁移仓库的 typed
-  `E_NOT_MIGRATED` 拒绝与**零写入**、实际写 `timeline/`、真实 push 全链路，以及
+- **设备上未配置仓库 / 未知版本只读拒绝 *零写入**、实际写 `timeline/`、真实 push 全链路，以及
   「建记录→自动同步→三态行变已同步」均无端到端证据（评审 §9、`docs/VERIFICATION.md` §14.8）。
 - **双设备并发**：两设备同日各建、同 id 不同 ts / 同 ts、A 删 + B 编辑、媒体占位、fetch+union+replay
   双端逐字节一致，全部 `unverified`（契约 §15）。

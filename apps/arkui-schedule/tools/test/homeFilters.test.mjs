@@ -1,10 +1,13 @@
-// mod-home-filters：首页筛选控件从 5 个（今日待办/全部未完成 + 全部/未完成/已完成）
-// 收敛为 2 个 tab（今日 / 未完成）+ 1 个开关（显示已完成，默认关）的源码级契约。
+// mod-home-filters / mod-home-filters-2：首页筛选控件收敛的源码级契约。
+// 最终控制集 = 恰好 2 个 tab（今日 / 未完成），没有完成状态开关：
+// - 今日 tab 显示当天**全部**记录（已完成 + 未完成，行上勾选只是状态指示，不参与过滤），
+//   计数 = 当天记录总数（tab 全量），排序规则不变；
+// - 未完成 tab 保留跨日未完成取数与「先日期、再 ts」排序，计数 = 未完成条数。
 //
-// ArkTS（.ets）依赖 @kit.ArkUI，Node 里跑不起来；这里沿用 quickRecordUi.test.mjs 的
+// ArkTS（.ets）依赖 @kit.ArkUI，Node 里跑不起来；沿用 quickRecordUi.test.mjs 的
 // stripComments + bodyFrom 风格，只钉「能在源码里逐字复核」的事实：状态默认值、tab 取数、
-// 排序键、开关作用域、计数来源、空态文案，以及旧控件名在 UI/测试源码里彻底消失。
-// 不是覆盖削弱：旧 5 控件的行为被逐条映射到新的 3 控件（见 docs/UI-DESIGN.md 的映射表）。
+// 排序键、计数来源、空态文案，以及旧控件名 / 开关在 UI、测试与工具源码里彻底消失。
+// 被删控件名按字符拼出来，避免本测试文件自身被下面的「旧标签消失」扫描命中。
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, test } from 'node:test';
@@ -90,49 +93,48 @@ const INDEX = stripComments(INDEX_RAW);
 const RELOAD = bodyFrom(INDEX, 'private reload()');
 const REFRESH_QUERY = bodyFrom(INDEX, 'private refreshQuery()');
 const PENDING_SORTED = bodyFrom(INDEX, 'private pendingSorted()');
-const PENDING_COUNT = bodyFrom(INDEX, 'private pendingCountOf(');
 const TODAY_COUNT_TEXT = bodyFrom(INDEX, 'private todayCountText(');
 const EMPTY_COPY = bodyFrom(INDEX, 'private emptyCopy()');
 const MODE_TABS = bodyFrom(INDEX, '\n  ModeTabs() {');
 const SEARCH_BAR = bodyFrom(INDEX, '\n  SearchFilterBar() {');
 const TAB_EMPTY = bodyFrom(INDEX, '\n  TabEmpty() {');
 const RECORD_LIST = bodyFrom(INDEX, '\n  RecordList() {');
-const SHOW_DONE_CHANGE = bodyFrom(INDEX, 'private onShowDoneChange(');
+const LIST_ROWS = bodyFrom(INDEX, '\n  ListRows() {');
 
-// 旧控件的「带引号标签」按字符拼出来，避免本测试文件自身被下面的「旧标签消失」扫描命中。
-// 注意 `显示已完成` 是**新开关**的合法文案，不能用裸 `已完成'` 当判据（会误报）。
+// 被删控件名按字符拼出来，避免本测试文件自身被扫描命中。
 const QUOTE = String.fromCharCode(39);
 const ALL = '全' + '部';
 const DONE = '已' + '完' + '成';
 const PENDING = '未' + '完' + '成';
 const REMOVED_LABELS = [ALL + PENDING, QUOTE + DONE + QUOTE, QUOTE + ALL + QUOTE];
-// P2-2：设备验收 / QA 表格脚本里死掉的旧 tab fallback 标签（同样拼出来，避免本文件被守卫命中）。
 const TODAY_TODO = '今' + '日' + '待' + '办';
+// 已删的开关 / 状态 / 回调名同样拼接，保证仓库里不再出现这些字面量。
+const SHOW_DONE = 'show' + 'Done';
+const ON_SHOW_DONE_CHANGE = 'on' + SHOW_DONE + 'Change';
+const TOGGLE_LABEL = '显' + '示' + DONE;
 
-describe('mod-home-filters · 状态机与控制集（5 → 3）', () => {
-  test('默认状态：tab=today + showDone=false；旧 showAllPending/statusFilter 状态已删', () => {
+describe('mod-home-filters-2 · 控制集恰好两 tab，开关彻底删除', () => {
+  test('默认状态：仅 tab=today；旧跨日状态 / 状态片 / 完成状态开关状态均已删', () => {
     assert.match(INDEX, /type HomeTab = 'today' \| 'pending';/);
     assert.match(INDEX, /@State tab: HomeTab = 'today';/);
-    assert.match(INDEX, /@State showDone: boolean = false;/);
     assert.equal(INDEX.includes('showAllPending'), false, '旧 tab 状态名及其所有引用必须删除');
     assert.equal(INDEX.includes('@State statusFilter'), false, '旧状态 chip 字符串状态必须删除');
+    assert.equal(INDEX.includes('@State ' + SHOW_DONE), false, '开关 @State 必须删除');
   });
 
-  test('两个 tab 文案恰好是「今日 / 未完成」，顶部不再有「今日待办 / 全部未完成」', () => {
+  test('tab 文案恰好两项「今日 / 未完成」，两段各自的主次态绑定正确', () => {
     const labels = [...MODE_TABS.matchAll(/label: '([^']+)'/g)].map((m) => m[1]);
     assert.deepEqual(labels, ['今日', '未完成'], `tab 文案应为两项，实际 ${JSON.stringify(labels)}`);
     assert.ok(MODE_TABS.includes("this.tab === 'today' ? 'primary' : 'ghost'"));
     assert.ok(MODE_TABS.includes("this.tab === 'pending' ? 'primary' : 'ghost'"));
   });
 
-  test('「显示已完成」开关只在今日 tab 渲染，isOn 绑定 showDone，改动走 onShowDoneChange', () => {
-    assert.ok(MODE_TABS.includes("if (this.tab === 'today') {"), '开关必须只在今日 tab 出现');
-    assert.ok(MODE_TABS.includes("Text('显示已完成')"));
-    assert.ok(MODE_TABS.includes('Toggle({ type: ToggleType.Switch, isOn: this.showDone })'));
-    assert.ok(MODE_TABS.includes('this.onShowDoneChange(isOn);'));
-    assert.ok(SHOW_DONE_CHANGE.includes('this.showDone = isOn;'));
-    assert.ok(SHOW_DONE_CHANGE.includes('this.refreshQuery();'));
-    assert.equal(SHOW_DONE_CHANGE.includes('this.reload()'), false, '拨开关不重读磁盘');
+  test('没有完成状态开关：无 Toggle / 文案 / @State / 回调', () => {
+    assert.equal(MODE_TABS.includes('Toggle('), false, 'ModeTabs 不应渲染任何开关');
+    assert.equal(INDEX.includes('ToggleType.Switch'), false, '首页不应残留 Toggle 类型');
+    assert.equal(INDEX_RAW.includes(TOGGLE_LABEL), false, '开关文案必须逐字删除');
+    assert.equal(INDEX.includes(SHOW_DONE), false, '开关状态名必须逐字删除');
+    assert.equal(INDEX.includes(ON_SHOW_DONE_CHANGE), false, '开关回调必须逐字删除');
   });
 
   test('状态 chip 的 builder / handler / makeFilter 状态入参全部删除，搜索与作者筛选保留', () => {
@@ -145,11 +147,11 @@ describe('mod-home-filters · 状态机与控制集（5 → 3）', () => {
     assert.ok(SEARCH_BAR.includes('this.resetFilters()'));
   });
 
-  test('首页 UI 源码不含被删控件名（旧状态 chip 与旧跨日 tab）', () => {
-    for (const label of REMOVED_LABELS) {
-      assert.equal(INDEX_RAW.includes(label), false, `Index.ets 不应再出现旧控件名 ${label}`);
+  test('首页 UI 源码不含被删控件名（旧状态 chip / 旧跨日 tab / 开关文案）', () => {
+    for (const label of [...REMOVED_LABELS, TOGGLE_LABEL]) {
+      assert.equal(INDEX_RAW.includes(label), false, `Index.ets 不应再出现被删控件名 ${label}`);
     }
-    assert.equal(INDEX_RAW.includes('今日待办'), false, '旧「今日待办」按钮名必须删除');
+    assert.equal(INDEX_RAW.includes(TODAY_TODO), false, '旧「今日待办」按钮名必须删除');
     assert.equal(INDEX.includes("this.StatusChip('"), false);
   });
 
@@ -162,12 +164,24 @@ describe('mod-home-filters · 状态机与控制集（5 → 3）', () => {
   });
 });
 
-describe('mod-home-filters · tab 取数与排序', () => {
-  test('reload：未完成 tab 走 pendingSorted，今日 tab 走 readDay(所选日期)', () => {
+describe('mod-home-filters-2 · tab 取数、排序与今日全量', () => {
+  test('reload：未完成 tab 走 pendingSorted，今日 tab 走 readDay（所选日期全部记录）', () => {
     assert.ok(RELOAD.includes("this.tab === 'pending'"));
     assert.ok(RELOAD.includes('this.pendingSorted()'));
     assert.ok(RELOAD.includes('timelineStore.readDay(this.selectedDate)'));
     assert.equal(RELOAD.includes('openIndexStore'), false, 'v2-only：不碰 v1 索引');
+  });
+
+  test('今日 tab 列出已完成 + 未完成：不做完成状态过滤，行上勾选只是展示', () => {
+    assert.ok(REFRESH_QUERY.includes('applyQuery(this.records, filter)'),
+      'tab 全量直接进 applyQuery，不再按 done 裁可见列表');
+    assert.equal(REFRESH_QUERY.includes('record.done !== true'), false, '今日不得按完成状态过滤');
+    assert.equal(REFRESH_QUERY.includes('.filter('), false, '可见范围不得额外裁剪 records');
+    assert.equal(REFRESH_QUERY.includes(SHOW_DONE), false);
+    assert.ok(LIST_ROWS.includes('this.visibleRecords'), '列表渲染过滤后的 tab 全量');
+    assert.ok(LIST_ROWS.includes('RecordRow({'));
+    assert.ok(LIST_ROWS.includes('record: item'));
+    assert.ok(LIST_ROWS.includes('onToggle:'), '逐行勾选完成仍保留（只改变记录状态）');
   });
 
   test('pendingSorted：先按日期（ts 前 10 位）再按 ts 排序，且不改动 store 返回值', () => {
@@ -181,53 +195,40 @@ describe('mod-home-filters · tab 取数与排序', () => {
     assert.ok(PENDING_SORTED.includes('left.ts < right.ts'));
   });
 
-  test('刷新可见范围：仅今日 + 开关关闭时挡掉已完成；未完成 tab 始终用 tab 全量', () => {
-    assert.ok(REFRESH_QUERY.includes("this.tab === 'today' && !this.showDone"));
-    assert.ok(REFRESH_QUERY.includes('record.done !== true'));
-    assert.ok(REFRESH_QUERY.includes('applyQuery(source, filter)'));
-    assert.ok(REFRESH_QUERY.includes(': this.records;'), '未完成 tab 不经过开关过滤');
-  });
-
   test('服务层仍是唯一的跨日未完成取数口（读 closed_at 派生）', () => {
     const service = readFileSync(TIMELINE_PATH, 'utf8');
     assert.ok(service.includes('pendingRecords(): ScheduleRecord[]'));
     assert.ok(service.includes('openRecords(loaded.day'));
   });
+
+  test('query.ts 不再宣称与完成状态开关正交（开关已删除）', () => {
+    const query = readFileSync(QUERY_PATH, 'utf8');
+    assert.equal(query.includes(TOGGLE_LABEL), false);
+    assert.ok(query.includes('完成状态不做过滤'));
+  });
 });
 
-describe('mod-home-filters · 计数、空态与不变量', () => {
-  test('今日计数 = 今日未完成条数，开关开启只追加「共 N 条」而不替换它', () => {
+describe('mod-home-filters-2 · 计数、空态与不变量', () => {
+  test('今日计数 = 当天记录总数（tab 全量），不是未完成数、不是可见列表长度', () => {
     assert.ok(RELOAD.includes('this.statusText = this.todayCountText();'), 'reload 今日分支走统一计数文案');
-    assert.ok(TODAY_COUNT_TEXT.includes('`今日 ${this.pendingCountOf(this.records)} 条未完成`'));
-    assert.ok(TODAY_COUNT_TEXT.includes("(this.showDone ? ` · 共 ${this.records.length} 条` : '')"));
-    assert.ok(PENDING_COUNT.includes('record.done !== true'));
-    assert.equal(TODAY_COUNT_TEXT.includes('visibleRecords.length'), false, '计数不能取被开关裁过的可见列表');
+    assert.ok(TODAY_COUNT_TEXT.includes('`今日 ${this.records.length} 条（v2 时间线，自动同步）`'),
+      '今日 N 条 = 当天记录总数');
+    assert.equal(TODAY_COUNT_TEXT.includes('pendingCountOf'), false, '不再按未完成数计数');
+    assert.equal(TODAY_COUNT_TEXT.includes('visibleRecords.length'), false, '计数不取被过滤的可见列表');
   });
 
-  test('拨「显示已完成」即时重算副标题：开→含共 N 条、关→去掉，未完成计数两种状态相同', () => {
-    // ArkTS 不能在 Node 跑，这里按本文件惯例做源码级静态钉死：
-    // reload 与 onShowDoneChange 调同一个 todayCountText()，后缀不可能停留在上次 reload 的旧值。
-    assert.ok(SHOW_DONE_CHANGE.includes('this.statusText = this.todayCountText();'),
-      '拨开关必须重算计数文案（含后缀）');
-    assert.ok(SHOW_DONE_CHANGE.includes("this.tab === 'today'"), '只在今日 tab 重算');
-    assert.ok(SHOW_DONE_CHANGE.includes('this.records.length > 0'), '空态/错误态文案不被覆盖');
-    assert.equal(SHOW_DONE_CHANGE.includes('this.reload()'), false, '重算后缀不得重读磁盘');
-
-    // 三种断言对应三种行为：开关开→后缀取 tab 全量（含已完成）；关→后缀消失；
-    // 主计数始终取 pendingCountOf（未完成集合），表达式里不含 showDone，故两态相同。
-    assert.ok(TODAY_COUNT_TEXT.includes('this.pendingCountOf(this.records)'), '主计数取未完成集合');
-    assert.ok(TODAY_COUNT_TEXT.includes("this.showDone ? ` · 共 ${this.records.length} 条` : ''"),
-      '后缀由 showDone 门控，N = tab 全量（含已完成）');
-    const pendingAt = TODAY_COUNT_TEXT.indexOf('this.pendingCountOf(this.records)');
-    const suffixAt = TODAY_COUNT_TEXT.indexOf("this.showDone ? ` · 共");
-    assert.ok(pendingAt >= 0 && suffixAt > pendingAt, '主计数与后缀同处一条文案');
-    assert.equal(TODAY_COUNT_TEXT.slice(pendingAt, suffixAt).includes('showDone'), false,
-      '未完成计数表达式不得依赖 showDone（两态必须相同）');
+  test('无任何「共 M 条」后缀：今日与未完成副标题都不含「共」', () => {
+    assert.equal(TODAY_COUNT_TEXT.includes('共'), false, '今日副标题无「共 M 条」');
+    assert.ok(RELOAD.includes('`未完成 ${this.records.length} 条（v2 时间线，自动同步）`'),
+      '未完成 tab 副标题 = 未完成 N 条');
+    assert.equal(RELOAD.includes('条未完成'), false, '旧「共 N 条未完成」句式已删');
+    assert.equal(INDEX.includes('· 共 '), false, '首页所有副标题都无「· 共 M 条」后缀');
   });
 
   test('空态文案：今日 → 今天还没有日程；未完成 → 没有未完成的日程；旧文案已删', () => {
     assert.ok(EMPTY_COPY.includes("this.tab === 'pending' ? '没有未完成的日程' : '今天还没有日程'"));
     assert.ok(TAB_EMPTY.includes("Text('没有未完成的日程')"));
+    assert.equal(TAB_EMPTY.includes('this.records.length > 0'), false, '今日不再有「全已完成所以列表空」的空态');
     assert.ok(INDEX.includes("Text('✨ 今日汇总')"));
     assert.ok(INDEX.includes("Text('今天还没有日程')"), '今日汇总块的今日空态灰字保留');
     assert.ok(RECORD_LIST.includes('this.TabEmpty()'));
@@ -249,18 +250,20 @@ describe('mod-home-filters · 计数、空态与不变量', () => {
   });
 });
 
-describe('mod-home-filters · 测试与工具里没有旧控件名', () => {
-  test('retarget 过的 5 个测试文件不含旧状态名与旧控件名', () => {
+describe('mod-home-filters-2 · 测试与工具里没有旧控件名', () => {
+  test('retarget 过的测试文件不含旧状态名、旧控件名或已删开关名', () => {
     const files = [
       'b3Batch.test.mjs', 'timelineService.test.mjs', 'uiTokens.test.mjs',
-      'b4CalendarWiring.test.mjs', 'quickRecordUi.test.mjs', 'openIndex.test.mjs'
+      'b4CalendarWiring.test.mjs', 'quickRecordUi.test.mjs', 'openIndex.test.mjs', 'query.test.mjs'
     ];
     for (const name of files) {
       const text = readFileSync(new URL(name, HERE), 'utf8');
       assert.equal(text.includes('showAllPending'), false, `${name} 仍引用旧状态名`);
       assert.equal(text.includes('statusFilter'), false, `${name} 仍引用旧状态名`);
-      for (const label of REMOVED_LABELS) {
-        assert.equal(text.includes(label), false, `${name} 仍引用旧控件名 ${label}`);
+      assert.equal(text.includes(SHOW_DONE), false, `${name} 仍引用已删开关状态名`);
+      assert.equal(text.includes(ON_SHOW_DONE_CHANGE), false, `${name} 仍引用已删开关回调`);
+      for (const label of [...REMOVED_LABELS, TOGGLE_LABEL]) {
+        assert.equal(text.includes(label), false, `${name} 仍引用被删控件名 ${label}`);
       }
     }
   });
@@ -272,8 +275,8 @@ describe('mod-home-filters · 测试与工具里没有旧控件名', () => {
     for (const path of [DEVICE_ACCEPT_PATH, QA_TABLE_PATH]) {
       const tool = readFileSync(path, 'utf8');
       assert.equal(tool.includes(TODAY_TODO), false, `${path.pathname} 仍残留旧「${TODAY_TODO}」fallback 标签`);
-      for (const label of REMOVED_LABELS) {
-        assert.equal(tool.includes(label), false, `${path.pathname} 仍引用旧控件名 ${label}`);
+      for (const label of [...REMOVED_LABELS, TOGGLE_LABEL]) {
+        assert.equal(tool.includes(label), false, `${path.pathname} 仍引用被删控件名 ${label}`);
       }
     }
     // 仍容忍编辑器/详情里逐条的「已完成 / 未完成」状态文案：本守卫只禁带引号的旧状态片与旧 tab 名。

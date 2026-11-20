@@ -6,6 +6,7 @@
     "pages/Settings",
     "pages/Handwriting",
     "pages/RemoteControl",
+    "pages/Instances",
     "pages/Chats",
     "pages/ChatDetail"
   ]

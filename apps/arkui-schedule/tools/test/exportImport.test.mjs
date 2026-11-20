@@ -825,8 +825,8 @@ describe('reconcileBeforeAppend：写盘前的幂等复核（M2）', () => {
   });
 });
 
-describe('exportService.ets 接线：迁移门禁 + 复核顺序 + 并发闸（源码级契约）', () => {
-  test('retargeted：v1 格式导入现在先过 E_NOT_MIGRATED，再读 v2 真值 / reconcile / timelineWriteStore.append', () => {
+describe('exportService.ets 接线：复核顺序 + 并发闸（源码级契约）', () => {
+  test('retargeted：v1 格式导入直接读 v2 真值 / reconcile / timelineWriteStore.append（空仓库无门槛）', () => {
     // 只截 v1-format 导入段（appendImportPlan → applyImportPlanOnce），不含后面的 v2 备份段。
     const start = SERVICE_SOURCE.indexOf('function applyImportPlanOnce');
     const end = SERVICE_SOURCE.indexOf('// ================================================================ v2 单时间线导出');
@@ -834,13 +834,12 @@ describe('exportService.ets 接线：迁移门禁 + 复核顺序 + 并发闸（�
     const section = SERVICE_SOURCE.slice(start, end)
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/\/\/[^\n]*/g, '');
-    const guardIndex = section.indexOf('if (!timelineStore.isMigrated())');
     const readIndex = section.indexOf('existingNow = timelineStore.readAll()');
     const reconcileIndex = section.indexOf('reconcileBeforeAppend(plan.toAppend, existingNow)');
     const writeIndex = section.indexOf('timelineWriteStore.append(record, date)');
-    assert.ok(guardIndex >= 0 && readIndex > guardIndex && reconcileIndex > readIndex && writeIndex > reconcileIndex,
-      '未迁移拒绝 → 读 v2 真值 → 复核 → 经 timelineWriteStore 落盘的顺序不可颠倒（零 devices 写）');
-    assert.match(section, /return failed\(NOT_MIGRATED_REASON\)/, '未迁移必须返回 typed E_NOT_MIGRATED');
+    assert.ok(readIndex >= 0 && reconcileIndex > readIndex && writeIndex > reconcileIndex,
+      '读 v2 真值 → 复核 → 经 timelineWriteStore 落盘的顺序不可颠倒（零 v1 写）');
+    assert.doesNotMatch(section, /isMigrated|NOT_MIGRATED/, '不得残留未迁移门槛');
     assert.match(section, /if \(reconciled\.added\.length === 0\)/, '复核为空时必须直接返回、不写盘');
     assert.doesNotMatch(section, /writePlan\(|importWriteIo\(|scheduleStore\.dayFilePath\(|devices\//,
       'v1-format 导入段不得残留任何 devices/** 写路径');

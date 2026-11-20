@@ -2,8 +2,8 @@
 //
 // 服务层 import 了 @kit.*，无法在 Node 里运行，所以这里断言**代码形状**与它依赖的纯模型契约：
 //   - timelineStore.ets 只复用 model/timeline 的解析函数，不含任何写 API；
-//   - schema 门槛 / isMigrated 唯一判定 / 未迁移降级路径都在源码里可证；
-//   - Index.ets 在 bootstrap 建立迁移态、reload 无条件读 v2；页头与 PageLayout 不动；
+//   - 空仓库首用起点 / 未知版本只读门槛 / 读方法单一 ready 前置都在源码里可证；
+//   - Index.ets 在 bootstrap 以空仓库为起点、reload 无条件读 v2；页头与 PageLayout 不动；
 //   - 另从编译产物 import parseSchemaMarker，跑 2 条真实行为断言（版本 2 / 3）。
 //
 // 前置构建：node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json
@@ -68,7 +68,8 @@ function calendarCheck(date) {
 
 test('服务 import model/timeline 的五个解析/读函数，且没有自带解析器', () => {
   assert.match(SERVICE_CODE, /from '\.\.\/model\/timeline'/);
-  for (const fn of ['parseSchemaMarker', 'parseTimelineDay', 'parseLedger', 'visibleRecords', 'openRecords', 'timelineDayPath']) {
+  assert.match(SERVICE_CODE, /from '\.\.\/model\/freshStart'/);
+  for (const fn of ['decideFreshStart', 'parseTimelineDay', 'parseLedger', 'visibleRecords', 'openRecords', 'timelineDayPath']) {
     assert.match(SERVICE_CODE, new RegExp(`\\b${fn}\\b`), `缺少对 ${fn} 的复用`);
     assert.doesNotMatch(SERVICE_CODE, new RegExp(`function\\s+${fn}\\s*\\(`), `${fn} 不得在服务里重新实现`);
   }
@@ -85,21 +86,22 @@ test('服务只用 CoreFileKit 的只读文件接口（readTextSync/accessSync/l
   assert.match(SERVICE_CODE, /fs\.listFileSync/);
 });
 
-test('schema 门槛：解析 schema.json 后 ok !== true 一律降级为非 v2', () => {
+test('首用门槛：缺标记 = 空仓库正常起点；未知版本 = E_SCHEMA_UNKNOWN 只读', () => {
   const ensure = methodBody(SERVICE_CODE, 'ensureReady');
-  assert.match(ensure, /const marker = parseSchemaMarker\(/);
-  assert.match(ensure, /marker\.ok !== true/);
-  assert.match(ensure, /this\.v2 = false/);
+  assert.match(ensure, /decideFreshStart\(markerText\)/);
+  assert.match(ensure, /schemaProblem = 'E_SCHEMA_UNKNOWN'/);
+  assert.doesNotMatch(SERVICE_CODE, /NOT_MIGRATED|isMigrated|迁移/);
   assert.match(SERVICE, /schema\.json/);
 });
 
-test('isV2() 只有 ready 且标记明确为 v2 时才为真（未迁移路径可证）', () => {
-  const body = methodBody(SERVICE_CODE, 'isV2');
-  assert.match(body, /return this\.ready && this\.v2/);
+test('schemaProblemText() 只有未知版本才返回 typed 只读码', () => {
+  const body = methodBody(SERVICE_CODE, 'schemaProblemText');
+  assert.match(body, /return this\.ready \? this\.schemaProblem : ''/);
+  assert.doesNotMatch(SERVICE_CODE, /\bisV2\s*\(|\bisMigrated\s*\(/);
 });
 
-test('v2-only：isMigrated() 是唯一读写门槛，readMode/useV2 已彻底消失', () => {
-  assert.match(methodBody(SERVICE_CODE, 'isMigrated'), /return this\.isV2\(\)/);
+test('v2-only：没有读模式开关，也没有已删除的迁移门槛', () => {
+  assert.doesNotMatch(SERVICE_CODE, /\bisMigrated\s*\(/);
   assert.doesNotMatch(SERVICE_CODE, /\breadMode\s*\(/);
   assert.doesNotMatch(SERVICE_CODE, /\bsetReadMode\s*\(/);
   assert.doesNotMatch(SERVICE_CODE, /\buseV2\s*\(/);
@@ -133,10 +135,10 @@ test('每个公开读方法都有 try/catch，异常只记一条 [tl] 日志并�
   assert.ok(logs.length >= 6, `期望至少 6 条 [tl] 日志，实际 ${logs.length}`);
 });
 
-test('degrade：非 v2 时 readDay / readAll / pendingRecords 直接返回 []', () => {
+test('fresh start：读方法只判 ready，空仓库返回 [] 且无 banner', () => {
   for (const name of ['readDay', 'readAll', 'pendingRecords']) {
     const body = methodBody(SERVICE_CODE, name);
-    assert.match(body, /if \(!this\.isV2\(\)/, `${name}() 必须在非 v2 时降级`);
+    assert.match(body, /if \(!this\.isReady\(\)/, `${name}() 必须以 ready 为唯一前置`);
     assert.match(body, /return \[\]/, `${name}() 必须返回空数组`);
   }
 });
@@ -182,7 +184,7 @@ test('服务不调用 openIndexStore / reconcile，也不建立派生索引', ()
 
 test('服务导出契约要求的完整 API 与单例', () => {
   for (const name of [
-    'ensureReady', 'isReady', 'isV2', 'isMigrated',
+    'ensureReady', 'isReady', 'schemaProblemText',
     'listDates', 'readDay', 'readAll', 'pendingRecords', 'readSummaryText'
   ]) {
     assert.match(SERVICE_CODE, new RegExp(`\\b${name}\\s*\\(`), `缺少 API ${name}`);
@@ -235,10 +237,10 @@ test('v2-only：无任何读模式开关/激活位的 AppStorage 写入', () => 
   assert.doesNotMatch(INDEX_CODE, /timelineModeSwitch|v2ActivationService/);
 });
 
-test('bootstrap 建立唯一迁移态，且绝不写 v1 索引（无 openIndexStore）', () => {
+test('bootstrap 走空仓库起点：没有 unmigrated 态与迁移入口，不写 v1 索引', () => {
   const body = methodBody(INDEX_CODE, 'bootstrap');
   assert.match(body, /await timelineStore\.ensureReady/);
-  assert.match(body, /this\.unmigrated = !timelineStore\.isMigrated\(\)/);
+  assert.doesNotMatch(body, /unmigrated|isMigrated|Migration|迁移/);
   assert.doesNotMatch(body, /openIndexStore|reconcile\(/);
   assert.doesNotMatch(INDEX_CODE, /import \{ openIndexStore \}/);
 });
@@ -258,13 +260,13 @@ test('页头注释与 PageLayout 结构未被本模块改动', () => {
 
 // ---------------------------------------------------------------- 纯模型契约（编译产物真实行为）
 
-test('parseSchemaMarker：版本 3 判为不支持（服务据此判未迁移）', () => {
+test('parseSchemaMarker：版本 3 判为不支持（服务据此标记只读）', () => {
   const marker = parseSchemaMarker('{"schemaVersion":3}');
   assert.equal(marker.ok, false);
   assert.equal(marker.version, 3);
 });
 
-test('parseSchemaMarker：版本 2 判为通过（服务据此判定已迁移）', () => {
+test('parseSchemaMarker：版本 2 判为通过（正常 v2 仓库）', () => {
   const marker = parseSchemaMarker('{"schemaVersion":2}');
   assert.equal(marker.ok, true);
   assert.equal(marker.version, 2);

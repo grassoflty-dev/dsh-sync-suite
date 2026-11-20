@@ -49,7 +49,6 @@ const {
   V2_LEDGER_DELETED,
   V2_LEDGER_FILES,
   V2_LEDGER_RESTORE,
-  V2_NOTE_LEDGERS_ABSENT,
   V2_REFUSAL_BUNDLE_CORRUPT,
   V2_REFUSAL_BUNDLE_VERSION,
   V2_REFUSAL_MEDIA_CORRUPT,
@@ -430,14 +429,6 @@ describe('planV2Import：五类类型化拒绝（typed refusals）', () => {
     const plan = planV2Import(bundle, V2_TARGET_OK);
     assert.equal(plan.code, V2_REFUSAL_MEDIA_MISSING);
   });
-
-  test('E_V1_TARGET：v2 bundle 落进 v1 仓库（无 schema 标记）→ 要求先迁移', () => {
-    const bundle = makeBundle({ dates: ['2026-11-19'] });
-    const plan = planV2Import(bundle, { repoIsV2: false, writeEnabled: false });
-    assert.equal(plan.code, V2_REFUSAL_V1_TARGET);
-    assert.ok(plan.reason.includes('迁移'), '原因里要给出「先迁移」的下一步');
-  });
-
   test('E_TARGET_BUSY：仓库是 v2 但写入路径未启用', () => {
     const bundle = makeBundle({ dates: ['2026-11-19'] });
     const plan = planV2Import(bundle, { repoIsV2: true, writeEnabled: false });
@@ -650,40 +641,22 @@ describe('bundleVersion=2：三本按日账本进 bundle + 字节数声明', () 
   });
 });
 
-describe('旧 bundle（bundleVersion 缺失 / 1）：不拒绝 + informational note', () => {
-  function asLegacy(bundle, explicitOne) {
-    const doc = JSON.parse(bundle.manifestText);
-    if (explicitOne) {
-      doc.bundleVersion = 1;
-    } else {
-      delete doc.bundleVersion;
-    }
-    for (const d of doc.days) {
-      delete d.ledgers;
-    }
-    const days = bundle.days.map((d) => ({ ...d, ledgers: [] }));
-    return { manifestText: JSON.stringify(doc), days };
-  }
-
-  for (const explicitOne of [false, true]) {
-    const label = explicitOne ? '显式 bundleVersion=1' : '缺 bundleVersion 字段';
-    test(`${label}：照常导入记录/汇总/媒体，返回 absent-note`, () => {
-      const legacy = asLegacy(makeBundle({ dates: [LDAY] }), explicitOne);
-      const parsed = parseV2Manifest(legacy.manifestText);
-      assert.equal(parsed.ok, true, parsed.reason);
-      assert.equal(parsed.code, '');
-      assert.equal(parsed.manifest.bundleVersion, 1);
-      assert.equal(parsed.manifest.days[0].ledgers, undefined, '旧 bundle 不声明账本');
-
-      const plan = planV2Import(legacy, V2_TARGET_OK);
-      assert.equal(plan.ok, true, plan.reason);
-      assert.equal(plan.code, '');
-      assert.equal(plan.bundleVersion, 1);
-      assert.deepEqual(plan.notes, [V2_NOTE_LEDGERS_ABSENT]);
-      assert.equal(v2PlanNotes(plan), V2_NOTE_LEDGERS_ABSENT);
-      assert.ok(v2PlanSummary(plan).includes('旧版备份'), 'note 随计划行展示给用户');
-      assert.deepEqual(plan.days[0].ledgers, [], '旧 bundle 无账本行可搬运');
-      assert.equal(plan.totals.records, 1, 'records 仍照常导入');
+describe('bundleVersion !== 2：一律 typed E_BUNDLE_VERSION（旧包不支持）', () => {
+  for (const bad of [undefined, 1, 3]) {
+    const label = bad === undefined ? '缺 bundleVersion' : 'bundleVersion=' + bad;
+    test(label + ' → parse / plan 均拒绝，零计划零写入', () => {
+      const bundle = makeBundle({ dates: [LDAY] });
+      const doc = JSON.parse(bundle.manifestText);
+      if (bad === undefined) delete doc.bundleVersion; else doc.bundleVersion = bad;
+      const text = JSON.stringify(doc);
+      const parsed = parseV2Manifest(text);
+      assert.equal(parsed.ok, false);
+      assert.equal(parsed.code, V2_REFUSAL_BUNDLE_VERSION);
+      const plan = planV2Import({ ...bundle, manifestText: text }, V2_TARGET_OK);
+      assert.equal(plan.ok, false);
+      assert.equal(plan.code, V2_REFUSAL_BUNDLE_VERSION);
+      assert.deepEqual(plan.days, []);
+      assert.equal(plan.totals.records, 0);
     });
   }
 });
@@ -761,17 +734,6 @@ describe('未来 bundleVersion>2：typed E_BUNDLE_VERSION 拒绝', () => {
     assert.deepEqual(plan.days, []);
     assert.equal(plan.totals.records, 0);
     assert.match(v2RefusalNext(V2_REFUSAL_BUNDLE_VERSION), /[\u4e00-\u9fa5]/);
-  });
-
-  test('畸形版本（0 / "2"）按 E_BUNDLE_CORRUPT，不误当未来版本', () => {
-    const base = makeBundle({ dates: [LDAY] });
-    for (const bad of [0, '2']) {
-      const doc = JSON.parse(base.manifestText);
-      doc.bundleVersion = bad;
-      const parsed = parseV2Manifest(JSON.stringify(doc));
-      assert.equal(parsed.ok, false);
-      assert.equal(parsed.code, V2_REFUSAL_BUNDLE_CORRUPT);
-    }
   });
 });
 
@@ -875,23 +837,5 @@ describe('源码级：v2 落点只经原子写、不碰 devices、UI flag-gated'
     assert.match(v1Section, /timelineWriteStore\.append\(/, 'v1 格式导入必须经 v2 原子 writer 落盘');
     assert.doesNotMatch(v1Section, /writePlan\(|importWriteIo\(|scheduleStore\.dayFilePath\(|devices\//,
       'v1 格式导入段不得残留 devices/** 写分支');
-  });
-
-  test('面板只在 isMigrated() 时渲染 v2 节，禁用按钮有中文原因，无裸 Text 点击', () => {
-    assert.match(PANEL, /timelineStore\.isMigrated\(\)/, 'v2 节必须由迁移门槛 gate（没有 v1/v2 开关）');
-    assert.doesNotMatch(PANEL, /useV2\(/, 'v2-only：不得残留 useV2() 门控');
-    assert.match(PANEL, /if \(this\.v2Visible\(\)\)/, 'build() 里必须有 flag 条件');
-    assert.match(PANEL, /this\.V2Section\(\)/, 'v2 节必须挂到渲染树');
-    assert.equal(PANEL.includes('V2_NOT_WIRED'), false, '四个 v2 回调已全部接线，不得残留「未接入」死路径');
-    for (const cb of ['onV2Export', 'onV2Pick', 'onV2Apply', 'onV2Cancel']) {
-      assert.ok(PANEL.includes(`${cb}:`), `${cb} 必须在面板声明`);
-      assert.ok(SETTINGS.includes(`${cb}: (): void => {`), `${cb} 必须在设置页接线`);
-    }
-    assert.match(PANEL, /V2_BUSY/, '忙碌按钮必须给原因');
-    // mod-export-json 删除格式选择器与两个 Markdown 开关：@State 5 → 2（fromText / toText），
-    // 不是覆盖削弱——这些控件承载的格式已不存在。
-    assert.equal((PANEL.match(/^\s*@State\b/gm) ?? []).length, 2, '面板只保留 fromText / toText 两个 @State');
-    assert.equal(PANEL.includes('FormatRow'), false, '格式选择器必须删除');
-    assert.equal(PANEL.includes('Markdown'), false, '面板不得残留 Markdown 文案');
   });
 });

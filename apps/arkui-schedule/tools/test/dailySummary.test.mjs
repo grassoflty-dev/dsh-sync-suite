@@ -448,12 +448,4 @@ describe('AI 失败不覆盖旧汇总（服务层顺序，v2-only 落点）', ()
     const writeAt = STORE_CODE.indexOf('timelineWriteStore.appendSummary(');
     assert.ok(replyAt > 0 && writeAt > replyAt);
   });
-
-  test('未迁移拒绝排在任何 IO（AI / 写盘）之前', () => {
-    const guardAt = STORE_CODE.indexOf('if (!timelineStore.isMigrated())');
-    const summarizeAt = STORE_CODE.indexOf('await summarize(');
-    const writeAt = STORE_CODE.indexOf('timelineWriteStore.appendSummary(');
-    assert.ok(guardAt > 0 && summarizeAt > guardAt && writeAt > guardAt,
-      'E_NOT_MIGRATED 必须在 AI 请求与落盘之前（零 IO 拒绝）');
-  });
 });

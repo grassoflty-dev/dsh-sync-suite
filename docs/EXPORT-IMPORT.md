@@ -367,17 +367,19 @@ v2-<stamp>/
 - 账本从源仓库 **append-only 逐字节复制**（不解析、不重排、不重写历史行），与 `DATA-CONTRACT-v2.md` §7 P2-3 的「旧字节是新字节严格前缀」一致；
 - 确定性不变：days 按 date、ledgers 按固定名序、records 按 `(ts,id)`、media 按 `(date,file)`；同数据重复导出逐字节相同。
 
-### 7.1 Bundle/version compatibility rule（verbatim，与 `model/exportImport.ts` 头注释同源）
+### 7.1 Bundle/version rule（mod-drop-v1）
 
-> - `bundleVersion` missing or `1` (old bundles): import as today (records/summary/media only), and **log/return an informational note** that ledgers were absent — do not refuse.
-> - `bundleVersion: 2`: import ledgers too, **union** with the target's existing ledgers (append-only, dedupe by `(id,ts)` for delete/restore, `(id,ts,dedupeKey)` for conflicts), never truncating target bytes; record/summary/media rules unchanged (media add-only, preflight sha256 unchanged).
-> - Refuse with typed `E_BUNDLE_VERSION` only for a *future* unknown bundleVersion (`> 2`).
+> 只支持当前一种 bundle：undleVersion: 2，必须同时带 media.zip 与三本按日账本。
+> 任何 undleVersion !== 2（缺失 / 1 / >2 / 畸形）均以 typed E_BUNDLE_VERSION 拒绝，
+> 零计划、零写入。旧 bundle（缺 media.zip / 缺账本）**不支持**，不再降级导入、不再返回 informational note。
 
-中文等价说明（面板展示文案同源）：
-- 旧 bundle（缺字段或 1）不拒绝：照常导入记录/汇总/媒体，返回 informational note（`V2_NOTE_LEDGERS_ABSENT`），服务层 `console.info` 记日志、面板把 note 附在计划行后；跨端删除/撤销/冲突审计状态不会因旧 bundle 被搬运。
-- `bundleVersion: 2`：三本账本与目标已有账本做**并集**，只追加目标里没有的新行；`mergeV2LedgerText()` 保证目标已有字节恒为新字节前缀（缺尾换行只补 `\n`），delete/restore 按 `(id,ts)`、conflicts 按 `(id,ts,dedupeKey)` 去重，坏行按整行去重；重复导入零新增（幂等）。
-- 只有 `bundleVersion > 2` 以 typed `E_BUNDLE_VERSION` 拒绝（下一步：换用 `bundleVersion<=2` 的备份或升级工具）；畸形值（非正整数 / 非数字）按 `E_BUNDLE_CORRUPT`，不误判为未来版本。
-- `schemaVersion` 仍固定为 2、规则不变（非 2 仍是 `E_SCHEMA_UNKNOWN`）；`bundleVersion` 不是仓库级 schema 门槛，只是 bundle 格式门槛。
+中文说明：
+- undleVersion: 2：三本账本与目标已有账本做**并集**，只追加目标里没有的新行；
+  mergeV2LedgerText() 保证目标已有字节恒为新字节前缀，delete/restore 按 (id,ts)、
+  conflicts 按 (id,ts,dedupeKey) 去重，坏行按整行去重；重复导入零新增（幂等）。
+  records/summary/media 规则不变（media 只增、预检 sha256 不变）。
+- 非 2 的 bundleVersion 一律 typed E_BUNDLE_VERSION；下一步：用当前版本工具重新导出一份完整备份。
+- schemaVersion 仍固定为 2、规则不变（非 2 仍是 E_SCHEMA_UNKNOWN）。
 
 ### 7.2 验证（`tools/test/exportImportV2.test.mjs`）
 
@@ -396,10 +398,7 @@ v2-<stamp>/
 **确定性**：zip 条目按 `(date,file)` 排序，桥 `zipWrite` 用固定 DOS 时间（1980-01-01）+
 STORE 压缩，因此同一份数据两次导出的 manifest / media.zip / 日文件逐字节相同（测试钉死）。
 
-**Bundle/version compatibility（续 §7.1）**：
-- 新 bundle（有 `mediaArchive`）：从 `media.zip` 读媒体；旧 bundle（缺 `mediaArchive`，可能是按日 zip 或散图）
-  **不拒绝**，仍从旧位置读媒体并返回 informational note `V2_NOTE_MEDIA_ARCHIVE_ABSENT`，与账本 note 可并存。
-- `bundleVersion > 2` 仍 typed `E_BUNDLE_VERSION`；缺失/1 的旧 bundle note 规则不变。
+**Bundle/version rule（续 §7.1）**：只支持 undleVersion:2 且带 media.zip 的当前 bundle；缺 mediaArchive 或 undleVersion!==2 一律 typed E_BUNDLE_VERSION，不再从按日散图 / 按日 zip 降级导入。
 
 **媒体校验规则（fail-closed，零写入）**：
 1. dry-run 读回 `media.zip` 字节，先比对整包 `mediaArchive.sha256` / `bytes`；不符 → `E_MEDIA_CORRUPT`；

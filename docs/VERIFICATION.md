@@ -1114,3 +1114,153 @@ PASS  完成反馈  编辑页显示「手迹 2 页」
 4. **详情页附件**——详情页标签 / 附件区需点按进入，注入不可行（见 §14.6）。
 5. **下拉刷新**——需手势 / 点按注入触发，无法自动化。
 6. **全部未完成·索引**——索引日志路径本次未触发、未覆盖。
+
+## 15. 设备验证（2026-11-20，v2-only 之后）
+
+> 本节是一次**只读为主的验收 pass**（feature work 暂停）。构建的是**当前工作树**：含未提交的
+> `mod-instance-list` 批（`pages/Instances.ets`、`model/instanceSeed.ts`、`services/instanceStore.ets`、
+> 两份 `main_pages.json`、测试与 docs）；**未 stash / revert 任何改动**。
+> 设备 `hdc list targets` → `6MFBB25C27205131`（在线）。截图与日志均在 `.tmp/`（gitignore）。
+> 原则同 §14：**有证据才翻转，FAIL 保持 FAIL，未验证的继续写 unverified**。
+
+### 15.1 总表
+
+> **mod-drop-v1 订正**：本节的迁移项（#2 未迁移 banner / 写拒绝、#3 应用内迁移、#6 迁移中途打断）保留为**历史设备证据**，但产品语义已被 `mod-drop-v1` **superseded**：横幅、`E_NOT_MIGRATED`、迁移 UI 与三个迁移代码文件已删除，空仓库改为正常起点（空列表 + 首用骨架）。这些历史 PASS / FAIL / BLOCKED 结论**不再代表现行行为**；现行空仓库流程端侧仍 `unverified`。
+
+| # | 项 | 结论 | 一行证据 |
+| --- | --- | --- | --- |
+| 1 | 构建 / 签名 / 安装 / 启动 + 首页 tabs | **PASS** | `BUILD SUCCESSFUL`；签名 HAP 4,997,272 B；`install bundle successfully` / `start ability successfully`；`.tmp/device-shots/home-20261120.jpeg` 见 今日/未完成 + 显示已完成 |
+| 2 | 未迁移态 banner + 写拒绝 | **PASS** | dumpLayout 逐字 `错误 · E_NOT_MIGRATED: 时间线尚未初始化，请先迁移旧数据` + banner；点「保存」后 Toast 同码；sandbox 仍只有 `devices/`（零写入） |
+| 3 | 真实迁移（v1 → v2） | **FAILED** | `E_IO: 读取迁移输入失败：E_IO: 仅允许读取 v1 数据目录`（plan 与 apply 两次一致）；`timeline/` 未生成 |
+| 4 | v2 端到端同步 smoke | **BLOCKED** | 迁移失败 → 无 `timeline/schema.json`；设置页 `还没有配置同步仓库`；设备仓库无 `.git`，无 commit/push 链路 |
+| 5 | UI spot checks | **部分 PASS / 部分 FAILED** | 未完成 tab PASS；显示已完成开关 checked=false→true PASS；UU 提示 **FAILED**（仍显示 manual 文案）；计数行变更 **BLOCKED**（未渲染） |
+| 6 | 迁移中途打断 | **BLOCKED** | 与 #3 同因：apply 在写任何文件前即被 E_IO 拒绝，不存在可打断的部分态 |
+
+### 15.2 #1 构建 / 签名 / 安装 / 启动（PASS）
+
+```
+cd apps/arkui-schedule
+$env:DEVECO_CLI_STUDIO_PATH='D:\A-DevEco\DevEco Studio'; $env:DEVECO_SDK_HOME='D:\A-DevEco\DevEco Studio\sdk'
+powershell -ExecutionPolicy Bypass -File tools\build-harmony.ps1 -Cores 4 -Product default
+→ BUILD SUCCESSFUL in 1 s 127 ms；42 tasks in total: 21 executed, 21 up-to-date
+→ 产物 …entry-default-unsigned.hap（4,932,956 B）→ ✓ 产物验收通过
+→ overlay(finally): applied=false（已断言）
+```
+本次是**增量构建**（CompileArkTS 为 `UP-TO-DATE`，复用 17:56:08 的 `modules.abc`），已核对工作树确已编入：
+HAP 内 `resources/base/profile/main_pages.json` = 9 页（含 `pages/Instances`），`modules.abc` 中
+`Instances` ×18；源 `Instances.ets` mtime 17:54:59 < `modules.abc` 17:56:08。
+
+签名首次尝试**失败**（原文）：`powershell : File ... tools\sign-hap.ps1 cannot be loaded. ... is not digitally signed. You cannot run this script on the current system. ... about_Execution_Policies`（命令未带 `-ExecutionPolicy Bypass`）。加 Bypass 后：
+
+```
+$env:JAVA_HOME='D:\jdk17\jdk-17'; $env:SIGN_PASS='itwill123'
+powershell -ExecutionPolicy Bypass -File tools\sign-hap.ps1 -StorePass $env:SIGN_PASS -KeyPass $env:SIGN_PASS -Deliver
+→ Sign Hap success! / verify-app success；SIGN_EXIT=0
+→ …\apps\arkui-schedule\dist-harmony\arkui-schedule-harmony-debug-signed.hap
+  4,997,272 B  SHA256=A748E2BFC542B10FABF5EC0AC939CD0CA7382581D255BB24DE559AC53063E0C5
+```
+（命令中 `Get-Item` 曾因我写错成仓库根 `dist-harmony\` 而报「找不到路径」，是取证命令的路径笔误，非签名失败。）
+
+```
+& $hdc -t 6MFBB25C27205131 install -r …\dist-harmony\arkui-schedule-harmony-debug-signed.hap
+→ install bundle successfully.   INSTALL_EXIT=0
+& $hdc -t 6MFBB25C27205131 shell "aa start -a EntryAbility -b com.itwill.schedule"
+→ start ability successfully.    LAUNCH_EXIT=0
+& $hdc shell "ps -ef | grep itwill" → com.itwill.schedule + com.itwill.schedule:render 存活
+```
+截图：`.tmp/device-shots/home-20261120.jpeg`（2560×1600，149,266 B）—— 横屏双栏，左栏「今日 / 未完成」两个 tab 与「显示已完成」开关清晰可见；右栏 `从左侧选一条日程查看`。
+
+### 15.3 #2 未迁移态（PASS）
+
+```
+& $hdc shell "ls -la /data/app/el2/100/base/com.itwill.schedule/haps/entry/files/"
+→ attachments-src, drafts, git-repo, sync-baseline.json
+& $hdc shell "ls -la …/files/git-repo/" → 仅 devices/
+& $hdc shell "ls -la …/files/git-repo/timeline/ 2>&1 || echo NO_TIMELINE"
+→ No such file or directory / NO_TIMELINE
+```
+dumpLayout 逐字证据（`layout-home-20261120.json`）：
+`错误 · E_NOT_MIGRATED: 时间线尚未初始化，请先迁移旧数据`；
+`检测到旧版数据（devices/），尚未迁移到时间线。旧数据不会被删除。`；
+`下一步：先在 PC 端运行 v1→v2 单向迁移，生成 timeline/schema.json 后重开应用（旧数据不会删除）`。
+
+写拒绝（坐标来自 layout dump，非盲点）：
+```
+uitest uiInput inputText 400 1348 DEVPASS-unmigrated-20261120  → No Error
+uitest uiInput click 836 725                                  → No Error（保存）
+dumpLayout → Toast: E_NOT_MIGRATED: 时间线尚未初始化，请先迁移旧数据
+再 ls git-repo/ → 仍仅 devices/（零写入，无 timeline/、无本地提交）
+```
+截图：`.tmp/device-shots/quick-record-refused-20261120.jpeg`（Toast + banner + 仍留在输入框的标题）。
+补充：本次坐标/文本注入**可用**，推翻 §14.6「点按注入不可用」的旧结论（仅对当前横屏会话成立）。
+
+### 15.4 #3 真实迁移（FAILED，非「无仓库」）
+
+设备**确有** v1 仓库（故不适用「无仓库 BLOCKED」口径）：`devices/phone-a/{schedules(空),attachments,open.jsonl}`，
+`attachments/` 含 8 张 png + 2 个 zip；`git-repo/.git` 不存在；`du -sh` = 1.5M。
+先备份：`hdc file recv …/git-repo .tmp/device-shots/git-repo-backup-20261120` → 11 files / 1,553,903 B。
+
+点首页「迁移旧数据（先查看计划）」→ 面板与两步确认后的原文均为：
+
+```
+E_IO: 读取迁移输入失败：E_IO: 仅允许读取 v1 数据目录
+下一步：检查仓库可读性与 devices/ 目录后重试。
+```
+apply 后面板同位置再显示该 E_IO；`ls git-repo/` 仍只有 `devices/`，**timeline/ 未生成**。
+根因定位：`services/importV1Service.ets:192`（及 :473）调用 `importV1Reader.listNames('devices')`，
+而 `services/importV1Reader.ets:56` 要求 `relPath.startsWith('devices/')` —— 缺尾斜杠使计划阶段必然抛错，
+确认按钮（`Index.ets:683` `confirmMigrationPlan()`）未校验 `plan.refusal`，故 apply 复现同一错误。
+旁证（PC 侧工具、仅对备份只读 dry-run）：`node tools/migrate-v1-to-v2.mjs --repo .tmp/device-shots/git-repo-backup-20261120 --dry-run`
+→ `plan days=0 records=0 …`，即设备 v1 数据本身也没有日程行；即便修好该路径 bug，也只能生成空 timeline。
+截图：`.tmp/device-shots/migration-plan-20261120.jpeg`、`.tmp/device-shots/migration-apply-result-20261120.jpeg`。
+
+### 15.5 #4 v2 端到端同步（BLOCKED）
+
+证据：`timeline/` 不存在（§15.3 `ls`）；设置页 `还没有配置同步仓库` +
+`推送不可用：推送前需要先填写并保存仓库地址`（`layout-settings-20261120.json`）；
+设备 `git-repo/.git: No such file or directory`。因此无法产生 `[v2] sync <n> days` 提交、
+无法观察 `已同步·HH:MM` 三态行、无法验证 commit+push / 重启后保留。**不宣称已验证**。
+
+### 15.6 #5 UI spot checks（部分 PASS / 部分 FAILED）
+
+- **PASS**：`uitest uiInput click 703 474`（未完成）→ 页头由「今天」变「未完成」，开关从今日 tab 消失，
+  空态 `没有未完成的日程` 出现。截图 `.tmp/device-shots/pending-tab-20261120.jpeg`。
+- **PASS（状态）**：回到「今日」后 `uitest uiInput click 864 589` → layout `Toggle … checked=true`（原 false），
+  截图 `.tmp/device-shots/toggle-done-20261120.jpeg` 中开关为蓝色开启态。
+- **FAILED（UU 提示）**：设置 → 远程控制 → 访问方式选「网易 UU 远程」后，下拉框确已高亮该项
+  （`.tmp/device-shots/remote-mode-after-select-20261120.jpeg`），但下方说明行**仍是 manual 文案**
+  `你自己已有一条能访问这台电脑的地址，App 只负责保存与归一。`，**未出现** `网易UU远程` / `端口映射`；
+  也没有出现 `平板需与电脑在同一局域网`（该串在源码中本就不存在）。强制父级重渲染（点「高级 ▸」）后仍不变。
+  预期来自 `model/remoteAccess.ts:288` / `:332`，`components/settings/RemoteSection.ets:168,350` 未随模式刷新。
+  截图 `.tmp/device-shots/settings-scrolled-20261120.jpeg`、`uu-hint-20261120.jpeg`、`uu-hint-rerender-20261120.jpeg`。
+- **BLOCKED（计数行）**：开关前后两份 dump（`layout-home-baseline-20261120.json` /
+  `layout-toggle-done-20261120.json`）**都没有**任何 `条未完成` 文本节点；当前未迁移/空数据态下计数行不渲染，
+  无法验证「计数行变化」。仅能确认开关自身状态改变。
+
+### 15.7 #6 迁移中途打断（BLOCKED）
+
+与 #3 同因：`apply` 在生成/写入 timeline 之前即被 `E_IO: 仅允许读取 v1 数据目录` 拒绝，
+没有任何部分态可打断；设备侧无失败注入钩子。状态行、sandbox `ls` 与 #3 相同。
+
+### 15.8 标记翻转（保守）
+
+**新增 VERIFIED（有本次真机证据）**：工作树（含未提交 mod-instance-list）真实编译 / 签名 / 安装 / 启动；
+首页两 tab + 显示已完成开关的渲染；横屏坐标 + 文本注入可用；未迁移 banner 与 typed `E_NOT_MIGRATED` Toast
+及零写入；未完成 tab 切换与空态；显示已完成开关自身状态切换。
+
+**新增 FAIL（保持）**：应用内 v1→v2 迁移 `E_IO: 仅允许读取 v1 数据目录`（`importV1Service.ets:192` vs
+`importV1Reader.ets:56`）；UU 方式说明行不刷新（仍显示 manual 文案）。
+
+**STILL UNVERIFIED（本次未翻转）**：实际 v2 timeline 写入、`[v2] sync <n> days` 提交与 push、
+`已同步·HH:MM` 三态行、迁移后重启保留、双设备并发、OCR 端到端、远程 Web 连接、聊天「在电脑上继续」、
+第二设备同步、插件 live。§6 / §14.8 / `RUNBOOK.md` §6 的 unverified 列表继续有效，不因设备在线而自动翻转。
+
+### 15.9 收尾状态
+
+- 设备已 `aa force-stop` → `aa start` 重启，`start ability successfully`，进程存活；`.tmp/device-shots/final-home-20261120.jpeg`。
+- `node apps/arkui-schedule/tools/overlay.mjs status` → `[overlay] applied=false`。
+- `git status --porcelain` 与 pass 开始时**完全一致**：仅既有未提交 mod-instance-list 工作
+  （`main_pages.json` ×2、`instances.ts`、`Settings.ets`、`instanceStore.ets`、`instanceModel.test.mjs`、
+  `docs/MODULES.md`、`docs/REMOTE-INSTANCES.md`、`docs/ROADMAP.md`；新增 `instanceSeed.ts`、
+  `pages/Instances.ets`、`instanceList.test.mjs`）+ 本文件修改；截图与日志在 gitignore 的 `.tmp/`。
+- 复现入口：构建/签名/安装/启动命令见 §15.2；dumpLayout 解析辅助 `.tmp/layout-nodes.mjs`（非仓库文件）。
