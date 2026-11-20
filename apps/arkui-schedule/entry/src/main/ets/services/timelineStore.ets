@@ -1,21 +1,22 @@
 /**
- * v2 单时间线**只读**服务（mod-v2-read-service）。
+ * v2 单时间线**只读**服务（mod-v2-only：v2 是唯一读写路径）。
  *
  * 职责边界（与契约 docs/DATA-CONTRACT-v2.md §2/§6/§7/§11 对齐）：
  * - 只读：本文件**从不写任何 v2 路径**，不提供任何写入口；唯一的持久化写入方
- *   是后面的同步 / 写入模块，本服务连临时文件都不建。
+ *   是同步 / 写入服务，本服务连临时文件都不建。
  * - 门槛：ensureReady() 只读一次 `<filesDir>/git-repo/timeline/schema.json`，交给纯函数
- *   parseSchemaMarker 判定；`schemaVersion === 2` 才算 v2。缺文件、坏 JSON、别的版本一律
- *   **降级为「非 v2」**，调用方因此继续走 v1 路径；本文件不修改任何标记。
+ *   parseSchemaMarker 判定；`schemaVersion === 2` 才算已迁移。缺文件、坏 JSON、别的版本
+ *   一律是**未迁移**状态：首页显示固定横幅，所有写入在任何 IO 之前抛 E_NOT_MIGRATED；
+ *   本文件不修改任何标记、不迁移数据、不删 v1。
  * - 没有 open.jsonl、没有 reconcile、没有派生索引：v2 的「未完成」直接由记录内 closed_at
  *   缺省推导（model/timeline.ts 的 openRecords()），本服务只做文件字节与时机。
  * - 不自带解析器：records.json / 两本账本 / schema 标记全部交给 model/timeline.ts 的纯函数，
  *   本文件只负责定位路径、读文本、把纯函数结果转给调用方。
  * - 删撤销账本 visibleRecords() 是唯一的展示记录来源；day.allRecords 绝不外泄给页面。
- * - v2 模式下启动不得写 v1 索引（`openIndexStore.reconcile` 由 `!useV2()` 守护）。
+ * - 没有 v1/v2 模式开关、没有读模式回退：任何读路径都直接查 v2 时间线；未迁移时返回空。
  * - 任何读取异常都吞掉并记一条 `console.info('[tl] …')`，绝不抛给调用方；
  *   返回类型沿用页面既有的 ScheduleRecord，v2 的多余字段（media/opened_at/closed_at 等）
- *   随对象原样带出，不做字段裁剪（下一模块再负责媒体占位与类型细化）。
+ *   随对象原样带出，不做字段裁剪。
  */
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
@@ -29,7 +30,6 @@ import {
 } from '../model/timeline';
 import type { TimelineDay, TimelineRecord, LedgerEntry } from '../model/timeline';
 import type { ScheduleRecord } from '../model/types';
-import { PERSISTENT_READ_MODE_KEY } from '../model/persistentSettings';
 
 const ROOT_DIR_NAME: string = 'git-repo';
 const SCHEMA_FILE_NAME: string = 'schema.json';
@@ -38,13 +38,6 @@ const RESTORE_FILE_NAME: string = 'restore.jsonl';
 const SUMMARY_FILE_NAME: string = 'summary.json';
 /** 日期目录的**形状**：YYYY-MM-DD；真实日历合法性由 isCalendarDate() 往返校验（契约 §2 可测项）。 */
 const DATE_KEY_RE: RegExp = /^\d{4}-\d{2}-\d{2}$/;
-
-/**
- * 读模式在 AppStorage 里的键；取值仅 'v1' | 'v2'，缺省视作 'v1'。
- * P1-5：键与缺省值由 model/persistentSettings.ts 统一定义，EntryAbility 启动时
- * 用 PersistentStorage.persistProp 绑定；这里的 setOrCreate 写入即自动落盘。
- */
-export const TIMELINE_READ_MODE_KEY: string = PERSISTENT_READ_MODE_KEY;
 
 /**
  * 一日三文件的解析结果（loadDay 的返回类型）。
@@ -65,8 +58,7 @@ export class TimelineStore {
   /**
    * 初始化（幂等）：取 filesDir，读一次仓库级 schema 标记。
    *
-   * 任何异常都按「非 v2」降级并记日志，绝不抛；这样 bootstrap 里即便这个新服务出问题，
-   * 页面仍然按 v1 完整启动（回滚本模块也不会把用户卡在半迁移态）。
+   * 任何异常都按「未迁移」处理并记日志，绝不抛；页面据此显示唯一横幅并拒绝写入。
    */
   async ensureReady(context: object): Promise<void> {
     if (this.ready) {
@@ -77,12 +69,12 @@ export class TimelineStore {
     try {
       const markerPath = this.schemaPath();
       if (!this.fileExists(markerPath)) {
-        console.info('[tl] 缺少 timeline/schema.json，按非 v2 处理');
+        console.info('[tl] 缺少 timeline/schema.json，按未迁移处理');
       } else {
         const marker = parseSchemaMarker(fs.readTextSync(markerPath));
-        // 门槛：parseSchemaMarker(...).ok !== true → 非 v2（缺字段 / 坏 JSON / 其他版本一律降级）
+        // 门槛：parseSchemaMarker(...).ok !== true → 未迁移（缺字段 / 坏 JSON / 其他版本一律拒绝写入）
         if (marker.ok !== true) {
-          console.info('[tl] schema 标记不是 v2，按非 v2 处理：' + marker.reason);
+          console.info('[tl] schema 标记不是 v2，按未迁移处理：' + marker.reason);
           this.v2 = false;
         } else {
           this.v2 = true;
@@ -90,7 +82,7 @@ export class TimelineStore {
       }
     } catch (error) {
       this.v2 = false;
-      console.info('[tl] 读取 schema 标记失败，按非 v2 处理：' + this.errorText(error));
+      console.info('[tl] 读取 schema 标记失败，按未迁移处理：' + this.errorText(error));
     }
     this.ready = true;
   }
@@ -99,34 +91,17 @@ export class TimelineStore {
     return this.ready;
   }
 
-  /** 仓库级 schema 标记是否明确为 v2。 */
+  /** 仓库级 schema 标记是否明确为 v2（即迁移已完成）。 */
   isV2(): boolean {
     return this.ready && this.v2;
   }
 
-  /**
-   * 读模式开关：只认 'v2'，其余（含未设置）一律 'v1'。
-   * 这里只**读**不写，缺省值不落 AppStorage —— 默认行为由后续模块显式翻转。
-   */
-  readMode(): string {
-    const stored: string | undefined = AppStorage.get<string>(TIMELINE_READ_MODE_KEY);
-    return stored === 'v2' ? 'v2' : 'v1';
+  /** v2 是唯一读写路径：迁移完成即可读写；未迁移时所有写入拒绝、读返回空。 */
+  isMigrated(): boolean {
+    return this.isV2();
   }
 
-  /** 显式切换读模式（测试 / 后续灰度模块用）；非法值忽略，不写 AppStorage。 */
-  setReadMode(mode: string): void {
-    if (mode !== 'v1' && mode !== 'v2') {
-      return;
-    }
-    AppStorage.setOrCreate<string>(TIMELINE_READ_MODE_KEY, mode);
-  }
-
-  /** 同时满足「仓库是 v2」与「开关选了 v2」才走 v2 读路径。 */
-  useV2(): boolean {
-    return this.isV2() && this.readMode() === 'v2';
-  }
-
-  /** 有 records.json 的合法日历日目录（升序）。非 v2 返回空，调用方继续走 v1。 */
+  /** 有 records.json 的合法日历日目录（升序）。未迁移时返回空。 */
   listDates(): string[] {
     const dates: string[] = [];
     if (!this.isV2()) {

@@ -1,7 +1,8 @@
 /**
- * v2 单时间线**写入**服务（mod-v2-write-service）。默认**惰性**：只有仓库标记明确为 v2
- * 且开关 timeline.readMode='v2' 时才允许落盘；否则每个公开方法在**任何 IO 之前**抛出
- * `Error('timeline v2 写入未启用')`，调用方继续走原 v1 写路径。本模块不翻转开关、不接 UI。
+ * v2 单时间线**写入**服务（mod-v2-only：v2 是唯一写入路径）。
+ * 仓库标记明确为 v2（迁移完成）才允许落盘；未迁移时每个公开方法在**任何 IO 之前**
+ * 抛出 `E_NOT_MIGRATED: 时间线尚未初始化，请先迁移旧数据`，绝不回落到 v1 写入、
+ * 绝不静默写空 v2 仓库。本模块不接 UI、不迁移、不删 v1。
  *
  * 与契约 docs/DATA-CONTRACT-v2.md §3/§6/§7/§8/§11 对齐：
  * - records.json 原子替换：同目录临时文件 → `renameSync`，永不写半个文件、永不先删原文件；
@@ -35,6 +36,7 @@ import { timelineStore } from './timelineStore';
 import { parseTimelineDay, parseLedger, visibleRecords, timelineDayPath } from '../model/timeline';
 import type { TimelineRecord, TimelineMedia } from '../model/timeline';
 import type { ScheduleRecord, Attachment } from '../model/types';
+import { NOT_MIGRATED_REASON } from '../model/migrationState';
 import {
   planUpsert, planRemove, ledgerDeleteLine, ledgerRestoreLine,
   tsMillis, isValidTsShape, isNewerSummaryText, canPurge
@@ -69,8 +71,8 @@ const NEW_LINE: string = '\n';
 /** 本地媒体文件名：<sha256 前 16 位小写 hex>.jpg（与契约 §5 一致，非法附件跳过）。 */
 const MEDIA_SHA_RE: RegExp = /^[0-9a-fA-F]{64}$/;
 
-/** 未启用时的唯一错误文案（调用方据此判断「保持 v1」）。 */
-const DISABLED_MESSAGE: string = 'timeline v2 写入未启用';
+/** 未迁移时的唯一类型化中文拒绝原因（与首页横幅文案同源，见 model/migrationState）。 */
+const DISABLED_MESSAGE: string = NOT_MIGRATED_REASON;
 
 /** ts 形状错误的类型化文案（写侧删除相关入口 + append 共用）。 */
 const TS_SHAPE_ERROR: string = 'E_TS_SHAPE: 时间戳格式不合法（需 YYYY-MM-DDTHH:mm:ss 且可解析）';
@@ -101,9 +103,9 @@ export class TimelineWriteStore {
     this.ready = true;
   }
 
-  /** 唯一开关：复用只读服务的组合判定（仓库确为 v2 且读模式选了 v2）。 */
+  /** 唯一门槛：v2 是唯一路径，迁移完成即允许写；未迁移由 requireEnabled 抛类型化拒绝。 */
   isEnabled(): boolean {
-    return timelineStore.useV2();
+    return timelineStore.isMigrated();
   }
 
   /** upsert：把一条 v1 形状记录规范化为 v2 记录后写入当日 records.json。 */

@@ -1,12 +1,14 @@
 /**
- * 写入统一门面（mod-v2-dual-write-off）：所有 v1 日程写调用点都改走这里。
+ * 写入统一门面（mod-v2-only）：所有日程写调用点都走这里，v2 是唯一写入路径。
  *
- * 分流规则（唯一判定源 `timelineStore.useV2()`，即「仓库确为 v2 且开关已翻 v2」）：
- * - `!useV2()`：**仅此路径**调用 `scheduleStore.appendRecord`（翻转前的 v1 路径，保持原行为）；
- * - `useV2()`：走 `timelineWriteStore`：
+ * 规则：
+ * - 未迁移（timeline/schema.json 非 v2）→ 在任何 IO（含 outbox 停放）之前抛
+ *   `E_NOT_MIGRATED: 时间线尚未初始化，请先迁移旧数据`，零写入、零伪造成功；
+ * - 已迁移 → 一律走 `timelineWriteStore`：
  *   - writeRecord → append(upsert)；
  *   - deleteRecord → scheduleDelete（§7 删除账本，不写墓碑版本）；
  *   - restoreRecord → restore（§7 撤销账本，ts 严格晚于删除）。
+ * - **绝不调用 `scheduleStore.appendRecord`**：v1 写入路径已彻底移除。
  *
  * **失败语义（绝不 fork 两 store，P1-1）**：
  * 1. 先用 `writeV2()` 把意图**停放落盘**（durable），再做 v2 写尝试；
@@ -18,9 +20,9 @@
  *
  * 硬约束：本文件不写 AppStorage、不写 `devices/**`、不迁移数据、不引入新依赖。
  */
-import { scheduleStore } from './scheduleStore';
 import { timelineStore } from './timelineStore';
 import { timelineWriteStore } from './timelineWriteStore';
+import { NOT_MIGRATED_REASON } from '../model/migrationState';
 import { outboxStore } from './outboxStore';
 import { makeIntentId } from '../model/syncProtocol';
 import { ledgerDeleteLine, ledgerRestoreLine } from '../model/timelineWrite';
@@ -42,55 +44,40 @@ function dateOf(ts: string): string {
 }
 
 export class RecordWriter {
-  /** 唯一判定源：两个 store 共用的 useV2()（仓库是 v2 且读模式已翻 v2）。 */
-  useV2(): boolean {
-    return timelineStore.useV2();
-  }
-
-  /** 保存 / 勾选完成 / 编辑 / AI 更新：v2 upsert，否则 v1 追加。 */
+  /** 保存 / 勾选完成 / 编辑 / AI 更新：唯一 v2 upsert 路径。 */
   writeRecord(record: ScheduleRecord): void {
-    if (this.useV2()) {
-      this.writeV2('upsert', record, (): void => {
-        timelineWriteStore.append(record, dateOf(record.ts));
-      });
-      return;
-    }
-    // 翻转前的 v1 路径：保持调用点原语义，原样追加一条版本行。
-    scheduleStore.appendRecord(record);
+    this.writeV2('upsert', record, (): void => {
+      timelineWriteStore.append(record, dateOf(record.ts));
+    });
   }
 
-  /** 删除：v2 写删除账本（记录行保留到确认清行），否则 v1 追加已构造好的墓碑版本。 */
+  /** 删除：写删除账本（记录行保留到确认清行），绝不写 v1 墓碑版本。 */
   deleteRecord(record: ScheduleRecord): void {
-    if (this.useV2()) {
-      this.writeV2('delete', record, (): void => {
-        timelineWriteStore.scheduleDelete(record.id, dateOf(record.ts), record.ts);
-      });
-      return;
-    }
-    // 翻转前的 v1 路径：调用点已用 softDeleteRecord() 构造墓碑，原样追加。
-    scheduleStore.appendRecord(record);
+    this.writeV2('delete', record, (): void => {
+      timelineWriteStore.scheduleDelete(record.id, dateOf(record.ts), record.ts);
+    });
   }
 
-  /** 撤销删除：v2 写撤销账本，否则 v1 追加已构造好的恢复版本。 */
+  /** 撤销删除：写撤销账本（ts 严格晚于删除），绝不写 v1 恢复版本。 */
   restoreRecord(record: ScheduleRecord): void {
-    if (this.useV2()) {
-      this.writeV2('restore', record, (): void => {
-        timelineWriteStore.restore(record.id, dateOf(record.ts), record.ts);
-      });
-      return;
-    }
-    // 翻转前的 v1 路径：调用点已用 restoreRecord() 构造恢复版本，原样追加。
-    scheduleStore.appendRecord(record);
+    this.writeV2('restore', record, (): void => {
+      timelineWriteStore.restore(record.id, dateOf(record.ts), record.ts);
+    });
   }
 
   /**
    * v2 写的统一编排（P1-1）：**先停放、后写、成败都触发一次周期**。
    *
+   * 未迁移时第一句就抛 E_NOT_MIGRATED，**在 buildIntent / 停放 / 写 / 同步之前**，
+   * 因此未迁移仓库零写入（连仓库外的 outbox 也不碰）。
    * 停放发生在写尝试之前，因此进程在写盘中/写盘后崩溃都仍有 outbox 真值；
    * 写失败留停放并记 typed 原因；写成功出队。两条路径都 `triggerSync()`：
    * 失败路径也触发是为了让新日期进入周期 days、把停放意图真正重放掉。
    */
   private writeV2(op: ParkOp, record: ScheduleRecord, apply: V2Apply): void {
+    if (!timelineStore.isMigrated()) {
+      throw new Error(NOT_MIGRATED_REASON);
+    }
     const entry: OutboxEntry = this.buildIntent(op, record);
     let parkNote: string = '已存入待同步队列';
     try {

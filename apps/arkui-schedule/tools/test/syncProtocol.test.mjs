@@ -105,7 +105,7 @@ test('1 assertWritable ok: schema=2 + branch main + HEAD==origin/main', () => {
 
 test('2 assertWritable E_SCHEMA_UNKNOWN for null schema', () => {
   const r = assertWritable({ schemaVersion: null, branch: 'main', headSha: SHORT.head, originMainSha: SHORT.head });
-  assert.deepEqual(r, { ok: false, code: 'E_SCHEMA_UNKNOWN', message: '只读（仓库结构版本不认识，见 §11）' });
+  assert.deepEqual(r, { ok: false, code: 'E_SCHEMA_UNKNOWN', message: '错误（仓库结构版本不认识，见 §11）' });
 });
 
 test('3 assertWritable E_SCHEMA_UNKNOWN for version 99', () => {
@@ -484,13 +484,14 @@ test('47 service disabled: requireEnabled is first statement and throws before a
   const body = methodBody(SERVICE_CODE, 'runCycle');
   const first = body.indexOf('this.requireEnabled();');
   assert.ok(first >= 0, 'runCycle 未先调用 requireEnabled');
-  assert.match(SERVICE, /DISABLED_MESSAGE: string = 'timeline v2 同步未启用'/);
+  assert.match(SERVICE, /DISABLED_MESSAGE: string = NOT_MIGRATED_REASON/);
   const guard = methodBody(SERVICE_CODE, 'requireEnabled');
   assert.match(guard, /if \(!this\.isEnabled\(\)\)/);
   assert.match(guard, /throw new Error\(DISABLED_MESSAGE\)/);
   const ioAt = body.indexOf('await this.ensureReady');
   assert.ok(ioAt > first, 'requireEnabled 必须早于任何 IO');
-  assert.match(methodBody(SERVICE_CODE, 'isEnabled'), /timelineStore\.useV2\(\)/);
+  assert.match(methodBody(SERVICE_CODE, 'isEnabled'), /timelineStore\.isMigrated\(\)/);
+  assert.doesNotMatch(SERVICE, /useV2\(|setReadMode|readMode\(/);
   assert.doesNotMatch(body, /AppStorage/);
 });
 

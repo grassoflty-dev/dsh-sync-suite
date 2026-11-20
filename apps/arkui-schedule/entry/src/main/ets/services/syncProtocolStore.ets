@@ -9,8 +9,8 @@
  * 3. **绝不删除远端文件**：只写 `timeline/**` 的日文件与账本，不运行任何远端 rm / 清理。
  *
  * 门禁与职责：
- * - `isEnabled()` = timelineStore.useV2()；每个公开 IO 方法第一句 requireEnabled()，
- *   未启用时在任何 IO 之前抛 `Error('timeline v2 同步未启用')`。本模块不翻转开关、不接 UI、
+ * - `isEnabled()` = timelineStore.isMigrated()（v2 是唯一路径）；每个公开 IO 方法第一句
+ *   requireEnabled()，未迁移时在任何 IO 之前抛 E_NOT_MIGRATED。本模块不接 UI、
  *   不写 AppStorage、不写 v1 路径。
  * - §11 唯一门禁 assertWritable()：schema=2 + 分支 main + HEAD 是 origin/main 或其祖先
  *   （behind 放行、ahead/diverged 拒绝）。门禁在 fetch **之后**（需 freshly fetched origin/main
@@ -41,6 +41,7 @@ import type {
   OutboxEntry, DayUnion, DayTexts, WriteGateInput, WriteGateResult
 } from '../model/syncProtocol';
 import type { ScheduleRecord } from '../model/types';
+import { NOT_MIGRATED_REASON } from '../model/migrationState';
 import { runCyclePure } from '../model/syncCycle';
 import type { GitPort, CycleOutcome, DayRead, DayWriteTexts, WritePort } from '../model/syncCycle';
 
@@ -97,7 +98,7 @@ const DELETED_FILE_NAME: string = 'deleted.jsonl';
 const RESTORE_FILE_NAME: string = 'restore.jsonl';
 const TMP_INFIX: string = '.tmp-';
 const COMMIT_PREFIX: string = '[v2] sync ';
-const DISABLED_MESSAGE: string = 'timeline v2 同步未启用';
+const DISABLED_MESSAGE: string = NOT_MIGRATED_REASON;
 /** F1：快进失败（本地分叉）时的 typed 文案；零写入。 */
 const FF_DIVERGED_MESSAGE: string = '本地与 origin/main 已分叉，请先手工处理';
 
@@ -116,9 +117,9 @@ export class SyncProtocolStore {
   /** mod-v2-sync-wiring：注入的 GitPort（未注入时保留原有 GitRunner 裸周期路径）。 */
   private runner: GitPort | null = null;
 
-  /** 唯一开关：与写入服务共用 timelineStore 的组合判定；本方法不执行任何 IO。 */
+  /** 唯一门槛：与写入服务共用迁移判定；本方法不执行任何 IO。 */
   isEnabled(): boolean {
-    return timelineStore.useV2();
+    return timelineStore.isMigrated();
   }
 
   /** 注入真实 git 绑定（页面 bootstrap 调一次）；未注入时周期保持 inert。 */
@@ -126,7 +127,7 @@ export class SyncProtocolStore {
     this.runner = port;
   }
 
-  /** 周期是否可用（显式激活闸的第三个拒绝理由来源）。 */
+  /** 真实 git 绑定是否已注入（未注入时周期保持惰性、不伪造成功）。 */
   hasRunner(): boolean {
     return this.runner !== null;
   }

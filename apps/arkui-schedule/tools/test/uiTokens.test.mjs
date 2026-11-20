@@ -189,7 +189,7 @@ test('首页头只留「⚙ 设置」：AI 汇总图标入口已删除，也没�
   assert.equal(/✨ AI 汇总/.test(INDEX), false, '页头「✨ AI 汇总」文案必须删除');
   assert.equal(/onHeaderSummaryAction/.test(INDEX), false, '页头汇总 handler 必须删除');
   assert.match(INDEX, /router\.pushUrl\(\{ url: 'pages\/Settings' \}\)/, '设置动作要能进设置页');
-  assert.match(INDEX, /HOME_INCLUDE_OTHER_KEY/, '「含其他设备」必须走共享的 AppStorage 键');
+  assert.doesNotMatch(INDEX, /HOME_INCLUDE_OTHER_KEY/, 'v2-only：首页不再有「含其他设备」v1 过滤开关');
 });
 
 test('今日汇总块：持久化数据源（read/换日期 re-read/generate 失败不清空）', () => {

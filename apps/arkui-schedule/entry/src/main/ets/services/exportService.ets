@@ -6,18 +6,21 @@
  *    文件名时间戳来自**记录**（`exportFileStamp`），同名时加 `-2` / `-3` 后缀（不用随机数）；
  * 2. **选文件 + 读文本**：`picker.DocumentViewPicker` 选一份 JSON，用 `openSync` + `readSync` +
  *    `decodeUtf8` 读成字符串（不新增权限）；
- * 3. **导入落盘**：先**复核**（重读本机 + `reconcileBeforeAppend`）再按复核后的 added 追加，
- *    **绝不重写历史行、绝不写别的设备目录**，并且在飞时拒绝第二次调用（并发闸）。
+ * 3. **导入落盘**（v2-only）：v1 格式的 JSON 文件也只落到共享时间线——先**复核**
+ *    （重读 timelineStore + `reconcileBeforeAppend`），再按复核后的 added 逐条经
+ *    `timelineWriteStore.append` 原子写入 `timeline/<date>/records.json`；
+ *    **绝不写 devices/、绝不重写历史行**，并且在飞时拒绝第二次调用（并发闸）。
  *
  * 边界（`docs/EXPORT-IMPORT.md` §5）：
  * - 导出是只读派生：只读 `scheduleStore.readAll()`，不碰源文件；导出目录是**沙箱内**路径，
  *   不进 Git 仓库（`devices/` 之外），所以不会被同步推走；
  * - 导入**必须**先 `planImportFromText` 拿到 dry-run 结果，再由用户确认后 `appendImportPlan`；
  *   本模块不提供「分析+落盘」一步到位的函数，防止 UI 误用成「选了文件就写」；
- * - 落盘的**纯实现**在 `model/exportImport.ts` 的 `writePlan`（IO 由本文件注入，可 fake 测）；
- *   整批写入前先把所有行编码完：任何一条编码失败就整批不写（fail-closed），
- *   不会出现「写了一半」的历史日志；
- * - 同一天多条按 `ts` 升序拼接后**一次**物理追加（定位到文件末尾写入），历史字节一个都不改。
+ * - 复核的**纯实现**在 `model/exportImport.ts` 的 `reconcileBeforeAppend`（去重按 id / 更晚 ts），
+ *   落盘统一经 `timelineWriteStore.append`（内部 planUpsert 再守一次同 id 更晚 ts），
+ *   两条路径都不再提供任何 `devices/` 写入口（v1 的 writePlan 分支已整体移除）；
+ * - 附件 JSON 里的 `attachments` 由 `timelineWriteStore` 既有的媒体映射写入 v2 `media` 字段，
+ *   不新增媒体写入器、不触碰 v1 附件目录。
  */
 import { fileIo as fs, picker } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
@@ -51,13 +54,11 @@ import {
   planV2Import,
   reconcileBeforeAppend,
   renderMarkdownExport,
-  v2PlanSummary,
-  writePlan
+  v2PlanSummary
 } from '../model/exportImport';
 import type {
   ExportStampInput,
   ImportPlan,
-  ImportWriteIo,
   JsonExportInput,
   MarkdownExportInput,
   ReconcileResult,
@@ -69,13 +70,12 @@ import type {
   V2LedgerKind,
   V2LedgerMeta,
   V2Manifest,
-  V2TargetState,
-  WritePlanResult
+  V2TargetState
 } from '../model/exportImport';
 import type { ScheduleRecord } from '../model/types';
 import type { TimelineMedia } from '../model/timeline';
-import { describeError, scheduleStore } from './scheduleStore';
-import { openIndexStore } from './openIndexStore';
+import { NOT_MIGRATED_REASON } from '../model/migrationState';
+import { describeError, resolveRecordDate, scheduleStore } from './scheduleStore';
 import { timelineStore } from './timelineStore';
 import { timelineWriteStore } from './timelineWriteStore';
 
@@ -206,7 +206,7 @@ function writeTextFile(path: string, text: string): void {
  *
  * 不复用 `scheduleStore.appendRecord` 的原因：那条路一次只能写一条记录，而导入要求
  * 「同一天多条按 ts 排序后一次追加」；这里保持同一套语义（末尾写入、必要时补换行），
- * 只是把多行拼成一次写。派生索引由调用方用 `openIndexStore.applyRecord` 补上。
+ * 只是把多行拼成一次写。v2-only 之后本函数只服务 v2 备份里的账本并集追加（不写 devices/）。
  */
 function appendTextAtEnd(path: string, text: string): void {
   const file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE);
@@ -411,6 +411,16 @@ export async function pickImportFile(context: object): Promise<ImportFilePickRes
  * 文件本身不可用（空 / 不是 JSON / 版本不认识）时 `ok:false`，`plan` 为 null。
  */
 export function planImportFromText(text: string, fileName: string): ImportPlanResult {
+  // v2-only：未迁移在解析文件 / 读盘之前就给 typed 拒绝，零写入、无 v1 兜底。
+  if (!timelineStore.isMigrated()) {
+    const unmigrated: ImportPlanResult = {
+      ok: false,
+      plan: null,
+      fileName: fileName,
+      reason: NOT_MIGRATED_REASON
+    };
+    return unmigrated;
+  }
   if (!scheduleStore.isReady()) {
     const notReady: ImportPlanResult = {
       ok: false,
@@ -427,7 +437,8 @@ export function planImportFromText(text: string, fileName: string): ImportPlanRe
   }
   let existing: ScheduleRecord[] = [];
   try {
-    existing = scheduleStore.readAll();
+    // 基线是 v2 真值（timeline），不再读 v1 分片。
+    existing = timelineStore.readAll();
   } catch (error) {
     const readFailed: ImportPlanResult = {
       ok: false,
@@ -440,28 +451,6 @@ export function planImportFromText(text: string, fileName: string): ImportPlanRe
   const plan = planImport({ existing: existing, incoming: parsed.records, now: nowIso() });
   const ok: ImportPlanResult = { ok: true, plan: plan, fileName: fileName, reason: '' };
   return ok;
-}
-
-/**
- * 把纯逻辑层的 `writePlan` 接到真实文件系统上（本文件是**唯一**提供 IO 的地方）。
- *
- * 只交出这四个能力：建目录 / 取本机某天路径 / 末尾追加 / 维护派生索引。
- * 没有覆盖写、没有截断写、没有删除——导入在类型层面就碰不到 `TRUNC`。
- */
-function importWriteIo(): ImportWriteIo {
-  const io: ImportWriteIo = {
-    ensureDirs: (): void => {
-      scheduleStore.ensureDirs();
-    },
-    dayFilePath: (date: string): string => scheduleStore.dayFilePath(date),
-    appendTextAtEnd: (path: string, text: string): void => {
-      appendTextAtEnd(path, text);
-    },
-    applyRecord: (record: ScheduleRecord): void => {
-      openIndexStore.applyRecord(record);
-    }
-  };
-  return io;
 }
 
 /**
@@ -481,17 +470,21 @@ function noReconfirmed(): ReconfirmedCounts {
 }
 
 /**
- * 确认导入：把 dry-run 里 `added` 的记录追加到本设备当天的 JSONL 末尾。
+ * 确认导入（v2-only）：把 dry-run 里 `added` 的记录经 `timelineWriteStore` 落到共享时间线。
  *
- * 安全性质（逐条对应 `docs/EXPORT-IMPORT.md` §3.3）：
+ * v1 格式的 JSON 仍然能读，但**落点只有 `timeline/<date>/records.json`**：v1 的
+ * `writePlan` + `scheduleStore.dayFilePath()` 分支已整体移除，本函数不再持有任何
+ * `devices/` 写入口（见 `docs/DATA-CONTRACT-v2.md` §9「outbox 唯一真值」）。
+ *
+ * 安全性质：
+ * - **迁移门禁**：未迁移时在任何 IO（读盘 / 写盘）之前返回 typed `E_NOT_MIGRATED`，零写入；
  * - **并发闸**：在飞时再次调用直接返回 `ok:false`（`reason='正在导入中，请稍候'`），不排队；
- * - **写盘前复核**：用 `scheduleStore.readAll()` 重读**此刻**的本机记录，再用
- *   `reconcileBeforeAppend` 对 `plan.toAppend` 过滤一次——只有复核后的 `added` 才会被写。
- *   于是「双击」「dry-run 之后本机（或远端同步）写入了同一个 id」都不会重复追加；
+ * - **写盘前复核**：用 `timelineStore.readAll()` 重读**此刻**的 v2 真值，再用
+ *   `reconcileBeforeAppend` 过滤一次（按 id / 更晚 ts 去重），只有复核后的 `added` 才会被写；
+ * - **原子写 + 二次去重**：逐条经 `timelineWriteStore.append`，其内部 planUpsert 再守一次
+ *   同 id 更晚 ts；附件走该 writer 既有的 media 映射，不新增媒体写入器、不碰 v1 附件目录；
  * - 只写复核后的 added（`conflict` / `skipped` / `invalid` 一律不写，**绝不覆盖**既有行）；
- * - 只写 `scheduleStore.dayFilePath(date)`：别的设备目录永不触碰；
- * - **先编码、后落盘** + **同一天多条只追加一次**：都在纯逻辑 `writePlan` 里，
- *   并由 `tools/test/exportImport.test.mjs` 的 fake-IO 契约测试逐条钉住。
+ * - 半批失败如实报告：已写条数 / 文件只算成功落盘的部分，原因带 typed 说明。
  */
 export function appendImportPlan(plan: ImportPlan): ImportApplyResult {
   if (importInFlight) {
@@ -530,6 +523,10 @@ function applyImportPlanOnce(plan: ImportPlan): ImportApplyResult {
     };
     return result;
   };
+  // v2-only 第一道闸：未迁移在任何读盘 / 写盘之前 typed 拒绝（与首页横幅同源）。
+  if (!timelineStore.isMigrated()) {
+    return failed(NOT_MIGRATED_REASON);
+  }
   if (!scheduleStore.isReady()) {
     return failed('日程存储尚未初始化：请先调用 scheduleStore.ensureReady(context)');
   }
@@ -547,12 +544,12 @@ function applyImportPlanOnce(plan: ImportPlan): ImportApplyResult {
     return empty;
   }
 
-  // 第一步：复核——写盘前重读本机记录；读不到就 fail-closed，绝不凭一份过期计划写盘。
+  // 第一步：复核——写盘前重读 v2 真值；读不到就 fail-closed，绝不凭一份过期计划写盘。
   let existingNow: ScheduleRecord[] = [];
   try {
-    existingNow = scheduleStore.readAll();
+    existingNow = timelineStore.readAll();
   } catch (error) {
-    return failed(`导入复核失败（读取本机日程）：${describeError(error)}`);
+    return failed(`导入复核失败（读取时间线）：${describeError(error)}`);
   }
   const reconciled: ReconcileResult = reconcileBeforeAppend(plan.toAppend, existingNow);
   const counts: ReconfirmedCounts = {
@@ -575,16 +572,42 @@ function applyImportPlanOnce(plan: ImportPlan): ImportApplyResult {
     return nothing;
   }
 
-  // 第二步：真正落盘（编码 → 逐日一次追加 → 派生索引），全部在纯逻辑 `writePlan` 里。
-  const written: WritePlanResult = writePlan(reconciled.added, importWriteIo());
+  // 第二步：逐条经原子 writer 落盘到 timeline/<date>/records.json（不再有 devices/ 分支）。
+  // 媒体的唯一落点是该 writer 内部的 media 映射（v1 attachments → <sha16>.jpg），
+  // 媒体字节的搬运属于备份导入 applyV2Import 的职责，本函数不新增任何媒体写入器。
+  const files: string[] = [];
+  let appended: number = 0;
+  for (const record of reconciled.added) {
+    const date: string = resolveRecordDate(record.ts);
+    try {
+      timelineWriteStore.append(record, date);
+    } catch (error) {
+      const partial: ImportApplyResult = {
+        ok: false,
+        appended: appended,
+        skipped: plan.skipped + reconciled.skipped,
+        conflict: plan.conflict + reconciled.conflict,
+        invalid: plan.invalid,
+        files: files,
+        reason: `写入时间线失败（${date}）：${describeError(error)}`,
+        reconfirmed: counts
+      };
+      return partial;
+    }
+    appended += 1;
+    const path: string = `${scheduleStore.getFilesDir()}/${V2_REPO_RELATIVE}/${date}/${V2_RECORDS_FILE}`;
+    if (files.indexOf(path) < 0) {
+      files.push(path);
+    }
+  }
   const result: ImportApplyResult = {
-    ok: written.ok,
-    appended: written.appended,
+    ok: true,
+    appended: appended,
     skipped: plan.skipped + reconciled.skipped,
     conflict: plan.conflict + reconciled.conflict,
     invalid: plan.invalid,
-    files: written.files,
-    reason: written.reason,
+    files: files,
+    reason: '',
     reconfirmed: counts
   };
   return result;
@@ -592,10 +615,10 @@ function applyImportPlanOnce(plan: ImportPlan): ImportApplyResult {
 
 // ================================================================ v2 单时间线导出 / 导入（additive）
 //
-// 只在 `timelineStore.useV2()` 为真时可用；v1 的 exportSchedules / planImportFromText /
+// 只在 `timelineStore.isMigrated()` 为真时可用；v1 的 exportSchedules / planImportFromText /
 // appendImportPlan 一节一行未改。v2 bundle 落在沙箱 `<filesDir>/exports/v2-<stamp>/`，
 // **不在 git 仓库里**；导入只经 `timelineWriteStore`（原子写 records.json / summary.json）
-// 与 media/ 只增复制，绝不写 devices/**、绝不删媒体；三本账本按 bundleVersion 做**并集追加**
+// 与 media/ 只增复制，绝不写 devices/、绝不删媒体；三本账本按 bundleVersion 做**并集追加**
 // （目标已有账本字节恒为新字节前缀，只追加新行，绝不重写历史行，见 docs/EXPORT-IMPORT.md §7）。
 //
 // 关键纪律：
@@ -811,7 +834,7 @@ function v2StampOf(latestTs: string): string {
 /**
  * v2 导出：把共享时间线搬运成一份**只读派生** bundle（不碰 timeline/ 源文件）。
  *
- * 非 v2（v1 仓库 / 未激活）直接返回 E_V1_TARGET；区间非法 / 读取失败都返回 ok:false + 中文原因。
+ * 未迁移（timeline/schema.json 非 v2）直接返回类型化拒绝；区间非法 / 读取失败都返回 ok:false + 中文原因。
  */
 export function exportV2Timeline(request: ExportRequestInput): V2ExportResult {
   const failed = (code: string, reason: string): V2ExportResult => {
@@ -821,8 +844,8 @@ export function exportV2Timeline(request: ExportRequestInput): V2ExportResult {
     };
     return result;
   };
-  if (!timelineStore.useV2()) {
-    return failed(V2_REFUSAL_V1_TARGET, '当前不是 v2 时间线模式：请激活 v2 后再导出时间线备份');
+  if (!timelineStore.isMigrated()) {
+    return failed(V2_REFUSAL_V1_TARGET, NOT_MIGRATED_REASON);
   }
   if (!scheduleStore.isReady()) {
     return failed('', '日程存储尚未初始化：请先调用 scheduleStore.ensureReady(context)');

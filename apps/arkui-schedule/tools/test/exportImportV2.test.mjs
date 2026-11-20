@@ -861,16 +861,25 @@ describe('源码级：v2 落点只经原子写、不碰 devices、UI flag-gated'
     assert.equal(apply.includes('v2CopyBinary'), false, '导入不再二次读源字节（写入已校验字节）');
   });
 
-  test('v1 落盘路径未被改：TRUNC 仍只有导出 1 处，v1 三函数仍在', () => {
+  test('retargeted：v1 格式入口仍在但落点改为 timeline（TRUNC 仍只有导出 1 处，零 devices 写）', () => {
     const truncCount = (SERVICE.match(/OpenMode\.TRUNC/g) ?? []).length;
     assert.equal(truncCount, 1, 'v1 契约：TRUNC 只允许新建导出文件那一处');
     for (const name of ['exportSchedules(', 'planImportFromText(', 'appendImportPlan(']) {
-      assert.ok(SERVICE.includes(name), `v1 入口 ${name} 必须保留`);
+      assert.ok(SERVICE.includes(name), `v1 格式入口 ${name} 必须保留（格式兼容，不是写路径兼容）`);
     }
+    // mod-v2-only P1-2：v1 入口仍在，但它的落盘分支已整体改成 timelineWriteStore。
+    const v1Start = SERVICE.indexOf('function applyImportPlanOnce');
+    const v2Start = SERVICE.indexOf(V2_MARK);
+    assert.ok(v1Start > 0 && v2Start > v1Start, '找不到 v1-format 导入实现段');
+    const v1Section = stripLineComments(SERVICE.slice(v1Start, v2Start));
+    assert.match(v1Section, /timelineWriteStore\.append\(/, 'v1 格式导入必须经 v2 原子 writer 落盘');
+    assert.doesNotMatch(v1Section, /writePlan\(|importWriteIo\(|scheduleStore\.dayFilePath\(|devices\//,
+      'v1 格式导入段不得残留 devices/** 写分支');
   });
 
-  test('面板只在 useV2() 时渲染 v2 节，禁用按钮有中文原因，无裸 Text 点击', () => {
-    assert.match(PANEL, /timelineStore\.useV2\(\)/, 'v2 节必须由 timelineStore.useV2() flag gate');
+  test('面板只在 isMigrated() 时渲染 v2 节，禁用按钮有中文原因，无裸 Text 点击', () => {
+    assert.match(PANEL, /timelineStore\.isMigrated\(\)/, 'v2 节必须由迁移门槛 gate（没有 v1/v2 开关）');
+    assert.doesNotMatch(PANEL, /useV2\(/, 'v2-only：不得残留 useV2() 门控');
     assert.match(PANEL, /if \(this\.v2Visible\(\)\)/, 'build() 里必须有 flag 条件');
     assert.match(PANEL, /this\.V2Section\(\)/, 'v2 节必须挂到渲染树');
     assert.equal(PANEL.includes('V2_NOT_WIRED'), false, '四个 v2 回调已全部接线，不得残留「未接入」死路径');

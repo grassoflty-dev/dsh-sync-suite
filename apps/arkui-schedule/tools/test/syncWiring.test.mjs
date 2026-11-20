@@ -5,10 +5,9 @@
 //
 // 覆盖：happy（gate→union→commit→push→outbox 排空）、push 拒一次（reset→replay→成功）、
 //       一直拒（MAX_ATTEMPTS 耗尽→failed/pending）、远端删除+陈旧 upsert（dropped 不出队）、
-//       behind→ff 放行 / ahead·diverged·schema·branch→E_* 零写入、activation 决策表
-//       （schema 错 / 并存但 timeline 空 / 并存未确认 needsConfirm / 确认后 ok / 周期不可用），
-//       以及「激活开关 / 并存专用确认文案与裁决键 / setRunner / tri-state 行 /
-//       无 force-push·merge·rebase·clean·devices/ 写」静态断言。
+//       behind→ff 放行 / ahead·diverged·schema·branch→E_* 零写入；
+//       v2-only：激活决策表与持久化开关已删除，改由 mod-v2-only 的迁移门槛 + 首页横幅承担；
+//       保留 setRunner / tri-state 行 / 无 force-push·merge·rebase·clean·devices/ 写静态断言。
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
@@ -42,15 +41,10 @@ const {
 const {
   makeIntentId, MAX_ATTEMPTS, SYNC_RETRY_ERROR, resetForRetry
 } = await import('../.build/model/syncProtocol.js');
-const {
-  PERSISTENT_BINDINGS, PERSISTENT_READ_MODE_KEY, PERSISTENT_V2_WRITE_KEY,
-  PERSISTENT_V1_RETAINED_KEY, bindingFor
-} = await import('../.build/model/persistentSettings.js');
 const { canonicalRecordLine, parseTimelineDay, parseLedger } =
   await import('../.build/model/timeline.js');
 const { buildRecordsText, ledgerDeleteLine, ledgerRestoreLine } =
   await import('../.build/model/timelineWrite.js');
-const { decideActivation, ACTIVATION_MESSAGES } = await import('../.build/model/v2Activation.js');
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP = join(HERE, '..', '..');
@@ -505,134 +499,25 @@ test('25 fetch runs before the gate even on gate failure (fresh origin/main fact
   assert.equal(fake.pushCount, 0);
 });
 
-// ---------------------------------------------------------------- activation（决策表：schema / 并存裁决 / 周期）
-
-const activationBase = {
-  schemaVersion: 2, hasDevices: false, hasTimeline: true,
-  timelineDays: 1, confirmed: false, cycleAvailable: true
-};
-const BOTH_TEXT = '检测到 v1（devices/）与 v2（timeline/）数据并存：确认以 timeline/ 为权威并停用 v1 写入？v1 文件不会被删除。';
-
-test('26 activation ok: schema=2, no devices/, cycle available', () => {
-  const decision = decideActivation(activationBase);
-  assert.equal(decision.ok, true);
-  assert.equal(decision.allowed, true);
-  assert.equal(decision.code, 'ok');
-  assert.equal(decision.needsConfirm, false);
-});
-
-test('27 activation refusal: schema v3 → E_SCHEMA_UNKNOWN', () => {
-  const decision = decideActivation({ ...activationBase, schemaVersion: 3 });
-  assert.equal(decision.ok, false);
-  assert.equal(decision.code, 'E_SCHEMA_UNKNOWN');
-  assert.equal(decision.needsConfirm, false);
-  assert.equal(decision.reason, ACTIVATION_MESSAGES.E_SCHEMA_UNKNOWN);
-});
-
-test('28 activation refusal: missing schema → E_SCHEMA_MISSING', () => {
-  const decision = decideActivation({ ...activationBase, schemaVersion: null });
-  assert.equal(decision.code, 'E_SCHEMA_MISSING');
-  assert.equal(decision.needsConfirm, false);
-});
-
-test('29 activation refusal: no cycle runner → E_SYNC_UNAVAILABLE', () => {
-  const decision = decideActivation({ ...activationBase, cycleAvailable: false });
-  assert.equal(decision.ok, false);
-  assert.equal(decision.code, 'E_SYNC_UNAVAILABLE');
-  assert.equal(decision.needsConfirm, false);
-});
-
-test('30 both present + empty timeline → E_MIGRATION_EMPTY (refusal, no confirm)', () => {
-  const decision = decideActivation({ ...activationBase, hasDevices: true, timelineDays: 0 });
-  assert.equal(decision.ok, false);
-  assert.equal(decision.code, 'E_MIGRATION_EMPTY');
-  assert.equal(decision.needsConfirm, false);
-  assert.equal(decision.reason, ACTIVATION_MESSAGES.E_MIGRATION_EMPTY);
-  assert.match(decision.nextStep, /迁移/);
-});
-
-test('31 both present + valid timeline + not confirmed → needsConfirm (no activation)', () => {
-  const decision = decideActivation({ ...activationBase, hasDevices: true });
-  assert.equal(decision.ok, false);
-  assert.equal(decision.allowed, false);
-  assert.equal(decision.code, 'E_NEEDS_EXPLICIT_RESOLUTION');
-  assert.equal(decision.needsConfirm, true);
-  assert.equal(decision.reason, BOTH_TEXT);
-  assert.equal(decision.reason, ACTIVATION_MESSAGES.E_NEEDS_EXPLICIT_RESOLUTION);
-});
-
-test('32 both present + valid timeline + confirmed → ok (no second prompt)', () => {
-  const decision = decideActivation({ ...activationBase, hasDevices: true, confirmed: true });
-  assert.equal(decision.ok, true);
-  assert.equal(decision.code, 'ok');
-  assert.equal(decision.needsConfirm, false);
-});
-
-test('33 both present + confirmed + no cycle → E_SYNC_UNAVAILABLE (gate still holds)', () => {
-  const decision = decideActivation({
-    ...activationBase, hasDevices: true, confirmed: true, cycleAvailable: false
-  });
-  assert.equal(decision.code, 'E_SYNC_UNAVAILABLE');
-  assert.equal(decision.needsConfirm, false);
-});
-
-test('34 priority: both-present empty beats missing-cycle (fail-closed)', () => {
-  const decision = decideActivation({
-    ...activationBase, hasDevices: true, timelineDays: 0, cycleAvailable: false
-  });
-  assert.equal(decision.code, 'E_MIGRATION_EMPTY');
-});
-
-test('35 priority: schema beats both-present (no schema, no confirm)', () => {
-  const decision = decideActivation({
-    ...activationBase, schemaVersion: 3, hasDevices: true, timelineDays: 0
-  });
-  assert.equal(decision.code, 'E_SCHEMA_UNKNOWN');
-  assert.equal(decision.needsConfirm, false);
-});
-
-test('36 no devices/ + empty timeline is not a refusal (fresh v2 repo)', () => {
-  const decision = decideActivation({
-    ...activationBase, hasTimeline: false, timelineDays: 0
-  });
-  assert.equal(decision.ok, true);
-  assert.equal(decision.needsConfirm, false);
-});
-
 // ---------------------------------------------------------------- 静态接线契约
 
-test('37 static: explicit activation switch + both dialogs + disable path', () => {
+test('37 static v2-only: no activation switch / confirm dialog / dual-store resolution remains', () => {
   const section = src('components/settings/SyncSection.ets');
   const settings = src('pages/Settings.ets');
-  assert.match(section, /启用 v2 时间线写入/);
-  assert.match(section, /onToggleV2Write/);
-  assert.match(section, /Toggle\(\{ type: ToggleType\.Switch, isOn: this\.v2WriteEnabled \}\)/);
-  assert.match(section, /仓库已迁移到 timeline\/ 结构后才可开启/);
-  assert.match(section, /关闭即回到 v1，v1 数据不会被删除/);
-  assert.match(settings, /promptAction\.showDialog/);
-  assert.match(settings, /确认启用/);
-  assert.match(settings, /v2ActivationService\.deactivate\(\)/);
-  assert.match(settings, /v2ActivationService\.activate\(/);
-  // 并存专用文案逐字出现在设置页；单态文案仍保留，两者不可互相替代。
-  assert.match(settings, /检测到 v1（devices\/）与 v2（timeline\/）数据并存：确认以 timeline\/ 为权威并停用 v1 写入？v1 文件不会被删除。/);
-  assert.match(settings, /确认以 timeline\/ 为权威/);
-  assert.match(settings, /needsConfirm/);
-  assert.match(settings, /activate\(context, true\)/);
+  for (const forbidden of [/启用 v2 时间线写入/, /onToggleV2Write/, /v2WriteEnabled/, /关闭即回到 v1/,
+    /确认以 timeline\/ 为权威/, /needsConfirm/, /v1Retained/, /v2WriteEnabled/]) {
+    assert.doesNotMatch(section, forbidden, `SyncSection 不得残留激活控件：${forbidden}`);
+    assert.doesNotMatch(settings, forbidden, `Settings 不得残留激活逻辑：${forbidden}`);
+  }
 });
 
-test('38 static: both-present decision persisted + timeline days counted', () => {
-  const model = src('model/v2Activation.ts');
-  const service = src('services/v2ActivationService.ets');
-  assert.match(model, /V1_RETAINED_KEY: string = PERSISTENT_V1_RETAINED_KEY/);
-  assert.match(model, /BOTH_PRESENT_CONFIRM_TEXT/);
-  assert.match(model, /E_NEEDS_EXPLICIT_RESOLUTION/);
-  assert.match(model, /E_MIGRATION_EMPTY/);
-  assert.match(service, /V1_RETAINED_KEY/);
-  assert.match(service, /AppStorage\.setOrCreate<string>\(V1_RETAINED_KEY, '1'\)/);
-  assert.match(service, /countValidTimelineDays/);
-  assert.match(service, /parseTimelineDay/);
-  assert.match(service, /timelineDays: this\.countValidTimelineDays\(repoRoot\)/);
-  assert.match(service, /confirmed: confirmed/);
+test('38 static v2-only: deleted activation modules are gone from the import graph', () => {
+  for (const rel of ['model/v2Activation.ts', 'model/timelineMode.ts', 'model/persistentSettings.ts',
+    'services/v2ActivationService.ets', 'services/timelineModeSwitch.ets']) {
+    assert.throws(() => readFileSync(join(ETS, rel)), `已删除文件仍存在：${rel}`);
+  }
+  const index = src('pages/Index.ets');
+  assert.doesNotMatch(index, /timelineModeSwitch|v2ActivationService|useV2\(|readMode\(/);
 });
 
 test('39 static: setRunner(bridgeGitRunner) wired in Index bootstrap', () => {
@@ -651,13 +536,13 @@ test('40 static: tri-state row present and driven by syncStatusStore', () => {
   const store = src('services/syncStatusStore.ets');
   assert.match(store, /label = '已同步'/);
   assert.match(store, /label = `\$\{pending\} 条待同步`/);
-  assert.match(store, /let label: string = '只读'/);
+  assert.match(store, /let label: string = '错误'/);
+  assert.doesNotMatch(store, /'只读'/);
 });
 
 test('41 static: no force-push / --force / merge / rebase / clean in new wiring', () => {
   const files = [
-    'model/syncCycle.ts', 'services/gitRunner.ets', 'services/syncProtocolStore.ets',
-    'services/gitRunner.ets', 'services/v2ActivationService.ets'
+    'model/syncCycle.ts', 'services/gitRunner.ets', 'services/syncProtocolStore.ets'
   ];
   for (const rel of new Set(files)) {
     const code = src(rel);
@@ -674,7 +559,7 @@ test('41 static: no force-push / --force / merge / rebase / clean in new wiring'
 });
 
 test('42 static: new files never write devices/**', () => {
-  for (const rel of ['model/syncCycle.ts', 'services/gitRunner.ets', 'services/v2ActivationService.ets', 'services/syncStatusStore.ets']) {
+  for (const rel of ['model/syncCycle.ts', 'services/gitRunner.ets', 'services/syncStatusStore.ets']) {
     const code = src(rel);
     assert.doesNotMatch(code, /devices\//, rel);
   }
@@ -729,44 +614,6 @@ test('46 static P1-1: outbox dates are unioned into runWiredCycle days', () => {
   assert.match(store, /parkedDays\.push\(entry\.date\)/);
   assert.match(store, /remoteDays\.concat\(parkedDays\)/);
   assert.match(store, /for \(const entry of outbox\) \{/);
-});
-
-// ---------------------------------------------------------------- P1-5：持久化绑定
-
-test('47 P1-5 pure: three persistent bindings with exact keys and defaults', () => {
-  assert.deepEqual(PERSISTENT_BINDINGS.map((b) => [b.key, b.defaultValue]), [
-    ['timeline.readMode', 'v1'],
-    ['timeline.v2WriteEnabled', false],
-    ['timeline.v1Retained', '']
-  ]);
-  assert.equal(PERSISTENT_READ_MODE_KEY, 'timeline.readMode');
-  assert.equal(PERSISTENT_V2_WRITE_KEY, 'timeline.v2WriteEnabled');
-  assert.equal(PERSISTENT_V1_RETAINED_KEY, 'timeline.v1Retained');
-  assert.deepEqual(bindingFor('timeline.v2WriteEnabled').defaultValue, false);
-  assert.equal(bindingFor('not.registered'), null);
-});
-
-test('48 static P1-5: EntryAbility binds all three keys before page load; services reuse them', () => {
-  const entry = src('entryability/EntryAbility.ets');
-  assert.match(entry, /PersistentStorage\.persistProp<string>\(PERSISTENT_READ_MODE_KEY/);
-  // 本 SDK：PersistentStorage 是 ArkUI 全局类，@kit.ArkUI 不导出（编译验证过）。
-  assert.doesNotMatch(entry, /import \{[^}]*PersistentStorage[^}]*\} from '@kit\.ArkUI'/);
-  assert.match(entry, /this\.bindPersistentSettings\(\);/);
-  assert.match(entry, /PersistentStorage\.persistProp<string>\(PERSISTENT_READ_MODE_KEY, 'v1'\)/);
-  assert.match(entry, /PersistentStorage\.persistProp<boolean>\(PERSISTENT_V2_WRITE_KEY, false\)/);
-  assert.match(entry, /PersistentStorage\.persistProp<string>\(PERSISTENT_V1_RETAINED_KEY, ''\)/);
-  assert.match(src('services/timelineStore.ets'), /TIMELINE_READ_MODE_KEY: string = PERSISTENT_READ_MODE_KEY/);
-  assert.match(src('services/timelineModeSwitch.ets'), /V2_WRITE_ENABLED_KEY: string = PERSISTENT_V2_WRITE_KEY/);
-  assert.match(src('model/v2Activation.ts'), /V1_RETAINED_KEY: string = PERSISTENT_V1_RETAINED_KEY/);
-});
-
-test('49 static P1-5: deactivate persists false/v1; readers use the bound keys', () => {
-  const service = src('services/v2ActivationService.ets');
-  assert.match(service, /AppStorage\.setOrCreate<boolean>\(V2_WRITE_ENABLED_KEY, false\)/);
-  assert.match(service, /timelineStore\.setReadMode\('v1'\)/);
-  assert.match(src('services/timelineStore.ets'), /AppStorage\.get<string>\(TIMELINE_READ_MODE_KEY\)/);
-  assert.match(src('services/timelineModeSwitch.ets'), /AppStorage\.get<boolean>\(V2_WRITE_ENABLED_KEY\) === true/);
-  assert.match(src('services/v2ActivationService.ets'), /AppStorage\.get<string>\(V1_RETAINED_KEY\) === '1'/);
 });
 
 // ---------------------------------------------------------------- P1-2：用户可见重试

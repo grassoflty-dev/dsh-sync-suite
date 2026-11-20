@@ -26,8 +26,8 @@
  * ## 搜索 / 筛选（Wave 2-A）
  * - 列表顶部：搜索框（标题/正文/OCR/作者，大小写不敏感、多关键词 AND）+ 状态 chips
  *   （全部/未完成/已完成）+ 作者 chips（来自 `authorsOf`）；
- * - **与「今日待办|全部未完成」tab 正交**：先按 tab 取数（`scheduleStore.readDay` /
- *   `openIndexStore.pendingRecords`），再 `applyQuery` 过滤（见 `model/query.ts`，纯逻辑可单测）；
+ * - **与「今日待办|全部未完成」tab 正交**：先按 tab 取数（v2 `timelineStore.readDay` /
+ *   `timelineStore.pendingRecords`），再 `applyQuery` 过滤（见 `model/query.ts`，纯逻辑可单测）；
  * - 列表真正渲染的是 `visibleRecords`；`records` 仍是 tab 级全量（汇总块 / 计数 / AI 面板用它）。
  *
  * ## 删除 + 5 秒撤销（Wave 2-A）
@@ -51,17 +51,18 @@ import { SUMMARY_MAX_POINTS, truncateSummaryForDisplay } from '../model/dailySum
 import type { DailySummary, SummaryDisplay } from '../model/dailySummary';
 import { applyQuery, authorsOf, hasKeyword, isFilterActive, makeFilter } from '../model/query';
 import type { QueryFilter } from '../model/query';
-import { UNDO_TTL_MS, UndoDelete, restoreRecord, softDeleteRecord, withoutDeleted } from '../model/undoDelete';
+import { UNDO_TTL_MS, UndoDelete, restoreRecord, softDeleteRecord } from '../model/undoDelete';
 import { formatDiagnostics } from '../model/stateView';
 import type { DiagnosticsInput } from '../model/stateView';
 import { SAVED_MARKER_KEY, decodeSavedMarker, containsRecordVersion } from '../model/homeRefresh';
 import type { SavedMarker } from '../model/homeRefresh';
 import { redactSecrets } from '../model/syncError';
 import { describeError, newRecordId, scheduleStore } from '../services/scheduleStore';
-import { openIndexStore } from '../services/openIndexStore';
 import { timelineStore } from '../services/timelineStore';
 import { recordWriter } from '../services/recordWriter';
-import { timelineModeSwitch } from '../services/timelineModeSwitch';
+import {
+  NOT_MIGRATED_BANNER, NOT_MIGRATED_REASON, NOT_MIGRATED_NEXT_STEP
+} from '../model/migrationState';
 import { syncProtocolStore } from '../services/syncProtocolStore';
 import { bridgeGitRunner } from '../services/gitRunner';
 import { syncStatusStore } from '../services/syncStatusStore';
@@ -87,7 +88,6 @@ import { ErrorState } from '../components/state/ErrorState';
 import {
   DIVIDER,
   FONT,
-  HOME_INCLUDE_OTHER_KEY,
   LINE_HEIGHT,
   RADIUS,
   SPACING,
@@ -134,12 +134,12 @@ struct Index {
   @State showDatePicker: boolean = false;
   /** false=今日待办；true=全部未完成。 */
   @State showAllPending: boolean = false;
-  /** true=同时折叠展示其他设备目录（pull 后只读展示，写入仍只进本机目录）。 */
-  @State includeOtherDevices: boolean = false;
-  /** 列表数据（每次操作后重读存储，保证跨设备/追加语义一致）。 */
+  /** 列表数据（每次操作后重读存储，保证追加语义一致）。 */
   @State records: ScheduleRecord[] = [];
   @State statusText: string = '';
-  /** v2 同步三态（已同步·时间 / N 条待同步·最近失败 / 只读·原因），来自 syncStatusStore。 */
+  /** 未迁移（timeline/schema.json 非 v2）：首页唯一横幅 + 写入拒绝，v1 数据不删。 */
+  @State unmigrated: boolean = false;
+  /** v2 同步三态（已同步·时间 / N 条待同步·最近失败 / 错误·原因），来自 syncStatusStore。 */
   @State syncStatus: SyncStatusView = syncStatusStore.snapshot();
   /** 下拉刷新中的转圈状态（`Refresh` 组件用 `$$` 双向绑定）。 */
   @State refreshing: boolean = false;
@@ -202,7 +202,7 @@ struct Index {
   @State aiResultText: string = '';
 
   // 「今日汇总」块（列表第一项）的展示状态。
-  // 单一数据源 = `summaryStore.read(date)`（落盘在 devices/<id>/summaries/<date>.json），
+  // 单一数据源 = `summaryStore.read(date)`（v2-only：落盘在 timeline/<date>/summary.json），
   // 仅把读到的结果物化到下面这几个 @State 供渲染；`aiResultText` 同时供「查看全部」面板使用。
   /** 汇总标题；空串 = 这一天还没有汇总。 */
   @State summaryHeadline: string = '';
@@ -236,7 +236,6 @@ struct Index {
   private undoTimer: number = -1;
 
   aboutToAppear(): void {
-    this.syncHomeFilter();
     this.bootstrap();
   }
 
@@ -302,25 +301,20 @@ struct Index {
 
   /** 从编辑页/设置页返回时重新加载（追加写语义下必须重读）。 */
   onPageShow(): void {
-    // 「含其他设备」开关归设置页管，回来时同步一次
-    this.syncHomeFilter();
-    // 从设置页开关 v2 回来后刷新三态行（状态来自 syncStatusStore）
+    // v2-only：没有激活开关，三态行只跟随 syncStatusStore 的最近结果。
     this.syncStatus = syncStatusStore.snapshot();
     if (this.ready) {
       const saved: SavedMarker | null = this.consumeSavedMarker();
       if (saved !== null) {
-        // 保存返回：只重读列表（写盘与派生索引在 appendRecord 内已同步完成），
-        // 不再**直接**跑 reconcileIfDue 全量对账、不重读汇总、不推进 paneTick。
-        // 注：「全部未完成」tab 的 reload() 走 pendingRecords()，它内部仍会做一次
-        // 被 15s 节流的索引自愈（openIndexStore.ets），这里省掉的是首页自己那次显式调用。
+        // 保存返回：只重读列表（v2 原子写入已完成），不跑 v1 对账 / 不重读 v1 汇总。
         this.reload();
         this.reconcileSavedRow(saved);
         return;
       }
-      // 从设置页 pull 回来也走这里：顺手做一次带节流的索引自愈，保证「全部未完成」数据是新的
-      openIndexStore.reconcileIfDue();
       this.reload();
-      this.loadSummary();
+      if (!this.unmigrated) {
+        this.loadSummary();
+      }
       this.paneTick = this.paneTick + 1;
       return;
     }
@@ -328,9 +322,10 @@ struct Index {
       .ensureReady(getContext(this) as common.UIAbilityContext)
       .then(() => {
         this.ready = true;
-        openIndexStore.reconcileIfDue();
         this.reload();
-        this.loadSummary();
+        if (!this.unmigrated) {
+          this.loadSummary();
+        }
         this.paneTick = this.paneTick + 1;
       })
       .catch((error: Error) => {
@@ -369,7 +364,6 @@ struct Index {
     if (containsRecordVersion(this.records, saved.id, saved.ts)) {
       return;
     }
-    openIndexStore.reconcile();
     this.reload();
     this.loadSummary();
     promptAction.showToast({
@@ -382,28 +376,18 @@ struct Index {
     try {
       // summaryStore.ensureReady 内部会先 ensureReady(scheduleStore)，这里两处都调以保持幂等与顺序清晰
       await scheduleStore.ensureReady(getContext(this) as common.UIAbilityContext);
-      // v2 只读服务：只读一次 schema 门槛；坏标记/无标记内部降级为「非 v2」，失败也不打断 v1 启动
+      // v2 唯一路径：只读一次 schema 门槛；缺标记 / 坏标记 = 未迁移（横幅 + 写入拒绝）。
       await timelineStore.ensureReady(getContext(this) as common.UIAbilityContext);
       await summaryStore.ensureReady(getContext(this) as common.UIAbilityContext);
-      await openIndexStore.ensureReady(getContext(this) as common.UIAbilityContext);
-      // mod-v2-dual-write-off：只有 schema.json 明确为 v2 才翻转开关；否则保持 v1。
-      // 配置了仓库才提示一次（避免未配置仓库的新用户被打扰），原因文案来自纯决策函数。
-      const modeResult = await timelineModeSwitch.applyMode(getContext(this) as common.UIAbilityContext);
-      if (modeResult.mode === 'v1' && modeResult.code !== 'ok') {
-        const cachedSettings = settingsStore.cached();
-        if (cachedSettings !== null && cachedSettings.repoUrl.trim().length > 0) {
-          promptAction.showToast({ message: modeResult.reason, duration: toastMsFor(true) });
-        }
-      }
-      // mod-v2-sync-wiring：绑定真实 GitRunner（isomorphic-git 桥），并让周期服务记住 filesDir。
-      // 未激活 v2 时周期保持惰性；激活后 recordWriter 写成功即触发同步。
+      this.unmigrated = !timelineStore.isMigrated();
+      // 绑定真实 GitRunner（isomorphic-git 桥），并让周期服务记住 filesDir。
+      // 未迁移时周期保持惰性；迁移后 recordWriter 写成功即触发同步。
       syncProtocolStore.setRunner(bridgeGitRunner);
       await syncProtocolStore.ensureReadyForBootstrap(getContext(this) as common.UIAbilityContext);
       await outboxStore.ensureReady(getContext(this) as common.UIAbilityContext);
-      this.syncStatus = syncStatusStore.snapshot();
-      if (!timelineStore.useV2()) {
-        syncStatusStore.setReadOnly('v2 写入未启用，当前使用 v1 日程路径（在设置页显式开启）');
-        this.syncStatus = syncStatusStore.snapshot();
+      if (this.unmigrated) {
+        // 唯一未迁移态：错误行如实给出类型化原因；横幅由 MigrationBanner 渲染。
+        this.syncStatus = syncStatusStore.setError(NOT_MIGRATED_REASON);
       } else {
         // P1-2/P2-5：带残留 outbox 启动时也要显示「N 条待同步」并暴露「重试同步」入口。
         const parked = outboxStore.list();
@@ -411,15 +395,15 @@ struct Index {
           const failed: number = parked.filter((e): boolean => e.state === 'failed').length;
           syncStatusStore.setPending(
             parked.length, failed > 0 ? '上次同步失败，点重试继续' : '等待重试');
-          this.syncStatus = syncStatusStore.snapshot();
         }
+        this.syncStatus = syncStatusStore.snapshot();
       }
-      // 启动自愈：「全部未完成」读索引，这里先把索引与最近 30 天分片对齐（无漂移则不写盘）
-      // v2 模式下启动不得写 v1 索引：reconcile 会重写 devices/<id>/open.jsonl，仅 v1 默认路径执行
-      if (!timelineStore.useV2()) { openIndexStore.reconcile(); }
+      // v2-only：绝不写 v1 索引（reconcile 会重写 devices/<id>/open.jsonl），旧数据只读保留。
       this.ready = true;
       this.reload();
-      this.loadSummary();
+      if (!this.unmigrated) {
+        this.loadSummary();
+      }
     } catch (error) {
       this.ready = false;
       this.statusText = `存储初始化失败：${describeError(error)}`;
@@ -437,38 +421,14 @@ struct Index {
       return;
     }
     try {
-      // v2 只读分支（默认关闭）：useV2() 同时要求「仓库是 v2」且「开关选了 v2」。
-      // 命中时只读 timelineStore，绝不碰 openIndexStore / reconcile / loadSummary；
-      // records 仍是 tab 级全量，下方 refreshQuery + pruneSelection 的筛选/排序逻辑完全不变。
-      if (timelineStore.useV2()) {
-        this.records = this.showAllPending
-          ? timelineStore.pendingRecords() // 未完成由 closed_at 派生（不是 done，也不是 open.jsonl）
-          : timelineStore.readDay(this.selectedDate); // 已用 visibleRecords 过滤删除账本
-        this.statusText = this.records.length === 0
-          ? (this.showAllPending ? '所有日程都已完成' : '这一天还没有日程')
-          : `共 ${this.records.length} 条${this.showAllPending ? '未完成' : ''}（v2 时间线，自动同步）`;
-      } else if (this.showAllPending) {
-        // 数据源：每台设备读自己的 open.jsonl（N 台设备 = N 个小文件）；某台设备缺索引时
-        // 在内存里用它的分片重建，绝不写别人的设备目录（契约：每台设备只写自己的目录）。
-        // 墓碑过滤：本机走 readDay 时已过滤；跨设备的内存重建读的是原始分片，这里再兜一层。
-        const pending: ScheduleRecord[] = withoutDeleted(openIndexStore.pendingRecords(this.includeOtherDevices));
-        this.records = pending;
-        this.statusText = pending.length === 0 ? '所有日程都已完成' : `共 ${pending.length} 条未完成（跨全部日期${this.includeOtherDevices ? '与全部设备' : ''}）`;
-      } else {
-        const day: ScheduleRecord[] = withoutDeleted(
-          this.includeOtherDevices
-            ? scheduleStore.readDayAllDevices(this.selectedDate)
-            : scheduleStore.readDay(this.selectedDate)
-        );
-        this.records = day;
-        let doneCount = 0;
-        for (const record of day) {
-          if (record.done === true) {
-            doneCount++;
-          }
-        }
-        this.statusText = day.length === 0 ? '这一天还没有日程' : `共 ${day.length} 条 · 已完成 ${doneCount} 条${this.includeOtherDevices ? ' · 含其他设备（只读）' : ''}`;
-      }
+      // v2 是唯一读路径：无条件读 timelineStore，绝不碰 openIndexStore / reconcile /
+      // v1 分片；records 仍是 tab 级全量，下方 refreshQuery + pruneSelection 不变。
+      this.records = this.showAllPending
+        ? timelineStore.pendingRecords() // 未完成由 closed_at 派生（不是 done，也不是 open.jsonl）
+        : timelineStore.readDay(this.selectedDate); // 已用 visibleRecords 过滤删除账本
+      this.statusText = this.records.length === 0
+        ? (this.showAllPending ? '所有日程都已完成' : '这一天还没有日程')
+        : `共 ${this.records.length} 条${this.showAllPending ? '未完成' : ''}（v2 时间线，自动同步）`;
     } catch (error) {
       this.records = [];
       this.statusText = `读取日程失败：${describeError(error)}`;
@@ -590,8 +550,11 @@ struct Index {
       promptAction.showToast({ message: plan.reason, duration: toastMsFor(true) });
       return false;
     }
-    if (!scheduleStore.isReady()) {
-      promptAction.showToast({ message: '存储尚未就绪，请稍后重试' });
+    if (!this.ready || !timelineStore.isMigrated()) {
+      promptAction.showToast({
+        message: this.unmigrated ? NOT_MIGRATED_REASON : '存储尚未就绪，请稍后重试',
+        duration: toastMsFor(true)
+      });
       return false;
     }
     const record: ScheduleRecord = {
@@ -605,7 +568,7 @@ struct Index {
     };
     this.quickBusy = true;
     try {
-      // 分流写入：v2 走 timeline，失败停放 outbox 并抛 E_V2_WRITE_PARKED；v1 走原 appendRecord
+      // v2 唯一写入：失败停放 outbox 并抛 E_V2_WRITE_PARKED；未迁移则抛 E_NOT_MIGRATED（零写入）
       recordWriter.writeRecord(record);
     } catch (error) {
       this.quickBusy = false;
@@ -614,7 +577,9 @@ struct Index {
     }
     this.quickBusy = false;
     this.reload();
-    this.loadSummary();
+    if (!this.unmigrated) {
+      this.loadSummary();
+    }
     promptAction.showToast({ message: '已记下' });
     return true;
   }
@@ -714,12 +679,6 @@ struct Index {
     this.paneTick = this.paneTick + 1;
   }
 
-  /** 「含其他设备」由设置页的开关写 AppStorage，首页返回时读一次（不新增配置项）。 */
-  private syncHomeFilter(): void {
-    const stored: boolean | undefined = AppStorage.get<boolean>(HOME_INCLUDE_OTHER_KEY);
-    this.includeOtherDevices = stored === true;
-  }
-
   // ------------------------------------------------------------------ 今日汇总块（数据源：summaryStore 持久化）
 
   /** 是否已有可展示的汇总（决定汇总块走 ④「生成」态还是 ⑤「有汇总」态）。 */
@@ -766,7 +725,8 @@ struct Index {
   /** 读当前日期的汇总（`aboutToAppear` / 换日期 / 换模式 都走它，单一数据源）。 */
   private loadSummary(): void {
     this.summaryError = '';
-    if (!this.ready) {
+    // 未迁移时 v1 汇总既不可读也不可写：只留空态，旧文件原样保留。
+    if (this.unmigrated || !this.ready) {
       this.applySummary(null);
       return;
     }
@@ -784,6 +744,10 @@ struct Index {
    * 失败时**不清空**：重新 `read()` 一次旧汇总继续显示，块内只多一行错误 + 重试。
    */
   private async generateSummary(): Promise<void> {
+    if (this.unmigrated) {
+      promptAction.showToast({ message: NOT_MIGRATED_REASON, duration: toastMsFor(true) });
+      return;
+    }
     if (this.aiBusy || this.records.length === 0) {
       return;
     }
@@ -805,8 +769,8 @@ struct Index {
         this.summaryError = `读取设置失败：${describeError(error)}`;
         return;
       }
-      // 全量当天记录（含已处理），不要自己按 ai_processed 过滤
-      const dayRecords: ScheduleRecord[] = scheduleStore.readDay(this.selectedDate);
+      // 全量当天记录（含已处理），不要自己按 ai_processed 过滤；v2 唯一读路径
+      const dayRecords: ScheduleRecord[] = timelineStore.readDay(this.selectedDate);
       const saved: DailySummary = await summaryStore.generate(
         dayRecords,
         this.selectedDate,
@@ -969,10 +933,7 @@ struct Index {
       promptAction.showToast({ message: '存储尚未就绪，请稍后再试' });
       return;
     }
-    let target: ScheduleRecord | null = this.findRecordById(id);
-    if (target === null) {
-      target = scheduleStore.findByIdAny(id);
-    }
+    const target: ScheduleRecord | null = this.findRecordById(id);
     if (target === null) {
       promptAction.showToast({ message: '记录已不存在，列表已刷新' });
       this.reload();
@@ -1052,11 +1013,15 @@ struct Index {
   // ------------------------------------------------------------------ AI 汇总
 
   private openAiPanel(): void {
+    if (this.unmigrated) {
+      promptAction.showToast({ message: NOT_MIGRATED_REASON, duration: toastMsFor(true) });
+      return;
+    }
     if (!this.ready) {
       promptAction.showToast({ message: '存储尚未就绪，请稍后再试' });
       return;
     }
-    const dayRecords = scheduleStore.readDay(this.selectedDate);
+    const dayRecords = timelineStore.readDay(this.selectedDate);
     const payload = buildAiPayload(this.selectedDate, dayRecords);
     if (payload.records.length === 0) {
       promptAction.showToast({ message: '这一天没有需要 AI 整理的记录（或已全部处理）' });
@@ -1110,7 +1075,7 @@ struct Index {
       promptAction.showToast({ message: '请至少选择一条记录' });
       return;
     }
-    const dayRecords = scheduleStore.readDay(this.aiPanelDate);
+    const dayRecords = timelineStore.readDay(this.aiPanelDate);
     const payload = buildAiPayload(this.aiPanelDate, dayRecords);
     const selected: AiPayload = { date: payload.date, records: [] };
     for (const item of payload.records) {
@@ -1669,8 +1634,37 @@ struct Index {
   }
 
   /**
-   * v2 同步三态行（mod-v2-sync-wiring）：已同步·时间 / N 条待同步·最近失败 / 只读·原因。
-   * 数据只来自 syncStatusStore.snapshot()（last result + outbox count + 激活/门禁原因）。
+   * 未迁移唯一横幅（mod-v2-only）：只在 timeline/schema.json 缺失/非 v2 时渲染一次。
+   * 文案逐字来自 model/migrationState；按钮只给下一步提示，不执行迁移、不伪造成功。
+   */
+  @Builder
+  MigrationBanner() {
+    if (this.unmigrated) {
+      Column({ space: SPACING.xs }) {
+        Text(NOT_MIGRATED_BANNER)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.danger'))
+          .width('100%')
+        Text('查看迁移步骤')
+          .fontSize(FONT.caption)
+          .fontColor($r('app.color.brand'))
+          .padding({ top: SPACING.xs, bottom: SPACING.xs })
+          .onClick(() => {
+            promptAction.showToast({ message: NOT_MIGRATED_NEXT_STEP, duration: toastMsFor(true) });
+          })
+      }
+      .width('100%')
+      .padding(SPACING.sm)
+      .backgroundColor($r('app.color.brand_soft'))
+      .borderRadius(RADIUS.sm)
+      .alignItems(HorizontalAlign.Start)
+    }
+  }
+
+  /**
+   * v2 同步三态行（mod-v2-only）：已同步·时间 / N 条待同步·最近失败 / 错误·原因。
+   * 数据只来自 syncStatusStore.snapshot()（last result + outbox count + typed 门禁原因）。
    */
   @Builder
   SyncStatusRow() {
@@ -1816,6 +1810,7 @@ struct Index {
       this.ModeTabs()
       this.SearchFilterBar()
       this.SyncStatusRow()
+      this.MigrationBanner()
       Divider()
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
@@ -1860,6 +1855,7 @@ struct Index {
         this.ModeTabs()
         this.SearchFilterBar()
         this.SyncStatusRow()
+        this.MigrationBanner()
         Divider()
           .strokeWidth(DIVIDER)
           .color($r('app.color.divider'))

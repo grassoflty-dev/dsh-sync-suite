@@ -429,17 +429,31 @@ describe('SummaryIO 落盘（真实临时目录）', () => {
   });
 });
 
-describe('AI 失败不覆盖旧汇总（服务层顺序）', () => {
-  test('summaryStore 先调 AI、后写盘', () => {
-    const summarizeAt = SUMMARY_STORE.indexOf('await summarize(');
-    const writeAt = SUMMARY_STORE.indexOf('writeDailySummary(');
+describe('AI 失败不覆盖旧汇总（服务层顺序，v2-only 落点）', () => {
+  // retarget（mod-v2-only P1-1）：v1 的 writeDailySummary 已不在 summaryStore 里，
+  // 唯一落盘口是 timelineWriteStore.appendSummary；顺序纪律「AI 先、写盘后」不变。
+  // 剥注释后再找调用点——新适配器的文档注释里也会引用这些函数名，不能让注释干扰顺序断言。
+  const STORE_CODE = SUMMARY_STORE
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  test('summaryStore 先调 AI、后写盘（经 timelineWriteStore）', () => {
+    const summarizeAt = STORE_CODE.indexOf('await summarize(');
+    const writeAt = STORE_CODE.indexOf('timelineWriteStore.appendSummary(');
     assert.ok(summarizeAt > 0, 'summaryStore 没有调用 summarize');
     assert.ok(writeAt > summarizeAt, '写盘必须排在 AI 调用之后（AI 失败时不能落盘）');
   });
 
   test('只有拿到回复后才构造汇总并写盘', () => {
-    const replyAt = SUMMARY_STORE.indexOf('summaryFromReply(reply, meta)');
-    const writeAt = SUMMARY_STORE.indexOf('writeDailySummary(');
+    const replyAt = STORE_CODE.indexOf('summaryFromReply(reply, meta)');
+    const writeAt = STORE_CODE.indexOf('timelineWriteStore.appendSummary(');
     assert.ok(replyAt > 0 && writeAt > replyAt);
+  });
+
+  test('未迁移拒绝排在任何 IO（AI / 写盘）之前', () => {
+    const guardAt = STORE_CODE.indexOf('if (!timelineStore.isMigrated())');
+    const summarizeAt = STORE_CODE.indexOf('await summarize(');
+    const writeAt = STORE_CODE.indexOf('timelineWriteStore.appendSummary(');
+    assert.ok(guardAt > 0 && summarizeAt > guardAt && writeAt > guardAt,
+      'E_NOT_MIGRATED 必须在 AI 请求与落盘之前（零 IO 拒绝）');
   });
 });

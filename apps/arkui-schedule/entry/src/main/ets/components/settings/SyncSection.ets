@@ -112,14 +112,6 @@ export struct SyncSection {
   /** 首页是否展示其他设备的只读记录。 */
   @Prop includeOtherDevices: boolean = false;
 
-  // ---------------------------------------------------------------- v2 写入显式激活（mod-v2-sync-wiring）
-  /** 显式激活位：默认 false，只能由设置页确认后翻转。 */
-  @Prop v2WriteEnabled: boolean = false;
-  /** 预检拒绝原因（空串 = 可开启 / 已开启）。 */
-  @Prop v2ActivationReason: string = '';
-  /** 预检给出的下一步动作（空串 = 无需动作）。 */
-  @Prop v2ActivationNextStep: string = '';
-
   // ---------------------------------------------------------------- 页面只读派生（函数 props）
   /** 推送按钮的阻塞原因（空串 = 可以推）：闭包读页面最新状态，调用点与拆分前一致。 */
   pushBlockedReason: () => string = () => '';
@@ -140,8 +132,6 @@ export struct SyncSection {
   toggleSyncAdvanced: () => void = () => {};
   /** 首页过滤开关（页面同时写 AppStorage）。 */
   onToggleIncludeOtherDevices: (isOn: boolean) => void = () => {};
-  /** v2 写入开关：页面先跑预检 + 确认弹层，再决定是否真正翻转。 */
-  onToggleV2Write: (isOn: boolean) => void = () => {};
   /** pull / push / status（与拆分前 `runAction(action)` 同一个入口）。 */
   runAction: (action: string) => void = () => {};
   /** 打开「更多」弹层（组头「更多」与状态行点击都走这里）。 */
@@ -649,37 +639,7 @@ export struct SyncSection {
       .height(TOUCH_MIN + SPACING.sm)
       .alignItems(VerticalAlign.Center)
 
-      // ---- v2 时间线写入：显式激活（mod-v2-sync-wiring）----
-      // 不是隐藏 flag：开启必须先过 schema / 并存裁决 / 同步周期三道预检 + 用户确认。
-      // devices/ + 有数据的 timeline/ 并存是迁移后常态：走专用确认框显式裁决
-      // （以 timeline/ 为权威、v1 文件保留），不再一律拒绝；关闭无条件回到 v1。
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-      Row({ space: SPACING.sm }) {
-        Text('启用 v2 时间线写入')
-          .fontSize(FONT.body)
-          .lineHeight(LINE_HEIGHT.body)
-          .fontColor($r('app.color.text_primary'))
-          .layoutWeight(1)
-          .textAlign(TextAlign.Start)
-        Toggle({ type: ToggleType.Switch, isOn: this.v2WriteEnabled })
-          .selectedColor($r('app.color.brand'))
-          .onChange((isOn: boolean) => {
-            this.onToggleV2Write(isOn);
-          })
-      }
-      .width('100%')
-      .height(TOUCH_MIN + SPACING.sm)
-      .alignItems(VerticalAlign.Center)
-      this.HintLine('仓库已迁移到 timeline/ 结构后才可开启；开启后新记录写入 timeline/ 并自动同步；关闭即回到 v1，v1 数据不会被删除')
-      if (this.v2ActivationReason.length > 0) {
-        this.ErrorText(`无法开启：${this.v2ActivationReason}`)
-      }
-      if (this.v2ActivationNextStep.length > 0) {
-        this.HintLine(this.v2ActivationNextStep)
-      }
-
+      // v2-only：没有激活开关。写入始终走 timeline/；未迁移时由首页横幅 + typed 拒绝说明。
       // 错误态（`docs/STATE-UI.md` §4.3）：发生了什么 / 为什么 / 下一步 + 可复制诊断 + 重试
       if (this.lastSyncError.length > 0) {
         ErrorState({

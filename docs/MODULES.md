@@ -44,8 +44,13 @@
 | `mod-v2-doctor` | READ-ONLY 仓库体检 CLI：schema / 布局 / 每日 records / 账本 / 媒体 / v1 侧 / 冲突审计的 typed 诊断，零写入、零修复 | 已提交 | 7fc5b9f | 提交前回滚 = 删除 `tools/doctor-v2.mjs` + `apps/arkui-schedule/tools/test/doctorV2.test.mjs` 两个新增文件并撤销本文 §1/§2/§5/§6 登记；提交后 `git revert <hash>` | 独立叶子，无代码依赖、无下游，不进回滚链；只读 v1/v2 仓库布局与 `docs/DATA-CONTRACT-v2.md` §2/§3/§4/§5/§6/§7/§9/§11 | `tools/doctor-v2.mjs`（自包含、仅 `node:` 内建）、测试 `apps/arkui-schedule/tools/test/doctorV2.test.mjs`（39 例；含 `I_LEDGER_RETAINED`/`W_LEDGER_ORPHAN`/`W_MEDIA_NOT_MIGRATED` 新码；每次运行前后整棵 repo 逐字节快照相等） |
 | `mod-export-v2-ledgers` | v2 bundle 增 `bundleVersion:2` + 三本按日账本（逐字节搬运 + 并集导入 + 旧 bundle note + 未来版本 typed 拒绝） | 已提交 | 25fd0f2 | 提交前回滚 = 撤销 `model/exportImport.ts` / `services/exportService.ets` / `tools/test/exportImportV2.test.mjs` 三处增量 + `docs/EXPORT-IMPORT.md` §7 + 本文 §1/§2/§5/§6 登记；提交后 `git revert <hash>`（v1 导出导入与媒体预检不变，旧 bundle 仍可导入） | 依赖 `mod-export-import-v2`（在其 v2 bundle 上追加字段，不删既有内容）；独立叶子、无下游，不进回滚链 | `docs/EXPORT-IMPORT.md` §7（bundle/version 兼容规则 verbatim）；测试 `tools/test/exportImportV2.test.mjs` |
 | `mod-doctor-media-window` | 修 doctor 迁移窗口假阳性（N-1）：`media/` 不存在或为空且当日引用全缺也降为 `W_MEDIA_NOT_MIGRATED`，仅非空目录仍缺引用才 `E_MEDIA_MISSING` | 已提交 | df917ff | 提交前回滚 = 撤销 `tools/doctor-v2.mjs` 的 `checkMedia` 规则改动与 `apps/arkui-schedule/tools/test/doctorV2.test.mjs` 的测试 28/40/41 增量，并撤销本文 §1/§5/§6 登记；提交后 `git revert <hash>` | 独立叶子，无下游；在 `mod-v2-doctor` 的只读 CLI 上做语义修正，不进 v2 回滚链；只读契约 `docs/DATA-CONTRACT-v2.md` §5 | `tools/doctor-v2.mjs`（`checkMedia` ~:616-629 + 头注释）；测试 `apps/arkui-schedule/tools/test/doctorV2.test.mjs`（41 例） |
+| `mod-remote-instances-design` | 远程实例统一管理**设计稿**（信息架构 / 实例模型 / 协议 / 授权 / 分期 / 风险 / 与六点计划关系），纯文档、零代码 | 已写完（待 Lead 提交，状态/哈希由 Lead 填） | （Lead 填） | 提交前回滚 = 删除 `docs/REMOTE-INSTANCES.md` 并撤销本文 §1/§5/§6 三处登记；提交后 `git revert <hash>`（纯文档） | 独立叶子，无代码依赖、无下游；引用 `UI-DESIGN` / `CHAT-SYNC` / `REVIEW-remote-security` / `DATA-CONTRACT` §10；后续实现模块 `mod-instance-model` / `mod-instance-list` / `mod-instance-session-create` / `mod-chat-lease` / `mod-chat-write` / `mod-instance-grant` | `docs/REMOTE-INSTANCES.md`（7 节） |
+| `mod-v2-only` | v2-only 默认行为：删除激活开关 / `timeline.readMode` / `timeline.v2WriteEnabled` / `timeline.v1Retained` / 双库并存确认 / v1 读写兜底；未迁移仓库 → 一条 banner + typed `E_NOT_MIGRATED` + 零写入；`devices/**` 永不删除；下一模块 `mod-v2-import-v1`（pending，显式迁移，最后写 `timeline/schema.json` 作提交边界） | 已写完，待 Lead 提交（哈希由 Lead 填） | （Lead 填） | 提交前回滚 = 删除 `v2Only.test.mjs` 并撤销本文 §1/§5/§6 登记；提交后 `git revert <hash>`（独立叶子） | 独立叶子，取代 `mod-v2-dual-write-off` / `mod-v2-sync-wiring` 的激活部分；不进 v2 回滚链 | `apps/arkui-schedule/tools/test/v2Only.test.mjs`（+16 例）；契约 §9/§10/§11；`docs/RUNBOOK.md` §2/§4 |
 
 `mod-v2-dual-read` 已被 `mod-v2-dual-write-off` 取代，见契约 §13。
+
+> **2026-11-20 v2-only 订正**：`mod-v2-dual-write-off` 的**激活部分**（`timeline.v2WriteEnabled` 显式激活闸、readMode 翻转、激活失败拒绝）已被 `mod-v2-only` 取代，见契约 §9/§10/§11。
+> **2026-11-20 v2-only 订正**：`mod-v2-sync-wiring` 的**激活部分**（设置页开关 `v2ActivationService`、两库并存专用确认、三键持久化）已被 `mod-v2-only` 取代；其 git runner 周期接线部分仍保留，见契约 §9。
 
 说明：「提交」列记的是该模块**最后一个**提交；`mod-d5-create-date` 的完整回滚要连同索引里写明的较早提交一起做。
 哈希已由 Lead 于 2026-11-19 提交后回填；执行子代理不得猜测或编造哈希。
@@ -57,9 +62,11 @@
 mod-v2-contract
  ├─ mod-v2-migration ─ mod-v2-media-migration
  ├─ mod-v2-read-timeline ─ mod-v2-read-service ──┐
- ├─ mod-v2-write-service ────────────────────────┼─ mod-v2-dual-write-off ─ mod-v2-sync-wiring ─ mod-export-import-v2
+ ├─ mod-v2-write-service ────────────────────────┼─ mod-v2-only ─ mod-export-import-v2
  └─ mod-v2-sync-protocol ────────────────────────┘
 ```
+
+> **2026-11-20 v2-only 订正**：`mod-v2-dual-write-off` / `mod-v2-sync-wiring` 的激活部分已从依赖图移除（被 `mod-v2-only` 取代）；其 git runner 周期接线仍随 `mod-v2-sync-protocol` 保留。
 
 `mod-push-detail` 是**独立叶子**（无被依赖、无下游），不在上面的回滚链里：只改 `model/syncCycle.ts` 的 `typedPushError` 及两个测试文件（`contractGaps.test.mjs` / `syncWiring.test.mjs`），回滚独立、不影响任何 v2 模块。
 
@@ -67,7 +74,7 @@ mod-v2-contract
 
 `mod-v2-doctor` 也是**独立叶子**：纯只读离线 CLI + 测试两个新增文件，不接线、不改 app / 插件 / 任何写路径，也不创建临时文件；不进上面的回滚链，回滚只需删这两个文件（或 `git revert <hash>`）。它与 `mod-v2-media-gc` 互不依赖：前者只观察、后者可删除，二者可各自单独回滚。
 
-回滚必须从右往左（先回滚依赖方）；单独回滚 `mod-v2-read-service` 而保留 `mod-v2-dual-write-off` 会让已迁移仓库没有读取方（见 ROADMAP 的排序风险）。`mod-v2-sync-wiring` 是激活环节，**单独回滚它只让应用回到「v2 写入未激活」状态（安全，v1 数据未删）**；但若先回滚 `mod-v2-dual-write-off` 而保留 sync-wiring，接线会悬空（`runCycle`/激活闸失去分流基础），故二者必须按此顺序回滚。新增 `mod-export-import-v2` 位于依赖链最右端（依赖 sync-wiring）；**回滚顺序固定为：先回滚 `mod-export-import-v2`（导出/导入），再回滚 `mod-v2-sync-wiring`，最后回滚 `mod-v2-dual-write-off`**，不可颠倒——先回滚下游会让仍在线的导出/导入失去分流基础。
+回滚必须从右往左（先回滚依赖方）；单独回滚 `mod-v2-read-service` 而保留写入方会让已迁移仓库没有读取方（见 ROADMAP 的排序风险）。**（2026-11-20 v2-only 订正）**原「`mod-v2-sync-wiring` 是激活环节，单独回滚只回到 v2 写入未激活安全态」以及「先回滚 export/import → sync-wiring → dual-write-off」的激活模块顺序均已作废；二者的激活部分被 `mod-v2-only` 取代。`mod-export-import-v2` 仍位于依赖链最右端；**现行回滚顺序固定为：先回滚 `mod-export-import-v2`（导出/导入），再回滚 `mod-v2-only`**，不可颠倒——先回滚下游会让仍在线的导出/导入失去分流基础。
 
 ## 2 跨模块触碰登记
 
@@ -111,7 +118,7 @@ mod-v2-contract
 2. **执行 revert**：一次只回滚一个模块；同一提交捆绑多个模块时，按登记的补救方案处理，不拿 `git revert <hash>` 一把梭。
 3. **跑门闸并记录原始输出**（工作目录 `dsh-sync-suite`）：
    - `node tools/overlay.mjs status` → 期望 `applied=false`；
-   - `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"` → 当前基线 **2848 例 / 2847 pass / 0 fail / 1 skip**（最终状态：+22 `mod-v2-media-gc` / +35 `mod-v2-doctor` / +13 `mod-export-v2-ledgers` / +4 doctor 评审修复；此前 +3 = `mod-push-detail` 的 `contractGaps.test.mjs` C14/C15/C16，contractGaps 28/28；相对 2771 的 +25 = `mod-v2-contract-tests`；此前 +26 = `mod-export-import-v2` 的 `exportImportV2.test.mjs` 26；相对 2670 基线的 **+44 = `mod-v2-sync-wiring` 的 `syncWiring.test.mjs` 44**；相对 2607 基线的 **+18 = `mod-v2-dual-write-off` 的 `dualWriteOff.test.mjs` 18**；相对 2536 基线的 **+56 = `mod-v2-sync-protocol` 的 `syncProtocol.test.mjs` 56**；相对 2485 基线的 **+51 = `mod-v2-write-service` 的 `timelineWrite.test.mjs` 32**；相对 2459 基线的 **+23 = `mod-v2-read-service` 的 `timelineService.test.mjs` 23**；相对 2425 基线的 **+34 = `mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` 31**；相对 2391 基线的 **+30 = `mod-quick-record` 的 `quickRecord.test.mjs` 16 + `quickRecordUi.test.mjs` 14**；`mod-settings-lean` 原地改测 4 个既有测试文件、用例数不变，delta 0，基线不动；相对 2348 基线：`mod-v2-read-timeline` **+42**；再往前相对 2306 基线：`mod-v2-migration` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` **+1**；`cec3c93` 之后；数字随模块加入而变动；回滚 D5 相关模块时，因删除的旧用例被恢复，数字会变化，须在批次记录里写明变化原因）；
+   - `node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"` → 当前基线 **2831 例 / 2830 pass / 0 fail / 1 skip**（2026-11-20 v2-only 订正：Δ−19 = `dualWriteOff.test.mjs` / `syncWiring.test.mjs` / `timelineService.test.mjs` 的激活相关用例移除，加上 `v2Only.test.mjs` +16 例新增，净 −19；此前基线 2850 → 2831。以下为历史增量明细：+22 `mod-v2-media-gc` / +35 `mod-v2-doctor` / +13 `mod-export-v2-ledgers` / +4 doctor 评审修复；此前 +3 = `mod-push-detail` 的 `contractGaps.test.mjs` C14/C15/C16，contractGaps 28/28；相对 2771 的 +25 = `mod-v2-contract-tests`；此前 +26 = `mod-export-import-v2` 的 `exportImportV2.test.mjs` 26；相对 2670 基线的 **+44 = `mod-v2-sync-wiring` 的 `syncWiring.test.mjs` 44**；相对 2607 基线的 **+18 = `mod-v2-dual-write-off` 的 `dualWriteOff.test.mjs` 18**；相对 2536 基线的 **+56 = `mod-v2-sync-protocol` 的 `syncProtocol.test.mjs` 56**；相对 2485 基线的 **+51 = `mod-v2-write-service` 的 `timelineWrite.test.mjs` 32**；相对 2459 基线的 **+23 = `mod-v2-read-service` 的 `timelineService.test.mjs` 23**；相对 2425 基线的 **+34 = `mod-v2-media-migration` 的 `v2MediaMigration.test.mjs` 31**；相对 2391 基线的 **+30 = `mod-quick-record` 的 `quickRecord.test.mjs` 16 + `quickRecordUi.test.mjs` 14**；`mod-settings-lean` 原地改测 4 个既有测试文件、用例数不变，delta 0，基线不动；相对 2348 基线：`mod-v2-read-timeline` **+42**；再往前相对 2306 基线：`mod-v2-migration` **+39 = +30 初版 +9 评审修复**、`mod-insert-page-count` **+1**；`cec3c93` 之后；数字随模块加入而变动；回滚 D5 相关模块时，因删除的旧用例被恢复，数字会变化，须在批次记录里写明变化原因）；
    - `node apps/arkui-schedule/tools/validate-app.mjs` → **8/8**；
    - `node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json` → **exit 0**。
 4. **判定「回滚干净」**：0 fail、skip 数未异常增加、8/8、tsc exit 0、`overlay applied=false` 五项同时成立；任何一项不满足即为未回滚干净，不许在 §1 把状态改回「已回滚」。
@@ -151,6 +158,9 @@ mod-v2-contract
 
 | 2026-11-20 | `mod-doctor-media-window` | 已提交（哈希由 Lead 回填） | 全量 **2850/2849/0/1**（+2 = `doctorV2.test.mjs` 41/41）；`validate-app` 8/8；`tsc` exit 0；`--repo <本仓>` 只读 no-op exit 0 | （评审后填） | 闭合 `REVIEW-hardening.md` §复审 N-1：`media/` 不存在或为空且当日引用媒体全缺 → `W_MEDIA_NOT_MIGRATED` warning/exit 0；非空 `media/` 仍缺引用 → `E_MEDIA_MISSING` error/exit 2；`E_MEDIA_NAME`/`E_MEDIA_COLLISION`/`W_MEDIA_UNREFERENCED` 不变；测试 28 由「空目录缺文件=error」调整为「已填充目录缺文件=error」，新增 40（空目录全缺）/41（部分到位） |
 
+| 2026-11-20 | `mod-remote-instances-design` | 已写完（待 Lead 提交，状态/哈希由 Lead 填） | 文档门闸（无代码门闸；`docs/REMOTE-INSTANCES.md` 7 节，≤260 行） | — | 设计稿：推荐独立顶层实例页 + 混合会话、实例模型与可达三态、今天 22 个 RPC 与 8 组 `新增` RPC、owner token + grant + 单写者租约、5+1 个实现模块分期；不碰代码；真机 / 第二设备结论一律 `unverified` |
+| 2026-11-20 | `mod-v2-only` | 已写完（待 Lead 提交，哈希 `（Lead 填）`） | 全量 **2831/2830/0/1**（Δ−19 = dualWriteOff/syncWiring/timelineService 激活用例移除 + `v2Only.test.mjs` +16）；validate-app 8/8；tsc 0 | — | v2-only 默认行为：删除激活开关 / 三持久键 / 双库确认 / v1 读写兜底；未迁移 = 一条 banner + typed `E_NOT_MIGRATED` + 零写入；`devices/**` 永不删除；下一模块 `mod-v2-import-v1`（pending，显式迁移，最后写 `timeline/schema.json` 作提交边界） |
+
 ## 6. 追加批次（2026-11-20 之后，Lead 提交时登记）
 
 | 模块 | 内容 | 状态 | 提交 | 回滚 |
@@ -170,6 +180,8 @@ mod-v2-contract
 | mod-v2-doctor | READ-ONLY 仓库体检 CLI：typed code + 中文原因/下一步，v1/v2/mixed/corrupt 四套夹具，零写入 | 已提交 | 7fc5b9f | 提交前回滚 = 删除 `tools/doctor-v2.mjs` + `apps/arkui-schedule/tools/test/doctorV2.test.mjs` 并撤销 §1/§2/§5 登记；提交后 `git revert <hash>`（独立叶子，无下游） |
 | mod-export-v2-ledgers | v2 bundle 加 `bundleVersion:2` 与三本按日账本（逐字节搬运 / 并集去重 / 旧 bundle note / 未来版本 typed 拒绝），旧 bundle 仍可导入 | 已提交 | 25fd0f2 | 提交前回滚 = 撤销 `model/exportImport.ts` / `services/exportService.ets` / `tools/test/exportImportV2.test.mjs` 三处增量 + `docs/EXPORT-IMPORT.md` §7 + 本文 §1/§2/§5/§6 登记；提交后 `git revert <hash>`（独立叶子，无下游，不进 v2 回滚链） |
 | mod-doctor-media-window | 修 doctor 迁移窗口假阳性（N-1）：`media/` 不存在或为空且当日引用全缺 → `W_MEDIA_NOT_MIGRATED` warning/exit 0；非空 `media/` 仍缺引用 → `E_MEDIA_MISSING` error/exit 2；其余 media code 不变 | 已提交 | df917ff | 提交前回滚 = 撤销 `tools/doctor-v2.mjs` 的 `checkMedia` 规则改动与 `apps/arkui-schedule/tools/test/doctorV2.test.mjs` 的测试 28/40/41 增量，并撤销本文 §1/§5/§6 登记；提交后 `git revert <hash>`（独立叶子，无下游，不进回滚链） |
+| mod-remote-instances-design | 远程实例统一管理**设计稿**（7 节，纯文档、零代码）：独立顶层实例页 + 混合会话、实例模型、今天 22 RPC 与 8 组 `新增` RPC、owner token+grant+租约、分期与风险 | 已写完，待 Lead 提交 | （Lead 填） | 提交前回滚 = 删除 `docs/REMOTE-INSTANCES.md` 并撤销本文 §1/§5/§6 三处登记；提交后 `git revert <hash>`（独立叶子，纯文档） |
+| mod-v2-only | v2-only 默认行为：删除激活开关 / `timeline.readMode` / `timeline.v2WriteEnabled` / `timeline.v1Retained` / 双库确认 / v1 读写兜底；未迁移仓库 = 一条 banner + typed `E_NOT_MIGRATED` + 零写入，`devices/**` 永不删除；下一模块 `mod-v2-import-v1`（pending） | 已写完，待 Lead 提交 | （Lead 填） | 提交前回滚 = 删除 `apps/arkui-schedule/tools/test/v2Only.test.mjs` 并撤销本文 §1/§5/§6 登记；提交后 `git revert <hash>`（独立叶子，无下游） |
 
 > 追加登记：mod-v2-doctor = 7fc5b9f；mod-v2-media-gc = 915a416；mod-export-v2-ledgers = 25fd0f2（评审见 docs/REVIEW-hardening.md；doctor 的 P1 复审已落盘（`docs/REVIEW-hardening.md` §复审：P1-1 CLOSED / P2-2 PARTIAL + N-1））。
 > 追加登记：mod-doctor-media-window = df917ff：闭合上述 N-1（`docs/REVIEW-hardening.md` §复审新发现），哈希待 Lead 提交后回填。

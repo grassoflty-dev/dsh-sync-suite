@@ -46,6 +46,7 @@ import {
 import type { DateRangeResult, ExportImportState, ExportRequest, QuickRangeOption } from '../model/exportImport';
 import { formatDiagnostics } from '../model/stateView';
 import type { DiagnosticsInput } from '../model/stateView';
+import { NOT_MIGRATED_REASON } from '../model/migrationState';
 import { timelineStore } from '../services/timelineStore';
 import { ActionButton } from './ActionButton';
 import { EmptyState } from './state/EmptyState';
@@ -82,7 +83,7 @@ const PANEL_ERROR_NEXT: string = '检查日期区间与文件后重试';
  */
 const FAILURE_PREFIXES: string[] = ['导出失败', '导入失败', '选择文件失败', '无法读取导入文件', '复制路径失败', '没有待确认'];
 
-// ---- v2 时间线备份（只在 timelineStore.useV2() 时渲染，v1 用户看不到这一节）----
+// ---- v2 时间线备份（只在 timelineStore.isMigrated() 时渲染，未迁移用户看不到这一节）----
 const V2_GROUP_TITLE: string = 'v2 时间线备份';
 const V2_HINT: string = '导出共享时间线（含媒体）为只读备份；导入先 dry-run，确认后才写入 timeline/';
 const V2_EXPORT_LABEL: string = '导出 v2 备份';
@@ -217,9 +218,18 @@ export struct ExportImportPanel {
 
   // ------------------------------------------------------------------ v2 时间线备份
 
-  /** 只有仓库确为 v2 且读模式选了 v2 时才显示这一节（默认 v1 用户完全看不到）。 */
+  /** v2 是唯一路径：迁移完成才显示这一节；未迁移用户只看到首页横幅，不看到 v2 备份。 */
   private v2Visible(): boolean {
-    return timelineStore.useV2();
+    return timelineStore.isMigrated();
+  }
+
+  /**
+   * v1 格式导入节在 v2-only 里的门槛：未迁移时整节禁用并给出 typed 原因，
+   * 按钮点了也只展示同一句原因（不做「静默吞点击」），回调根本不会被触发，因此零写入。
+   * 已迁移时导入目标仍是 timeline/（由页面经 timelineWriteStore 落盘）。
+   */
+  private importDisabledReason(): string {
+    return this.v2Visible() ? '' : NOT_MIGRATED_REASON;
   }
 
   /**
@@ -581,7 +591,7 @@ export struct ExportImportPanel {
   }
 
   /**
-   * v2 时间线备份节（flag-gated）：只在 useV2() 时渲染。
+   * v2 时间线备份节：只在迁移完成（isMigrated()）时渲染。
    *
    * 三态纪律（docs/STATE-UI.md）：没计划 → EmptyState 给「去选备份」；忙 → LoadingState；
    * 类型化拒绝文案走 v2Message + HintLine（不是静默吞点击）。按钮统一 ActionButton，
@@ -814,12 +824,17 @@ export struct ExportImportPanel {
         .color($r('app.color.divider'))
 
       this.GroupTitle('导入')
-      this.HintLine('只追加到本机当天文件：冲突（同 id 且更新）不会覆盖，非法记录整批不写')
+      // v2-only：未迁移整节禁用，先给 typed 原因；已迁移的落点是 timeline/<date>/records.json。
+      this.HintLine(this.importDisabledReason().length > 0
+        ? `导入不可用：${this.importDisabledReason()}`
+        : '只追加到 timeline/<date>/records.json：冲突（同 id 且更新）不会覆盖，非法记录整批不写')
 
       ActionButton({
         label: this.pickLabel(),
-        actionEnabled: !this.state.busy,
-        disabledReason: this.busyReason(IMPORT_BUSY_REASON),
+        actionEnabled: this.importDisabledReason().length === 0 && !this.state.busy,
+        disabledReason: this.importDisabledReason().length > 0
+          ? this.importDisabledReason()
+          : this.busyReason(IMPORT_BUSY_REASON),
         busy: false,
         variant: 'secondary',
         block: true,
@@ -867,8 +882,10 @@ export struct ExportImportPanel {
         Column() {
           ActionButton({
             label: this.confirmLabel(),
-            actionEnabled: canConfirmImport(this.state),
-            disabledReason: this.confirmBlockedReason(),
+            actionEnabled: canConfirmImport(this.state) && this.importDisabledReason().length === 0,
+            disabledReason: this.importDisabledReason().length > 0
+              ? this.importDisabledReason()
+              : this.confirmBlockedReason(),
             busy: this.state.busy,
             variant: 'primary',
             block: true,
@@ -883,8 +900,10 @@ export struct ExportImportPanel {
         Column() {
           ActionButton({
             label: '取消',
-            actionEnabled: !this.state.busy,
-            disabledReason: this.busyReason(CANCEL_BUSY_REASON),
+            actionEnabled: !this.state.busy && this.importDisabledReason().length === 0,
+            disabledReason: this.importDisabledReason().length > 0
+              ? this.importDisabledReason()
+              : this.busyReason(CANCEL_BUSY_REASON),
             busy: false,
             variant: 'secondary',
             block: true,

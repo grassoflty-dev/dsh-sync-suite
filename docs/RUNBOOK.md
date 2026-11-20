@@ -1,4 +1,4 @@
-# 运维手册（Runbook）：v2 单时间线迁移 / 激活 / 回滚 / 异常处置
+# 运维手册（Runbook）：v2 单时间线迁移 / 回滚 / 异常处置
 
 > 面向对象：操作员（Lead / 设备维护者），不是开发者。本文只使用仓库里**真实存在**的工具与命令。
 > 权威依据：`docs/DATA-CONTRACT-v2.md` §9（同步协议）/ §10（迁移）/ §11（门槛），
@@ -19,7 +19,7 @@
 先整目录复制 `<repo>` 作备份（带日期）；若 `<repo>` 是 git 仓库，`git -C <repo> status --porcelain`
 必须干净，可建 `git -C <repo> branch backup/v1-<date>` 作回滚锚点；代码仓库同样先
 `git status --porcelain` 确认干净。注意：v2 写操作断言分支固定 `main`（契约 §2/§11），
-**迁移与激活必须在 `main` 上完成**，backup 分支只是锚点，不是迁移落地分支。
+**迁移必须在 `main` 上完成**（2026-11-20 订正：原「与激活」随激活流程删除而作废），backup 分支只是锚点，不是迁移落地分支。
 
 - **成功信号**：备份目录可读；`status --porcelain` 无输出；当前分支 `main`。
 - **失败信号 + 处置**：工作区有改动 → 先由 Lead 处理或换用干净副本，不要在脏树上迁移；
@@ -95,58 +95,67 @@ node tools/migrate-media-v1-to-v2.mjs --repo <path> --apply
 - **失败信号 + 处置**：push 非快进 → 不要强推，核对远端状态后由 Lead 决定常规收敛；
   提交里混进 `devices/**` 删除 → 撤回重做，迁移提交不得删 v1（契约 §10）。
 
-### 1.7 在 App 里显式激活
+### 1.7 迁移一次 → App 即用 timeline（无激活步骤）
 
-按 §2 到设置页打开「启用 v2 时间线写入」。迁移完成只是**允许**激活，代码绝不自动激活。
+> **2026-11-20 v2-only 订正**：原「在 App 里显式激活」整节已废止删除——激活开关
+> `timeline.v2WriteEnabled`、预检服务 `v2ActivationService` 与设置页开关均不存在。
 
-- **成功信号**：开关保持开启，三态行不再「只读」（§2）。
-- **失败信号 + 处置**：开关打不开 → 按 §4 的五类拒绝逐项排查；此时 v1 仍可用，不要改仓库标记绕过门槛。
+§1.1–§1.6 的迁移提交一落地（`timeline/schema.json` 写明 `schemaVersion:2`），App 与插件即直接以
+`timeline/` 为唯一日程真值；没有开关、没有确认弹层、没有「回到 v1」的路径。
 
-## 2. 激活与关闭
+- **成功信号**：不再显示未迁移 banner；新写入落到 `timeline/<date>/` 并随周期 commit + push；
+  `devices/**` 原样保留、未被删除。
+- **失败信号 + 处置**：出现**唯一一条**「仓库尚未迁移」banner 且 typed `E_NOT_MIGRATED` →
+  说明标记未落地（迁移未完成或已回滚），回到 §1.1–§1.6 执行一次性迁移；零写入是预期，
+  不要改仓库标记绕过门槛。
 
-- **位置**：设置页 → 同步区，行标题「启用 v2 时间线写入」+ 开关，源码在
-  `components/settings/SyncSection.ets:652–675`；开关处理在 `pages/Settings.ets:544` 的 `toggleV2Write()`。
-  开启前必经 `v2ActivationService.decide()` 预检 + `promptAction.showDialog()` 确认；全仓唯一写激活位的是
-  `v2ActivationService.activate()/deactivate()`。
-- **两库并存专用确认**：`devices/` 与有有效日的 `timeline/` 并存是迁移后常态，此时弹层标题
-  「v1 / v2 数据并存：需要显式裁决」、按钮「确认以 timeline/ 为权威」（`pages/Settings.ets:572/578`），
-  明示 v1 文件不删除；确认后写 `timeline.v1Retained='1'` 作为裁决记录，之后不再重问。
-  单态走普通「确认启用」，文案不同。取消则两种都不激活。
-- **关闭**：关掉开关 → `deactivate()` 显式写 `false` / `'v1'`，回到 v1 日程路径，toast 提示「已关闭 v2 写入，
-  回到 v1（v1 数据未删除）」；**`timeline.v1Retained` 保留**，因为裁决是事实记录（契约 §9 P1-5）。
-- **三个持久键**：`timeline.readMode`（默认 `'v1'`）、`timeline.v2WriteEnabled`（默认 `false`）、
-  `timeline.v1Retained`（默认 `''`）的唯一真值在 `model/persistentSettings.ts`，由 `EntryAbility.onCreate()`
-  在页面加载前用全局 `PersistentStorage.persistProp` 绑定。真机重启是否仍生效仍 `unverified`（§6）。
-- **激活后应看到**：首页三态行 `已同步·HH:MM`（`services/syncStatusStore.ets` 的 `lastAt` 本地时间，
-  `Index.ets` 的 `SyncStatusRow()`）；数据仓 `timeline/<date>/` 下 `records.json`、`summary.json?`、
-  `deleted.jsonl`、`restore.jsonl`、`conflicts.jsonl`、`media/` 与仓库级 `timeline/schema.json`；
-  一次成功的 push（v2 周期提交 `[v2] sync <n> days`，`force:false`，不改写远端历史、不删远端文件）。
+## 2. 迁移一次 → App 使用 timeline（v2-only）
+
+> **2026-11-20 v2-only 订正**：原「激活与关闭」整节已废止删除——设置页没有「启用 v2 时间线写入」
+> 开关，也不存在 `v2ActivationService.decide()/activate()/deactivate()`、两库并存专用确认、
+> `timeline.v1Retained` / `timeline.readMode` / `timeline.v2WriteEnabled` 三个持久键，以及「关闭回到 v1」。
+> 以上均为历史记录，不再成立（契约 §9/§10/§11）。
+
+- **唯一路径**：迁移完成（`timeline/schema.json` 的 `schemaVersion=2`）后，App 与插件直接走 v2 单时间线：
+  `timeline/<date>/` 下 `records.json`、`summary.json?`、`deleted.jsonl`、`restore.jsonl`、
+  `conflicts.jsonl`、`media/` 与仓库级 `timeline/schema.json`。写入经 §9 同步周期自动 commit + push
+  （提交 `[v2] sync <n> days`，`force:false`，不改写远端历史、不删远端文件）。
+- **未迁移**：缺 `timeline/schema.json` 且存在 `devices/` → 界面显示**唯一一条** banner + typed
+  `E_NOT_MIGRATED` 拒绝，**零写入**（不建本地提交、不 push）；处置只有一条：由用户显式执行一次
+  `mod-v2-import-v1`（待交付）迁移。
+- **安全网**：`devices/**` 永不删除、保持原样；迁移只新增 `timeline/` 与标记，不删改任何 v1 文件。
+- **应看到**：首页三态行 `已同步·HH:MM`（`services/syncStatusStore.ets` 的 `lastAt` 本地时间，
+  `Index.ets` 的 `SyncStatusRow()`）；一次成功的 v2 周期提交（同上）。
 
 ## 3. 回滚任一模块（按 tag，从右往左）
 
 tag 命名为 `module/mod-<id>`（`docs/MODULES.md` §3；`git tag -l` 可列出）。回滚由 Lead 执行，
-规则是**从右往左先回滚依赖方**；依赖链见 `docs/MODULES.md` §1.1：
+规则是**从右往左先回滚依赖方**；依赖链见 `docs/MODULES.md` §1.1。
+
+> **2026-11-20 v2-only 订正**：`mod-v2-dual-write-off` 的激活部分与 `mod-v2-sync-wiring` 的激活部分已删除、
+> 被 `mod-v2-only` 取代；二者不再出现在回滚链中（原「单独回滚只回到 v2 写入未激活安全态」的说法作废）。
 
 ```
 mod-v2-contract
  ├─ mod-v2-migration ─ mod-v2-media-migration
  ├─ mod-v2-read-timeline ─ mod-v2-read-service ──┐
- ├─ mod-v2-write-service ────────────────────────┼─ mod-v2-dual-write-off ─ mod-v2-sync-wiring ─ mod-export-import-v2
+ ├─ mod-v2-write-service ────────────────────────┼─ mod-v2-only ─ mod-export-import-v2
  └─ mod-v2-sync-protocol ────────────────────────┘
 ```
 
 固定顺序（`git revert <tag>`，一次一个、逐项记录）：
 
 1. `git revert module/mod-export-import-v2`（最右端，导出/导入）
-2. `git revert module/mod-v2-sync-wiring`（激活环节；单独回滚只回到「v2 写入未激活」安全态，v1 数据未删）
-3. `git revert module/mod-v2-dual-write-off`（必须在 sync-wiring 之后，否则接线悬空）
-4. 再回滚汇入它的三方：`git revert module/mod-v2-sync-protocol`、`git revert module/mod-v2-write-service`、
+2. `git revert module/mod-v2-only`（v2-only 默认行为；单独回滚只回到「含已删除激活模块的旧代码」历史态，
+   不作为常规回滚目标）
+3. 再回滚汇入它的三方：`git revert module/mod-v2-sync-protocol`、`git revert module/mod-v2-write-service`、
    `git revert module/mod-v2-read-service`；随后 `git revert module/mod-v2-read-timeline`
-5. `git revert module/mod-v2-media-migration` → `git revert module/mod-v2-migration` → `git revert module/mod-v2-contract`
+4. `git revert module/mod-v2-media-migration` → `git revert module/mod-v2-migration` → `git revert module/mod-v2-contract`
 
-`git-bridge` 不能被早于 `mod-v2-sync-wiring` 回滚：`services/GitSyncService.ets` 与
-`resources/rawfile/git/git-bridge.js` 的 `opV2Git` 是 sync-wiring 的跨模块触碰（§2 登记），随该提交一起回滚；
-先回滚桥会让仍在线的接线失去 git 执行基础。多提交模块按**提交时间从新到旧**逐次 revert
+`git-bridge` 不能被早于汇入它的同步模块回滚：`services/GitSyncService.ets` 与
+`resources/rawfile/git/git-bridge.js` 的 `opV2Git` 承担 v2 周期的 git 执行，先回滚桥会让仍在线的周期失去 git 执行基础
+（2026-11-20 订正：原「不得早于 `mod-v2-sync-wiring` 回滚」的说法随该模块激活部分删除而作废）。
+多提交模块按**提交时间从新到旧**逐次 revert
 （例：`mod-d5-create-date` 的 `git revert d6a6b69 14b181a`，见 §1 行）。若已执行过 v1 清理提交，
 须先逆序 revert 清理提交再 revert 迁移提交，否则只能恢复到 v2 状态（契约 §10）。
 
@@ -161,23 +170,26 @@ node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json 
 
 五项同时成立才算回滚干净；**回滚之后必须再跑一次全绿全量**（§4 第 5 步），没有这次绿灯不算回滚完成。
 
-## 4. 激活失败 / 异常处置
+## 4. 异常处置（原「激活失败 / 异常处置」）
 
-五类拒绝的现象与下一步（`model/v2Activation.ts` 决策表，评审 `REVIEW-sync-wiring.md` §4）：
+> **2026-11-20 v2-only 订正**：原五类激活拒绝中的 `E_SCHEMA_MISSING` / `E_MIGRATION_EMPTY` /
+> `E_NEEDS_EXPLICIT_RESOLUTION` / `E_SYNC_UNAVAILABLE`（决策表 `model/v2Activation.ts`，评审
+> `REVIEW-sync-wiring.md` §4）随激活流程一并删除，不再存在；`E_SCHEMA_UNKNOWN` 保留为 schema 门禁拒绝。
+> 新增未迁移拒绝 `E_NOT_MIGRATED`。
 
-| code | 现象（设置页原因行） | 下一步 |
+现有 typed 拒绝的现象与下一步（`assertWritable()` 门禁，契约 §9/§11）：
+
+| code | 现象 | 下一步 |
 | --- | --- | --- |
-| `E_SCHEMA_MISSING` | 「仓库缺少 timeline/schema.json（或无法解析），不能启用 v2 写入」 | 先按 §1 跑迁移生成 `timeline/schema.json`，再回来开启 |
-| `E_SCHEMA_UNKNOWN` | 「仓库结构版本不是 2（不认识），不能启用 v2 写入」 | 核对标记内容，重跑记录迁移 apply；不要手改 schemaVersion 绕过 |
-| `E_MIGRATION_EMPTY` | devices/ 与 timeline/ 并存但 timeline/ 无有效日，拒绝启用 | 先跑单向迁移让 timeline/ 产生有效日，再开启 |
-| `E_NEEDS_EXPLICIT_RESOLUTION` | 弹出「v1 / v2 数据并存：需要显式裁决」专用确认（非错误） | 在弹层点「确认以 timeline/ 为权威」；取消则不激活 |
-| `E_SYNC_UNAVAILABLE` | 「同步周期不可用（未绑定 GitRunner 或同步内核未就绪）」 | 先进入设置页让同步内核就绪，再回来开启 |
+| `E_NOT_MIGRATED` | **唯一一条**「仓库尚未迁移到 v2 时间线」banner；`timeline/**` 写入零写入 | 由用户显式执行一次 `mod-v2-import-v1`（待交付）迁移，生成 `timeline/schema.json`；不要手改标记绕过门槛 |
+| `E_SCHEMA_UNKNOWN` | 「仓库结构版本不是 2（不认识）」，只读、零写入 | 核对标记内容，重跑一次性迁移；不要手改 schemaVersion 绕过 |
 
 三态行异常时先查什么：
 
-- **`只读`**：先查开关是否真开启、`timeline/schema.json` 是否 2、分支是否 `main`；缺省文案
-  「v2 写入未启用，当前使用 v1 日程路径（在设置页显式开启）」来自 `services/syncStatusStore.ets`。
-  未激活 / 已关闭 / 门禁失败都会落这一态；关闭后回到 v1 属预期，不是故障。
+- **`未迁移 banner`**：先查 `timeline/schema.json` 是否存在、`schemaVersion` 是否 2；缺标记 + `devices/`
+  存在 → `E_NOT_MIGRATED` + 唯一一条 banner + 零写入，属预期，须显式迁移，不是故障。
+- **`只读`**：先查 `timeline/schema.json` 是否 2、分支是否 `main`（**不再查「开关是否真开启」**，开关已删除）；
+  未知版本 → `E_SCHEMA_UNKNOWN`、零写入；门禁失败都会落这一态。
 - **`N 条待同步`**：先读「最近失败：<typed>」——是 `E_SCHEMA_UNKNOWN`/`E_BRANCH_MISMATCH` 一类门禁错，
   还是 `E_PUSH_REJECTED`/`E_AUTH`/`E_IO` 一类同步错；再查是否 4 次预算耗尽进入 `failed` 终态
   （契约 §9 P1-1，只有 UI「重试同步」能复位）。
@@ -188,17 +200,19 @@ node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json 
   **不要手改 payload（入队即不可变）也不要删条目**——outbox 是周期之间唯一本地真值，删了就丢数据；
   ④ 若远端坏文件报 `E_CORRUPT`，按契约 §9 整日不动、意图留 outbox，须先修远端再重试。
 
-## 5. 验收清单（激活后）
+## 5. 验收清单（迁移完成后）
 
-逐项打勾，任何一项不满足都不要宣告迁移/激活成功：
+> **2026-11-20 v2-only 订正**：原「激活后验收」口径已改为「迁移完成后验收」；不再检查任何设置页开关。
 
-1. 建一条记录：设置页开关为开，三态行不再「只读」。
+逐项打勾，任何一项不满足都不要宣告迁移成功：
+
+1. 建一条记录：无未迁移 banner（已迁移），三态行不再「只读」；`devices/**` 原样保留、未被删除。
 2. 确认 commit + push：数据仓库 `git -C <repo> log -1 --oneline` 见 `[v2] sync <n> days`；
    `git -C <repo> status --porcelain` 干净；`origin/main` 前进；无 force-push。
 3. 重启 App：按 `docs/VERIFICATION.md` §14.9 的 hdc 路径
    （`D:\A-DevEco\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe`）停止进程后用
    `hdc -t <serial> shell "aa start -a EntryAbility -b com.itwill.schedule"` 重启。
-4. 记录仍在（列表与详情可见、未回退到 v1 路径）；注意「重启后仍生效」本身仍 `unverified`（§6），
+4. 记录仍在（列表与详情可见、未出现未迁移 banner / 未零写入）；注意「重启后仍生效」本身仍 `unverified`（§6），
    这一步是现场核对，不是引用已有通过结论。
 5. `timeline/<date>/records.json` 形态正确：合法 JSON 对象，顶层仅 `date`/`open`/`records`，
    每条记录独占一行、键序符合契约 §3、末尾恰好一个换行，`date` == 目录名；
@@ -210,11 +224,14 @@ node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json 
 
 以下项当前明确为 `unverified`，本文任何步骤都**不能**被当作它们的通过证据：
 
-- **设备上未配置仓库**：真机激活对话框的弹出/取消/翻转、实际写 `timeline/`、真实 push 全链路，
-  以及「建记录→自动同步→三态行变已同步」均无端到端证据（评审 §9、`docs/VERIFICATION.md` §14.8）。
+- **设备上未配置仓库 / 未迁移拒绝**：真机上「唯一一条 banner」的渲染、对未迁移仓库的 typed
+  `E_NOT_MIGRATED` 拒绝与**零写入**、实际写 `timeline/`、真实 push 全链路，以及
+  「建记录→自动同步→三态行变已同步」均无端到端证据（评审 §9、`docs/VERIFICATION.md` §14.8）。
 - **双设备并发**：两设备同日各建、同 id 不同 ts / 同 ts、A 删 + B 编辑、媒体占位、fetch+union+replay
   双端逐字节一致，全部 `unverified`（契约 §15）。
-- **PersistentStorage 重启证明**：三键已用全局 `PersistentStorage.persistProp` 绑定且有编译证据，
-  但「已激活/已裁决 → 杀进程 → 重启仍生效」在真机未验证（评审 §9 第 3 项）。
+- **签名 / 安装 / 启动（v2-only 后）**：`hdc list targets` 为空，当前无法在真机重新签名、安装并启动含
+  v2-only 改动的 HAP；banner 渲染与设备写拒绝因此端侧 `unverified`（评审 §9 第 3 项）。
+- **PersistentStorage 重启证明**：原三个持久键（`timeline.readMode` / `timeline.v2WriteEnabled` /
+  `timeline.v1Retained`）已随激活流程删除；「迁移完成 → 杀进程 → 重启仍生效」在真机未验证（评审 §9 第 3 项）。
 
 不要据此宣称已验证；对外表述只能是「纯逻辑/编译可证，端侧待验」。

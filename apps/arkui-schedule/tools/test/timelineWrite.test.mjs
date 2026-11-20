@@ -38,6 +38,7 @@ registerHooks({
 });
 
 const { parseTimelineDay, canonicalRecordLine } = await import('../.build/model/timeline.js');
+const { NOT_MIGRATED_REASON } = await import('../.build/model/migrationState.js');
 const {
   buildRecordsText, planUpsert, planRemove, openIdsOf, ledgerDeleteLine, ledgerRestoreLine,
   isNewerSummaryText, tsMillis, isValidTsShape, canPurge
@@ -348,13 +349,14 @@ test('27 disabled guard: every write method starts with requireEnabled before an
   const guard = methodBody(SERVICE_CODE, 'requireEnabled');
   assert.match(guard, /!this\.isEnabled\(\)/);
   assert.match(guard, /throw new Error\(DISABLED_MESSAGE\)/);
-  assert.match(SERVICE, /DISABLED_MESSAGE: string = 'timeline v2 写入未启用'/);
+  assert.match(SERVICE, /DISABLED_MESSAGE: string = NOT_MIGRATED_REASON/);
 });
 
-test('28 isEnabled is gated solely by the shared flag (useV2), no AppStorage writes', () => {
-  assert.match(methodBody(SERVICE_CODE, 'isEnabled'), /return timelineStore\.useV2\(\)/);
+test('28 v2-only: isEnabled is gated solely by migration state, refusal is typed', () => {
+  assert.match(methodBody(SERVICE_CODE, 'isEnabled'), /return timelineStore\.isMigrated\(\)/);
+  assert.equal(NOT_MIGRATED_REASON, 'E_NOT_MIGRATED: 时间线尚未初始化，请先迁移旧数据');
   assert.doesNotMatch(SERVICE, /AppStorage\s*\.\s*(set|setOrCreate|create)/);
-  assert.doesNotMatch(SERVICE, /setReadMode/);
+  assert.doesNotMatch(SERVICE, /setReadMode|useV2|scheduleStore\.appendRecord/);
 });
 
 test('29 records.json is atomically replaced with a same-directory tmp + rename', () => {

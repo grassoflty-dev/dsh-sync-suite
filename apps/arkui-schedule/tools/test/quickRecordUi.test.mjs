@@ -156,7 +156,7 @@ describe('Index.ets：快捷记录只接在列表区，不动页头', () => {
     assert.match(fn, /if \(!plan\.ok\)/);
     assert.ok(fn.indexOf('!plan.ok') < fn.indexOf('writeRecord'), '无效输入必须在写入前挡住');
     assert.match(fn, /message: plan\.reason/);
-    assert.match(fn, /scheduleStore\.isReady\(\)/);
+    assert.match(fn, /!timelineStore\.isMigrated\(\)/, 'v2-only：写入前检查迁移状态');
   });
 
   test('记录字段与编辑器路径一致，作者走同步缓存', () => {
@@ -215,14 +215,17 @@ describe('Index.ets：快捷记录只接在列表区，不动页头', () => {
     assert.ok(toastAt >= 0 && returnAt > toastAt, 'catch 内顺序必须是 toast → return false');
   });
 
-  test('store-not-ready 守卫：文案 + return false 位于首次 writeRecord 之前', () => {
+  test('v2-only 守卫：未迁移给 E_NOT_MIGRATED 中文原因 + return false，位于首次 writeRecord 之前', () => {
     const fn = bodyFrom(INDEX, 'private submitQuickRecord(');
-    const notReady = bodyFrom(fn, 'if (!scheduleStore.isReady())');
-    assert.match(notReady, /存储尚未就绪/, '未就绪分支必须有中文提示');
-    assert.match(notReady, /return false;/, '未就绪分支必须 return false');
+    const guardAt = fn.indexOf('!timelineStore.isMigrated()');
+    assert.ok(guardAt >= 0, '未迁移守卫必须存在');
+    assert.match(fn, /NOT_MIGRATED_REASON/, '未迁移必须给类型化中文原因');
+    assert.match(fn, /存储尚未就绪/, '未就绪分支必须有中文提示');
+    assert.match(fn, /return false;/, '未就绪/未迁移分支必须 return false');
     const firstAppend = fn.indexOf('writeRecord(');
     assert.ok(firstAppend >= 0, '必须存在写入调用');
-    assert.ok(fn.indexOf('if (!scheduleStore.isReady())') < firstAppend, '未就绪守卫必须在首次写入之前');
+    assert.ok(guardAt < firstAppend, '未迁移守卫必须在首次写入之前（零写入）');
+    assert.equal(fn.includes('scheduleStore.isReady()'), false, 'v2-only 不再用 v1 存储就绪判定');
   });
 
   test('quickBusy：写入前置 true，catch 与成功路径各复位一次 false', () => {

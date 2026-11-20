@@ -203,12 +203,13 @@ describe('B3 纯逻辑 homeRefresh：一次性标记的编解码与版本判定'
 // B. 路径 1：Index.ets + RecordEditorView.ets + Edit.ets 的静态契约
 // ---------------------------------------------------------------------------
 describe('B3 路径 1：保存返回首页走局部刷新的源码级契约', () => {
-  test('B3-07 onPageShow ready 分支：先 consume 后 reconcileIfDue；保存分支只 reload + 单行对账', () => {
+  test('B3-07（v2-only  retarget）onPageShow ready 分支：先 consume 再 reload；无 v1 索引对账', () => {
     assertOrdered(
       READY_BRANCH,
-      ['this.consumeSavedMarker()', 'openIndexStore.reconcileIfDue()'],
+      ['this.consumeSavedMarker()', 'this.reload()'],
       'Index.onPageShow.ready'
     );
+    assert.doesNotMatch(READY_BRANCH, /reconcileIfDue/, 'v2-only：不得再写 v1 索引');
     assert.match(SAVED_BRANCH, /this\.reload\(\);/, '保存分支必须重读列表');
     assert.match(SAVED_BRANCH, /this\.reconcileSavedRow\(saved\);/, '保存分支必须做单行对账');
     assert.equal(SAVED_BRANCH_CODE.includes('loadSummary()'), false, '保存分支的可执行代码不得重读汇总（全量重载）');
@@ -224,7 +225,7 @@ describe('B3 路径 1：保存返回首页走局部刷新的源码级契约', ()
     assert.match(CONSUME, /return decodeSavedMarker\(raw\);/, '必须把原文交给 decodeSavedMarker');
   });
 
-  test('B3-09 reconcileSavedRow：三条早退 + 兜底 reconcile + loadSummary + 非静默中文 toast', () => {
+  test('B3-09（v2-only  retarget）reconcileSavedRow：三条早退 + 兜底 reload + loadSummary + 非静默中文 toast', () => {
     assert.match(RECONCILE, /if \(this\.showAllPending && saved\.done === true\) \{\s*return;\s*\}/, '早退①：全部未完成里已完成');
     assert.match(
       RECONCILE,
@@ -236,7 +237,8 @@ describe('B3 路径 1：保存返回首页走局部刷新的源码级契约', ()
       /if \(containsRecordVersion\(this\.records, saved\.id, saved\.ts\)\) \{\s*return;\s*\}/,
       '早退③：列表已有同 id 同 ts 版本'
     );
-    assert.match(RECONCILE, /openIndexStore\.reconcile\(\);/, '兜底必须全量重建索引');
+    assert.match(RECONCILE, /this\.reload\(\);/, '兜底必须重读 v2 列表');
+    assert.doesNotMatch(RECONCILE, /openIndexStore\.reconcile\(\)/, 'v2-only：不得写 v1 索引');
     assert.match(RECONCILE, /this\.loadSummary\(\);/, '兜底必须重读汇总');
     assert.match(
       RECONCILE,

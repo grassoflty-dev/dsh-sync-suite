@@ -1,9 +1,9 @@
-// mod-v2-read-service：v2 只读时间线服务 + 首页 flag 接线的静态契约测试。
+// mod-v2-read-service（v2-only  retarget）：v2 唯一只读服务 + 首页无条件读路径的静态契约测试。
 //
 // 服务层 import 了 @kit.*，无法在 Node 里运行，所以这里断言**代码形状**与它依赖的纯模型契约：
 //   - timelineStore.ets 只复用 model/timeline 的解析函数，不含任何写 API；
-//   - schema 门槛 / 读模式默认值 / useV2 组合 / 三条 degrade 路径都在源码里可证；
-//   - Index.ets 只在 bootstrap / reload 加了最小分支，页头、PageLayout、v1 路径全部不动；
+//   - schema 门槛 / isMigrated 唯一判定 / 未迁移降级路径都在源码里可证；
+//   - Index.ets 在 bootstrap 建立迁移态、reload 无条件读 v2；页头与 PageLayout 不动；
 //   - 另从编译产物 import parseSchemaMarker，跑 2 条真实行为断言（版本 2 / 3）。
 //
 // 前置构建：node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json
@@ -25,8 +25,6 @@ const SERVICE = readFileSync(join(APP, 'entry', 'src', 'main', 'ets', 'services'
 const INDEX = readFileSync(join(APP, 'entry', 'src', 'main', 'ets', 'pages', 'Index.ets'), 'utf8');
 const SERVICE_CODE = stripComments(SERVICE);
 const INDEX_CODE = stripComments(INDEX);
-const PERSISTENT_CODE = stripComments(readFileSync(
-  join(APP, 'entry', 'src', 'main', 'ets', 'model', 'persistentSettings.ts'), 'utf8'));
 
 /** 取「有返回类型 + 花括号」的方法声明体（避开 this.reload() 之类的调用点）。 */
 function methodBody(code, name) {
@@ -95,33 +93,17 @@ test('schema 门槛：解析 schema.json 后 ok !== true 一律降级为非 v2',
   assert.match(SERVICE, /schema\.json/);
 });
 
-test('isV2() 只有 ready 且标记明确为 v2 时才为真（降级路径可证）', () => {
+test('isV2() 只有 ready 且标记明确为 v2 时才为真（未迁移路径可证）', () => {
   const body = methodBody(SERVICE_CODE, 'isV2');
   assert.match(body, /return this\.ready && this\.v2/);
-  const isV2Index = SERVICE_CODE.indexOf('isV2()');
-  const flagIndex = SERVICE_CODE.indexOf('useV2()');
-  assert.ok(isV2Index < flagIndex);
 });
 
-test('readMode() 缺省返回 v1，且不把默认值写进 AppStorage', () => {
-  const body = methodBody(SERVICE_CODE, 'readMode');
-  assert.match(body, /AppStorage\.get<string>/);
-  assert.match(body, /return stored === 'v2' \? 'v2' : 'v1'/);
-  assert.doesNotMatch(body, /setOrCreate/);
-});
-
-test('setReadMode() 只接受 v1/v2，非法值直接忽略', () => {
-  const body = methodBody(SERVICE_CODE, 'setReadMode');
-  assert.match(body, /if \(mode !== 'v1' && mode !== 'v2'\) \{\s*return;\s*\}/);
-  assert.match(body, /AppStorage\.setOrCreate<string>/);
-});
-
-test('读模式键名与 useV2() 组合条件逐字符匹配契约', () => {
-  // P1-5：键字面量收敛到 model/persistentSettings.ts 单一真值；服务从它 import。
-  assert.match(PERSISTENT_CODE, /PERSISTENT_READ_MODE_KEY: string = 'timeline\.readMode'/);
-  assert.match(SERVICE_CODE, /TIMELINE_READ_MODE_KEY:\s*string\s*=\s*PERSISTENT_READ_MODE_KEY/);
-  const body = methodBody(SERVICE_CODE, 'useV2');
-  assert.match(body, /return this\.isV2\(\) && this\.readMode\(\) === 'v2'/);
+test('v2-only：isMigrated() 是唯一读写门槛，readMode/useV2 已彻底消失', () => {
+  assert.match(methodBody(SERVICE_CODE, 'isMigrated'), /return this\.isV2\(\)/);
+  assert.doesNotMatch(SERVICE_CODE, /\breadMode\s*\(/);
+  assert.doesNotMatch(SERVICE_CODE, /\bsetReadMode\s*\(/);
+  assert.doesNotMatch(SERVICE_CODE, /\buseV2\s*\(/);
+  assert.doesNotMatch(SERVICE_CODE, /AppStorage/);
 });
 
 test('readDay 只读 records.json + deleted.jsonl + restore.jsonl，并应用 visibleRecords', () => {
@@ -200,7 +182,7 @@ test('服务不调用 openIndexStore / reconcile，也不建立派生索引', ()
 
 test('服务导出契约要求的完整 API 与单例', () => {
   for (const name of [
-    'ensureReady', 'isReady', 'isV2', 'readMode', 'setReadMode', 'useV2',
+    'ensureReady', 'isReady', 'isV2', 'isMigrated',
     'listDates', 'readDay', 'readAll', 'pendingRecords', 'readSummaryText'
   ]) {
     assert.match(SERVICE_CODE, new RegExp(`\\b${name}\\s*\\(`), `缺少 API ${name}`);
@@ -222,55 +204,49 @@ test('Index 导入 timelineStore，并在 bootstrap 中于 scheduleStore 之后 
   );
 });
 
-test('reload 的 useV2() 分支位于两条 v1 取数分支之前', () => {
+test('reload 无条件读 v2：showAllPending 走 pendingRecords，否则走 readDay', () => {
   const body = methodBody(INDEX_CODE, 'reload');
-  const v2 = body.indexOf('timelineStore.useV2()');
-  const v1 = body.indexOf('} else if (this.showAllPending)');
-  assert.ok(v2 >= 0, 'reload 缺少 useV2() 分支');
-  assert.ok(v1 >= 0, 'reload 缺少 v1 未完成分支');
-  assert.ok(v2 < v1, 'v2 分支必须出现在 v1 分支之前');
+  assert.match(body, /this\.showAllPending\s*\n\s*\? timelineStore\.pendingRecords\(\)/);
+  assert.match(body, /: timelineStore\.readDay\(this\.selectedDate\)/);
+  assert.doesNotMatch(body, /scheduleStore\.readDay|openIndexStore\.pendingRecords|timelineStore\.useV2\(\)/);
 });
 
-test('v2 分支只读 timelineStore 的 readDay / pendingRecords，不触发 v1 写入或对账', () => {
+test('reload 只读 timelineStore，不触发 v1 写入或对账', () => {
   const body = methodBody(INDEX_CODE, 'reload');
-  const start = body.indexOf('timelineStore.useV2()');
-  const end = body.indexOf('} else if (this.showAllPending)');
-  const branch = body.slice(start, end);
-  assert.match(branch, /timelineStore\.readDay\(this\.selectedDate\)/);
-  assert.match(branch, /timelineStore\.pendingRecords\(\)/);
-  assert.doesNotMatch(branch, /openIndexStore|reconcile|loadSummary/);
-  assert.doesNotMatch(branch, /appendRecord|saveText/);
+  assert.match(body, /timelineStore\.readDay\(this\.selectedDate\)/);
+  assert.match(body, /timelineStore\.pendingRecords\(\)/);
+  assert.doesNotMatch(body, /openIndexStore|reconcile|loadSummary/);
+  assert.doesNotMatch(body, /appendRecord|saveText/);
 });
 
 test('reload 赋值后仍执行 refreshQuery + pruneSelection（筛选/排序逻辑不变）', () => {
   const body = methodBody(INDEX_CODE, 'reload');
   assert.match(body, /this\.refreshQuery\(\);/);
   assert.match(body, /this\.pruneSelection\(\);/);
-  assert.ok(body.lastIndexOf('this.refreshQuery()') > body.indexOf('timelineStore.useV2()'));
+  assert.ok(body.lastIndexOf('this.refreshQuery()') > body.indexOf('timelineStore.readDay'));
 });
 
-test('本模块不写读模式开关默认值（无 AppStorage.setOrCreate 指向 timeline.readMode）', () => {
-  assert.doesNotMatch(INDEX_CODE, /setOrCreate[^;]*timeline\.readMode/);
-  assert.doesNotMatch(INDEX_CODE, /setOrCreate[^;]*TIMELINE_READ_MODE_KEY/);
-  assert.doesNotMatch(SERVICE_CODE, /ensureReady[\s\S]{0,400}setOrCreate/);
+test('v2-only：无任何读模式开关/激活位的 AppStorage 写入', () => {
+  for (const key of ['timeline.readMode', 'timeline.v2WriteEnabled', 'timeline.v1Retained']) {
+    assert.equal(INDEX_CODE.includes(key), false, `首页不得写 ${key}`);
+    assert.equal(SERVICE_CODE.includes(key), false, `服务不得写 ${key}`);
+  }
+  assert.doesNotMatch(INDEX_CODE, /timelineModeSwitch|v2ActivationService/);
 });
 
-test('bootstrap 的 v1 索引 reconcile() 由 !useV2() 守护（v2 启动零 v1 写）', () => {
+test('bootstrap 建立唯一迁移态，且绝不写 v1 索引（无 openIndexStore）', () => {
   const body = methodBody(INDEX_CODE, 'bootstrap');
-  const guarded = /if \(!timelineStore\.useV2\(\)\) \{\s*openIndexStore\.reconcile\(\);\s*\}/;
-  assert.match(body, guarded, 'reconcile() 必须位于 !timelineStore.useV2() 分支内');
-  assert.doesNotMatch(
-    body.replace(guarded, ''),
-    /openIndexStore\.reconcile\(\)/,
-    'bootstrap 中不应存在未被守护的 reconcile()'
-  );
+  assert.match(body, /await timelineStore\.ensureReady/);
+  assert.match(body, /this\.unmigrated = !timelineStore\.isMigrated\(\)/);
+  assert.doesNotMatch(body, /openIndexStore|reconcile\(/);
+  assert.doesNotMatch(INDEX_CODE, /import \{ openIndexStore \}/);
 });
 
-test('onPageShow / reconcileSavedRow 的 v1 对账调用保持原样（未触碰）', () => {
+test('onPageShow / reconcileSavedRow 不再做任何 v1 对账写盘', () => {
   const onShow = methodBody(INDEX_CODE, 'onPageShow');
-  assert.match(onShow, /openIndexStore\.reconcileIfDue\(\)/);
+  assert.doesNotMatch(onShow, /reconcileIfDue/);
   const saved = methodBody(INDEX_CODE, 'reconcileSavedRow');
-  assert.match(saved, /openIndexStore\.reconcile\(\)/);
+  assert.doesNotMatch(saved, /openIndexStore\.reconcile\(\)/);
 });
 
 test('页头注释与 PageLayout 结构未被本模块改动', () => {
@@ -281,13 +257,13 @@ test('页头注释与 PageLayout 结构未被本模块改动', () => {
 
 // ---------------------------------------------------------------- 纯模型契约（编译产物真实行为）
 
-test('parseSchemaMarker：版本 3 判为不支持（服务据此降级为 v1）', () => {
+test('parseSchemaMarker：版本 3 判为不支持（服务据此判未迁移）', () => {
   const marker = parseSchemaMarker('{"schemaVersion":3}');
   assert.equal(marker.ok, false);
   assert.equal(marker.version, 3);
 });
 
-test('parseSchemaMarker：版本 2 判为通过（服务据此可进入 v2 读路径）', () => {
+test('parseSchemaMarker：版本 2 判为通过（服务据此判定已迁移）', () => {
   const marker = parseSchemaMarker('{"schemaVersion":2}');
   assert.equal(marker.ok, true);
   assert.equal(marker.version, 2);

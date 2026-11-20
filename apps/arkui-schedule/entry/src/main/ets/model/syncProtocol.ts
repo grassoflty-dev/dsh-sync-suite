@@ -64,7 +64,7 @@ export interface WriteGateResult {
 /** 四条门禁消息（verbatim；用户可见文案见 §9 typed 状态）。 */
 export const WRITE_GATE_MESSAGES: Record<WriteGateCode, string> = {
   ok: '可写',
-  E_SCHEMA_UNKNOWN: '只读（仓库结构版本不认识，见 §11）',
+  E_SCHEMA_UNKNOWN: '错误（仓库结构版本不认识，见 §11）',
   E_BRANCH_MISMATCH: '分支不是 main，拒绝写入',
   E_NOT_SYNCED: '本地 HEAD 与 origin/main 不一致，请先同步'
 };

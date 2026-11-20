@@ -28,18 +28,14 @@ import { installPlatformFeatures } from '../common/platformFeatures';
 import { applyThemeMode } from '../common/themeApply';
 import { scheduleStore } from '../services/scheduleStore';
 import { settingsStore } from '../services/settingsStore';
-import {
-  PERSISTENT_READ_MODE_KEY, PERSISTENT_V2_WRITE_KEY, PERSISTENT_V1_RETAINED_KEY
-} from '../model/persistentSettings';
 
 const DOMAIN: number = 0x0000;
 const TAG: string = 'ScheduleEntry';
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
-    // P1-5：页面加载前先绑定三个「用户选择」键。persistProp 在首次启动时写默认值，
-    // 之后每次启动先把磁盘值 hydrate 回 AppStorage —— 激活 / 并存裁决 / 读模式跨重启。
-    this.bindPersistentSettings();
+    // v2-only：激活 / 并存裁决 / 读模式三个持久化键已随模式开关一并移除，
+    // 页面加载前不再有任何 PersistentStorage.persistProp 绑定。
 
     // 第一道防线：同步 fail-closed（鸿蒙覆盖层会在此处直接切成 harmony + 能力开启）
     setPlatform('android');
@@ -75,22 +71,6 @@ export default class EntryAbility extends UIAbility {
 
   onDestroy(): void {
     hilog.info(DOMAIN, TAG, 'EntryAbility onDestroy');
-  }
-
-  /**
-   * P1-5：绑定三个持久化键（键 / 默认值来自 model/persistentSettings.ts 的唯一真值）。
-   *
-   * 必须在 `loadContent('pages/Index')` **之前**调用：PersistentStorage 在 persistProp 时
-   * 把磁盘值同步进 AppStorage；之后 `AppStorage.setOrCreate` 的写入自动回写磁盘。
-   * 本 SDK 里 PersistentStorage 是 ArkUI 全局类（`@kit.ArkUI` 不导出它），故直接使用全局名。
-   * 因此 `v2ActivationService.activate()` / `deactivate()` / `timelineStore.setReadMode()`
-   * 无需改动写入方式，重启后读到的就是用户上次的选择。
-   * persistProp 幂等（已绑定键不会覆盖磁盘值），可随每次启动安全调用。
-   */
-  private bindPersistentSettings(): void {
-    PersistentStorage.persistProp<string>(PERSISTENT_READ_MODE_KEY, 'v1');
-    PersistentStorage.persistProp<boolean>(PERSISTENT_V2_WRITE_KEY, false);
-    PersistentStorage.persistProp<string>(PERSISTENT_V1_RETAINED_KEY, '');
   }
 
   /**

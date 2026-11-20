@@ -1,10 +1,10 @@
 /**
- * 同步状态的三态视图（mod-v2-sync-wiring）：首页状态行与设置页共用的唯一数据源。
+ * 同步状态的三态视图（mod-v2-only）：首页状态行与设置页共用的唯一数据源。
  *
- * 三态（契约 §9 可见状态 + 本模块激活闸）：
+ * 三态（契约 §9 可见状态；v2 是唯一路径，没有「只读」态）：
  * - `synced`：最近一次周期成功且 outbox 空 → 文案「已同步·<HH:MM>」；
  * - `pending`：outbox 仍有可重放意图或已有 failed 终态 → 「N 条待同步·最近失败：<typed 原因>」；
- * - `readonly`：未启用 v2 写入 / 门禁拒绝 / 周期不可用 → 「只读·<原因>」。
+ * - `error`：门禁拒绝 / 未迁移 / 周期不可用 → 「错误·<typed 原因>」。
  *
  * 只写 AppStorage 的四个小键（不写文件、不碰仓库、不写 devices/**），页面用 @State 镜像；
  * recordWriter 的 fire-and-forget 同步结果也经这里落到 UI，失败原因如实展示，不静默吞。
@@ -12,12 +12,12 @@
 import type { CycleResult } from './syncProtocolStore';
 
 /** 三态枚举（用字符串而非联合字面量，避免在 ArkTS 里写类型断言）。 */
-export type SyncState = 'synced' | 'pending' | 'readonly';
+export type SyncState = 'synced' | 'pending' | 'error';
 
 /** 页面 @State 镜像的只读视图（显式接口：ArkTS 禁止对象字面量当类型）。 */
 export interface SyncStatusView {
   state: SyncState;
-  /** 「已同步」/「N 条待同步」/「只读」。 */
+  /** 「已同步」/「N 条待同步」/「错误」。 */
   label: string;
   /** 状态行完整文案（label·detail）。 */
   text: string;
@@ -56,9 +56,9 @@ export class SyncStatusStore {
     return this.snapshot();
   }
 
-  /** 只读态（未激活 / 门禁拒绝 / 周期不可用），原因如实展示。 */
-  setReadOnly(reason: string): SyncStatusView {
-    AppStorage.setOrCreate<string>(KEY_STATE, 'readonly');
+  /** 错误态（未迁移 / 门禁拒绝 / 周期不可用），typed 原因如实展示。 */
+  setError(reason: string): SyncStatusView {
+    AppStorage.setOrCreate<string>(KEY_STATE, 'error');
     AppStorage.setOrCreate<string>(KEY_REASON, reason);
     AppStorage.setOrCreate<number>(KEY_PENDING, 0);
     return this.snapshot();
@@ -82,22 +82,22 @@ export class SyncStatusStore {
     return this.snapshot();
   }
 
-  /** 组装页面 @State（任何异常都降级为只读，绝不 throwing 到 UI 线程）。 */
+  /** 组装页面 @State（任何异常都降级为错误态，绝不 throwing 到 UI 线程）。 */
   snapshot(): SyncStatusView {
-    let state: SyncState = 'readonly';
+    let state: SyncState = 'error';
     try {
       const raw: string | undefined = AppStorage.get<string>(KEY_STATE);
       if (raw === 'synced' || raw === 'pending') {
         state = raw;
       }
     } catch (error) {
-      state = 'readonly';
+      state = 'error';
     }
     const pending: number = this.numberOf(KEY_PENDING);
     const reason: string = this.textOf(KEY_REASON);
     const lastAt: string = this.textOf(KEY_LAST_AT);
-    let label: string = '只读';
-    let detail: string = reason.length > 0 ? reason : 'v2 写入未启用，当前使用 v1 日程路径';
+    let label: string = '错误';
+    let detail: string = reason.length > 0 ? reason : '未知错误';
     if (state === 'synced') {
       label = '已同步';
       detail = lastAt.length > 0 ? lastAt : '刚刚';
@@ -122,5 +122,5 @@ export class SyncStatusStore {
   }
 }
 
-/** 全局单例：首页状态行 / 设置页激活 / recordWriter 共用同一份三态视图。 */
+/** 全局单例：首页状态行 / recordWriter 共用同一份三态视图。 */
 export const syncStatusStore: SyncStatusStore = new SyncStatusStore();
