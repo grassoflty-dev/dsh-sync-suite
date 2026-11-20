@@ -136,6 +136,8 @@ dots 不持有它。
 dots 进 `OBSERVING` 只读并提示"该会话正被人使用，另开 dots 会话"（`docs/CHAT-SYNC.md:131-132,166,193`）；
 人关闭/释放后也不自动夺取，须由用户显式新建或接管。
 
+> **落地注（2026-11-20，`mod-instance-grant`）**：本节授权模型已落成纯模型 + store（`model/instanceGrant.ts` / `services/instanceGrantStore.ets`，零 UI / 零 RPC 接线）——工具 id 取 `instance.list` / `instance.inspect` / `session.list` / `session.read` / `session.prompt`（四个 view + 一个 command），`grantKey=(instanceId, dots)`，view 权**永不隐含** `session.prompt`（必须显式列入 tools），支持 typed 拒绝、坏信封回落空表、吊销与过期 fail-closed、per-instance 隔离；后续 `mod-home-entries` / `mod-dots-readonly` / `mod-dots-commands` 直接消费。
+
 ## 5. 协议
 
 **今天存在的 RPC**（全部 `POST /dsh-dots/rpc`，`packages/dsh-dots/src/rpc.ts:677-729`）：
