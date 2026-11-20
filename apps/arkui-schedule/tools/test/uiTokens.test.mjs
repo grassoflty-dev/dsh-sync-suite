@@ -176,8 +176,9 @@ test('宽屏视觉四条：页头不重复日期 / 空态居中 CTA / 列表最�
   assert.match(INDEX_CODE, /放弃当前编辑/, '冲突提示文案')
   assert.match(DETAIL_VIEW, /从左侧选一条日程查看/, '右栏空态文案在详情组件里')
   assert.match(INDEX, /subtitle: this\.subtitleText\(\)/, '页头副标题走 subtitleText()（空态不重复）')
-  assert.equal(/return this\.showAllPending \? '全部未完成' : this\.selectedDate;/.test(INDEX), false, '页头不能直接显示日期')
+  assert.equal(/return this\.tab === 'pending' \? '未完成' : this\.selectedDate;/.test(INDEX), false, '页头不能直接显示日期')
   assert.match(INDEX, /return this\.selectedDate === localDateKey\(new Date\(\)\) \? '今天' : '日程';/)
+  assert.match(INDEX, /return '未完成';/, '未完成 tab 仍用于页头相对标签')
 })
 
 test('首页头只留「⚙ 设置」：AI 汇总图标入口已删除，也没有「更多」/ActionSheet', () => {

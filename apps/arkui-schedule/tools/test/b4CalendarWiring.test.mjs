@@ -205,7 +205,7 @@ describe('D7-B 行为等价、防假入口、两处日期入口复用同一组�
     const actions = [
       'this.selectedDate = dateKey;',
       'this.showDatePicker = false;',
-      'this.showAllPending = false;',
+      'this.tab = \'today\';',
       'this.reload();',
       'this.loadSummary();'
     ];

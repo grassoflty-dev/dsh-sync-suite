@@ -1,6 +1,6 @@
 /**
- * 主页：日期条 + 今日待办/全部未完成 + 列表（左勾选 / 中标题+时间 / 右手迹）+ 「新建」主操作
- * + 页头唯一动作「⚙ 设置」。
+ * 主页：日期条 + 今日/未完成 两段 + 「显示已完成」开关（仅今日）+ 列表（左勾选 / 中标题+时间 / 右手迹）
+ * + 「新建」主操作 + 页头唯一动作「⚙ 设置」。
  *
  * ## 页头 AI 汇总入口已删除（用户反馈：点了没反应，但图标还占着位置）
  * AI 汇总本来就是**列表第一项**（`SummaryCard`，数据源 `summaryStore.read` / `generate`），
@@ -23,12 +23,13 @@
  * （`continuousTask`）+ 前台通知，或在到点拉起应用后由用户点触发。这里刻意不加
  * 「看起来能用、实际会被回收」的定时器。
  *
- * ## 搜索 / 筛选（Wave 2-A）
- * - 列表顶部：搜索框（标题/正文/OCR/作者，大小写不敏感、多关键词 AND）+ 状态 chips
- *   （全部/未完成/已完成）+ 作者 chips（来自 `authorsOf`）；
- * - **与「今日待办|全部未完成」tab 正交**：先按 tab 取数（v2 `timelineStore.readDay` /
- *   `timelineStore.pendingRecords`），再 `applyQuery` 过滤（见 `model/query.ts`，纯逻辑可单测）；
- * - 列表真正渲染的是 `visibleRecords`；`records` 仍是 tab 级全量（汇总块 / 计数 / AI 面板用它）。
+ * ## 搜索 / 筛选（Wave 2-A；控件在 mod-home-filters 收敛为 2 段 + 1 开关）
+ * - 列表顶部：搜索框（标题/正文/OCR/作者，大小写不敏感、多关键词 AND）+ 作者 chips（来自 `authorsOf`）；
+ *   原状态 chips 已删除：「全部 / 已完成」由今日 tab 的「显示已完成」开关取代，原跨日 tab 更名为「未完成」；
+ * - **与 tab 正交**：先按 tab 取数（v2 `timelineStore.readDay` / `timelineStore.pendingRecords`），
+ *   今日 tab 在开关关闭时先把已完成行挡掉，再 `applyQuery` 过滤（见 `model/query.ts`，纯逻辑可单测）；
+ * - 列表真正渲染的是 `visibleRecords`；`records` 始终是 **tab 级全量**（汇总块 / 计数 / AI 面板 /
+ *   「显示已完成」开关都基于它），所以开关不改变「今天还剩几条」的计数。
  *
  * ## 删除 + 5 秒撤销（Wave 2-A）
  * - 入口：行尾「删除」按钮（`RecordRow.onDelete`）+ 右栏详情的「删除」（`RecordDetailView.onDelete`）；
@@ -126,15 +127,20 @@ function two(value: number): string {
   return value < 10 ? `0${value}` : `${value}`;
 }
 
+/** 首页两个 tab：`today` = 当前所选日期（默认今天）；`pending` = 跨日未完成。 */
+type HomeTab = 'today' | 'pending';
+
 @Entry
 @Component
 struct Index {
-  /** 当前查看的日期（今日待办模式）。 */
+  /** 当前查看的日期（今日 tab 数据源）。 */
   @State selectedDate: string = localDateKey(new Date());
   /** 是否展开日期选择器。 */
   @State showDatePicker: boolean = false;
-  /** false=今日待办；true=全部未完成。 */
-  @State showAllPending: boolean = false;
+  /** 两个 tab：today = 今日（默认）；pending = 跨日未完成。 */
+  @State tab: HomeTab = 'today';
+  /** 「显示已完成」开关：默认关（今日只看未完成）；仅在今日 tab 生效。 */
+  @State showDone: boolean = false;
   /** 列表数据（每次操作后重读存储，保证追加语义一致）。 */
   @State records: ScheduleRecord[] = [];
   @State statusText: string = '';
@@ -158,11 +164,9 @@ struct Index {
   /** 快捷记录保存中（防重复提交；appendRecord 同步完成，正常一闪而过）。 */
   @State quickBusy: boolean = false;
 
-  // 搜索 / 筛选状态（与 tab 正交：tab 决定数据源，这里只过滤）
+  // 搜索 / 筛选状态（与 tab 正交：tab + 开关决定数据源与未完成范围，这里只按关键词/作者过滤）
   /** 搜索框原始输入（匹配时才做 trim / 小写 / 空白折叠）。 */
   @State queryText: string = '';
-  /** 状态筛选：`all` / `open` / `done`（字符串，避免在 .ets 里写联合类型断言）。 */
-  @State statusFilter: string = 'all';
   /** 作者筛选（空串 = 全部作者；再点一次同一个 chip 取消）。 */
   @State authorFilter: string = '';
   /** 作者 chips（来自 `authorsOf(records)`，随 tab/日期变化）。 */
@@ -360,16 +364,17 @@ struct Index {
    * 保存返回、局部 `reload()` 之后对账刚保存的那一行（**不许静默**）。
    *
    * 三种情况直接返回（不需要额外开销，也不打扰用户）：
-   * - 「全部未完成」里 `saved.done=true`：已完成的记录本来就不在该 tab；
-   * - 非「全部未完成」且保存的是别的日期：当前列表本就不该出现它；
+   * - 未完成 tab 里 `saved.done=true`：已完成的记录本来就不在该 tab；
+   * - 今日 tab 且保存的是别的日期：当前列表本就不该出现它；
    * - 列表里已有同 id 且 `ts` 不早于标记 ts 的新版本：数据已是刚保存的最新版。
    * 兜底（读不到刚保存的版本）才全量重建，并明确 toast 告知用户。
+   * `records` 是 tab 级全量（不受「显示已完成」开关影响），所以开关状态不改变这里的判断。
    */
   private reconcileSavedRow(saved: SavedMarker): void {
-    if (this.showAllPending && saved.done === true) {
+    if (this.tab === 'pending' && saved.done === true) {
       return;
     }
-    if (!this.showAllPending && saved.date !== this.selectedDate) {
+    if (this.tab === 'today' && saved.date !== this.selectedDate) {
       return;
     }
     if (containsRecordVersion(this.records, saved.id, saved.ts)) {
@@ -424,28 +429,72 @@ struct Index {
   /**
    * 读存储并刷新列表与状态文案。
    *
-   * 数据流：tab 取数（`records`）→ 搜索/筛选（`visibleRecords`）。两者正交：
-   * 切 tab / 换日期只换数据源，筛选条件保留；改筛选只重算 `visibleRecords`，不重读磁盘。
+   * 数据流：tab 取数（`records`，tab 级全量）→ 今日 tab 按「显示已完成」开关收敛可见范围 →
+   * 搜索/作者过滤（`visibleRecords`）。切 tab / 换日期只换数据源，搜索条件保留；
+   * 开关/搜索变化只重算 `visibleRecords`，不重读磁盘。
    */
   private reload(): void {
     if (!this.ready) {
       return;
     }
     try {
-      // v2 是唯一读路径：无条件读 timelineStore，绝不碰 openIndexStore / reconcile /
-      // v1 分片；records 仍是 tab 级全量，下方 refreshQuery + pruneSelection 不变。
-      this.records = this.showAllPending
-        ? timelineStore.pendingRecords() // 未完成由 closed_at 派生（不是 done，也不是 open.jsonl）
-        : timelineStore.readDay(this.selectedDate); // 已用 visibleRecords 过滤删除账本
-      this.statusText = this.records.length === 0
-        ? (this.showAllPending ? '所有日程都已完成' : '这一天还没有日程')
-        : `共 ${this.records.length} 条${this.showAllPending ? '未完成' : ''}（v2 时间线，自动同步）`;
+      // v2 是唯一读路径：无条件读 timelineStore，绝不碰 openIndexStore / reconcile / v1 分片。
+      this.records = this.tab === 'pending'
+        ? this.pendingSorted() // 跨日未完成（closed_at 派生），按日期再按 ts 升序
+        : timelineStore.readDay(this.selectedDate); // 今日 tab 取 tab 级全量（含已完成，计数需要它）
+      if (this.records.length === 0) {
+        this.statusText = this.emptyCopy();
+      } else if (this.tab === 'today') {
+        this.statusText = this.todayCountText();
+      } else {
+        this.statusText = `共 ${this.records.length} 条未完成（v2 时间线，自动同步）`;
+      }
     } catch (error) {
       this.records = [];
       this.statusText = `读取日程失败：${describeError(error)}`;
     }
     this.refreshQuery();
     this.pruneSelection();
+  }
+
+  /** tab 级全量里仍未完成的条数（今日计数用，与「显示已完成」开关无关）。 */
+  private pendingCountOf(records: ScheduleRecord[]): number {
+    let count: number = 0;
+    for (const record of records) {
+      if (record.done !== true) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * 今日 tab 的计数文案：主计数永远取未完成集合（与「显示已完成」开关无关），
+   * 「· 共 N 条」后缀只在开关开启时追加（N = tab 级全量，含已完成）。
+   * reload 与拨开关共用它，保证切换开关时后缀立即刷新，不会停留在上次 reload 的旧值。
+   */
+  private todayCountText(): string {
+    return `今日 ${this.pendingCountOf(this.records)} 条未完成` +
+      (this.showDone ? ` · 共 ${this.records.length} 条` : '') + '（v2 时间线，自动同步）';
+  }
+
+  /** 跨日未完成：按日期键、再按 ts 升序；返回新数组，不改动 store 的结果。 */
+  private pendingSorted(): ScheduleRecord[] {
+    const pending: ScheduleRecord[] = timelineStore.pendingRecords().slice();
+    pending.sort((left: ScheduleRecord, right: ScheduleRecord): number => {
+      const leftDate: string = left.ts.length >= 10 ? left.ts.slice(0, 10) : left.ts;
+      const rightDate: string = right.ts.length >= 10 ? right.ts.slice(0, 10) : right.ts;
+      if (leftDate !== rightDate) {
+        return leftDate < rightDate ? -1 : 1;
+      }
+      return left.ts === right.ts ? 0 : (left.ts < right.ts ? -1 : 1);
+    });
+    return pending;
+  }
+
+  /** 两个 tab 的空态文案：今日 → 「今天还没有日程」；未完成 → 「没有未完成的日程」。 */
+  private emptyCopy(): string {
+    return this.tab === 'pending' ? '没有未完成的日程' : '今天还没有日程';
   }
 
   /** 刷新后如果选中的记录已不在列表里（被删/换日期）→ 右栏回空态。 */
@@ -466,10 +515,10 @@ struct Index {
     }
   }
 
-  /** 页头标题：只给相对标签（今天 / 全部未完成 / 日程），具体日期归左栏或日期条，避免同一信息出现两次。 */
+  /** 页头标题：只给相对标签（今天 / 未完成 / 日程），具体日期归左栏或日期条，避免同一信息出现两次。 */
   private pageTitle(): string {
-    if (this.showAllPending) {
-      return '全部未完成';
+    if (this.tab === 'pending') {
+      return '未完成';
     }
     return this.selectedDate === localDateKey(new Date()) ? '今天' : '日程';
   }
@@ -496,14 +545,14 @@ struct Index {
     const base = dateFromKey(this.selectedDate);
     base.setDate(base.getDate() + delta);
     this.selectedDate = localDateKey(base);
-    this.showAllPending = false;
+    this.tab = 'today';
     this.reload();
     this.loadSummary();
   }
 
   private goToday(): void {
     this.selectedDate = localDateKey(new Date());
-    this.showAllPending = false;
+    this.tab = 'today';
     this.showDatePicker = false;
     this.reload();
     this.loadSummary();
@@ -520,7 +569,7 @@ struct Index {
     }
     this.selectedDate = dateKey;
     this.showDatePicker = false;
-    this.showAllPending = false;
+    this.tab = 'today';
     this.reload();
     this.loadSummary();
   }
@@ -943,14 +992,16 @@ struct Index {
 
   // ------------------------------------------------------------------ 搜索 / 筛选
 
-  /** 当前筛选条件（页面的三个字符串状态 → 纯逻辑层 filter）。 */
+  /** 当前筛选条件（搜索框 + 作者 → 纯逻辑层 filter；状态恒为 all，由 tab/开关去管）。 */
   private currentFilter(): QueryFilter {
-    return makeFilter(this.queryText, this.statusFilter, this.authorFilter);
+    return makeFilter(this.queryText, 'all', this.authorFilter);
   }
 
   /**
-   * 重算 `visibleRecords` 与作者 chips（tab 取数之后调用；改筛选时只调它，不重读磁盘）。
+   * 重算 `visibleRecords` 与作者 chips（tab 取数之后调用；改开关/筛选时只调它，不重读磁盘）。
    *
+   * 「显示已完成」只作用于今日 tab：关闭时先把已完成行挡在 `applyQuery` 之前；未完成 tab
+   * 的数据源本身就没有已完成行，所以开关在该 tab 永远不起作用。
    * 作者 chip 已不在当前数据里（换日期 / 切 tab / 记录被删）时自动取消作者筛选，
    * 否则会出现「筛选条件看得见、列表却永远为空」的怪异状态。
    */
@@ -959,8 +1010,11 @@ struct Index {
     if (this.authorFilter.length > 0 && this.authorChips.indexOf(this.authorFilter) < 0) {
       this.authorFilter = '';
     }
+    const source: ScheduleRecord[] = this.tab === 'today' && !this.showDone
+      ? this.records.filter((record: ScheduleRecord): boolean => record.done !== true)
+      : this.records;
     const filter: QueryFilter = this.currentFilter();
-    this.visibleRecords = applyQuery(this.records, filter);
+    this.visibleRecords = applyQuery(source, filter);
     this.hasSearchWord = hasKeyword(filter);
     this.hasActiveFilter = isFilterActive(filter);
   }
@@ -970,10 +1024,14 @@ struct Index {
     this.refreshQuery();
   }
 
-  /** 状态 chip：单选；重复点同一个仍是它本身（不做「点第二次取消」，取消走「全部」）。 */
-  private pickStatus(status: string): void {
-    this.statusFilter = status;
+  /** 「显示已完成」开关：只切可见范围并重算副标题后缀，不重读磁盘、不改今日未完成计数。 */
+  private onShowDoneChange(isOn: boolean): void {
+    this.showDone = isOn;
     this.refreshQuery();
+    // 后缀依赖 showDone，必须随开关立即重算；空态/错误态文案不在此覆盖。
+    if (this.tab === 'today' && this.records.length > 0) {
+      this.statusText = this.todayCountText();
+    }
   }
 
   /** 作者 chip：再点一次同一个 author 取消筛选。 */
@@ -982,11 +1040,10 @@ struct Index {
     this.refreshQuery();
   }
 
-  /** 清空搜索框 + 状态 + 作者（空态里的「清空」与搜索框的「清空」共用）。 */
+  /** 清空搜索框 + 作者（空态里的「清空」与搜索框的「清空」共用）。 */
   private resetFilters(): void {
     this.queryText = '';
     this.authorFilter = '';
-    this.statusFilter = 'all';
     this.refreshQuery();
   }
 
@@ -1306,43 +1363,68 @@ struct Index {
     .width('100%')
   }
 
-  /** 模式分段控件：两段各 40vp 高（选中 = 强调色实底）。 */
+  /**
+   * 两 tab + 一开关（mod-home-filters：原 5 个筛选控件 → 3 个）：
+   * - 今日（默认）：当日记录；开关关闭时只看未完成，开启才把已完成行也列出；
+   * - 未完成：跨日未完成（按日期再按 ts 升序），开关在该 tab 不渲染、不生效。
+   */
   @Builder
   ModeTabs() {
-    Row({ space: SPACING.sm }) {
-      // 分段控件：两段各占一半（ActionButton 撑满外层 Column，宽度仍由 layoutWeight 均分）
-      Column() {
-        ActionButton({
-          label: '今日待办',
-          actionEnabled: true,
-          disabledReason: '',
-          busy: false,
-          variant: this.showAllPending ? 'ghost' : 'primary',
-          block: true,
-          onTap: (): void => {
-            this.showAllPending = false;
-            this.reload();
-          }
-        })
-      }
-      .layoutWeight(1)
+    Column({ space: SPACING.sm }) {
+      Row({ space: SPACING.sm }) {
+        // 两段各占一半（ActionButton 撑满外层 Column，宽度由 layoutWeight 均分）
+        Column() {
+          ActionButton({
+            label: '今日',
+            actionEnabled: true,
+            disabledReason: '',
+            busy: false,
+            variant: this.tab === 'today' ? 'primary' : 'ghost',
+            block: true,
+            onTap: (): void => {
+              this.tab = 'today';
+              this.reload();
+            }
+          })
+        }
+        .layoutWeight(1)
 
-      Column() {
-        ActionButton({
-          label: '全部未完成',
-          actionEnabled: true,
-          disabledReason: '',
-          busy: false,
-          variant: this.showAllPending ? 'primary' : 'ghost',
-          block: true,
-          onTap: (): void => {
-            this.showAllPending = true;
-            this.showDatePicker = false;
-            this.reload();
-          }
-        })
+        Column() {
+          ActionButton({
+            label: '未完成',
+            actionEnabled: true,
+            disabledReason: '',
+            busy: false,
+            variant: this.tab === 'pending' ? 'primary' : 'ghost',
+            block: true,
+            onTap: (): void => {
+              this.tab = 'pending';
+              this.showDatePicker = false;
+              this.reload();
+            }
+          })
+        }
+        .layoutWeight(1)
       }
-      .layoutWeight(1)
+      .width('100%')
+
+      if (this.tab === 'today') {
+        Row({ space: SPACING.sm }) {
+          Text('显示已完成')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.text_secondary'))
+            .layoutWeight(1)
+          Toggle({ type: ToggleType.Switch, isOn: this.showDone })
+            .selectedColor($r('app.color.brand'))
+            .onChange((isOn: boolean): void => {
+              this.onShowDoneChange(isOn);
+            })
+        }
+        .width('100%')
+        .height(TOUCH_MIN)
+        .alignItems(VerticalAlign.Center)
+      }
     }
     .width('100%')
   }
@@ -1531,9 +1613,9 @@ struct Index {
   // ------------------------------------------------------------------ 搜索 / 筛选 / 撤销（UI）
 
   /**
-   * 搜索框 + 状态 chips + 作者 chips。
+   * 搜索框 + 作者 chips（状态 chips 已由「今日/未完成」+「显示已完成」取代）。
    *
-   * 三条互不干扰，任一变化都只重算 `visibleRecords`（不重读磁盘、不改 tab）。
+   * 两者互不干扰，任一变化都只重算 `visibleRecords`（不重读磁盘、不改 tab）。
    */
   @Builder
   SearchFilterBar() {
@@ -1563,14 +1645,6 @@ struct Index {
             }
           })
         }
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-
-      Row({ space: SPACING.sm }) {
-        this.StatusChip('全部', 'all')
-        this.StatusChip('未完成', 'open')
-        this.StatusChip('已完成', 'done')
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
@@ -1609,22 +1683,6 @@ struct Index {
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
-  }
-
-  /** 状态 chip（`all` / `open` / `done`）：选中 = 品牌实底反白字，未选 = 文字链形态。 */
-  @Builder
-  StatusChip(label: string, value: string) {
-    ActionButton({
-      label: label,
-      actionEnabled: true,
-      disabledReason: '',
-      busy: false,
-      variant: this.statusFilter === value ? 'primary' : 'ghost',
-      block: false,
-      onTap: (): void => {
-        this.pickStatus(value);
-      }
-    })
   }
 
   /**
@@ -1897,13 +1955,34 @@ struct Index {
     .scrollBar(BarState.Off)
   }
 
-  /** 列表区：有结果渲染行；无结果时只在「有筛选条件」时显示空态文案。 */
+  /**
+   * tab 级空态（没有搜索/作者筛选时）：
+   * - 未完成 tab 一条都没有 → 「没有未完成的日程」；
+   * - 今日 tab 当天全已完成、开关又关着 → 同样「没有未完成的日程」（不是「今天还没有日程」）；
+   * - 今日 tab 一条记录都没有 → 不在这里渲染，上方「✨ 今日汇总」块已有灰字「今天还没有日程」，避免同屏重复。
+   */
+  @Builder
+  TabEmpty() {
+    if (this.tab === 'pending' || this.records.length > 0) {
+      Text('没有未完成的日程')
+        .fontSize(FONT.body)
+        .lineHeight(LINE_HEIGHT.body)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+        .padding({ top: SPACING.md })
+    }
+  }
+
+  /** 列表区：有结果渲染行；无结果时先看筛选空态，再看 tab 空态。 */
   @Builder
   RecordList() {
     if (this.visibleRecords.length > 0) {
       this.ListRows()
-    } else {
+    } else if (this.hasSearchWord || this.hasActiveFilter) {
       this.EmptyResults()
+    } else {
+      this.TabEmpty()
     }
   }
 
@@ -1978,7 +2057,7 @@ struct Index {
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
       Column() {
-        if (!this.showAllPending) {
+        if (this.tab === 'today') {
           this.SummaryCard()
         }
         // 下拉刷新：只包列表，不改主从/单列结构
@@ -2023,7 +2102,7 @@ struct Index {
           .strokeWidth(DIVIDER)
           .color($r('app.color.divider'))
         Column() {
-          if (!this.showAllPending) {
+          if (this.tab === 'today') {
             this.SummaryCard()
           }
           this.RecordList()

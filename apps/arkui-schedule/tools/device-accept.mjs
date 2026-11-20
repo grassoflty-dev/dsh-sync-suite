@@ -15,7 +15,7 @@
  * 也会 exit 0 —— 没验过的东西被当成了验过。SKIP 是**未覆盖**，必须让下游看得见。
  *
  * 末行固定是一行机器可读汇总（由 `summaryLine()` 生成，格式别随手改）：
- *   [accept] pass=3 fail=0 skip=5 total=8 → exit 3（未覆盖：下拉刷新, 全部未完成·索引）
+ *   [accept] pass=3 fail=0 skip=5 total=8 → exit 3（未覆盖：下拉刷新, 未完成·索引）
  * 没有 SKIP 时省略括号部分；没有设备时也照样打一行（total=0 → exit 2）。
  *
  * 设计要点：
@@ -101,7 +101,7 @@ export function gradeExit(results) {
 /**
  * 末行机器可读汇总（格式被下游 grep，改之前先看文件头契约）。
  *
- * 形如：`[accept] pass=3 fail=0 skip=5 total=8 → exit 3（未覆盖：下拉刷新, 全部未完成·索引）`
+ * 形如：`[accept] pass=3 fail=0 skip=5 total=8 → exit 3（未覆盖：下拉刷新, 未完成·索引）`
  * - `未覆盖` 里按 results 出现顺序列 SKIP 的步骤名，用「, 」分隔；
  * - 没有 SKIP 时**省略**括号部分（不留空括号）；
  * - 注意中文全角括号与 `→`：下游是按这一行整行匹配的。
@@ -920,7 +920,7 @@ function runSteps() {
   for (let attempt = 0; attempt < 4; attempt += 1) {
     flat = layout();
     const textsNow = texts(flat);
-    const onHome = textsNow.includes('新建') || textsNow.some((t) => t.includes('今日待办'));
+    const onHome = textsNow.includes('新建');
     const inHandwriting = textsNow.some((t) => /^[^·]*·/.test(t)) && textsNow.includes('完成');
     if (onHome && !inHandwriting) {
       break;
@@ -1134,18 +1134,18 @@ function runSteps() {
     skipped('下拉刷新', 'hilog 未见 [sync] refresh pull');
   }
 
-  // 8. 全部未完成读索引
+  // 8. 未完成 tab 读索引
   flat = layout();
-  const tab = byText(flat, '全部未完成');
+  const tab = byText(flat, '未完成');
   if (!tab) {
-    skipped('全部未完成', '找不到 tab');
+    skipped('未完成', '找不到 tab');
   } else {
     tap(tab);
     const idxLog = hilog(4);
     if (/\[idx\]/.test(idxLog)) {
-      pass('全部未完成·索引', idxLog.split(/\r?\n/).find((l) => l.includes('[idx]')) ?? '');
+      pass('未完成·索引', idxLog.split(/\r?\n/).find((l) => l.includes('[idx]')) ?? '');
     } else {
-      skipped('全部未完成·索引', 'hilog 未见 [idx]（索引未漂移时不会打印，属正常）');
+      skipped('未完成·索引', 'hilog 未见 [idx]（索引未漂移时不会打印，属正常）');
     }
   }
 }

@@ -226,11 +226,11 @@ describe('B3 路径 1：保存返回首页走局部刷新的源码级契约', ()
   });
 
   test('B3-09（v2-only  retarget）reconcileSavedRow：三条早退 + 兜底 reload + loadSummary + 非静默中文 toast', () => {
-    assert.match(RECONCILE, /if \(this\.showAllPending && saved\.done === true\) \{\s*return;\s*\}/, '早退①：全部未完成里已完成');
+    assert.match(RECONCILE, /if \(this\.tab === 'pending' && saved\.done === true\) \{\s*return;\s*\}/, '早退①：未完成 tab 里已完成');
     assert.match(
       RECONCILE,
-      /if \(!this\.showAllPending && saved\.date !== this\.selectedDate\) \{\s*return;\s*\}/,
-      '早退②：非全部未完成但日期不匹配'
+      /if \(this\.tab === 'today' && saved\.date !== this\.selectedDate\) \{\s*return;\s*\}/,
+      '早退②：今日 tab 但日期不匹配'
     );
     assert.match(
       RECONCILE,

@@ -413,9 +413,10 @@
   `openIndexStore.applyRecord()`；返回首页后 `Index.onPageShow()` 先消费一次性标记，命中时**只**做
   `reload()`（同步读当日分片）+ 单行对账，**不再直接调用** `reconcileIfDue()`（跨 30 天分片对账）/
   **不再** `loadSummary()` / **不再** `paneTick + 1`。整条链路上没有 >300ms 的异步等待，所以这一步从 1 wait 变 0。
-  （精确一点：「全部未完成」tab 的 `reload()` 走 `openIndexStore.pendingRecords()`，它内部还会做一次
+  （精确一点：本节基线当时的旧跨日 tab 走 `openIndexStore.pendingRecords()`，它内部还会做一次
   **被 15s 节流**的索引自愈（`openIndexStore.ets:292`）——省掉的是首页自己那次**显式**全量对账，
-  不是「这条链路上永远不存在 reconcile」。）
+  不是「这条链路上永远不存在 reconcile」。现行 v2-only 路径下「未完成」tab 走
+  `pendingSorted()` → `timelineStore.pendingRecords()`，不碰 v1 索引。）
 - **路径 2 为什么正好 6**：自动保存发生在「从手写板 `router.back()` 回编辑页」的同一帧
   （`onRefreshTick → applyPendingInkResult() → maybeAutoSaveAfterInk() → save()`）；
   `save()` 同步落盘后 `onSaved` 再 `router.back()` 回首页。用户不再点「保存日程」，也不再单独等一次
@@ -632,6 +633,83 @@
      （`Index.ets:490-493` 注释）；真机冷启动竞态未验（`unverified`）。
   5. **静态断言的表达力上限**：`quickRecordUi.test.mjs` 以读 `.ets` 文本为主，能挡住「接线位置错 /
      主操作被替换 / 页头被改」这类回归，但挡不住 ArkTS 编译错误与真机行为；改 UI 时同步改断言。
+
+---
+
+### 4.6 本轮落地（`mod-export-json`：格式选择器删除，步数 **不变**）
+
+> 口径仍按 §1（v1），数字全部是源码复算，不是真机实测（见 §5.2）。本批只交付一件事：
+> **把导出格式固定为 git 格式 bundle，删掉 Markdown 及格式选择器**（面板同时删掉两个
+> Markdown 专属勾选框）。§3 里其余可砍点都没做。
+
+| # | 路径 | 改前（§4.2 B2 口径） | 改后（本轮） | 差 | 逐项算式（tap / scroll / wait） |
+| --- | --- | --- | --- | --- | --- |
+| 3 | 导出今天或一周 | **7**（tap 5 + scroll 0 + wait 2） | **7**（tap 5 + scroll 0 + wait 2） | **0** | tap：`⚙ 设置` 1 + 锚点「数据」1 + chip「今天 / 本周」1 + `导出` 1 + `复制路径` 1 = 5；scroll 0；wait：读设置 1 + 写盘 1 = 2。改前同一串算式里**没有**格式选择器的 tap，`Markdown / JSON` 格式在 §2.3「不计入」清单第 ① 项里就被明确排除（默认 Markdown，用户不点它也能完成导出），两个 Markdown 勾选框同理属于第 ② 项。删掉一个本来就未被计数的控件不能让合计变小。 |
+
+**为什么不是 −1（按 §1 约定据实记录，不虚构数字）**：格式选择器在 §2.3 基线中被明确列为
+「不计入」（`Markdown / JSON` 默认 Markdown，`:55`），且 §4.2 路径 3 的 tap 逐项算式
+（5 tap）里也从未出现「点格式」这一步；两个 Markdown 专属勾选框同样在 §2.3 的「不计入」清单里。
+因此「格式 picker  gone」改变的是**界面控件数量**，不是 §1 定义的可计数动作，路径 3 的
+tap / scroll / wait 三项都保持不变。**若未来把格式选择改成必点步骤再删除，才谈得上 −1。**
+
+**合计**：承接 §4.5 的 **31 步** → 本轮 **31 步**（0 变化）；相对 §2.0 首次口径仍是 **43 → 31**；
+相对原 §4 的 P1 目标 26 仍差 5 步，缺口全部属于未做项（D2-P2 / 路径 2′ / 路径 3、5 的 P2 项），
+不是本轮回归。
+
+- **实现落点**（行号以本轮工作树为准，可 `read` 复核）：`components/ExportImportPanel.ets`
+  删除 `FormatRow()` builder、`build()` 里的调用、两个 Markdown 勾选框、`format` / `includeAttachments` /
+  `includeMeta` 三个 `@State`（面板 `@State` 5 → 2，仅 `fromText` / `toText`）；
+  `model/exportImport.ts` 删除 `renderMarkdownExport` 及全部 Markdown 常量 / 文案；
+  `services/exportService.ets` 的 `exportSchedules` 固定为 JSON，`exportV2Timeline` 产出 bundle；
+  `pages/Settings.ets` 的 `handleExport` / `v2ExportRequest` 不再传格式字段。
+- **真机项一律 `unverified`**（见 §5.2）：新导出路径走 zip 桥（WebView JSZip），真机是否可用、
+  bundle 文件是否能在平板的文件选择器里正常选中，本机无 DevEco / 无设备连接，均未验。
+- **测试**：`tools/test/exportJson.test.mjs`（本模块自带，7 例）覆盖 bundle 形态 / 确定性 /
+  round-trip / 篡改零写入 / 旧 bundle note / 未来版本拒绝；`exportImport.test.mjs` 删除 3 个
+  Markdown describe（11 例）并 retarget 2 例格式默认值断言——删的是**已不存在的格式**的测试，
+  不是覆盖削弱。
+
+---
+
+### 4.7 本轮落地（`mod-home-filters`：首页筛选控件 5 → 3，步数 **不变**）
+
+> 口径仍按 §1（v1），数字全部是源码复算，不是真机实测（见 §5.2）。本批只交付一件事：
+> 把首页的 5 个筛选控件收敛为 **2 个 tab + 1 个开关**——`今日`（默认）/ `未完成` 两段，
+> 加一个**只在今日出现**的「显示已完成」开关（默认 **关**，首屏即只看当天未完成）。
+> 搜索框、✨今日汇总块、撤销条、记录点击/编辑路径均未改，页头也未改。
+>
+> **控件数：5 → 3（−2）**。映射：原「今日待办 / 全部未完成」两段 → `今日` / `未完成`（改名，
+> 段数不变）；原「全部 / 未完成 / 已完成」三个状态 chip → 今日 tab 上的一个「显示已完成」开关
+> （今日 + 关 = 只看未完成；今日 + 开 = 当天全部，原来的「已完成」视图即开开关后看已完成行）；
+> 跨日 tab 改名「未完成」后不再需要状态 chip 做第二次筛选。理由与删除项见 `docs/UI-DESIGN.md` §10。
+
+| # | 路径 | 改前 | 改后（本轮） | 差 | 逐项算式（tap / scroll / wait） |
+| --- | --- | --- | --- | --- | --- |
+| 2 | 加手写 | **6**（承接 §4.3：tap 3 + wait 3） | **6**（tap 3 + wait 3） | **0** | `新建` 1 + `手写板` 1 + `完成` 1 = tap 3；编辑页 bootstrap 1 + 手写板挂载/草稿恢复 1 + OCR 1 = wait 3。入口在首页「新建」，整条链不经过任何筛选控件。首屏「看今日未完成列表」同样 **Δ0**：改前默认停在「今日待办」、改后默认停在 `今日` + 开关关，两者都是 0 tap；开关默认关，不新增一次点击。 |
+
+**为什么是 Δ0（按 §1 据实记录，不虚构减步）**：5 个旧控件里被删掉的两个状态 chip（原「全部」/「已完成」）
+从来不是 §2 任何路径的必经步骤——默认状态就能完成路径 1–5，点它们属于**可选**筛选，与 §4.6 的导出格式
+选择器同属 §1.3「不计入」的可选控件。新增的「显示已完成」开关默认关，也不出现在任何一条路径的算式里。
+因此本轮改变的是**界面控件数量**（5 → 3）和默认可见范围（今日首屏只剩未完成），不是可计数的 tap /
+scroll / wait。**§1 的计数单位与 §2 的五条路径明细都没有列出这 5 个筛选控件，故两表不改。**
+
+**合计**：承接 §4.5 / §4.6 的 **31 步** → 本轮 **31 步**（0 变化）；相对 §2.0 首次口径仍是 **43 → 31**；
+相对原 §4 的 P1 目标 26 仍差 5 步，缺口全部属于未做项（D2-P2 / 路径 2′ / 路径 3、5 的 P2 项），
+不是本轮回归。
+
+- **实现落点**（行号以本轮工作树为准，可 `read` 复核）：`pages/Index.ets` 的状态从
+  `showAllPending: boolean` + `statusFilter: string` 收敛为 `tab: HomeTab` + `showDone: boolean`
+  （`type HomeTab = 'today' | 'pending'`），删除 `StatusChip()` builder / `pickStatus()` / `statusFilter`；
+  `ModeTabs()` 渲染两段 + 今日专属的 `Toggle({ type: ToggleType.Switch, isOn: this.showDone })`；
+  `reload()` 的今日计数改为 `今日 ${pendingCountOf(records)} 条未完成`（开关开启只追加「共 N 条」），
+  未完成 tab 走 `pendingSorted()`（按日期再按 ts）；空态 `TabEmpty()` 给「没有未完成的日程」，
+  今日空仍由汇总块给「今天还没有日程」。
+- **测试**：新增 `tools/test/homeFilters.test.mjs`（16 例：默认值 / 控件数 / 排序键 / 开关作用域 /
+  今日计数 / 空态文案 / 旧标签消失）；retarget `b3Batch` / `timelineService` / `uiTokens` /
+  `b4CalendarWiring` / `query` / `v2Only` / `openIndex` 与 `device-accept` 工具的旧状态名与旧文案，
+  用例数不因 retarget 而减少。
+- **真机项一律 `unverified`**（见 §5.2）：两 tab + 开关的实际排布、`Toggle` 的触控反馈、
+  今日计数在开关切换后的刷新观感，本机无设备连接，均未验。
 
 ---
 

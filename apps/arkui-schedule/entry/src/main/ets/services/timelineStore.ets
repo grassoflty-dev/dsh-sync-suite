@@ -182,7 +182,7 @@ export class TimelineStore {
   }
 
   /**
-   * 全部未完成：逐日走 openRecords()（只看 closed_at 缺省，绝不用 done、不信 open 缓存），
+   * 跨日未完成：逐日走 openRecords()（只看 closed_at 缺省，绝不用 done、不信 open 缓存），
    * 按 ts 升序；非 v2 返回 []。这里不碰 openIndexStore，也不做 reconcile。
    */
   pendingRecords(): ScheduleRecord[] {
@@ -203,7 +203,7 @@ export class TimelineStore {
       open.sort((left: ScheduleRecord, right: ScheduleRecord): number => this.compareTs(left.ts, right.ts));
       return open;
     } catch (error) {
-      console.info('[tl] 读全部未完成失败：' + this.errorText(error));
+      console.info('[tl] 读跨日未完成失败：' + this.errorText(error));
       return [];
     }
   }

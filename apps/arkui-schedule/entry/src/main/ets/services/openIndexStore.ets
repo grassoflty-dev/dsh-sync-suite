@@ -273,7 +273,7 @@ export class OpenIndexStore {
   }
 
   /**
-   * 「全部未完成」的数据源（按索引里的 id 取记录）。
+   * 跨日未完成的数据源（按索引里的 id 取记录；现 UI tab 名为「未完成」）。
    *
    * - `includeOtherDevices=false`（默认）：只读本机 `devices/<本机>/open.jsonl`；
    * - `true`：每台设备读**它自己**的 `open.jsonl` —— N 台设备只有 N 个小文件；
@@ -361,7 +361,7 @@ export class OpenIndexStore {
    * 其他设备缺索引时的**内存重建**（只读该设备分片，不写任何文件）。
    *
    * 读它的**全部分片**而不是只读最近 30 天：这类设备多半是旧版本，漏掉老分片会让
-   * 它很早创建、至今未完成的条目从「全部未完成」里消失。
+   * 它很早创建、至今未完成的条目从「未完成」里消失。
    */
   private memoryRebuild(deviceId: string): OpenEntry[] {
     const now = Date.now();

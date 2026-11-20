@@ -276,7 +276,8 @@ test('hasKeyword / isFilterActive：决定空态文案走哪一支', () => {
 
 test('源码级：Index 的列表走 applyQuery，而不是自己手写过滤', () => {
   assert.match(INDEX_SOURCE, /import \{[^}]*applyQuery[^}]*\} from '\.\.\/model\/query'/);
-  assert.match(INDEX_SOURCE, /this\.visibleRecords = applyQuery\(this\.records, filter\)/);
+  assert.match(INDEX_SOURCE, /this\.visibleRecords = applyQuery\(source, filter\)/);
+  assert.match(INDEX_SOURCE, /record\.done !== true/, '今日 tab 开关关闭时由 source 先挡已完成行');
   assert.match(INDEX_SOURCE, /this\.authorChips = authorsOf\(this\.records\)/);
   assert.match(INDEX_SOURCE, /this\.visibleRecords/, '列表要渲染过滤后的数据集');
   assert.equal(

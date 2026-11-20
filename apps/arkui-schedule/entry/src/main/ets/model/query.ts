@@ -1,7 +1,7 @@
 /**
  * 首页「搜索 + 筛选」纯逻辑（零 SDK / 零服务层依赖，`tools/tsconfig.json` 直接编成 JS 跑单测）。
  *
- * 设计（与现有「今日待办 / 全部未完成」两个 tab **正交**）：
+ * 设计（与首页「今日 / 未完成」两段 + 「显示已完成」开关 **正交**）：
  * 1. 先按 tab 取数（`scheduleStore.readDay` / `openIndexStore.pendingRecords`）；
  * 2. 再用 `applyQuery(records, filter)` 过滤：关键词 AND + 状态 + 作者；
  * 3. `applyQuery` 保持输入顺序（不重排），因此列表排序仍由数据源决定（ts 升序），筛选不会让行乱跳。

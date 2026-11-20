@@ -530,7 +530,7 @@ function backToHome() {
   let flat = layout();
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const now = texts(flat);
-    const onHome = now.includes('新建') || now.some((t) => t.includes('今日待办'));
+    const onHome = now.includes('新建');
     const onBoard = now.includes('笔迹') && now.includes('完成');
     if (onHome && !onBoard) {
       return flat;

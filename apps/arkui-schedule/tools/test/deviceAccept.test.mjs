@@ -97,14 +97,14 @@ describe('b) 末行汇总 summaryLine（逐字）', () => {
       pass('启动'),
       pass('完成'),
       skip('下拉刷新'),
-      skip('全部未完成·索引'),
+      skip('未完成·索引'),
       skip('正文占位符'),
       skip('详情页附件'),
       skip('启动自动 pull')
     ];
     assert.equal(
       summaryLine(results),
-      '[accept] pass=3 fail=0 skip=5 total=8 → exit 3（未覆盖：下拉刷新, 全部未完成·索引, 正文占位符, 详情页附件, 启动自动 pull）'
+      '[accept] pass=3 fail=0 skip=5 total=8 → exit 3（未覆盖：下拉刷新, 未完成·索引, 正文占位符, 详情页附件, 启动自动 pull）'
     );
   });
 
@@ -112,7 +112,7 @@ describe('b) 末行汇总 summaryLine（逐字）', () => {
     const results = [
       pass('设备连接'),
       skip('下拉刷新'),
-      skip('全部未完成·索引'),
+      skip('未完成·索引'),
       skip('正文占位符'),
       skip('详情页附件'),
       skip('启动自动 pull')
@@ -121,7 +121,7 @@ describe('b) 末行汇总 summaryLine（逐字）', () => {
     assert.equal(gradeExit(results), EXIT_SKIP, '旧实现把 skipped 记成 ok:true，于是这里返回 0');
     assert.equal(
       line,
-      '[accept] pass=1 fail=0 skip=5 total=6 → exit 3（未覆盖：下拉刷新, 全部未完成·索引, 正文占位符, 详情页附件, 启动自动 pull）'
+      '[accept] pass=1 fail=0 skip=5 total=6 → exit 3（未覆盖：下拉刷新, 未完成·索引, 正文占位符, 详情页附件, 启动自动 pull）'
     );
   });
 
@@ -386,7 +386,7 @@ describe('f) 笔注入不了 → 该步骤不登记（A2：exit 0 可达）', ()
       '详情页附件',
       '启动自动 pull',
       '下拉刷新',
-      '全部未完成·索引'
+      '未完成·索引'
     ];
     const results = steps.map((step) => pass(step));
     assert.equal(gradeExit(results), EXIT_PASS);

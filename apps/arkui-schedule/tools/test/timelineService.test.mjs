@@ -204,9 +204,9 @@ test('Index 导入 timelineStore，并在 bootstrap 中于 scheduleStore 之后 
   );
 });
 
-test('reload 无条件读 v2：showAllPending 走 pendingRecords，否则走 readDay', () => {
+test('reload 无条件读 v2：未完成 tab 走 pendingSorted，今日 tab 走 readDay', () => {
   const body = methodBody(INDEX_CODE, 'reload');
-  assert.match(body, /this\.showAllPending\s*\n\s*\? timelineStore\.pendingRecords\(\)/);
+  assert.match(body, /this\.tab === 'pending'\s*\n\s*\? this\.pendingSorted\(\)/);
   assert.match(body, /: timelineStore\.readDay\(this\.selectedDate\)/);
   assert.doesNotMatch(body, /scheduleStore\.readDay|openIndexStore\.pendingRecords|timelineStore\.useV2\(\)/);
 });
@@ -214,7 +214,8 @@ test('reload 无条件读 v2：showAllPending 走 pendingRecords，否则走 rea
 test('reload 只读 timelineStore，不触发 v1 写入或对账', () => {
   const body = methodBody(INDEX_CODE, 'reload');
   assert.match(body, /timelineStore\.readDay\(this\.selectedDate\)/);
-  assert.match(body, /timelineStore\.pendingRecords\(\)/);
+  assert.match(body, /this\.pendingSorted\(\)/);
+  assert.match(methodBody(INDEX_CODE, 'pendingSorted'), /timelineStore\.pendingRecords\(\)/);
   assert.doesNotMatch(body, /openIndexStore|reconcile|loadSummary/);
   assert.doesNotMatch(body, /appendRecord|saveText/);
 });

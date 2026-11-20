@@ -418,7 +418,7 @@ describe('索引脏数据自愈：多一条 / 少一条', () => {
   });
 });
 
-describe('跨设备合并：两台设备的「全部未完成」', () => {
+describe('跨设备合并：两台设备的「跨日未完成」', () => {
   const dayBefore = '2026-11-14';
   const earlier = `${dayBefore}T08:00:00+08:00`;
 
@@ -486,7 +486,7 @@ describe('跨设备合并：两台设备的「全部未完成」', () => {
     assert.deepEqual(
       merged.map((item) => `${item.deviceId}:${item.entry.id}`),
       ['phone-legacy:n1'],
-      '缺索引的设备靠内存重建照样进「全部未完成」，已完成的 n2 不出现'
+      '缺索引的设备靠内存重建照样进「跨日未完成」，已完成的 n2 不出现'
     );
   });
 });
@@ -535,6 +535,6 @@ describe('跨设备只读约束（源码级）', () => {
       false,
       '内存重建路径不得调用任何写盘方法'
     );
-    assert.match(STORE, /mergeDeviceIndexes\(snapshots\)/, '跨设备「全部未完成」走合并函数');
+    assert.match(STORE, /mergeDeviceIndexes\(snapshots\)/, '跨设备「跨日未完成」走合并函数');
   });
 });

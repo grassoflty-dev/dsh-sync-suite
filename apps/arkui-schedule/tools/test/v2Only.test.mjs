@@ -157,7 +157,8 @@ test('W4 写 / 同步服务与只读服务都以 isMigrated 为唯一门槛，ty
 test('W5 首页读路径无条件 v2，且不再调用任何 v1 索引 / 分片读或写', () => {
   const text = code(INDEX);
   const reload = methodBody(text, 'reload').body;
-  assert.match(reload, /timelineStore\.pendingRecords\(\)/);
+  assert.match(reload, /this\.pendingSorted\(\)/);
+  assert.match(methodBody(text, 'pendingSorted').body, /timelineStore\.pendingRecords\(\)/);
   assert.match(reload, /timelineStore\.readDay\(this\.selectedDate\)/);
   assert.doesNotMatch(reload, /scheduleStore|openIndexStore|reconcile|loadSummary|useV2\(/);
   assert.doesNotMatch(text, /import \{ openIndexStore \}/);
