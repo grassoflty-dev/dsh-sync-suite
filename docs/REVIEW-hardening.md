@@ -116,3 +116,34 @@ EXIT=0
 - gc `--delete` 的跨日同名文件语义（P2-4）与坏日文件保护（P2-3）未做端到端真实仓库演练。
 - 导出账本在真实 ArkUI `readTextFromUri`/`writeTextFile` 上的 BOM/CRLF 字节保真未做设备验证；Node 侧以 UTF-8 字符串与 `v2Utf8ByteLength` 等价推断。
 - 三模块提交哈希待 Lead 回填（`docs/MODULES.md` §1/§5/§6 已登记为「待提交」）。
+
+## 复审（2026-11-20，doctor P1 修复）
+
+- 范围：仅复审已变更语义，原文 §1–§8 不改；未改任何源码/测试，只在本文末尾追加本节。退出码用系统 temp 自造夹具（仓库外）独立执行断言。
+
+### 逐项结论
+
+- **P1-1 账本孤儿误报 → CLOSED**：`tools/doctor-v2.mjs:480-506` 已无 `E_LEDGER_ORPHAN`；delete id 无行 → `I_LEDGER_RETAINED`(info)，restore-only/无 delete 佐证 → `W_LEDGER_ORPHAN`(warning)，均不计 problems。`:485/:498` 明写“仓库无法证明原行是否确实存在过”的 best-effort caveat，文件头 `:6-8` 声明严重度。与契约 §7:157（账本永不清理）、§7:243（保留行可选）一致，正常终态不再 exit 2。夹具 a/b/c 实测 0 且 code 存在/缺失符合预期。
+- **P2-1 `perDay[].conflicts` 恒 0 → CLOSED**：`doctor-v2.mjs:527-565,770,778` 现以 `checkConflicts` 返回值为逐日真实行数；测试 27（`:540`）钉 `perDay[0].conflicts===1`；自造 2 行夹具实测 `perDay=2`、`conflicts=2`。
+- **P2-2 迁移窗口媒体误报 → PARTIAL**：`doctor-v2.mjs:615-626` 仅在 media/ 目录**不存在**时降为 `W_MEDIA_NOT_MIGRATED`(warning，exit 0)，测试 39 钉住，夹具 d 实测 0/无 E_MEDIA_MISSING。但契约 §5 P1-5（`:116`）明言 media/ **可能只有空目录**，此状态仍走 `E_MEDIA_MISSING`→exit 2；见新发现 N-1。
+- **退出码映射 → CLOSED（exit 1 仍 unverified）**：`EXIT={0,1,2}`；`:313` 仅 `error` 计入 problems、`:828` 仅 problems>0→2；CLI 拒绝→2(`:838`)，未预期→1(`:841`)。夹具实测：a/b/c/d 0；e(schema 99) 2 + E_SCHEMA_UNKNOWN；缺 `--repo` 2；`--help` 0。exit 1 只有代码路径，无注入用例（同原 §8）。
+- **无回归 → CLOSED**：39 例全经 `runReadOnly`（`:145-151` 每例前后整树目录标记 + 每文件 SHA256 deepEqual），四类夹具 v1Only/v2Only/mixed/corrupt 均在；34 号参数拒绝路径同样快照（`:624`）。
+
+### 新发现
+
+- **N-1（P2，诊断假阳性 / 契约偏差）**：`doctor-v2.mjs:616,622-626` 只以 media/ 目录存在与否区分「迁移窗口」与「真缺文件」。契约 §5:116 允许空目录，空目录 + 缺文件仍报 `E_MEDIA_MISSING` error/exit 2（夹具 d2 实测 status=2、codes=[E_MEDIA_MISSING]），即 P2-2 想消除的迁移窗口误报的另一半；测试 28（`:545-554`，`seedV2` 默认 `mediaDir:true`）还把该行为钉成预期。建议空目录且引用全缺 → warning，仅部分缺失 → error。不影响数据 / 只读保证。
+
+### 门闸尾部（原目录复现）
+
+```
+node --test apps/arkui-schedule/tools/test/doctorV2.test.mjs
+ℹ tests 39 / pass 39 / fail 0 / skipped 0 / duration_ms 5049.8746 → EXIT=0
+node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"
+ℹ tests 2848 / pass 2847 / fail 0 / skipped 1 / duration_ms 31320.8533 → EXIT=0
+node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json
+EXIT=0（无 stdout/stderr）
+node apps/arkui-schedule/tools/validate-app.mjs
+✅ 全部通过：8/8 条规则（JSON5/JSON 70、相对 import 424、main 静态 import 545、页面 7、rawfile/git 2 个文件）→ EXIT=0
+```
+
+- 总评：doctor P1 修复**基本完成**——P1-1 / P2-1 / 退出码 / 无回归 CLOSED，P2-2 PARTIAL 并残留 N-1(P2)；四门闸全绿、计数与预期一致。
