@@ -542,11 +542,13 @@ test('27 conflicts.jsonl well-formed is silent', (t) => {
 
 // ---------------------------------------------------------------- media checks
 
-test('28 referenced media file missing on disk -> E_MEDIA_MISSING, exit 2', (t) => {
+test('28 referenced media missing in a populated media/ dir -> E_MEDIA_MISSING, exit 2', (t) => {
   const { repo } = fixture(t);
   const sha = `1${'0'.repeat(63)}`;
   seedV2(repo, DAY, {
-    records: [rec('a', `${DAY}T09:00:00+08:00`, { media: [{ file: '1000000000000000.jpg', sha256: sha, pageIndex: 0 }] })]
+    records: [rec('a', `${DAY}T09:00:00+08:00`, { media: [{ file: '1000000000000000.jpg', sha256: sha, pageIndex: 0 }] })],
+    // media/ 已有文件（迁移已运行）⇒ 引用缺失是真缺文件，不是合法的迁移窗口空目录
+    mediaFiles: { 'aaaaaaaaaaaaaaaa.jpg': 'jpeg-bytes' }
   });
   const r = unhealthy(runReadOnly(t, repo));
   hasCode(r, 'E_MEDIA_MISSING');
@@ -716,4 +718,51 @@ test('39 media references with no media/ directory -> W_MEDIA_NOT_MIGRATED warni
   assert.equal(payload.warnings, 1);
   assert.equal(payload.mediaMissing, 1);
   assert.ok(payload.findings.some((f) => f.code === 'W_MEDIA_NOT_MIGRATED' && f.severity === 'warning'));
+});
+
+test('40 empty media/ dir + all referenced media missing -> W_MEDIA_NOT_MIGRATED warning, exit 0', (t) => {
+  const { repo } = fixture(t);
+  const sha = 'ab12'.repeat(16);
+  const dayDir = seedV2(repo, DAY, {
+    // 默认 mediaDir:true 且不放任何文件 ⇒ media/ 存在但为空（契约 §5 迁移窗口）
+    records: [rec('a', `${DAY}T09:00:00+08:00`, {
+      closed_at: `${DAY}T09:30:00+08:00`,
+      media: [{ file: 'ab12ab12ab12ab12.jpg', sha256: sha, pageIndex: 0 }]
+    })]
+  });
+  assert.equal(fs.existsSync(path.join(dayDir, 'media')), true);
+  assert.deepEqual(fs.readdirSync(path.join(dayDir, 'media')), []);
+  const r = healthy(runReadOnly(t, repo));
+  hasCode(r, 'W_MEDIA_NOT_MIGRATED');
+  assert.doesNotMatch(r.stdout, /E_MEDIA_MISSING/);
+  const payload = asJson(healthy(runReadOnly(t, repo, '--json')));
+  assert.equal(payload.problems, 0);
+  assert.equal(payload.warnings, 1);
+  assert.equal(payload.mediaMissing, 1);
+  assert.ok(payload.findings.some((f) => f.code === 'W_MEDIA_NOT_MIGRATED' && f.severity === 'warning'));
+});
+
+test('41 partially migrated media/ (one referenced present, one missing) -> E_MEDIA_MISSING, exit 2', (t) => {
+  const { repo } = fixture(t);
+  const presentSha = 'ab12'.repeat(16);
+  const presentFile = 'ab12ab12ab12ab12.jpg';
+  const missingSha = `1${'0'.repeat(63)}`;
+  const missingFile = '1000000000000000.jpg';
+  seedV2(repo, DAY, {
+    records: [rec('a', `${DAY}T09:00:00+08:00`, {
+      closed_at: `${DAY}T09:30:00+08:00`,
+      media: [
+        { file: presentFile, sha256: presentSha, pageIndex: 0 },
+        { file: missingFile, sha256: missingSha, pageIndex: 1 }
+      ]
+    })],
+    mediaFiles: { [presentFile]: 'jpeg-bytes' }
+  });
+  const r = unhealthy(runReadOnly(t, repo));
+  hasCode(r, 'E_MEDIA_MISSING');
+  assert.doesNotMatch(r.stdout, /W_MEDIA_NOT_MIGRATED/);
+  const payload = asJson(runReadOnly(t, repo, '--json'), 2);
+  assert.equal(payload.mediaMissing, 1);
+  assert.equal(payload.problems, 1);
+  assert.ok(payload.findings.some((f) => f.code === 'E_MEDIA_MISSING' && f.severity === 'error'));
 });

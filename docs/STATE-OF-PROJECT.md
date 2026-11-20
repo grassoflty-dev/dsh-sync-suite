@@ -1,8 +1,8 @@
 # 项目现状一页纸（STATE OF PROJECT）
 
-> 数据截止 2026-11-20；工作目录 `dsh-sync-suite`，HEAD = `c705212`（=`origin/main`，已同步）；本页 doc 更新尚未提交（待 Lead 提交后 HEAD 前进），其余无未提交批次。
+> 数据截止 2026-11-20；工作目录 `dsh-sync-suite`，HEAD = `c705212`（=`origin/main`，已同步）；本批 `mod-doctor-media-window`（源码 + 测试 + 本页 doc 更新）尚未提交（待 Lead 提交后 HEAD 前进），其余无未提交批次。
 > 依据：`docs/MODULES.md`、`docs/DATA-CONTRACT-v2.md`、`docs/RUNBOOK.md`、`docs/VERIFICATION.md` §14、`docs/REVIEW-three-batches.md`、`docs/REVIEW-sync-wiring.md`、`docs/REVIEW-hardening.md`。真机 / 双端 / 重启结论一律以 `VERIFICATION.md` §14 已记录者为准，其余标 `unverified`。
-> doctor P1 复审状态：已落盘（`docs/REVIEW-hardening.md` §复审）——P1-1 / P2-1 / 退出码 / 无回归 CLOSED，P2-2 PARTIAL（N-1：空 media/ 目录仍报 `E_MEDIA_MISSING`），exit 1 仍 `unverified`。
+> doctor 复审状态：已落盘（`docs/REVIEW-hardening.md` §复审）——P1-1 / P2-1 / 退出码 / 无回归 CLOSED；P2-2 的残留 N-1 已由 `mod-doctor-media-window` 闭合（空 `media/` + 引用全缺 → `W_MEDIA_NOT_MIGRATED` warning/exit 0），exit 1 仍 `unverified`。
 
 ## 1 一句话状态
 
@@ -42,8 +42,9 @@ DSH-Dots = 平板 ArkUI-X 日程 App + PC 端 DSH 插件，用 Git 仓库做跨�
 | `mod-v2-doctor` | 只读仓库体检 CLI（schema/布局/records/三本账本/media/v1 侧/冲突审计；独立开发工具） | 已提交 `7fc5b9f`（tag `module/mod-v2-doctor`） | `git revert`（纯新增 2 文件） |
 | `mod-v2-media-gc` | 散图回收（默认只读；`--delete` 需 planHash 确认，只删计划内文件；独立开发工具） | 已提交 `915a416`（tag `module/mod-v2-media-gc`） | `git revert`（纯新增 2 文件） |
 | `mod-export-v2-ledgers` | bundle 升 `bundleVersion:2` + 三本按日账本逐字节搬运；旧 bundle 导入给信息性 note；目标账本只并集追加、不截断 | 已提交 `25fd0f2`（tag `module/mod-export-v2-ledgers`） | `git revert`（增量；v1 导出导入不变） |
+| `mod-doctor-media-window` | 修 doctor 迁移窗口假阳性：空 `media/` + 引用全缺 → `W_MEDIA_NOT_MIGRATED` warning/exit 0；非空目录仍缺引用 → `E_MEDIA_MISSING` error/exit 2 | 已写完，待提交（哈希由 Lead 回填） | `git revert`（独立叶子；撤销 `checkMedia` 规则 + 测试 28/40/41 增量） |
 
-> 共 **30** 个模块条目（含 2 条纯文档登记）；全量回滚顺序固定：先 `1b79790` → `18a692e` → `634da60` → `241bab5` → …（见 `MODULES.md` §1.1 / `RUNBOOK.md` §3）；tag 形式 `git revert module/mod-<id>` 亦可用。doctor / media-gc / export-ledgers 均为独立叶子，不进 v2 回滚链。
+> 共 **31** 个模块条目（含 2 条纯文档登记）；全量回滚顺序固定：先 `1b79790` → `18a692e` → `634da60` → `241bab5` → …（见 `MODULES.md` §1.1 / `RUNBOOK.md` §3）；tag 形式 `git revert module/mod-<id>` 亦可用。doctor / media-gc / export-ledgers 均为独立叶子，不进 v2 回滚链。
 
 ## 3 v2 时间线的默认行为
 

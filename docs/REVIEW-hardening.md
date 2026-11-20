@@ -147,3 +147,34 @@ node apps/arkui-schedule/tools/validate-app.mjs
 ```
 
 - 总评：doctor P1 修复**基本完成**——P1-1 / P2-1 / 退出码 / 无回归 CLOSED，P2-2 PARTIAL 并残留 N-1(P2)；四门闸全绿、计数与预期一致。
+
+## 复审（2026-11-20，mod-doctor-media-window）
+
+- 范围：仅复审 HEAD `f984a88` 的未提交 diff；未改源码/测试，只在本文末尾追加本节；退出码用系统 temp 自造夹具独立执行 CLI 断言。
+
+### 逐项结论
+
+- **规则正确性 → 通过**：`tools/doctor-v2.mjs:616-620` 引述：`const allReferencedMissing = referenced.size > 0 && [...referenced].every((name) => !onDisk.includes(name)); const inMigrationWindow = !mediaDirExists || (onDisk.length === 0 && allReferencedMissing);`，外层门槛 `if (missing > 0)`。无 media/ → warning/exit 0；空 media/ + 引用全缺 → warning/exit 0；非空目录缺引用 → `E_MEDIA_MISSING` error/exit 2。重复引用经 `referenced` Set 去重，只影响 `missing` 计数、不翻 verdict；零引用 → `missing=0`，无媒体 finding。自造夹具实测：nodir/emptydir/dup 均 exit 0 + W_MEDIA_NOT_MIGRATED，zerorefs exit 0 无 code，partial/nonemptyallmissing exit 2 + E_MEDIA_MISSING。注意 E_MEDIA_MISSING 并非严格「仅部分缺失」：非空目录但引用全缺（仅含未引用文件，测试 28）也报错；与「已填充目录=迁移已运行」口径及 N-1「空目录且全缺→warning」一致，非缺陷。
+- **只读 → 通过**：grep `writeFile|appendFile|unlink|rmSync|rename|mkdir|copyFile|writeSync|openSync|...` 零命中；`doctorV2.test.mjs:146-151` 的 `runReadOnly` 仍逐例整树目录标记 + 每文件 SHA256 前后 `deepEqual`，40/41 均经此路。
+- **测试 → 通过**：40 断言空目录全缺 `healthy` + `W_MEDIA_NOT_MIGRATED` + `doesNotMatch(/E_MEDIA_MISSING/)`；41 断言部分到位 `unhealthy` + `E_MEDIA_MISSING` + `doesNotMatch(/W_MEDIA_NOT_MIGRATED/)`，两支互为正反，规则回退或过度放宽均会失败。测试 28 由「空目录缺文件=error」改为「已填充目录缺文件=error」，是把旧误报断言重定向到 error 分支（空目录分支由 40 覆盖），断言强度未降；测试 30/31/32/39 与 corrupt 夹具未动，无既有断言被删或弱化。
+- **退出码映射 → 通过（exit 1 仍 unverified）**：`EXIT={0,1,2}`（`:38`）；`:314` 仅 `severity==='error'` 计 problems，`:830` problems>0→2；`:838-840` Refused→2，`:841-843` unexpected→1；warning/info 不阻断。exit 1 仍无注入用例（同原 §8）。
+- **文档 → 通过**：`mod-doctor-media-window` 在 `MODULES.md` §1/§5/§6、`ROADMAP.md`、`STATE-OF-PROJECT.md` id 一致；计数 41 / 2850-2849-0-1 / 8/8 / tsc 0 与实测一致；N-1 标记闭合；`STATE-OF-PROJECT.md` 与本文 §8 均保留「exit 1 仍 unverified」，新行未声称已验证。旧批次行仍写「media/ 目录存在但文件缺失」，属历史表述，新行已补「非空」。
+
+### 新发现
+
+- **N-2（P2，非阻断，诊断假阴性）**：`filesOf`（`:105-111`）只收 `isFile()`；若 `media/` 仅含子目录（契约 §5 要求扁平 `<sha16>.jpg`），`onDisk.length===0` 被当成空迁移窗口 → warning/exit 0（改动前为 error/exit 2，夹具实测）。无数据风险、不影响门闸。建议用 `fs.readdirSync(mediaDir).length===0` 判空，或为 media/ 下非法条目加 typed code。
+
+### 门闸尾部（原目录复现）
+
+```
+node --test apps/arkui-schedule/tools/test/doctorV2.test.mjs
+ℹ tests 41 / pass 41 / fail 0 / skipped 0 / duration_ms 5046.9336 → EXIT=0
+node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"
+ℹ tests 2850 / pass 2849 / fail 0 / skipped 1 / duration_ms 29531.2267 → EXIT=0
+node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json
+EXIT=0（无 stdout/stderr）
+node apps/arkui-schedule/tools/validate-app.mjs
+✅ 全部通过：8/8 条规则（JSON5/JSON 70、相对 import 424、main 静态 import 545、页面 7、rawfile/git 2 个文件）→ EXIT=0
+```
+
+- 总评：**可以提交**（P0/P1 = 0；P2 = N-2，建议随批修或登记后续）。N-1 已闭合，四门闸全绿、计数与文档一致。

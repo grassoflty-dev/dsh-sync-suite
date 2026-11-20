@@ -5,7 +5,8 @@
 // 退出码：0 = 健康（无 problems）；2 = 发现问题（problems>0）或参数拒绝；1 = 未预期错误。
 // 严重度：只有 error 计入 problems 并触发 exit 2；warning / info 仅提示、不阻断。典型非阻断项：
 // 已删除清行后保留的账本 → I_LEDGER_RETAINED(info)；无佐证的孤儿账本 → W_LEDGER_ORPHAN(warning)；
-// 媒体迁移尚未运行的迁移窗口 → W_MEDIA_NOT_MIGRATED(warning)。
+// 媒体迁移窗口（media/ 不存在，或 media/ 为空且当日引用媒体全缺）→ W_MEDIA_NOT_MIGRATED(warning)；
+// media/ 已有文件却仍缺引用 → E_MEDIA_MISSING(error)。
 //
 // 硬性约束：**只读**。本工具只使用 fs.existsSync / statSync / readdirSync / readFileSync，
 // 不创建、不修改、不删除任何文件（不建 tmp、不做修复、不做 git 操作），因此可在冻结文件系统上运行。
@@ -613,15 +614,16 @@ function checkMedia(state, dayDir, day, records) {
   state.mediaCollisions += collision;
   state.mediaUnreferenced += unreferenced.length;
   if (missing > 0) {
-    if (!mediaDirExists) {
-      // 契约 §5：媒体解包归独立模块 mod-v2-media-migration；其尚未运行时 media/ 目录可不存在，
-      // 记录里的 file 只是占位引用。这是合法的迁移窗口状态，降为 warning、不阻断。
+    // 契约 §5 规则：media/ 不存在，或 media/ 为空且当日引用媒体全缺 = 合法迁移窗口 → warning；否则真缺文件 → error。
+    const allReferencedMissing = referenced.size > 0 && [...referenced].every((name) => !onDisk.includes(name));
+    const inMigrationWindow = !mediaDirExists || (onDisk.length === 0 && allReferencedMissing);
+    if (inMigrationWindow) {
       warning(state, 'W_MEDIA_NOT_MIGRATED',
-        `${day} 有 ${missing} 处 media[].file 引用，但同日 media/ 目录尚不存在（媒体迁移未运行）。`,
+        `${day} 有 ${missing} 处 media[].file 引用，但同日 media/ 目录${mediaDirExists ? '为空' : '尚不存在'}（媒体迁移未运行，引用为占位）。`,
         '下一步：先跑 node tools/migrate-media-v1-to-v2.mjs --repo <repo> --apply；未迁移前 App 应显示「媒体待迁移」占位（契约 §5），本项不计入 problems。', { day });
     } else {
       problem(state, 'E_MEDIA_MISSING',
-        `${day} 有 ${missing} 处 media[].file 在同日 media/ 中找不到文件（目录已存在）。`,
+        `${day} 有 ${missing} 处 media[].file 在同日 media/ 中找不到文件（目录已存在且非空，或已有部分引用文件到位）。`,
         '下一步：先跑 node tools/migrate-media-v1-to-v2.mjs --repo <repo> --apply 补齐缺文件；未迁移前 App 应显示「媒体待迁移」占位（契约 §5）。', { day });
     }
   }
