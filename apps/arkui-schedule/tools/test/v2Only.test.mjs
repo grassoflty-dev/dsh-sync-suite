@@ -76,11 +76,14 @@ test('W1 recordWriter 完全不含 v1 写入 / 模式开关：三个入口都无
   assert.equal((text.match(/this\.writeV2\(/g) || []).length, 3);
 });
 
-test('W2 七个 UI 写调用点仍全部经 recordWriter（没有 v1 直连）', () => {
+test('W2 六个 UI 写调用点仍全部经 recordWriter（没有 v1 直连）', () => {
   const editor = 'components/RecordEditorView.ets';
   const detail = 'components/RecordDetailView.ets';
   const count = (text, needle) => (text.match(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
-  assert.equal(count(code(INDEX), 'recordWriter.writeRecord('), 3);
+  // mod-home-drop-quick: 快捷记录写路径已删除；剩余 toggle / AI write-back + delete + restore 仍全经 recordWriter。
+  assert.doesNotMatch(code(INDEX), /submitQuickRecord|QuickRecordBar/,
+    '快捷记录写路径已删除，不得再出现第二个创建入口');
+  assert.equal(count(code(INDEX), 'recordWriter.writeRecord('), 2);
   assert.equal(count(code(INDEX), 'recordWriter.deleteRecord('), 1);
   assert.equal(count(code(INDEX), 'recordWriter.restoreRecord('), 1);
   assert.equal(count(code(editor), 'recordWriter.writeRecord('), 1);

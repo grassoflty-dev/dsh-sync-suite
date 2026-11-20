@@ -1,13 +1,17 @@
 /**
- * 设置页「导出 / 导入」面板（**纯展示 + 回调**）。
+ * 设置页「数据」组唯一的导出 / 导入面板（**纯展示 + 回调**）。
  *
  * 分工（`docs/EXPORT-IMPORT.md` §4）：
  * - 本组件**不做 IO、不做路由、不 import services**：dry-run 统计、按钮可用性、提示文案
  *   全部来自 `model/exportImport.ts` 的纯函数；导出 / 选文件 / 确认导入 / 取消都通过回调交给页面；
- * - 页面负责调 `services/exportService.ets`，再把结果写回 `state`（本组件的 `@Prop`）。
+ * - 页面负责调 `services/exportService.ets`，再把结果写回 `state`（本组件的 `@Prop`）；
+ * - **一个入口**：主「导出」按钮导出完整包（记录 + 媒体 + 账本），导入由同一套
+ *   「选文件 → 试算 → 确认」流程自动识别完整包 manifest 或兼容 JSON。
+ *   已删除独立的「日程备份」节——媒体能力保留在主流程里，界面上不再有第二套按钮与文案。
  *
  * 两步导入（关键交互）：
- * 1. 「选择 JSON 文件」→ 页面调 `pickImportFile` + `planImportFromText`，把 dry-run 计数写进 `state`；
+ * 1. 「选择文件」→ 页面调 `pickImportFile`，自动识别完整包 manifest（含媒体）或兼容 JSON，
+ *    把 dry-run 计数写进 `state`；
  * 2. 面板展示「将新增 N 条 / 跳过 M 条 / 冲突 K 条 / 非法 J 条」；**只有 `N>0 && J===0` 才能点
  *    「确认导入」**（有非法条目就 fail-closed，提示「先修正文件」），点确认才真正追加。
  *
@@ -19,7 +23,6 @@
  *   （不做「静默吞点击」的禁用——那正是 `docs/STATE-UI.md` §0 第 4 条要解决的问题）；
  * - 忙 → `LoadingState`（>3s 出现「取消」，走**独立的** `onCancelWait`——它只复位「等待」，
  *   与「取消导入（清空 dry-run）」不是同一件事，见两个回调的注释）；
- * - 还没导出过 → `EmptyState`（「填今天」用 `todayText()` 算，组件里不散落 `new Date()`）；
  * - 失败 → `ErrorState`（三段式 + 诊断四要素 + 重试）。
  *
  * 复制路径：路径用 `Text(...).copyOption(CopyOptions.LocalDevice)` 渲染，**长按即可复制**，
@@ -38,14 +41,12 @@ import {
   isDryRunEmpty,
   isQuickRangeActive,
   parseDateRange,
-  quickRange,
-  todayText
+  quickRange
 } from '../model/exportImport';
 import type { DateRangeResult, ExportImportState, ExportRequest, QuickRangeOption } from '../model/exportImport';
 import { formatDiagnostics } from '../model/stateView';
 import type { DiagnosticsInput } from '../model/stateView';
 import { ActionButton } from './ActionButton';
-import { EmptyState } from './state/EmptyState';
 import { ErrorState } from './state/ErrorState';
 import { LoadingState } from './state/LoadingState';
 
@@ -59,12 +60,7 @@ const IMPORT_BUSY_REASON: string = '导入还没结束，先等它读完文件';
 const CANCEL_BUSY_REASON: string = '导入进行中，先等它结束';
 
 /** 确认导入还没选文件时的原因（点了要知道下一步做什么）。 */
-const CONFIRM_NEED_FILE: string = '先选择 JSON 文件（会先算一遍，不写任何记录）';
-
-/** 空态：还没导出过时给一句说明 + 一个「填今天」的动作。 */
-const EMPTY_EXPORT_TITLE: string = '还没有导出记录';
-const EMPTY_EXPORT_DETAIL: string = '选好区间后点「导出」';
-const EMPTY_EXPORT_ACTION: string = '填今天';
+const CONFIRM_NEED_FILE: string = '先选择文件（完整包 manifest 或兼容 JSON，会先试算、不写任何记录）';
 
 /** 错误态的三段式文案（面板拿不到设备号，诊断里的设备写「未登记」由 model 兜底）。 */
 const PANEL_ERROR_WHAT: string = '导出/导入失败';
@@ -79,25 +75,13 @@ const PANEL_ERROR_NEXT: string = '检查日期区间与文件后重试';
  */
 const FAILURE_PREFIXES: string[] = ['导出失败', '导入失败', '选择文件失败', '无法读取导入文件', '复制路径失败', '没有待确认'];
 
-// ---- v2 时间线备份（空仓库也照常渲染；首用时由 write store 建骨架）----
-const V2_GROUP_TITLE: string = 'v2 时间线备份';
-const V2_HINT: string = '导出共享时间线（含媒体）为只读备份；导入先 dry-run，确认后才写入 timeline/';
-const V2_EXPORT_LABEL: string = '导出 v2 备份';
-const V2_PICK_LABEL: string = '选择 v2 备份并试算';
-const V2_APPLY_LABEL: string = '确认导入 v2';
-const V2_CANCEL_LABEL: string = '取消 v2 导入';
-const V2_EMPTY_TITLE: string = '还没有 v2 导入计划';
-const V2_EMPTY_DETAIL: string = '选一份 v2 备份的 manifest.json，先算出计划再决定要不要写入';
-const V2_EMPTY_ACTION: string = '去选备份';
-const V2_BUSY: string = 'v2 备份正在处理，请稍候';
-
 @Component
 export struct ExportImportPanel {
   /** 展示状态（区间初值、dry-run 计数、导出路径、错误文案、忙碌标志）。 */
   @Prop state: ExportImportState = EMPTY_EXPORT_IMPORT_STATE;
   /**
    * 导出回调：把用户当前选的区间原样交回页面。
-   * 页面据此拼 `exportService.exportSchedules(request)`（无参实现也兼容：忽略入参即可）。
+   * 页面据此调 `exportService.exportV2Timeline(request, zip)` 产出含媒体的完整包。
    */
   onExport: ((request: ExportRequest) => void) | null = null;
   /** 选导入文件（页面负责 picker + dry-run）。 */
@@ -116,24 +100,6 @@ export struct ExportImportPanel {
   onCancelWait: () => void = () => {};
   /** 可选：显式「复制路径」按钮（`null` = 不渲染，只靠长按复制）。 */
   onCopyPath: (() => void) | null = null;
-
-  // ---- v2 时间线备份（展示数据由页面写回，组件只读；不新增 @State，保持纯展示）----
-  /** v2 导入计划是否已生成（页面 dry-run 成功后置 true）。 */
-  @Prop v2PlanReady: boolean = false;
-  /** v2 计划的中文展示行（days / records / media / bytes，由纯函数 v2PlanSummary 产出）。 */
-  @Prop v2PlanText: string = '';
-  /** v2 导入最近一次提示（成功 / 类型化拒绝原因，空串 = 无）。 */
-  @Prop v2Message: string = '';
-  /** v2 操作是否进行中（按钮统一的忙碌原因来源）。 */
-  @Prop v2Busy: boolean = false;
-  /** 导出 v2 备份（页面调 exportV2Timeline 并写回 v2Message）。 */
-  onV2Export: (() => void) | null = null;
-  /** 选择 v2 备份并 dry-run（页面调 picker + planV2ImportFromPicked，写回 v2Plan*）。 */
-  onV2Pick: (() => void) | null = null;
-  /** 显式确认导入（页面调 applyV2Import；dry-run 默认不写）。 */
-  onV2Apply: (() => void) | null = null;
-  /** 取消 v2 导入（页面清空计划，本机零改动）。 */
-  onV2Cancel: (() => void) | null = null;
 
   // 可编辑项在组件本地承接：`@Prop` 是单向的，输入框直接改父状态会来回抖动。
   // 初始值来自 `state`（`aboutToAppear` 同步一次），之后由用户输入主导并随 `onExport` 回传。
@@ -201,55 +167,9 @@ export struct ExportImportPanel {
     }
   }
 
-  // ------------------------------------------------------------------ v2 时间线备份
-
-  /** v2 是唯一路径：空仓库也照常显示这一节（没有迁移门槛）。 */
-  private v2Visible(): boolean {
-    return true;
-  }
-
-  /** 不再有未迁移禁用：导入目标始终是 timeline/（由页面经 timelineWriteStore 落盘）。 */
-  private importDisabledReason(): string {
-    return '';
-  }
-
-  /**
-   * 按钮不可用原因：当前只有「忙碌」一种。
-   * 四个 v2 回调在设置页全部接线（onV2Export / onV2Pick / onV2Apply / onV2Cancel），
-   * 回调缺失时的不可达文案分支已删除；`v2CanTap` 仍保留 null 检查作防御，不会误调用。
-   */
-  private v2BlockedReason(): string {
-    if (this.v2Busy) {
-      return V2_BUSY;
-    }
-    return '';
-  }
-
-  /** 按钮是否真的能执行：有回调且不在忙碌中（不可用按钮仍可点，点了给原因）。 */
-  private v2CanTap(handler: (() => void) | null): boolean {
-    return handler !== null && !this.v2Busy;
-  }
-
-  /** 确认导入是否可点：必须已有 dry-run 计划且不忙（与 v1 的「先算后写」纪律一致）。 */
-  private v2CanApply(): boolean {
-    return this.v2CanTap(this.onV2Apply) && this.v2PlanReady && this.v2PlanText.length > 0;
-  }
-
-  /** 确认导入的不可用原因：先解释忙碌，其次「还没试算」。 */
-  private v2ApplyBlockedReason(): string {
-    const blocked: string = this.v2BlockedReason();
-    if (blocked.length > 0) {
-      return blocked;
-    }
-    if (!this.v2PlanReady || this.v2PlanText.length === 0) {
-      return '先选择 v2 备份并试算（dry-run 不写任何记录）';
-    }
-    return '';
-  }
-
-  /** 选文件按钮文案：还没选过 → 「选择 JSON 文件」；选过 → 「重新选择文件」。 */
+  /** 选文件按钮文案：还没选过 → 「选择文件」；选过 → 「重新选择文件」。 */
   private pickLabel(): string {
-    return this.state.importFileName.length > 0 ? '重新选择文件' : '选择 JSON 文件';
+    return this.state.importFileName.length > 0 ? '重新选择文件' : '选择文件';
   }
 
   /** 确认导入按钮文案：有非法条目时明确写「先修正文件」，避免用户以为按钮坏了。 */
@@ -302,11 +222,6 @@ export struct ExportImportPanel {
     return '';
   }
 
-  /** 还没导出过（且没有提示文案）：给出「填今天」这一步，而不是一片空白。 */
-  private showEmptyExport(): boolean {
-    return this.state.exportPath.length === 0 && this.state.message.length === 0;
-  }
-
   /** 当前 message 是一条失败提示（成功提示共用同一个字段，不能一律当错误）。 */
   private isFailureMessage(): boolean {
     const message: string = this.state.message.trim();
@@ -340,13 +255,6 @@ export struct ExportImportPanel {
       timestamp: Date.now()
     };
     return formatDiagnostics(input);
-  }
-
-  /** 空态的「填今天」：区间两端都填本机今天（纯函数算，本文件里没有 `new Date()`）。 */
-  private fillToday(): void {
-    const today: string = todayText();
-    this.fromText = today;
-    this.toText = today;
   }
 
   /** 应用快捷区间：只写本地输入态；手改后以手改为准（本组件不记住任何 chip 选择）。 */
@@ -533,153 +441,11 @@ export struct ExportImportPanel {
     .alignItems(HorizontalAlign.Start)
   }
 
-  /**
-   * v2 时间线备份节：空仓库也照常渲染（骨架由写入服务首用创建）。
-   *
-   * 三态纪律（docs/STATE-UI.md）：没计划 → EmptyState 给「去选备份」；忙 → LoadingState；
-   * 类型化拒绝文案走 v2Message + HintLine（不是静默吞点击）。按钮统一 ActionButton，
-   * 不可用时不禁用命中，而是点击给 v2BlockedReason() 的具体原因。
-   */
-  @Builder
-  V2Section() {
-    Column({ space: SPACING.md }) {
-      this.GroupTitle(V2_GROUP_TITLE)
-      this.HintLine(V2_HINT)
-
-      if (!this.v2PlanReady && this.v2Message.length === 0) {
-        EmptyState({
-          title: V2_EMPTY_TITLE,
-          detail: V2_EMPTY_DETAIL,
-          actionLabel: V2_EMPTY_ACTION,
-          compact: true,
-          onAction: (): void => {
-            const handler: (() => void) | null = this.onV2Pick;
-            if (handler !== null) {
-              handler();
-            }
-          }
-        })
-      }
-
-      Row({ space: SPACING.sm }) {
-        ActionButton({
-          label: V2_EXPORT_LABEL,
-          actionEnabled: this.v2CanTap(this.onV2Export),
-          disabledReason: this.v2BlockedReason(),
-          busy: this.v2Busy,
-          variant: 'secondary',
-          block: false,
-          onTap: (): void => {
-            const handler: (() => void) | null = this.onV2Export;
-            if (handler !== null) {
-              handler();
-            }
-          },
-          onBlockedTap: null
-        })
-        ActionButton({
-          label: V2_PICK_LABEL,
-          actionEnabled: this.v2CanTap(this.onV2Pick),
-          disabledReason: this.v2BlockedReason(),
-          busy: this.v2Busy,
-          variant: 'secondary',
-          block: false,
-          onTap: (): void => {
-            const handler: (() => void) | null = this.onV2Pick;
-            if (handler !== null) {
-              handler();
-            }
-          },
-          onBlockedTap: null
-        })
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-
-      if (this.v2Busy) {
-        LoadingState({
-          title: loadingText('处理 v2 备份'),
-          progress: -1,
-          compact: true,
-          onCancel: (): void => {
-            const handler: (() => void) | null = this.onV2Cancel;
-            if (handler !== null) {
-              handler();
-            }
-          }
-        })
-      }
-
-      if (this.v2PlanReady && this.v2PlanText.length > 0) {
-        this.HintLine(this.v2PlanText)
-      }
-      if (this.v2Message.length > 0) {
-        this.HintLine(this.v2Message)
-      }
-
-      Row({ space: SPACING.sm }) {
-        Column() {
-          ActionButton({
-            label: V2_APPLY_LABEL,
-            actionEnabled: this.v2CanApply(),
-            disabledReason: this.v2ApplyBlockedReason(),
-            busy: this.v2Busy,
-            variant: 'primary',
-            block: true,
-            onTap: (): void => {
-              const handler: (() => void) | null = this.onV2Apply;
-              if (handler !== null) {
-                handler();
-              }
-            },
-            onBlockedTap: null
-          })
-        }
-        .layoutWeight(1)
-
-        Column() {
-          ActionButton({
-            label: V2_CANCEL_LABEL,
-            actionEnabled: this.v2CanTap(this.onV2Cancel),
-            disabledReason: this.v2BlockedReason(),
-            busy: false,
-            variant: 'secondary',
-            block: true,
-            onTap: (): void => {
-              const handler: (() => void) | null = this.onV2Cancel;
-              if (handler !== null) {
-                handler();
-              }
-            },
-            onBlockedTap: null
-          })
-        }
-        .layoutWeight(1)
-      }
-      .width('100%')
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
-  }
-
   build() {
     Column({ space: SPACING.md }) {
       this.GroupTitle('导出')
-      this.HintLine('按日期区间导出本机记录（只读派生，不改任何源文件）')
+      this.HintLine('按日期区间导出完整包（记录 + 媒体 + 账本，不改任何源文件）')
       this.QuickRangeRow()
-
-      // 空态：还没导出过 → 「填今天」一键把区间填成本机今天（空态永远有出路）
-      if (this.showEmptyExport()) {
-        EmptyState({
-          title: EMPTY_EXPORT_TITLE,
-          detail: EMPTY_EXPORT_DETAIL,
-          actionLabel: EMPTY_EXPORT_ACTION,
-          compact: true,
-          onAction: (): void => {
-            this.fillToday();
-          }
-        })
-      }
 
       Row({ space: SPACING.sm }) {
         this.FromInput()
@@ -692,7 +458,7 @@ export struct ExportImportPanel {
       .alignItems(VerticalAlign.Center)
 
       ActionButton({
-        label: '导出',
+        label: '导出完整包',
         actionEnabled: this.exportBlockedReason().length === 0,
         disabledReason: this.exportBlockedReason(),
         busy: this.state.busy,
@@ -725,17 +491,13 @@ export struct ExportImportPanel {
         .color($r('app.color.divider'))
 
       this.GroupTitle('导入')
-      // v2-only：未迁移整节禁用，先给 typed 原因；已迁移的落点是 timeline/<date>/records.json。
-      this.HintLine(this.importDisabledReason().length > 0
-        ? `导入不可用：${this.importDisabledReason()}`
-        : '只追加到 timeline/<date>/records.json：冲突（同 id 且更新）不会覆盖，非法记录整批不写')
+      // 一个入口自动识别两种文件：完整包的 manifest.json（含媒体）或兼容 JSON（仅记录）。
+      this.HintLine('选完整包的 manifest.json 或兼容 JSON：只追加记录与媒体，冲突（同 id 且更新）不覆盖，非法记录整批不写')
 
       ActionButton({
         label: this.pickLabel(),
-        actionEnabled: this.importDisabledReason().length === 0 && !this.state.busy,
-        disabledReason: this.importDisabledReason().length > 0
-          ? this.importDisabledReason()
-          : this.busyReason(IMPORT_BUSY_REASON),
+        actionEnabled: !this.state.busy,
+        disabledReason: this.busyReason(IMPORT_BUSY_REASON),
         busy: false,
         variant: 'secondary',
         block: true,
@@ -783,10 +545,8 @@ export struct ExportImportPanel {
         Column() {
           ActionButton({
             label: this.confirmLabel(),
-            actionEnabled: canConfirmImport(this.state) && this.importDisabledReason().length === 0,
-            disabledReason: this.importDisabledReason().length > 0
-              ? this.importDisabledReason()
-              : this.confirmBlockedReason(),
+            actionEnabled: canConfirmImport(this.state),
+            disabledReason: this.confirmBlockedReason(),
             busy: this.state.busy,
             variant: 'primary',
             block: true,
@@ -801,10 +561,8 @@ export struct ExportImportPanel {
         Column() {
           ActionButton({
             label: '取消',
-            actionEnabled: !this.state.busy && this.importDisabledReason().length === 0,
-            disabledReason: this.importDisabledReason().length > 0
-              ? this.importDisabledReason()
-              : this.busyReason(CANCEL_BUSY_REASON),
+            actionEnabled: !this.state.busy,
+            disabledReason: this.busyReason(CANCEL_BUSY_REASON),
             busy: false,
             variant: 'secondary',
             block: true,
@@ -817,14 +575,6 @@ export struct ExportImportPanel {
         .layoutWeight(1)
       }
       .width('100%')
-
-      // v2 时间线备份：只在共享时间线模式启用时出现；v1 用户看不到这一节。
-      if (this.v2Visible()) {
-        Divider()
-          .strokeWidth(DIVIDER)
-          .color($r('app.color.divider'))
-        this.V2Section()
-      }
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)

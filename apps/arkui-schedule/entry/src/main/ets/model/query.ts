@@ -2,7 +2,8 @@
  * 首页「搜索 + 筛选」纯逻辑（零 SDK / 零服务层依赖，`tools/tsconfig.json` 直接编成 JS 跑单测）。
  *
  * 设计（与首页「今日 / 未完成」两段 **正交**；完成状态不做过滤，今日显示当天全部记录）：
- * 1. 先按 tab 取数（`scheduleStore.readDay` / `openIndexStore.pendingRecords`）；
+ * 1. 先按 tab 取数（今日 = `timelineStore.readDay`，未完成 = `timelineStore.pendingRecords`；
+ *    v2 是唯一读路径，不再经过 v1 的 scheduleStore / openIndexStore）；
  * 2. 再用 `applyQuery(records, filter)` 过滤：关键词 AND + 状态 + 作者；
  * 3. `applyQuery` 保持输入顺序（不重排），因此列表排序仍由数据源决定（ts 升序），筛选不会让行乱跳。
  *

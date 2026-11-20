@@ -7,15 +7,16 @@
  * 契约：
  * - 服务 / 模型是「点一行 → 页面开弹层选」的只读行（弹层仍在页面里）；
  * - API Key 只存本机（密码框），测试结果一行 + 失败时的「下一步」一行；
- * - 多源 fallback 面板放在「高级」折叠区**之前**（隐私决策不藏在折叠里），
- *   开关 / 列表 / 次数 / 诊断都在 `AiFallbackPanel` 内，本 section 只转发回调；
- * - 「高级」里只有模型名（预设源也可手输）与自定义源的 baseURL。
+ * - 多源 fallback 面板放在 AI 组内（隐私决策不藏在折叠里），开关 / 列表 / 次数 / 诊断
+ *   都在 `AiFallbackPanel` 内，本 section 只转发回调；
+ * - 模型只能从预设「模型」下拉选择，**没有手输模型名的入口**（mod-ai-drop-advanced）：
+ *   已配置但不在预设表里的旧模型名由 `modelLabel` 原样显示，不迁移、不丢失；
+ * - 自定义源的接口地址（baseURL）在选到「自定义」时直接显示，不再有「高级」折叠区。
  */
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../../common/uiTokens';
 import { AiFallbackPanel } from '../AiFallbackPanel';
 import { DEFAULT_MAX_ATTEMPTS, normalizeMaxAttempts } from '../../model/aiFallback';
 import type { FallbackDiagnostic, FallbackSource, FallbackSourcePatch } from '../../model/aiFallback';
-import { defaultModelOf } from '../../model/aiProvider';
 import {
   ErrorText as ErrorTextBit,
   FieldLabel as FieldLabelBit,
@@ -26,15 +27,11 @@ import {
 @Component
 export struct AiSection {
   @Prop aiKey: string = '';
-  @Prop aiModel: string = '';
   /** AI 服务源 id（`model/aiProvider.ts` 的预设表）。 */
   @Prop aiProviderId: string = '';
   /** 自定义源的接口地址；预设源下存的是预设地址快照，页面上不展示。 */
   @Prop aiBaseURL: string = '';
-  @Prop aiModelError: string = '';
   @Prop aiBaseUrlError: string = '';
-  /** 「高级」是否展开（选自定义源时由页面自动展开）。 */
-  @Prop advancedOpen: boolean = false;
   @Prop aiTestText: string = '';
   /** 失败后的一行可操作建议（成功时为空，不占行）。 */
   @Prop aiTestHint: string = '';
@@ -44,7 +41,7 @@ export struct AiSection {
   @Prop providerKeyHint: string = '';
   /** 当前模型展示名（页面 `modelLabel()` 派生）。 */
   @Prop modelLabel: string = '';
-  /** 当前源是不是「自定义」（决定 baseURL 行与「模型名（必填）」文案）。 */
+  /** 当前源是不是「自定义」（决定要不要显示接口地址 baseURL 行）。 */
   @Prop customProvider: boolean = false;
   /** 主源的展示名（给 fallback 面板说明「备用源里不要再选它」）。 */
   @Prop primarySourceLabel: string = '';
@@ -62,9 +59,6 @@ export struct AiSection {
   onOpenModelPanel: () => void = () => {};
   onChangeAiKey: (value: string) => void = () => {};
   onTestAi: () => void = () => {};
-  /** 手动点「高级 ▸ / ▾」（页面只翻转一个 @State）。 */
-  onToggleAdvanced: () => void = () => {};
-  onChangeAiModel: (value: string) => void = () => {};
   onChangeAiBaseURL: (value: string) => void = () => {};
   onToggleFallback: (isOn: boolean) => void = () => {};
   onAddFallback: () => void = () => {};
@@ -94,7 +88,7 @@ export struct AiSection {
     FieldNoteBit(text)
   }
 
-  /** AI 组：服务 / 模型 / API Key / 测试 + 折叠的高级（仅 baseURL）。 */
+  /** AI 组：服务 / 模型 / API Key / 测试 / fallback + 自定义源的内联接口地址。 */
   build() {
     Column({ space: SPACING.md }) {
       Text('AI 汇总')
@@ -215,9 +209,8 @@ export struct AiSection {
           .textAlign(TextAlign.Start)
       }
 
-      // 多源 fallback（`docs/AI-FALLBACK.md` §8 的挂载片段）：放在「高级」折叠区**之前**，
-      // 因为「主源失败后要不要发给别家」是隐私决策，不能藏在折叠里。组件自带开关 / 列表 /
-      // 次数 / 诊断，本页只接回调（改状态）与三个持久化键（保存时写回）。
+      // 多源 fallback（`docs/AI-FALLBACK.md` §8 的挂载片段）：隐私决策不藏在折叠里，
+      // 组件自带开关 / 列表 / 次数 / 诊断，本页只接回调（改状态）与三个持久化键（保存时写回）。
       Divider()
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
@@ -248,23 +241,12 @@ export struct AiSection {
         }
       })
 
-      Row({ space: SPACING.sm }) {
-        Text(this.advancedOpen ? '高级 ▾' : '高级 ▸')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .height(TOUCH_MIN)
-          .textAlign(TextAlign.Start)
-          .onClick(() => {
-            this.onToggleAdvanced();
-          })
-      }
-      .width('100%')
-
-      if (this.advancedOpen) {
-        // 模型名允许手输（三个预设源也允许，防模型下线）；留空回落到该源默认
-        this.FieldLabel(this.customProvider ? '模型名（必填）' : '模型名（可手输，留空用默认）')
-        TextInput({ text: this.aiModel, placeholder: defaultModelOf(this.aiProviderId) })
+      // 自定义源的接口地址：选到「自定义」时直接显示，不再有「高级」折叠区。
+      // 模型名不提供手输入口——服务 / 模型两个下拉就是唯一的模型配置路径；
+      // 存储里若已有手输的旧模型名，上面「模型」行由 modelLabel 原样显示，不迁移、不丢失。
+      if (this.customProvider) {
+        this.FieldLabel('接口地址 baseURL')
+        TextInput({ text: this.aiBaseURL, placeholder: 'https://api.example.com/v1' })
           .width('100%')
           .height(TOUCH_MIN + SPACING.xs)
           .fontSize(FONT.caption)
@@ -272,35 +254,13 @@ export struct AiSection {
           .borderRadius(RADIUS.none)
           .padding({ left: 0, right: 0 })
           .onChange((value: string) => {
-            this.onChangeAiModel(value);
+            this.onChangeAiBaseURL(value);
           })
         Divider()
           .strokeWidth(DIVIDER)
           .color($r('app.color.divider'))
-        if (this.aiModelError.length > 0) {
-          this.ErrorText(this.aiModelError)
-        }
-
-        if (this.customProvider) {
-          this.FieldLabel('接口地址 baseURL')
-          TextInput({ text: this.aiBaseURL, placeholder: 'https://api.example.com/v1' })
-            .width('100%')
-            .height(TOUCH_MIN + SPACING.xs)
-            .fontSize(FONT.caption)
-            .backgroundColor($r('app.color.page_background'))
-            .borderRadius(RADIUS.none)
-            .padding({ left: 0, right: 0 })
-            .onChange((value: string) => {
-              this.onChangeAiBaseURL(value);
-            })
-          Divider()
-            .strokeWidth(DIVIDER)
-            .color($r('app.color.divider'))
-          if (this.aiBaseUrlError.length > 0) {
-            this.ErrorText(this.aiBaseUrlError)
-          }
-        } else {
-          this.HintLine('预设源使用内置接口地址；要自定义地址请把「服务」切到「自定义」。')
+        if (this.aiBaseUrlError.length > 0) {
+          this.ErrorText(this.aiBaseUrlError)
         }
       }
     }

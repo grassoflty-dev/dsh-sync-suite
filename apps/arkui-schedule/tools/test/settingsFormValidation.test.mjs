@@ -34,7 +34,6 @@ const {
   AUTH_HTTPS,
   AUTH_SSH,
   FIELD_AI_BASE_URL,
-  FIELD_AI_MODEL,
   FIELD_AUTHOR,
   FIELD_DEVICE_ID,
   FIELD_REPO_URL,
@@ -134,13 +133,13 @@ describe('设置页保存校验：可见字段（token 留空沿用、平台纠�
     assert.match(issues[0].message, /协议/);
   });
 
-  test('AI：预设源不校验模型/地址；自定义源缺模型与地址都要报', () => {
+  test('AI：模型只能下拉选，不再校验手输模型名；自定义源只校验接口地址', () => {
     assert.deepEqual(check({ customProvider: false, aiModel: '', aiBaseURL: '' }), []);
     const issues = check({ customProvider: true, aiModel: '', aiBaseURL: '' });
-    assert.deepEqual(fieldsOf(issues), [FIELD_AI_MODEL, FIELD_AI_BASE_URL]);
-    const badBase = check({ customProvider: true, aiModel: 'my-model', aiBaseURL: 'https://' });
+    assert.deepEqual(fieldsOf(issues), [FIELD_AI_BASE_URL], '不再报 AI 模型名（手输入口已删除）');
+    const badBase = check({ customProvider: true, aiModel: '', aiBaseURL: 'https://' });
     assert.deepEqual(fieldsOf(badBase), [FIELD_AI_BASE_URL], '缺域名要报');
-    assert.deepEqual(check({ customProvider: true, aiModel: 'my-model', aiBaseURL: 'https://api.x.com/v1' }), []);
+    assert.deepEqual(check({ customProvider: true, aiModel: '', aiBaseURL: 'https://api.x.com/v1' }), []);
   });
 
   test('汇总文案：去重字段名、按数量报告', () => {
@@ -243,7 +242,6 @@ describe('幽灵报错守卫：每个 issue 都必须有可见落点', () => {
     [FIELD_AUTHOR]: 'authorError',
     [FIELD_REPO_URL]: 'repoUrlError',
     [FIELD_TOKEN]: 'tokenError',
-    [FIELD_AI_MODEL]: 'aiModelError',
     [FIELD_AI_BASE_URL]: 'aiBaseUrlError',
     // P0：HTTPS 用户名（Gitee 必填登录名）。字段常量定义在 Settings 页里（model 侧由别人维护）
     gitUsername: 'gitUsernameError'
@@ -255,12 +253,11 @@ describe('幽灵报错守卫：每个 issue 都必须有可见落点', () => {
     FIELD_AUTHOR,
     FIELD_REPO_URL,
     FIELD_TOKEN,
-    FIELD_AI_MODEL,
     FIELD_AI_BASE_URL
   ];
 
   test('checkSettingsFields 可能返回的 field 全部有页面映射', () => {
-    // 一次把所有分支都踩中：空设备标识 / 空作者 / 坏地址 / 无 token / 自定义源缺模型与地址
+    // 一次把所有分支都踩中：空设备标识 / 空作者 / 坏地址 / 无 token / 自定义源缺地址（模型名已不校验）
     const issues = check({
       deviceId: '',
       author: '',
@@ -319,7 +316,7 @@ describe('幽灵报错守卫：每个 issue 都必须有可见落点', () => {
       );
       // 每次保存前必须清空（避免上次红字残留 / 幽灵）
       assert.match(page, new RegExp(`this\\.${state} = '';`), `${state} 必须被清空`)
-      // 普通字段的清除写在 applyIssues 开头，AI 两态也在其中
+      // 普通字段的清除写在 applyIssues 开头，AI 接口地址态也在其中
       assert.ok(page.indexOf(`this.${state} = '';`) < page.indexOf(`this.${state} = issue.message`), `${state} 必须先清后赋`)
     });
   }

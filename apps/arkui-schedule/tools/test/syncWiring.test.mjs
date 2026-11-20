@@ -109,6 +109,8 @@ class FakeGit {
     this.commits = [];
     this.added = [];
     this.writes = 0;
+    /** 操作顺序探针（mod-auto-sync）：钉住 fetch 先于 add/commit/push。 */
+    this.trace = [];
     if (this.schema === null) {
       this.remote.delete('timeline/schema.json');
     } else {
@@ -128,7 +130,7 @@ class FakeGit {
     this.local.set(`timeline/${date}/restore.jsonl`, restore);
   }
 
-  async fetchMain() { this.fetchCount += 1; }
+  async fetchMain() { this.fetchCount += 1; this.trace.push('fetch'); }
   async headSha() { return this.head; }
   async originMainSha() { return this.origin; }
   async showMain(path) { return this.remote.get(path) || ''; }
@@ -138,17 +140,20 @@ class FakeGit {
     return this.head === this.origin ? 'equal' : 'diverged';
   }
   async addPaths(paths) {
+    this.trace.push('add');
     this.added.push(paths.slice());
     for (const path of paths) {
       assert.ok(path.startsWith('timeline/'), `提交路径越界：${path}`);
     }
   }
   async commit(message) {
+    this.trace.push('commit');
     this.commitCount += 1;
     this.commits.push(message);
     this.head = `c${String(this.commitCount).padStart(39, '0')}`;
   }
   async pushMain() {
+    this.trace.push('push');
     this.pushCount += 1;
     if (this.pushFailures > 0) {
       this.pushFailures -= 1;
@@ -161,6 +166,7 @@ class FakeGit {
     }
   }
   async resetHardOrigin() {
+    this.trace.push('reset');
     this.resetCount += 1;
     this.head = this.origin;
     this.relationOverride = null;
@@ -527,17 +533,26 @@ test('39 static: setRunner(bridgeGitRunner) wired in Index bootstrap', () => {
   assert.match(index, /import \{ syncProtocolStore \}/);
 });
 
-test('40 static: tri-state row present and driven by syncStatusStore', () => {
+// mod-auto-sync 重定位：原用例钉住旧的四态文案（已同步 / N 条待同步 / 错误）；
+// 新契约只有一行三态（已同步 · HH:MM / 同步中… / 失败：<typed 原因>）+ 状态行点一下重试。
+// 断言不比原来弱：既逐字钉新文案，也反向禁止旧按钮与第四态复活。
+test('40 static: exactly three status states with exact copy, no manual sync buttons', () => {
   const index = src('pages/Index.ets');
   assert.match(index, /SyncStatusRow\(\)/);
   assert.match(index, /@State syncStatus: SyncStatusView = syncStatusStore\.snapshot\(\)/);
-  assert.match(index, /this\.syncStatus\.label/);
-  assert.match(index, /this\.syncStatus\.text/);
+  assert.match(index, /Text\(this\.syncStatus\.text\)/);
+  assert.match(index, /this\.syncStatus\.state === 'failed'/);
+  assert.match(index, /Text\('重试同步'\)/);
   const store = src('services/syncStatusStore.ets');
-  assert.match(store, /label = '已同步'/);
-  assert.match(store, /label = `\$\{pending\} 条待同步`/);
-  assert.match(store, /let label: string = '错误'/);
-  assert.doesNotMatch(store, /'只读'/);
+  assert.match(store, /SYNCED_PREFIX: string = '已同步 · '/);
+  assert.match(store, /SYNCING_TEXT: string = '同步中…'/);
+  assert.match(store, /FAILED_PREFIX: string = '失败：'/);
+  assert.match(store, /setSyncing\(\)/);
+  assert.doesNotMatch(store, /条待同步|'只读'|'错误'/);
+  for (const rel of ['components/settings/SyncSection.ets', 'pages/Settings.ets', 'pages/Index.ets']) {
+    const text = src(rel);
+    assert.doesNotMatch(text, /label: '推送'|label: '立即同步'|Text\('推送'\)/, rel);
+  }
 });
 
 test('41 static: no force-push / --force / merge / rebase / clean in new wiring', () => {
@@ -737,4 +752,91 @@ test('58 push transport E_AUTH keeps original typed code and error text', async 
 test('59 static: gate is rechecked per intent before replay (P1-3(a) literal)', () => {
   const model = src('model/syncCycle.ts');
   assert.match(model, /for \(let i = 0; i < replayEntries\.length; i \+= 1\) \{[\s\S]{0,200}gateOf\(port\)/);
+});
+
+// ---------------------------------------------------------------- mod-auto-sync（用户项 3+4）
+
+test('60 create → pull (fetch) → replay on fresh remote → commit → push, in that order', async () => {
+  const fake = new FakeGit();
+  fake.setRemoteDay(DAY, [rec({ id: 'remote', ts: T0930 })]);
+  const intent = upsertIntent({ record: rec({ id: 'new', ts: T1100 }) });
+  const result = await run(fake, [intent]);
+  assert.equal(result.ok, true);
+  const fetchAt = fake.trace.indexOf('fetch');
+  const addAt = fake.trace.indexOf('add');
+  const commitAt = fake.trace.indexOf('commit');
+  const pushAt = fake.trace.indexOf('push');
+  assert.ok(fetchAt >= 0 && addAt > fetchAt && commitAt > addAt && pushAt > commitAt,
+    `git 操作顺序错误：${fake.trace.join('→')}`);
+  assert.equal(fetchAt, 0, 'fetch 必须是第一个 git 操作（先取远端最新状态）');
+  const merged = parseTimelineDay(fake.remote.get(`timeline/${DAY}/records.json`), DAY);
+  assert.deepEqual(merged.day.allRecords.map((r) => r.id).sort(), ['new', 'remote'],
+    '新记录叠加在最新远端状态之上，且远端最终拿到两者');
+  assert.equal(result.resultOutbox.length, 0);
+});
+
+test('61 offline / transport E_IO → typed failure + intent parked for retry (no force)', async () => {
+  const fake = new FakeGit();
+  fake.pushMain = async () => {
+    fake.pushCount += 1;
+    throw new Error('E_IO: network unreachable');
+  };
+  const result = await run(fake, [upsertIntent()]);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'E_IO');
+  assert.match(result.message, /E_IO: network unreachable/);
+  assert.equal(result.failed, 1);
+  assert.equal(result.resultOutbox.length, 1, '失败意图留在 outbox，等用户点重试');
+  assert.equal(result.resultOutbox[0].state, 'failed');
+  assert.match(result.resultOutbox[0].lastError, /E_IO/);
+  assert.equal(fake.resetCount, MAX_ATTEMPTS, '拒推只能 reset --hard origin/main，绝不 force-push');
+});
+
+test('62 static: home pull-to-refresh runs the configured cycle (pull+push) then re-renders', () => {
+  const index = src('pages/Index.ets');
+  const body = /private async onPullRefresh\(\): Promise<void> \{([\s\S]*?)\n  \}/.exec(index);
+  assert.ok(body, 'onPullRefresh body not found');
+  assert.match(body[1], /syncStatusStore\.setSyncing\(\)/);
+  assert.match(body[1], /await syncProtocolStore\.runConfiguredCycle\(\)/);
+  assert.match(body[1], /syncStatusStore\.fromCycle\(result/);
+  assert.match(body[1], /this\.reload\(\)/);
+  assert.match(body[1], /this\.loadSummary\(\)/);
+  assert.doesNotMatch(body[1], /syncController\.pullNow/);
+  assert.match(index, /Refresh\(\{ refreshing: \$\$this\.refreshing \}\)/);
+  assert.match(index, /Refresh\(\{ refreshing: \$\$this\.paneRefreshing \}\)/);
+  assert.match(src('services/recordWriter.ets'), /syncStatusStore\.setSyncing\(\)/);
+});
+
+test('63 static: every create path routes through recordWriter (one sync trigger, no second impl)', () => {
+  const writer = src('services/recordWriter.ets');
+  assert.match(writer, /syncStatusStore\.setSyncing\(\)/);
+  assert.match(writer, /runConfiguredCycle\(\)/);
+  const paths = {
+    // mod-home-drop-quick deleted the quick-record write path; the four remaining UI writes still route here.
+    'pages/Index.ets': 4, // toggle / delete / restore / AI write-back
+    'components/RecordEditorView.ets': 1, // editor save
+    'components/RecordDetailView.ets': 1  // detail save
+  };
+  assert.doesNotMatch(src('pages/Index.ets'), /QuickRecordBar|submitQuickRecord/,
+    '快捷记录写路径已删除，不得再出现第二个创建入口');
+  for (const rel of Object.keys(paths)) {
+    const text = src(rel);
+    const calls = (text.match(/recordWriter\.writeRecord\(/g) || []).length +
+      (text.match(/recordWriter\.deleteRecord\(/g) || []).length +
+      (text.match(/recordWriter\.restoreRecord\(/g) || []).length;
+    assert.equal(calls, paths[rel], `${rel} 写调用点数`);
+  }
+  assert.doesNotMatch(src('pages/Index.ets'), /runCyclePure\(/);
+  assert.doesNotMatch(writer, /runCyclePure\(/);
+});
+
+test('64 static: force / rebase / reset --hard confined to the documented rejection path', () => {
+  for (const rel of ['pages/Index.ets', 'pages/Settings.ets',
+    'components/settings/SyncSection.ets', 'services/recordWriter.ets']) {
+    assert.doesNotMatch(src(rel), /--force|\brebase\b|--hard/, `${rel} 不得出现强制/改写/硬重置`);
+  }
+  const store = src('services/syncProtocolStore.ets');
+  assert.match(store, /'reset', '--hard', 'origin\/main'/);
+  assert.match(store, /'push', 'origin', 'main'/);
+  assert.doesNotMatch(store, /--force|\brebase\b/);
 });

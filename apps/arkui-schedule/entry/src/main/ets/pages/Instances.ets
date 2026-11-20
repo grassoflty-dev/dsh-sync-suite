@@ -30,7 +30,7 @@ import {
 import type { DsInstance, InstanceProblem, RawInstance, RedactedInstance } from '../model/instances';
 import { reachabilityLabel, relativeLastSeen } from '../model/instanceSeed';
 import { REMOTE_MODE_LAN, REMOTE_MODE_ORDER, findRemoteMode } from '../model/remoteAccess';
-import { mergeRemoteToken, normalizeRemoteUrl, routeToRemote } from '../model/remoteUrl';
+import { mergeRemoteToken, normalizeRemoteUrl, routeToRemote, stripRemoteToken } from '../model/remoteUrl';
 import { instanceStore } from '../services/instanceStore';
 import { settingsStore } from '../services/settingsStore';
 import { describeError } from '../services/scheduleStore';
@@ -282,14 +282,22 @@ struct Instances {
     });
   }
 
-  /** 空态次操作：把旧设置里的 DSH 地址交给系统浏览器；没填就说明原因，不假装能开。 */
+  /**
+   * 空态次操作：把旧设置里的 DSH 地址交给系统浏览器；没填就说明原因，不假装能开。
+   *
+   * 令牌出口边界：`settingsStore.cached().remoteUrl` 可能带 `?token=` / `?k=`，
+   * 绝不能把它直接交给 `Want.uri`（Intent / 浏览器历史会留明文令牌）。这里复用
+   * `stripRemoteToken()` 整对删掉令牌参数后再拼 `Want`——与 `remoteShowLink`
+   * 「用户显式出口才出明文」的纪律一致；URL 本身没有令牌时逐字不变。
+   */
   private async openInBrowser(): Promise<void> {
     const cached = settingsStore.cached();
-    const url: string = cached === null ? '' : cached.remoteUrl.trim();
-    if (url.length === 0) {
+    const raw: string = cached === null ? '' : cached.remoteUrl.trim();
+    if (raw.length === 0) {
       promptAction.showToast({ message: '先在设置里填写电脑上的 DSH 地址', duration: 3000 });
       return;
     }
+    const url: string = stripRemoteToken(raw); // 唯一进 Want.uri 的地址：已去令牌
     try {
       const context = getContext(this) as common.UIAbilityContext;
       const want: Want = { action: ACTION_VIEW_DATA, uri: url };

@@ -114,8 +114,11 @@ Index 紧凑(竖屏)                        Index 宽屏/横屏
 | 组 | 行 1 | 行 2 | 行 3 | 行 4 | 组头「更多」 |
 | --- | --- | --- | --- | --- | --- |
 | 同步 (Git) | 仓库地址（下方固定说明「平台按地址自动识别 · 分支固定 main」） | 访问令牌（密码框） | `高级 ▸` 折叠区：Git 用户名 / 设备标识 / 作者名（默认收起）；已保存 SSH 时警告 + 「改用 HTTPS 令牌」按钮（只切状态，落盘仍走底部 `保存设置`） | `立即同步` + **`含其他设备` 开关** + 1 行状态（超长 → `?`） | 推送 / 查看状态 / 重试上次 / 测试连接（平台按地址推断、分支固定 main、无认证切换） |
-| AI | 服务（下拉 4 源；`preset.experimental` 为真的源带「实验」标签） | 模型（下拉，`modelsOf(id)` 联动） | API Key（密码框，下方一行 `keyHint`） | `测试` + 1 行结果（`成功 · 320ms`，耗时取 `result.elapsedMs`；失败原样展示 `result.message`） | 高级（默认折叠）：**模型名可手输**（三源都允许，`custom` 必填）+ **baseURL 仅 `custom` 可编辑**；选 `custom` 时自动展开 |
+| AI | 服务（下拉 4 源；`preset.experimental` 为真的源带「实验」标签） | 模型（下拉，`modelsOf(id)` 联动） | API Key（密码框，下方一行 `keyHint`） | `测试` + 1 行结果（`成功 · 320ms`，耗时取 `result.elapsedMs`；失败原样展示 `result.message`） | **无「高级」折叠区**（mod-ai-drop-advanced）：模型只能从上两行的「服务 / 模型」下拉选，**没有手输模型名**；自定义源的 baseURL 在 `customProvider` 下直接内联显示（选 `custom` 即出现） |
+| 数据 | **唯一导入 / 导出入口**：一个 `导出完整包` 按钮（记录 + 媒体 + 账本）+ 区间 chip / 日期输入 | 选文件 → 试算（自动识别完整包 manifest 或兼容 JSON） | 试算计数 + `确认导入`（显式确认框后才落盘） | `取消` + 导出路径（长按复制） | — |
 | 关于 | 版本 + 上次同步 | 平台信息（平台·手写·OCR 一行） | 隐私说明 `?` | —（提醒功能已按用户要求删除） | — |
+
+> **mod-ui-drop-backup（2026-11-20）**：数据组原来在主「导出 / 导入」之外还渲染一个「日程备份」节（四个按钮 + 空态 + 独立提示行），用户反馈「已经有导入导出了，不需要备份的设置」。现在**只有一个入口**：媒体能力并入主流程——主按钮改为 `导出完整包`（repo-shaped bundle，含 `media.zip` 与三本账本），导入的「选文件 → 试算 → 确认」同一套控件自动识别完整包 manifest 与兼容 JSON；备份节、四个 `onV2*` 回调与四份展示状态全部删除，没有第二套按钮或文案。界面上不再出现「备份」二字；真机观感 `unverified`。
 
 > 分支契约（mod-settings-lean）：v2 起分支固定 `main`；旧 extras 里的 `branch` 会被忽略并在下次保存时写成 `main`（无迁移提示）。
 
@@ -152,8 +155,14 @@ Index 侧 :146-153 的断言（`settingsStore.load(` 必须早于 `await summari
 注意两点与直觉不同：**无 `defaultModel` 字段**（用 `defaultModelOf(id)`）、**无 `isCustom` 字段**（用 `preset.id === CUSTOM_PROVIDER_ID`）。
 `settingsStore` 增 `aiProviderId`/`aiBaseURL` 与 `cachedProviderId()`/`cachedBaseURL()`；测试用 3 参
 `testAiConnection(this.aiKey, this.aiProviderId, this.aiModel, this.aiBaseURL)`（「填了没保存」的地址也能测）。
-**「高级」里不放开超时/重试**：`AI_TIMEOUT_MS=20000`、退避 1000ms、只重试 1 次是 `model/aiRequest.ts` 的固定常量，
-做成开关就是改不动的假开关——与本轮「别太复杂」相反，故只保留 baseURL。
+**AI 组不再有「高级」折叠区**（mod-ai-drop-advanced）：原来折叠里的手输模型名已整条删除，模型只走
+「服务 / 模型」两个预设下拉；baseURL 从折叠里移出，选到 `custom` 时在 AI 组内联显示。
+**不放开超时/重试**：`AI_TIMEOUT_MS=20000`、退避 1000ms、只重试 1 次仍是 `model/aiRequest.ts` 的固定常量，
+做成开关就是改不动的假开关——与本轮「别太复杂」相反。
+
+**存量手输模型名不迁移**：若 `settingsStore.aiModel` 已是手输的非预设名，`load()` 的 `resolveAiModel`
+原样保留，`modelLabel()` 在预设表里查不到时把 id 原样显示在当前「模型」行，继续进入请求；
+只是 UI 不再提供手输入口，非预设模型名从此不可新设（备选：在预设模型表加「自定义」项，未实现）。
 
 ## 5. 旋转支持与手写板坐标系（只报告，不改 A 的文件）
 
@@ -190,7 +199,7 @@ Index 侧 :146-153 的断言（`settingsStore.load(` 必须早于 `await summari
 
 - 已交付：`uiTokens.ts`（20 例单测）、`PageLayout.ets`、`color.json`(+`dark/`)、`module.json5` 方向字段、
   `RecordRow`/`EmptyState` 重排，以及**四个页面全部重构**：Index（日期列 / 列表双栏）、Edit（表单 / 预览双栏）、
-  Detail（正文 / AI·附件双栏）、Settings（3 组 × ≤4 行 + `?` 弹层 + 高级折叠）。
+  Detail（正文 / AI·附件双栏）、Settings（3 组 × ≤4 行 + `?` 弹层；AI 组的「高级」折叠已按用户要求删除，见 §11）。
 - `Handwriting.ets` 由 A 做，只 import 本文件的 token；旋转锁方向方案见 §5。
 - **真机 AI 源测试：未验证**（设备 `hdc list targets` 为 `[Empty]`）：三个源各点一次「测试」、把 `成功 · Nms` / 错误码贴回，需设备回来后做。
 - **截图判据修正（2026-11-15 19:4x 复核）**：先前「白像素 0.9% / 无竖分割线 / 不可能是本应用」的结论**错误**——分析的是已被覆盖的旧文件（19:25 的 `ui-index-landscape.jpeg` 132,972 B，疑似退桌面误抓），且未处理 PNG 的 alpha 通道。
@@ -427,3 +436,39 @@ Index 侧 :146-153 的断言（`settingsStore.load(` 必须早于 `await summari
 - 测试：`tools/test/homeFilters.test.mjs`（18 例，两 tab 控制集 / 开关消失 / 今日全量 / 排序键 / 计数为总量 /
   无「共」后缀 / 空态 / 旧标签消失）；旧测试 `b3Batch` / `timelineService` / `uiTokens` / `b4CalendarWiring` / `query` / `v2Only` /
   `openIndex` / `device-accept` 的旧状态名与旧文案已 retarget，不是删断言。
+
+## 11. AI/API 配置删除「高级」与手输模型名（`mod-ai-drop-advanced`，2026-11-20）
+
+> 本节**只追加**，不改 §1–§10 的结论。用户原话：「api 配置里删掉高级按钮，模型配置已经完成了，不需要再填模型名称」。
+
+### 11.1 原来「高级」里是什么
+
+`components/settings/AiSection.ets` 的「高级 ▸ / 高级 ▾」展开后有三样东西：
+
+| 内容 | 条件 | 处置 |
+| --- | --- | --- |
+| 手输**模型名**输入框（`TextInput({ text: this.aiModel })`）+ 字段标题（预设源「模型名（可手输，留空用默认）」/ 自定义源「模型名（必填）」）+ `aiModelError` 红字 | 全部源 | **删除**（用户要求） |
+| **接口地址 baseURL** 输入框 + `aiBaseUrlError` 红字 | 仅 `customProvider` | **保留**，移出折叠区，选到「自定义」时在 AI 组内联常驻显示 |
+| 「预设源使用内置接口地址；要自定义地址请把『服务』切到『自定义』。」一行灰字 | 预设源且展开时 | 随折叠区删除（无剩余语义） |
+
+没有 temperature / timeout / retry 开关：`AI_TIMEOUT_MS=20000`、退避 1000ms、只重试 1 次一直是 `model/aiRequest.ts` 的固定常量（见 §4.1 注）。
+
+### 11.2 删除清单（逐处）
+
+- `components/settings/AiSection.ets`：删 `advancedOpen` / `aiModel` / `aiModelError` 三个 `@Prop`、`onToggleAdvanced` / `onChangeAiModel` 两个回调、`defaultModelOf` import、「高级」切换 Row、`if (this.advancedOpen) { … }` 整段里的模型名输入框与文案；baseURL 块改成 `if (this.customProvider) { … }` 直接渲染。
+- `pages/Settings.ets`：删 `@State advancedOpen` / `@State aiModelError`、`FIELD_AI_MODEL` import、`applyIssues()` 里 AI 模型名的清空与分支、`aiBaseUrlError` 分支里的 `this.advancedOpen = true`、`pickProvider()` 里选 custom 自动展开、`AiGroup()` 的四个无用接线；`this.aiModel` / `aiModel: this.aiModel` 与 `this.pickModel()` **保留**（模型仍从下拉写回）。
+- `model/settingsForm.ts`：删 FIELD_AI_MODEL 校验（`自定义源必须填写模型名（点「高级」手输）`）——模型只能从下拉选，`aiModel` 由 `defaultModelOf` 保证非空，这条校验既不可满足也无可见落点。
+- `services/settingsStore.ets`：只改注释，归一逻辑一字未动。
+- 测试：`modelHintGate.test.mjs` 整份重写（8 例）；`settingsCopyGuard.test.mjs` 加 C4；`settingsFormValidation.test.mjs` 把 FIELD_AI_MODEL 从校验/幽灵报错表移除。
+
+### 11.3 决策与代价
+
+预设模型**始终可用**：`AI_PROVIDERS` 每个源（含 `custom`）都有非空 `models`，`defaultModelOf(id)` 永远给得出默认模型；服务 + 模型两个下拉就是唯一配置路径。手输模型名是通往**非预设**模型名的唯一入口，删除后这类名字**不能再从 UI 新设**——用户明确说「模型配置已经完成了」，故按原样删除。最小备选（**未实现**）：在预设模型表里给各源加一条「自定义」项，选择后再输入名字；需要时另立模块。
+
+### 11.4 存量手输模型名的安全
+
+**不迁移、不清空、不重写**：`settingsStore.load()` 的 `resolveAiModel(providerId, aiModel)` 对非空字符串原样保留；`applySettings()` 把 `settings.aiModel` 铺回 `@State`；`modelLabel()` 在 `modelsOf(id)` 里查不到时把 id 原样显示在当前「模型」行；`saveSettings()` 仍把 `this.aiModel` 写回 patch，测试连接 / summary / 详情 / fallback runner 仍读 `settings.aiModel`。**表现**：已存的手输模型名继续显示并继续生效，只是「模型」下拉里没有它的勾选项。
+
+### 11.5 步数与未验证
+
+步数按 §1 口径 **Δ0**（删的是输入控件与折叠开关，不是可计数的 tap / scroll / wait）。`unverified`：真机观感（本机 `hdc list targets` 为空，按调度不做 ArkTS 构建 / 装机）；`TextInput.onChange` 与自定义源 baseURL 内联渲染的真机行为未验证。

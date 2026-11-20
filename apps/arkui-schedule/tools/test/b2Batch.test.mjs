@@ -16,12 +16,16 @@ const PANEL = readFileSync(
   new URL('../../entry/src/main/ets/components/ExportImportPanel.ets', import.meta.url),
   'utf8'
 );
+const DATA = readFileSync(
+  new URL('../../entry/src/main/ets/components/settings/DataSection.ets', import.meta.url),
+  'utf8'
+);
 const PAGE = readSettingsPage();
 
 /**
  * 剥掉块注释与行注释，但**保留字符串字面量里的 `//`**（避免把 URL / 文案误当注释）。
- * 用途：面板头注释与「填今天」的 JSDoc 里都写过 `new Date()` 这几个字，那是在陈述纪律，
- * 不是真的在组件里构造时间；只有可执行代码里的 `new Date(` 才算破坏「纯展示组件」约束。
+ * 用途：注释里可能写过 `new Date()` 这几个字（陈述纪律），那不是真的在组件里构造时间；
+ * 只有可执行代码里的 `new Date(` 才算破坏「纯展示组件」约束。
  */
 function stripComments(source) {
   let out = '';
@@ -146,16 +150,15 @@ describe('B2 面板 ExportImportPanel.ets：快捷 chip 的源码级契约', () 
     );
   });
 
-  test('B2-15 build() 顺序：GroupTitle(导出) → HintLine → QuickRangeRow → 空态 → 日期输入', () => {
+  test('B2-15 build() 顺序：GroupTitle(导出) → HintLine → QuickRangeRow → 两个日期输入', () => {
     assertOrdered(
       BUILD,
       [
         "this.GroupTitle('导出')",
-        "this.HintLine('按日期区间导出本机记录",
+        "this.HintLine('按日期区间导出完整包",
         'this.QuickRangeRow()',
-        'if (this.showEmptyExport())',
-        'EmptyState(',
-        'this.FromInput()'
+        'this.FromInput()',
+        'this.ToInput()'
       ],
       'ExportImportPanel.build()'
     );
@@ -179,6 +182,38 @@ describe('B2 面板 ExportImportPanel.ets：快捷 chip 的源码级契约', () 
       assert.match(body, /disabledReason:/, '契约丢了：chip 缺 disabledReason');
       assert.match(body, /onTap:/, '契约丢了：chip 缺 onTap');
     }
+  });
+
+  test('B2-26 区间入口只剩 chip + 两个日期输入：重复「填今天」空态已删，非法区间错误提示仍在', () => {
+    // 「今天 / 本周 / 近 7 天」chip 已能一键填今天，面板里不再有第二套「填今天」提示/动作。
+    assert.equal(PANEL.includes('填今天'), false, '契约丢了：面板不应再出现「填今天」提示文案');
+    assert.equal(PANEL.includes('EMPTY_EXPORT_ACTION'), false, '契约丢了：「填今天」动作常量必须删除');
+    assert.equal(PANEL.includes('showEmptyExport()'), false, '契约丢了：空态渲染判据必须删除');
+    assert.equal(PANEL.includes('fillToday()'), false, '契约丢了：「填今天」动作方法必须删除');
+    // chip 与两个日期输入都保留：它们是区间选择的唯一入口。
+    assert.ok(BUILD.includes('this.QuickRangeRow()'), '契约丢了：快捷区间 chip 必须保留');
+    assert.ok(BUILD.includes('this.FromInput()'), '契约丢了：开始日期输入必须保留');
+    assert.ok(BUILD.includes('this.ToInput()'), '契约丢了：结束日期输入必须保留');
+    // 非法区间（from > to / 空串 / 非法日期）的错误提示仍由导出按钮的 disabledReason 给出。
+    const BLOCK = bodyFrom(PANEL, 'private exportBlockedReason(');
+    assert.match(BLOCK, /parseDateRange\(this\.fromText, this\.toText\)/, '契约丢了：错误提示必须继续走 parseDateRange');
+    assert.match(BLOCK, /return range\.reason/, '契约丢了：非法区间原因必须原样回显');
+    assert.match(BUILD, /disabledReason: this\.exportBlockedReason\(\)/, '契约丢了：导出按钮必须继续显示非法区间原因');
+  });
+
+  test('B2-27 一个入口：备份节整段删除，主导出产出含媒体完整包，DataSection 只装配一个面板', () => {
+    // 注释允许写「已删备份节」的说明，只检查可执行源码。
+    const panelCode = stripComments(PANEL);
+    const dataCode = stripComments(DATA);
+    for (const token of ['V2Section', '日程备份', '导出备份', 'v2PlanReady', 'v2Busy', 'onV2Export', 'onV2Pick', 'onV2Apply', 'onV2Cancel']) {
+      assert.equal(panelCode.includes(token), false, `契约丢了：面板残留已删备份节点 ${token}`);
+      assert.equal(dataCode.includes(token), false, `契约丢了：DataSection 残留已删备份 props ${token}`);
+    }
+    assert.equal((DATA.match(/ExportImportPanel\(\{/g) ?? []).length, 1, 'DataSection 必须只装配一个面板');
+    assert.equal((BUILD.match(/label: '导出完整包'/g) ?? []).length, 1, '只能有一个主导出按钮');
+    assert.equal((BUILD.match(/this\.GroupTitle\('导出'\)/g) ?? []).length, 1, '只能有一个导出组');
+    assert.equal((BUILD.match(/this\.GroupTitle\('导入'\)/g) ?? []).length, 1, '只能有一个导入组');
+    assert.match(BUILD, /按日期区间导出完整包/, '主导出必须说明包含媒体');
   });
 });
 

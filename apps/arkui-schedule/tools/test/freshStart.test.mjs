@@ -293,3 +293,19 @@ test('F17 文档口径：旧 bundle 不支持；旧设备数据仅忽略、不�
   assert.match(run, /start fresh|start-fresh|空仓库|首次使用|首用/);
   assert.doesNotMatch(run, /mod-v2-import-v1[\s\S]{0,40}待交付/);
 });
+
+test('F18 启动不再建 devices/ 空目录：scheduleStore 降为只读兼容路径', () => {
+  const store = code('services/scheduleStore.ets');
+  assert.doesNotMatch(store, /mkdirSync\s*\(/, 'scheduleStore 不得创建任何目录');
+  assert.doesNotMatch(store, /ensureDirsSync\s*\(/, '旧 bootstrap 方法须整体删除');
+  const ready = store.slice(store.indexOf('async ensureReady('), store.indexOf('isReady(): boolean'));
+  assert.ok(ready.length > 0);
+  assert.doesNotMatch(ready, /mkdir|ensureDir/, 'ensureReady 不得创建 devices/ 目录');
+  assert.match(ready, /this\.filesDir = abilityContext\.filesDir/);
+  assert.match(ready, /this\.deviceId = normalizeDeviceId/);
+  const noop = store.slice(store.indexOf('ensureDirs(): void'), store.indexOf('// ------------------------------------------------------------------ 内部实现'));
+  assert.ok(noop.length > 0);
+  assert.doesNotMatch(noop, /mkdirSync|ensureDirSync/, 'ensureDirs 保持 no-op，兼容旧调用方但零写入');
+  const setter = store.slice(store.indexOf('setDeviceId(deviceId: string)'), store.indexOf('setAppendHook('));
+  assert.doesNotMatch(setter, /mkdir|ensureDir/, '切设备号只换路径字符串');
+});

@@ -323,6 +323,9 @@ describe('设置页接线（源码级）：无平台/认证选择器，平台仍
     );
     assert.match(PAGE, /describeAuthModeBlocker\(this\.authMode\)/, 'SSH 原因要展示');
     assert.match(PAGE, /this\.syncMessage = `❌ \$\{authBlocker\}`;/, '同步前拦 SSH 并说明原因');
-    assert.match(PAGE, /pushBlockedReason\(\)/, '推送按钮也要按认证方式禁用');
+    // mod-auto-sync 重定位：手动推送按钮已删，专用禁用判定随之删除；SSH 阻塞仍由
+    // 上面的 describeAuthModeBlocker + authBlocker 断言覆盖（认证守卫并未削弱）。
+    assert.equal(/pushBlockedReason\(\)/.test(PAGE), false, '手动推送按钮的专用禁用判定必须删除');
+    assert.match(PAGE, /authBlocker\(\)/, '认证阻塞仍由统一 authBlocker 判定');
   });
 });

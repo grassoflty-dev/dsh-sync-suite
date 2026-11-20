@@ -167,6 +167,17 @@ test('Index 双栏骨架：左日期列（DateBlock/ModeTabs/新建）+ 右列�
   assert.match(INDEX, /RecordDetailView\(\{[\s\S]{0,160}recordId: this\.paneMode === 'detail' \? this\.selectedId : ''/, '详情/空态共用 RecordDetailView');
 })
 
+test('首页只有一个创建入口：快捷记录行与其回车/失焦提交痕迹全部删除', () => {
+  assert.equal(/QuickRecordBar|QuickRecordRow|quickBusy|submitQuickRecord|快速记一条|回车保存/.test(INDEX_CODE), false,
+    '快捷记录行 / 回车 + 失焦提交必须从首页彻底删除')
+  for (const [builder, action] of [['CompactBody', 'PrimaryAction'], ['WideBody', 'SidebarAction']]) {
+    const start = INDEX_CODE.indexOf(`${builder}() {`)
+    assert.notEqual(start, -1)
+    const body = INDEX_CODE.slice(start, INDEX_CODE.indexOf('\n  }', start))
+    assert.ok(body.includes(`this.${action}()`), `${builder} 仍须渲染唯一创建入口 ${action}`)
+  }
+})
+
 test('宽屏视觉四条：页头不重复日期 / 空态居中 CTA / 列表最大 720vp / 左栏按钮 240vp', () => {
   assert.match(INDEX, /const LIST_MAX_WIDTH: number = 720;/, '列表最大宽必须被常量约束（720vp ≈ 45–50 字/行）')
   assert.match(INDEX, /const SIDEBAR_ACTION_WIDTH: number = 240;/, '左栏主操作固定 240vp')
@@ -233,10 +244,14 @@ test('提醒功能已删除：首页与设置页不再有提醒入口/文案/调
 });
 
 
-test('设置页同步组：主行可见「含其他设备」开关与「立即同步」', () => {
+// mod-auto-sync 重定位：原用例钉住「含其他设备」开关 + 「立即同步」手动按钮；
+// 手动按钮按新需求整体删除，这里改钉「开关仍在 + 手动同步按钮确实消失」，
+// 既防旧按钮复活，也防开关被一起误删（断言不比原来弱）。
+test('设置页同步组：主行可见「含其他设备」开关，无手动同步按钮', () => {
   assert.match(SETTINGS, /Toggle\(\{ type: ToggleType\.Switch, isOn: this\.includeOtherDevices \}\)/);
   assert.match(SETTINGS, /AppStorage\.setOrCreate<boolean>\(HOME_INCLUDE_OTHER_KEY, isOn\)/);
-  assert.match(SETTINGS, /'立即同步'/);
+  assert.equal(/'立即同步'/.test(SETTINGS), false, '手动同步按钮文案必须删除');
+  assert.equal(/label: '推送'/.test(SETTINGS), false, '手动推送按钮必须删除');
   assert.match(SETTINGS, /HOME_INCLUDE_OTHER_KEY/, '开关键必须来自 uiTokens，避免两处字号/键漂移');
 });
 

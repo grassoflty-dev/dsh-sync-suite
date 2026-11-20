@@ -1,5 +1,5 @@
 /**
- * 主页：日期条 + 今日/未完成 两段 + 列表（左勾选 / 中标题+时间 / 右手迹）
+ * 主页：日期条 + 当日全部日程/未完成 两段 + 列表（左勾选 / 中标题+时间 / 右手迹）
  * + 「新建」主操作 + 页头唯一动作「⚙ 设置」。
  *
  * ## 页头 AI 汇总入口已删除（用户反馈：点了没反应，但图标还占着位置）
@@ -12,7 +12,7 @@
  * 契约：BRIEF §3.5、`docs/CONTRACT.md` §3.4：
  * - 勾选完成 = `appendRecord` 追加一条同 id 新记录（ts=nowIso()），绝不改写历史行；
  * - 「AI 汇总」读当天 `ai_processed:false` 的记录，允许逐条取消勾选（结果面板里可「重选」）；
- * - 同步配置（仓库/token/含其他设备/立即同步/推送/测试连接）全部在设置页，首页不再提供入口；
+ * - 同步配置（仓库 / token / 含其他设备）在设置页；Git 操作由 app 自动完成，首页无手动同步按钮；
  * - 日历提醒功能已按用户要求删除（UI 侧调用点与文案已移除）。
  *
  * 布局：断点由 `PageLayout` 统一计算（`onAreaChange` + 方向），本页只做一处粗粒度分支
@@ -46,8 +46,6 @@ import { APP_VERSION } from '../common/version';
 import { applyAiResult, buildAiPayload } from '../model/aiPayload';
 import type { AiPayload, ScheduleRecord } from '../model/types';
 import { cloneRecord } from '../model/types';
-import { planQuickRecord } from '../model/quickRecord';
-import type { QuickRecordPlan } from '../model/quickRecord';
 import { SUMMARY_MAX_POINTS, truncateSummaryForDisplay } from '../model/dailySummary';
 import type { DailySummary, SummaryDisplay } from '../model/dailySummary';
 import { applyQuery, authorsOf, hasKeyword, isFilterActive, makeFilter } from '../model/query';
@@ -58,7 +56,7 @@ import type { DiagnosticsInput } from '../model/stateView';
 import { SAVED_MARKER_KEY, decodeSavedMarker, containsRecordVersion } from '../model/homeRefresh';
 import type { SavedMarker } from '../model/homeRefresh';
 import { redactSecrets } from '../model/syncError';
-import { describeError, newRecordId, scheduleStore } from '../services/scheduleStore';
+import { describeError, scheduleStore } from '../services/scheduleStore';
 import { timelineStore } from '../services/timelineStore';
 import { recordWriter } from '../services/recordWriter';
 import { syncProtocolStore } from '../services/syncProtocolStore';
@@ -79,7 +77,6 @@ import { RecordEditorView } from '../components/RecordEditorView';
 import { RecordRow } from '../components/RecordRow';
 import { ActionButton } from '../components/ActionButton';
 import { MonthCalendar } from '../components/MonthCalendar';
-import { QuickRecordBar } from '../components/QuickRecordBar';
 import { LoadingState } from '../components/state/LoadingState';
 import { EmptyState } from '../components/state/EmptyState';
 import { ErrorState } from '../components/state/ErrorState';
@@ -133,7 +130,7 @@ struct Index {
   @State selectedDate: string = localDateKey(new Date());
   /** 是否展开日期选择器。 */
   @State showDatePicker: boolean = false;
-  /** 两个 tab：today = 今日（默认，当天全部记录）；pending = 跨日未完成。 */
+  /** 两个 tab：today = 当日全部日程（默认，所选日期的全部记录）；pending = 跨日未完成。 */
   @State tab: HomeTab = 'today';
   /** 列表数据（每次操作后重读存储，保证追加语义一致）。 */
   @State records: ScheduleRecord[] = [];
@@ -143,8 +140,6 @@ struct Index {
   /** 下拉刷新中的转圈状态（`Refresh` 组件用 `$$` 双向绑定）。 */
   @State refreshing: boolean = false;
   @State ready: boolean = false;
-  /** 快捷记录保存中（防重复提交；appendRecord 同步完成，正常一闪而过）。 */
-  @State quickBusy: boolean = false;
 
   // 搜索 / 筛选状态（与 tab 正交：tab 决定数据源，这里只按关键词/作者过滤）
   /** 搜索框原始输入（匹配时才做 trim / 小写 / 空白折叠）。 */
@@ -260,15 +255,26 @@ struct Index {
     });
   }
 
-  /** 下拉刷新：立即 pull 一次，然后重读列表。 */
+  /**
+   * 下拉刷新：跑一次 v2 同步周期（fetch → 门禁 → 并集 → 落盘 → commit → push），
+   * 把本地待同步意图叠加在最新远端状态上推回去，随后重读列表与汇总。
+   *
+   * 复用 `syncProtocolStore.runConfiguredCycle()`（内部 `runCyclePure`），不另写同步实现；
+   * 三态行经 `syncStatusStore` 更新，失败原因原样保留，不弹第二个「同步失败」toast。
+   */
   private async onPullRefresh(): Promise<void> {
-    const outcome: SyncOutcome = await syncController.pullNow();
-    console.info(`[sync] refresh pull ok=${outcome.ok} elapsed=${outcome.elapsedMs}ms`);
+    try {
+      syncStatusStore.setSyncing();
+      const result = await syncProtocolStore.runConfiguredCycle();
+      this.syncStatus = result !== null
+        ? syncStatusStore.fromCycle(result, new Date())
+        : syncStatusStore.snapshot();
+    } catch (error) {
+      this.syncStatus = syncStatusStore.setFailed(
+        error instanceof Error ? error.message : String(error));
+    }
     this.reload();
     this.loadSummary();
-    if (!outcome.ok) {
-      promptAction.showToast({ message: `同步失败：${outcome.message}`, duration: 3000 });
-    }
   }
 
   /**
@@ -407,6 +413,8 @@ struct Index {
     if (!this.ready) {
       return;
     }
+    // 三态行只跟随唯一数据源：创建记录 / 下拉刷新 / 重试后都在这里取最新快照。
+    this.syncStatus = syncStatusStore.snapshot();
     try {
       // v2 是唯一读路径：无条件读 timelineStore，绝不碰 openIndexStore / reconcile / v1 分片。
       this.records = this.tab === 'pending'
@@ -427,9 +435,9 @@ struct Index {
     this.pruneSelection();
   }
 
-  /** 今日 tab 的计数文案：当天记录总数（已完成 + 未完成），不再区分完成状态、无「共 N 条」后缀。 */
+  /** 当日全部日程 tab 的计数文案：当天记录总数（已完成 + 未完成），不再区分完成状态、无「共 N 条」后缀。 */
   private todayCountText(): string {
-    return `今日 ${this.records.length} 条（v2 时间线，自动同步）`;
+    return `当日全部日程 ${this.records.length} 条（v2 时间线，自动同步）`;
   }
 
   /** 跨日未完成：按日期键、再按 ts 升序；返回新数组，不改动 store 的结果。 */
@@ -535,65 +543,7 @@ struct Index {
     });
   }
 
-  // ------------------------------------------------------------------ 首页快捷记录（列表区一行落盘，不进编辑页）
-
-  /**
-   * 快捷记录的作者：与 `RecordEditorView` 同一来源（`settings.author`，空则「我」），但走
-   * `settingsStore.cached()` 这个**同步**读取口。`bootstrap()` 里的 `scheduleStore.ensureReady()`
-   * 已经 `await settingsStore.load()` 填好缓存（下面还挡了一层 `isReady()`），所以点击路径
-   * 零异步、零等待，不需要在保存时再读一次偏好设置。
-   */
-  private defaultAuthorOrMe(): string {
-    const settings = settingsStore.cached();
-    if (settings !== null && settings.author.trim().length > 0) {
-      return settings.author.trim();
-    }
-    return '我';
-  }
-
-  /**
-   * 保存快捷记录：纯标题 + 当前所选日期，走与编辑页相同的 `appendRecord` 落盘链。
-   *
-   * 返回 `boolean` 给 `QuickRecordBar`：成功才清空输入框，失败保留原文供重试。
-   * 不写 `SAVED_MARKER_KEY`（那是「编辑页保存返回」的一次性标记，本路径不返回列表）；
-   * 派生索引在 `appendRecord` 内已同步更新，这里直接 `reload()` + `loadSummary()` 刷新首页。
-   */
-  private submitQuickRecord(rawTitle: string): boolean {
-    const plan: QuickRecordPlan = planQuickRecord(rawTitle, this.selectedDate, new Date());
-    if (!plan.ok) {
-      promptAction.showToast({ message: plan.reason, duration: toastMsFor(true) });
-      return false;
-    }
-    if (!this.ready) {
-      promptAction.showToast({ message: '存储尚未就绪，请稍后重试', duration: toastMsFor(true) });
-      return false;
-    }
-    const record: ScheduleRecord = {
-      id: newRecordId(),
-      ts: plan.ts,
-      title: plan.title,
-      body: '',
-      author: this.defaultAuthorOrMe(),
-      done: false,
-      ai_processed: false
-    };
-    this.quickBusy = true;
-    try {
-      // v2 唯一写入：失败停放 outbox 并抛 E_V2_WRITE_PARKED；空仓库由 write store 首用建骨架
-      recordWriter.writeRecord(record);
-    } catch (error) {
-      this.quickBusy = false;
-      promptAction.showToast({ message: `保存失败：${describeError(error)}`, duration: toastMsFor(true) });
-      return false;
-    }
-    this.quickBusy = false;
-    this.reload();
-    this.loadSummary();
-    promptAction.showToast({ message: '已记下' });
-    return true;
-  }
-
-  /** 进设置页：同步配置（仓库/token/含其他设备/立即同步/推送/测试连接）全部在那里。 */
+  /** 进设置页：仓库 / token / 含其他设备等配置在那里；Git 操作本页与设置页都不手动触发。 */
   private openSettings(): void {
     router.pushUrl({ url: 'pages/Settings' }).catch((error: Error) => {
       promptAction.showToast({ message: `打开设置页失败：${describeError(error)}` });
@@ -1217,7 +1167,7 @@ struct Index {
 
   /**
    * 仅两个 tab（mod-home-filters / mod-home-filters-2：原 5 个筛选控件 → 2 个）：
-   * - 今日（默认）：当日全部记录（已完成 + 未完成），排序不变；
+   * - 当日全部日程（默认）：所选日期的全部记录（已完成 + 未完成），排序不变；
    * - 未完成：跨日未完成（按日期再按 ts 升序）。
    * 完成状态只由行上的勾选指示，不再提供第二个完成状态开关。
    */
@@ -1228,7 +1178,7 @@ struct Index {
         // 两段各占一半（ActionButton 撑满外层 Column，宽度由 layoutWeight 均分）
         Column() {
           ActionButton({
-            label: '今日',
+            label: '当日全部日程',
             actionEnabled: true,
             disabledReason: '',
             busy: false,
@@ -1262,15 +1212,6 @@ struct Index {
       .width('100%')
     }
     .width('100%')
-  }
-
-  /** 列表区的快捷记录条（紧凑屏 / 宽屏共用同一个 Builder，都放在主操作之上）。 */
-  @Builder
-  QuickRecordRow() {
-    QuickRecordBar({
-      busy: this.quickBusy,
-      onSubmit: (title: string): boolean => this.submitQuickRecord(title)
-    })
   }
 
   /** 紧凑屏底部主操作：全宽（紧凑屏跳编辑页）。 */
@@ -1613,32 +1554,24 @@ struct Index {
   }
 
   /**
-   * v2 同步三态行（mod-v2-only）：已同步·时间 / N 条待同步·最近失败 / 错误·原因。
-   * 数据只来自 syncStatusStore.snapshot()（last result + outbox count + typed 门禁原因）。
+   * 唯一同步状态行（mod-auto-sync）：`已同步 · HH:MM` / `同步中…` / `失败：<typed 原因>`。
+   * 三态文案由 syncStatusStore 逐字给出，这里只负责显示与着色；失败态保留状态行上的
+   * 「点一下」重试（不是按钮），复用 outbox 的 `retry()` 复位失败意图。
    */
   @Builder
   SyncStatusRow() {
     Row({ space: SPACING.xs }) {
-      Text(this.syncStatus.label)
+      Text(this.syncStatus.text)
         .fontSize(FONT.caption)
         .lineHeight(LINE_HEIGHT.caption)
         .fontColor(this.syncStatus.state === 'synced'
           ? $r('app.color.success')
-          : (this.syncStatus.state === 'pending' ? $r('app.color.warning') : $r('app.color.text_secondary')))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-      Text('·')
-        .fontSize(FONT.caption)
-        .fontColor($r('app.color.text_secondary'))
-      Text(this.syncStatus.text.slice(this.syncStatus.label.length + 1))
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.text_secondary'))
+          : (this.syncStatus.state === 'failed' ? $r('app.color.danger') : $r('app.color.text_secondary')))
         .layoutWeight(1)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-      // P1-2：pending（含 failed 终态）时给用户一个真实可点的重放入口。
-      if (this.syncStatus.state === 'pending') {
+      // 失败态的重试：状态行上的一次点击，不新增按钮；契约 §9 P1-1 的用户重试入口。
+      if (this.syncStatus.state === 'failed') {
         Text('重试同步')
           .fontSize(FONT.caption)
           .fontColor($r('app.color.warning'))
@@ -1805,7 +1738,6 @@ struct Index {
       .width('100%')
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
-      this.QuickRecordRow()
       this.PrimaryAction()
     }
     .width('100%')
@@ -1840,7 +1772,6 @@ struct Index {
         .width('100%')
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
-        this.QuickRecordRow()
         this.SidebarAction()
       }
       .width(masterPaneWidth(this.contentWidth))

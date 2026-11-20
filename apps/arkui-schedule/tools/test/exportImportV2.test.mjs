@@ -839,3 +839,23 @@ describe('源码级：v2 落点只经原子写、不碰 devices、UI flag-gated'
       'v1 格式导入段不得残留 devices/** 写分支');
   });
 });
+
+describe('mod-ui-drop-backup：完整包仍是唯一导入导出入口的一部分', () => {
+  test('面板不渲染备份节；设置页主流程直接接线完整包导出 / 试算 / 确认', () => {
+    // 注释里允许说明「已删除备份节」，只检查可执行源码里的残留。
+    const code = (source) => source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    assert.doesNotMatch(code(PANEL), /V2Section|日程备份|导出备份|onV2Export|v2PlanReady/, '备份节必须整段删除');
+    assert.doesNotMatch(code(SETTINGS), /V2Section|onV2Export|handleV2Export|v2Busy/, '页面不得残留备份节回调');
+    assert.match(PANEL, /label: '导出完整包'/, '唯一的导出按钮必须产出含媒体完整包');
+    assert.match(SETTINGS, /exportV2Timeline\(/, '主导出走完整包服务');
+    assert.match(SETTINGS, /planV2ImportFromPicked\(/, '主试算识别完整包 manifest');
+    assert.match(SETTINGS, /applyV2Import\(/, '主确认导入落盘完整包（含 media.zip）');
+  });
+
+  test('能力不删：service 的 bundle / 账本 / 媒体预检代码路径保持原样', () => {
+    for (const token of ['exportV2Timeline(', 'planV2ImportFromPicked(', 'applyV2Import(',
+      'checkV2MediaIntegrity(', 'mergeV2LedgerText(', 'zipWriteBundle(', 'zip.zipRead(']) {
+      assert.ok(SERVICE.includes(token), `service 必须保留 ${token}`);
+    }
+  });
+});

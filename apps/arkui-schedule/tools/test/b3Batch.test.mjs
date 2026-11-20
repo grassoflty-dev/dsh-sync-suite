@@ -230,7 +230,7 @@ describe('B3 路径 1：保存返回首页走局部刷新的源码级契约', ()
     assert.match(
       RECONCILE,
       /if \(this\.tab === 'today' && saved\.date !== this\.selectedDate\) \{\s*return;\s*\}/,
-      '早退②：今日 tab 但日期不匹配'
+      '早退②：today tab（当日全部日程）但日期不匹配'
     );
     assert.match(
       RECONCILE,
@@ -340,5 +340,14 @@ describe('B3 D1-P2：DSH 地址失焦即归一的源码级契约', () => {
     assert.match(REMOTE_GROUP, /RemoteSection\(\{/, 'RemoteGroup 必须渲染 RemoteSection');
     assert.match(REMOTE_GROUP, /onBlurRemoteUrl: \(\): void => \{/, '必须装配 onBlurRemoteUrl 回调');
     assert.match(REMOTE_GROUP, /this\.normalizeRemoteOnBlur\(\);/, '回调必须转调 normalizeRemoteOnBlur');
+  });
+
+  // mod-home-drop-quick：快捷记录的独立写入路径已删除，SAVED_MARKER_KEY 只属于编辑页返回。
+  test('B3-17（mod-home-drop-quick）首页无快捷记录写入路径；唯一新建入口 onNewTap 仍在', () => {
+    for (const dead of ['QuickRecordBar', 'QuickRecordRow', 'quickBusy', 'submitQuickRecord', '快速记一条', '回车保存']) {
+      assert.equal(INDEX.includes(dead), false, `Index.ets 不应再出现快捷记录痕迹：${dead}`);
+    }
+    assert.equal(INDEX.includes("Button('新建')"), true, '唯一新建入口必须仍在');
+    assert.ok(INDEX.includes('private onNewTap(): void'), 'onNewTap 必须仍在');
   });
 });

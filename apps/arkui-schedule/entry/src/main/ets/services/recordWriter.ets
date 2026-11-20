@@ -105,6 +105,8 @@ export class RecordWriter {
    * 失败如实显示原因；没有 runner / 未启用时周期返回 null，只跳过不伪造「已同步」。
    */
   private triggerSync(): void {
+    // 三态行先切「同步中…」，周期返回后再由 fromCycle 落到「已同步 · HH:MM」或 typed 失败。
+    syncStatusStore.setSyncing();
     syncProtocolStore.runConfiguredCycle()
       .then((result: CycleResult | null): void => {
         if (result !== null) {

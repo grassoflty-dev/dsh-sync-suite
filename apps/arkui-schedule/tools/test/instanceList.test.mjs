@@ -279,4 +279,27 @@ describe('静态断言：页面、入口与存储接线', () => {
     assert.match(PAGE, /router\.pushUrl\(\{ url: 'pages\/Chats' \}\)/);
     assert.match(PAGE, /headerActionTwo: '云端对话'/);
   });
+
+  test('U-12 令牌出口边界：Want.uri 只能来自 stripRemoteToken() 后的地址', async () => {
+    // 带 token 的原始 settings 值绝不直接进 Want / startAbility / 日志。
+    assert.match(PAGE, /import \{[^}]*\bstripRemoteToken\b[^}]*\} from '\.\.\/model\/remoteUrl'/,
+      '必须 import 已有的去令牌纯函数');
+    const browser = PAGE.slice(PAGE.indexOf('private async openInBrowser()'), PAGE.indexOf('// ------------------------------------------------------------------ 渲染'));
+    assert.ok(browser.length > 0, 'openInBrowser 段必须存在');
+    assert.match(browser, /const raw: string = cached === null \? '' : cached\.remoteUrl\.trim\(\)/,
+      '原始 remoteUrl 先落到 raw 局部变量');
+    assert.match(browser, /const url: string = stripRemoteToken\(raw\)/,
+      'Want.uri 只能取 stripRemoteToken(raw) 的结果');
+    assert.match(browser, /uri: url \}/, 'Want 的 uri 只能是去令牌后的 url');
+    assert.equal(/uri: raw/.test(browser), false, '原始带令牌地址不得进 Want');
+    assert.equal(/uri: cached\.remoteUrl/.test(browser), false, 'settings 原值不得进 Want');
+    assert.doesNotMatch(browser, /(console|hilog|logger)\./, '兜底路径不得打日志（令牌不外泄）');
+    // 纯函数侧：?token= 与 ?k= 整对删掉，无令牌原串逐字不变（与出口静态断言互补）。
+    const REMOTE = readFileSync(new URL('../../entry/src/main/ets/model/remoteUrl.ts', import.meta.url), 'utf8');
+    assert.match(REMOTE, /export function stripRemoteToken\(url: string\): string/);
+    const U = await import('../.build/model/remoteUrl.js');
+    assert.equal(U.stripRemoteToken(`http://h:3080/?token=${SECRET}&a=1`), 'http://h:3080/?a=1');
+    assert.equal(U.stripRemoteToken(`http://h:3080/?k=${SECRET}`), 'http://h:3080/');
+    assert.equal(U.stripRemoteToken('http://h:3080/?a=1'), 'http://h:3080/?a=1');
+  });
 });

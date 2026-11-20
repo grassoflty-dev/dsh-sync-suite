@@ -159,14 +159,14 @@ describe('parseDateRange：真日历校验 + 首尾含', () => {
   });
 });
 
-// ---------------------------------------------------------------- 面板空态的「填今天」
+// ---------------------------------------------------------------- 默认导出起始日的本机日期
 
-describe('todayText：面板空态的「填今天」必须落在本机当天', () => {
+describe('todayText：默认导出起始日必须落在本机当天', () => {
   test('给定时刻：输出 YYYY-MM-DD，且与 parseDateRange 认的格式一致', () => {
     const local = new Date(2026, 10, 3, 9, 30, 0); // 2026-11-03 09:30 本地时区
     assert.equal(todayText(local), '2026-11-03');
     const range = parseDateRange(todayText(local), todayText(local));
-    assert.equal(range.ok, true, '「填今天」填出来的两端必须是合法区间（同日合法）');
+    assert.equal(range.ok, true, '默认起始日填出来的两端必须是合法区间（同日合法）');
     assert.equal(range.from, range.to);
   });
 
@@ -754,6 +754,18 @@ const SERVICE_SOURCE = readFileSync(
   join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'services', 'exportService.ets'),
   'utf8'
 ).replace(/\r\n/g, '\n');
+const PANEL_SOURCE = readFileSync(
+  join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'components', 'ExportImportPanel.ets'),
+  'utf8'
+).replace(/\r\n/g, '\n');
+const DATA_SOURCE = readFileSync(
+  join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'components', 'settings', 'DataSection.ets'),
+  'utf8'
+).replace(/\r\n/g, '\n');
+const PAGE_SOURCE = readFileSync(
+  join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'pages', 'Settings.ets'),
+  'utf8'
+).replace(/\r\n/g, '\n');
 
 describe('reconcileBeforeAppend：写盘前的幂等复核（M2）', () => {
   const existing = [rec({ id: 'same', ts: '2026-11-03T09:00:00+08:00' })];
@@ -1000,5 +1012,36 @@ describe('导出区间快捷 chip（D4）：QUICK_RANGE_* 定义 + quickRange / 
     quickRange('week', now);
     quickRange('last7', now);
     assert.equal(now.getTime(), before);
+  });
+});
+
+describe('mod-ui-drop-backup：唯一入口 + 备份节绝迹（源码级）', () => {
+  /** 注释允许说明「已删除备份节」，只检查可执行源码里的残留。 */
+  const code = (source) => source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+
+  test('UI 只剩一个导出/导入面板，日程备份节与四个 v2 回调全部删除', () => {
+    for (const [name, source] of [
+      ['panel', code(PANEL_SOURCE)], ['data', code(DATA_SOURCE)], ['page', code(PAGE_SOURCE)]
+    ]) {
+      for (const token of ['V2Section', '日程备份', '导出备份', 'v2PlanReady', 'v2PlanText', 'v2Busy',
+        'onV2Export', 'onV2Pick', 'onV2Apply', 'onV2Cancel', 'handleV2Export', 'handleV2Pick',
+        'handleV2Apply', 'handleV2Cancel']) {
+        assert.equal(source.includes(token), false, `${name} 仍残留已删备份节点 ${token}`);
+      }
+    }
+    assert.equal((DATA_SOURCE.match(/ExportImportPanel\(\{/g) ?? []).length, 1, '只能装配一个面板');
+    assert.equal((PAGE_SOURCE.match(/@Builder\s+DataGroup\(\)/g) ?? []).length, 1, '设置页只能有一个数据组 builder');
+    assert.equal((PAGE_SOURCE.match(/DataSection\(\{/g) ?? []).length, 1, '数据组只能装配一个 DataSection');
+    assert.equal((PANEL_SOURCE.match(/this\.GroupTitle\('导出'\)/g) ?? []).length, 1, '只能有一个导出组');
+    assert.equal((PANEL_SOURCE.match(/this\.GroupTitle\('导入'\)/g) ?? []).length, 1, '只能有一个导入组');
+  });
+
+  test('媒体能力仍可达：主流程接线完整包导出 / 试算 / 落盘，服务函数未删', () => {
+    assert.match(PAGE_SOURCE, /handleExport[\s\S]*?exportV2Timeline\(/, '主导出必须调完整包导出');
+    assert.match(PAGE_SOURCE, /handlePickImportFile[\s\S]*?planV2ImportFromPicked\(/, '主试算必须能识别完整包');
+    assert.match(PAGE_SOURCE, /confirmBundleImport[\s\S]*?applyV2Import\(/, '主确认导入必须落盘完整包');
+    for (const name of ['exportV2Timeline(', 'planV2ImportFromPicked(', 'applyV2Import(', 'zipWriteBundle(']) {
+      assert.ok(SERVICE_SOURCE.includes(name), `服务层函数 ${name} 必须保留（媒体能力不删）`);
+    }
   });
 });

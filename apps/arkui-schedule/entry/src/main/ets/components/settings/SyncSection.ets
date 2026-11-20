@@ -4,22 +4,23 @@
  * A2 拆分：内容从 `pages/Settings.ets` 的 `SyncHeader()` / `SyncAdvancedFields()` / `SyncGroup()`
  * 逐字搬出。页面持有全部 `@State`，这里只收**单向 props + 回调**（`@Prop` 值 + `onXxx`），
  * 本组件不写任何状态 —— 刷新语义因此与拆分前一致：父页面值变了才重绘，重绘时读到的
- * 就是最新值（`pushBlockedReason()` 之类的只读派生方法由父页面以函数 props 传入）。
+ * 就是最新值（`authBlocker()` 之类的只读派生方法由父页面以函数 props 传入）。
  *
  * 契约（与拆分前逐条对齐，改动前先读 `docs/UI-DESIGN.md`）：
  * - 主表单只有「仓库地址 / 访问令牌」两个控件，地址下固定一行说明
  *   「平台按地址自动识别 · 分支固定 main」；平台随地址推断、分支恒为 main，无选择控件；
  * - Git 用户名 / 设备标识 / 作者名在「高级 ▸」折叠区里，**默认收起**（三种情况由页面自动展开）；
  * - 设备标识重复是**常驻** warning（不是 toast），附件被暂停推送同样常驻一行；
- * - 「立即同步」（= pull）与「推送」是组内两个主按钮，查看状态 / 重试 / 测试连接
- *   在组头「更多」弹层里（弹层仍在页面，见 `pages/Settings.ets`）；已保存的认证方式是 SSH 时
+ * - Git 操作全部由 app 自动完成（创建记录后拉取 → 并集 → 推送，首页下拉刷新拉取 + 推送），
+ *   本组件**没有**「推送 / 立即同步」手动按钮；查看状态 / 测试连接在组头「更多」弹层里
+ *   （弹层仍在页面，见 `pages/Settings.ets`）；已保存的认证方式是 SSH 时
  *   本组件给一行只读警告 + 一个显式「改用 HTTPS 令牌」按钮（不是认证方式选择器；只切状态、
  *   不自动保存，落盘仍由用户点「保存设置」完成）；
  * - 隐藏的 Git 运行环境（1x1 全透明 Web）必须挂在本组内（`controller` 与页面是**同一个实例**，
  *   所以是普通成员而不是 `@Prop`：`@Prop` 会深拷贝，代理就注册到副本上了）。
  *
  * A 批（`docs/STATE-UI.md` §4/§5）：
- * - 两个主按钮与三处文字入口统一换成 `ActionButton`（禁用也**可点**，点了给具体中文原因）；
+ * - 组头「更多」与 SSH 切换入口统一用 `ActionButton`（禁用也**可点**，点了给具体中文原因）；
  * - 同步中 → `LoadingState`（>3s 出现「取消」，回调走 `runAction('cancel-wait')`，**不假装成功**）；
  * - 没填仓库地址 → `EmptyState`（「去填仓库地址」），只占状态行位置，**不藏表单**；
  * - `lastSyncError` 非空 → `ErrorState`（三段式 + 诊断四要素 + 重试）。
@@ -44,12 +45,6 @@ import {
   FieldNote as FieldNoteBit,
   HintLine as HintLineBit
 } from './SettingsBits';
-
-/** 同步内核（隐藏 Web）没就绪时的禁用原因（两个主按钮共用一句，避免各写一份）。 */
-const KERNEL_NOT_READY: string = '同步内核还没就绪，稍等或点重试';
-
-/** 上一次同步还没收尾时两个主按钮的原因。 */
-const PREVIOUS_SYNC_RUNNING: string = '上一次同步还没结束';
 
 /** 空态的标题 / 说明 / 动作（未配置仓库时占住「状态行」的位置）。 */
 const EMPTY_SYNC_TITLE: string = '还没有配置同步仓库';
@@ -113,8 +108,6 @@ export struct SyncSection {
   @Prop includeOtherDevices: boolean = false;
 
   // ---------------------------------------------------------------- 页面只读派生（函数 props）
-  /** 推送按钮的阻塞原因（空串 = 可以推）：闭包读页面最新状态，调用点与拆分前一致。 */
-  pushBlockedReason: () => string = () => '';
   /** 当前认证方式的阻塞原因（空串 = 可同步）。 */
   authBlocker: () => string = () => '';
   /** 用户名输入框占位文案（跟着平台变）。 */
@@ -178,7 +171,7 @@ export struct SyncSection {
   @Builder
   SyncHeader() {
     Row({ space: SPACING.sm }) {
-      Text('同步（Git）')
+      Text('同步仓库')
         .fontSize(FONT.body)
         .lineHeight(LINE_HEIGHT.body)
         .fontWeight(FontWeight.Medium)
@@ -283,55 +276,9 @@ export struct SyncSection {
     .alignItems(HorizontalAlign.Start)
   }
 
-  // ---------------------------------------------------------------- 三态判定 + 按钮可用性
+  // ---------------------------------------------------------------- 状态行派生
   //
-  // 这一组派生都放在组件里（只读 `@Prop` / 函数 props，不写状态、不发起动作）：
-  // 按钮的 `enabled` 与 `disabledReason` 必须来自**同一个**判定，否则会出现
-  // 「灰着但原因为空」或「原因在、按钮却能点」。
-
-  /** 「立即同步」可点吗（与拆分前的条件逐字等价：不忙 + 内核就绪 + 认证可用）。 */
-  private canPull(): boolean {
-    return !this.syncBusy && this.webReady && this.authBlocker().length === 0;
-  }
-
-  /**
-   * 「立即同步」不可用的具体原因（空串 = 可以点）。
-   *
-   * 优先级：内核未就绪 → 认证不可用（用页面给的原话）→ 上一次还没结束。
-   */
-  private pullBlockedReason(): string {
-    if (!this.webReady) {
-      return KERNEL_NOT_READY;
-    }
-    const blocker: string = this.authBlocker();
-    if (blocker.length > 0) {
-      return blocker;
-    }
-    if (this.syncBusy) {
-      return PREVIOUS_SYNC_RUNNING;
-    }
-    return '';
-  }
-
-  /** 「推送」可点吗（未就绪 / SSH / 无地址 / 分叉都由 `pushBlockedReason()` 给出原因；分支恒为 main）。 */
-  private canPush(): boolean {
-    return !this.syncBusy && this.webReady && this.pushBlockedReason().length === 0;
-  }
-
-  /** 「推送」不可用的具体原因（空串 = 可以点）：原因优先用页面的 `pushBlockedReason()`。 */
-  private pushBlockedText(): string {
-    if (!this.webReady) {
-      return KERNEL_NOT_READY;
-    }
-    const blocked: string = this.pushBlockedReason();
-    if (blocked.length > 0) {
-      return blocked;
-    }
-    if (this.syncBusy) {
-      return PREVIOUS_SYNC_RUNNING;
-    }
-    return '';
-  }
+  // Git 操作全部自动完成，这里只剩只读派生（不写状态、不发起手动同步）。
 
   /** 加载态的动作说明：页面在忙时把 `syncMessage` 写成「正在拉取…」，直接复用（空则不渲染该行）。 */
   private loadingDetail(): string {
@@ -376,7 +323,7 @@ export struct SyncSection {
     return formatDiagnostics(input);
   }
 
-  /** 同步组：仓库地址 / 访问令牌（主表单两个控件 + 一行固定说明）+「高级」折叠区 / 立即同步 + 1 行状态。 */
+  /** 同步组：仓库地址 / 访问令牌（主表单两个控件 + 一行固定说明）+「高级」折叠区 + 1 行状态。 */
   build() {
     Column({ space: SPACING.md }) {
       this.SyncHeader()
@@ -533,7 +480,7 @@ export struct SyncSection {
           .textAlign(TextAlign.Start)
       }
 
-      // ---- 加载态（`docs/STATE-UI.md` §5）：忙时在按钮区上方给进度 + 5s 后可取消 ----
+      // ---- 加载态（`docs/STATE-UI.md` §5）：忙时在状态行上方给进度 + 5s 后可取消 ----
       if (this.syncBusy) {
         LoadingState({
           title: loadingText('同步'),
@@ -546,37 +493,6 @@ export struct SyncSection {
           }
         })
       }
-
-      Row({ space: SPACING.md }) {
-        // 「立即同步」（= pull）：未就绪 / 认证不可用 / 忙碌时**仍可点**，点了给具体原因
-        ActionButton({
-          label: '立即同步',
-          actionEnabled: this.canPull(),
-          disabledReason: this.pullBlockedReason(),
-          busy: this.syncBusy,
-          variant: 'secondary',
-          block: false,
-          onTap: (): void => {
-            this.runAction('pull');
-          },
-          onBlockedTap: null
-        })
-        // 手动推送：未就绪 / SSH / 无地址时给出原因（分支恒为 main，无非法输入）
-        ActionButton({
-          label: '推送',
-          actionEnabled: this.canPush(),
-          disabledReason: this.pushBlockedText(),
-          busy: this.syncBusy,
-          variant: 'secondary',
-          block: false,
-          onTap: (): void => {
-            this.runAction('push');
-          },
-          onBlockedTap: null
-        })
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
 
       // 状态行位置：未配置仓库 → 空态（给出「去填仓库地址」这一步），否则显示最近一次结果
       // （状态行本身不再可点：它要保留 caption 字号与失败红字，重复入口统一走组头「更多」）
@@ -601,11 +517,6 @@ export struct SyncSection {
           .textAlign(TextAlign.Start)
       }
 
-      // 推送被禁用的具体原因（未就绪/SSH/无地址），避免「按钮灰着不知道为什么」
-      if (this.pushBlockedReason().length > 0) {
-        this.HintLine(`推送不可用：${this.pushBlockedReason()}`)
-      }
-
       // A2：同步状态（分支 / 领先 / 落后 / 冲突 / 本地改动）——桥就绪后自动刷新一次
       if (this.statusLine.length > 0) {
         Text(this.statusLine)
@@ -623,7 +534,7 @@ export struct SyncSection {
 
       // 从首页搬来的过滤开关：首页列表是否同时展示其他设备的只读记录
       Row({ space: SPACING.sm }) {
-        Text('首页含其他设备（只读）')
+        Text('首页含其他设备')
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.text_secondary'))
@@ -639,7 +550,7 @@ export struct SyncSection {
       .height(TOUCH_MIN + SPACING.sm)
       .alignItems(VerticalAlign.Center)
 
-      // v2-only：没有激活开关。写入始终走 timeline/；未迁移时由首页横幅 + typed 拒绝说明。
+      // 写入统一走日程目录；状态行只展示同步结果，不表达任何模式。
       // 错误态（`docs/STATE-UI.md` §4.3）：发生了什么 / 为什么 / 下一步 + 可复制诊断 + 重试
       if (this.lastSyncError.length > 0) {
         ErrorState({

@@ -1,9 +1,11 @@
 # 导出 / 导入契约（EXPORT-IMPORT）
 
-**export format is the git format**：设置页的「v2 时间线备份」把共享时间线导成一份
-**repo-shaped bundle**（与 `timeline/**` 同构，`docs/DATA-CONTRACT-v2.md`），导入把它
-**只追加**地搬回 `timeline/<date>/`。**没有 Markdown 格式**——`mod-export-json` 已把格式选择器、
+**export format is the git format**：设置页「数据」组唯一的 `导出完整包` 按钮把共享时间线导成一份
+**repo-shaped bundle**（与 `timeline/**` 同构，`docs/DATA-CONTRACT-v2.md`，含 `media.zip` 与三本账本），
+导入把它**只追加**地搬回 `timeline/<date>/`。**没有 Markdown 格式**——`mod-export-json` 已把格式选择器、
 Markdown 渲染代码、文案与测试整体删除；v1 兼容的 JSON 文本导入仍保留，但导出格式只有 bundle。
+**一个入口（mod-ui-drop-backup）**：原来的独立「日程备份」节已删除——媒体能力并入主导出 / 导入流程，
+界面上只有一套按钮；`exportService.ets` 的 bundle 函数原样保留，只是不再由第二个 section 调用。
 
 | 层 | 文件 | 职责 |
 | --- | --- | --- |
@@ -207,99 +209,83 @@ appendImportPlan(plan): {
 
 ## 4. UI 组件 `ExportImportPanel`
 
-只展示 + 回调，**不含** IO / 路由 / services 引用。可编辑项（区间、格式、两个开关）在组件本地
-`@State` 承接，初始值来自 `state`，导出时随 `ExportRequest` 回传给页面。
+只展示 + 回调，**不含** IO / 路由 / services 引用。可编辑项只有区间，在组件本地两个 `@State`
+承接，初始值来自 `state`，导出时随 `ExportRequest` 回传给页面。**组件是唯一入口**，没有第二个
+「备份」section；`mod-ui-drop-backup` 删除了 `V2Section` / 四个 `onV2*` 回调 / 四份 `v2*` 展示状态。
 
 | 属性 | 类型 | 说明 |
 | --- | --- | --- |
-| `state` | `@Prop ExportImportState` | 区间初值、格式、开关、dry-run 计数、导出路径、提示文案、`busy` |
-| `onExport` | `(request: ExportRequest) => void \| null` | 用户点「导出」；`ExportRequest` = `{fromText,toText}`（格式固定为 JSON / git bundle，Markdown 与两个开关已删除） |
-| `onPickFile` | `(() => void) \| null` | 用户点「选择 / 重新选择 JSON 文件」 |
-| `onConfirmImport` | `(() => void) \| null` | 用户点「确认导入」（组件内部已用 `canConfirmImport` 挡住不可点的情形） |
+| `state` | `@Prop ExportImportState` | 区间初值、dry-run 计数、导出路径、提示文案、`busy` |
+| `onExport` | `(request: ExportRequest) => void \| null` | 用户点唯一的「导出完整包」；`ExportRequest` = `{fromText,toText}`，页面据此调 `exportV2Timeline` 产出含媒体的 bundle |
+| `onPickFile` | `(() => void) \| null` | 用户点「选择 / 重新选择文件」；页面先按完整包 manifest 试算，不是完整包再回落兼容 JSON |
+| `onConfirmImport` | `(() => void) \| null` | 用户点「确认导入」（组件内部已用 `canConfirmImport` 挡住不可点的情形；页面按计划类型分派 `applyV2Import` / `appendImportPlan`） |
 | `onCancel` | `(() => void) \| null` | 用户点「取消」 |
 | `onCopyPath` | `(() => void) \| null` | 可选：传了才渲染「复制路径」按钮（默认靠长按复制） |
 
 按钮可用性、统计文案、提示文案全部由纯函数产出（与测试同源）：
 `canConfirmImport(state)`、`dryRunSummary(state)`、`importBlockedTip(state)`、`isDryRunEmpty(state)`。
 
-### 4.1 挂载片段（给 `pages/Settings.ets`）
+### 4.1 挂载片段（给 `pages/Settings.ets`，mod-ui-drop-backup 后）
 
 ```ts
-// 1) 页面顶部 import
-import { ExportImportPanel } from '../components/ExportImportPanel';
-import {
-  applyPlan, clearDryRun, defaultExportImportState, withExportPath, withImportFileName, withPanelMessage
-} from '../model/exportImport';
-import type { ExportImportState, ExportRequest, ImportPlan } from '../model/exportImport';
-import { appendImportPlan, exportSchedules, pickImportFile, planImportFromText } from '../services/exportService';
-import { common } from '@kit.AbilityKit';
-
-// 2) 页面状态（一个展示状态 + 一份待确认的计划）
+// 1) 一个展示状态 + 两份互斥的待确认计划（pendingV2Plan !== null → 完整包）
 @State exportImport: ExportImportState = defaultExportImportState();
-private pendingImport: ImportPlan | null = null;
+private pendingImport: ImportPlan | null = null;          // 兼容 JSON
+private pendingV2Plan: V2ImportPlan | null = null;        // 完整包（含媒体）
+private pendingV2BundleDir: string = '';
 
-// 3) 在「关于 / 数据」分组里挂一行（真实渲染位置由 Settings 决定）
+// 2) 主导出：区间来自面板，产物是 repo-shaped bundle（记录 + 媒体 + 账本）
+private async handleExport(request: ExportRequest): Promise<void> {
+  this.exportImport = withPanelMessage(this.exportImport, '', true);
+  const input: ExportRequestInput = { from: request.fromText, to: request.toText };
+  const zip: V2ZipBridge = new SettingsZipBridge(this.sync);   // ArkTS 显式适配器
+  const result: V2ExportResult = await exportV2Timeline(input, zip);
+  this.exportImport = result.ok
+    ? withExportPath(withPanelMessage(this.exportImport, `已导出完整包…`, false), result.dirPath)
+    : withPanelMessage(this.exportImport, `导出失败：…`, false);
+}
+
+// 3) 选文件：先按完整包试算，不是完整包再回落兼容 JSON（两者都只算不写）
+const bundled: V2ImportPlanResult = planV2ImportFromPicked(picked.text, picked.uri);
+if (bundled.ok && bundled.plan !== null) {
+  this.pendingV2Plan = bundled.plan;
+  this.pendingV2BundleDir = bundled.bundleDir;
+  // 用 withBundleDryRun 把天数/记录数写回同一份 ExportImportState，确认按钮仍走 canConfirmImport
+} else {
+  const planned = planImportFromText(picked.text, picked.fileName);
+  this.pendingImport = planned.plan;
+}
+
+// 4) 确认：同一按钮按计划类型分派；完整包先弹显式确认框再 applyV2Import
+if (this.pendingV2Plan !== null) {
+  this.confirmBundleImport();       // promptAction.showDialog → applyV2Import(plan, bundleDir, zip)
+} else {
+  const applied = appendImportPlan(this.pendingImport!);
+}
+
+// 5) 装配：数据组只有一个 ExportImportPanel（没有第二个 section）
 ExportImportPanel({
   state: this.exportImport,
-  onExport: (request: ExportRequest) => {
-    this.exportImport = withPanelMessage(this.exportImport, '', true);   // busy 置位
-    const result = exportSchedules(request);   // ExportRequest 字段名与 ExportRequestInput 一致，可直接透传
-    this.exportImport = result.ok
-      ? withExportPath(withPanelMessage(this.exportImport, `已导出 ${result.recordCount} 条`, false), result.path)
-      : withPanelMessage(this.exportImport, result.reason, false);       // busy 复位（成功/失败都复位）
-  },
-  onPickFile: () => {
-    this.exportImport = withPanelMessage(this.exportImport, '', true);   // busy 置位
-    const context = getContext(this) as common.UIAbilityContext;
-    pickImportFile(context).then((picked) => {
-      if (!picked.ok) {
-        this.exportImport = withPanelMessage(this.exportImport, picked.reason, false);   // busy 复位
-        return;
-      }
-      const planned = planImportFromText(picked.text, picked.fileName);
-      this.pendingImport = planned.plan;
-      if (planned.plan === null) {
-        this.exportImport = withPanelMessage(this.exportImport, planned.reason, false);  // busy 复位
-        return;
-      }
-      const tip = planned.plan.conflict > 0 ? '有冲突记录：本机版本不会被覆盖' : '';
-      this.exportImport = applyPlan(
-        withImportFileName(withPanelMessage(this.exportImport, tip, false), picked.fileName),
-        planned.plan
-      );
-    });
-  },
-  onConfirmImport: () => {
-    // busy 是 UI 层的第一道闸（第二道在 appendImportPlan 里：模块级 inFlight，在飞时直接拒绝、不排队）
-    if (this.pendingImport === null || this.exportImport.busy) {
-      return;
-    }
-    this.exportImport = withPanelMessage(this.exportImport, '', true);   // ← busy 置位
-    const applied = appendImportPlan(this.pendingImport);
-    this.pendingImport = null;
-    this.exportImport = withPanelMessage(
-      this.exportImport,
-      applied.ok
-        ? `已追加 ${applied.appended} 条、跳过 ${applied.skipped} 条、冲突 ${applied.conflict} 条` +
-          `（复核后：新增 ${applied.reconfirmed.added} / 跳过 ${applied.reconfirmed.skipped} / 冲突 ${applied.reconfirmed.conflict}）`
-        : applied.reason,
-      false                                                              // ← busy 复位（成功/失败都要复位）
-    );
-  },
-  onCancel: () => {
-    this.pendingImport = null;
-    this.exportImport = clearDryRun(withPanelMessage(this.exportImport, '', false));
-  }
+  onExport: (request: ExportRequest): void => { this.handleExport(request); },
+  onPickFile: (): void => { this.handlePickImportFile(); },
+  onConfirmImport: (): void => { this.handleConfirmImport(); },
+  onCancel: (): void => { this.handleCancelImport(); },
+  onCancelWait: (): void => { /* 只复位 busy，语义是「停止等待」不是「已取消」 */ },
+  onCopyPath: (): void => { this.handleCopyPath(); }
 })
 ```
 
-> 注意：`onConfirmImport` 必须用**用户看过的那份计划**（`pendingImport`）落盘，
-> 不要在确认时重新 `planImportFromText`——两次读取之间本机记录可能已被其它页面改动，
-> 重新规划会得到与用户看到的统计不一致的结果。
+> 注意：`onConfirmImport` 必须用**用户看过的那份计划**落盘（完整包用 `pendingV2Plan`，兼容 JSON 用
+> `pendingImport`），不要在确认时重新解析——两次读取之间本机记录可能已被其它页面改动。
 >
-> 但「不重解析」不等于「不复核」：`appendImportPlan` 内部会**重读本机**再复核一次（§3.3 第 2 道闸），
-> 所以过期计划不会造成同 `id` 重复追加。`busy` 置位/复位是 UI 的第一道闸（防止双击进第二次），
-> 模块级 `inFlight` 是第二道闸（即使 UI 没来得及置灰也不会写两遍）——**两道都要**。
+> 「不重解析」不等于「不复核」：`appendImportPlan` 与 `applyV2Import` 内部都会**重读本机**再复核
+> （§3.3 第 2 道闸 / §7.3 媒体预检），所以过期计划不会造成重复追加或覆盖媒体。
+> `busy` 置位/复位是 UI 第一道闸，模块级 `inFlight` 是第二道闸——**两道都要**。
+>
+> 已删除：`V2Section` 整段（空态 / 四个 ActionButton / 忙碌 / 计划行 / 备份提示）、
+> `v2PlanReady` / `v2PlanText` / `v2Message` / `v2Busy` 四份状态、`onV2Export` / `onV2Pick` /
+> `onV2Apply` / `onV2Cancel` 四个回调，以及 `handleV2*` 四个页面 handler（现只保留
+> `confirmBundleImport` 作为完整包确认分支）。服务层函数未删，仍由主流程调用。
 
 ---
 
@@ -369,12 +355,12 @@ v2-<stamp>/
 
 ### 7.1 Bundle/version rule（mod-drop-v1）
 
-> 只支持当前一种 bundle：undleVersion: 2，必须同时带 media.zip 与三本按日账本。
-> 任何 undleVersion !== 2（缺失 / 1 / >2 / 畸形）均以 typed E_BUNDLE_VERSION 拒绝，
+> 只支持当前一种 bundle：bundleVersion: 2，必须同时带 media.zip 与三本按日账本。
+> 任何 bundleVersion !== 2（缺失 / 1 / >2 / 畸形）均以 typed E_BUNDLE_VERSION 拒绝，
 > 零计划、零写入。旧 bundle（缺 media.zip / 缺账本）**不支持**，不再降级导入、不再返回 informational note。
 
 中文说明：
-- undleVersion: 2：三本账本与目标已有账本做**并集**，只追加目标里没有的新行；
+- bundleVersion: 2：三本账本与目标已有账本做**并集**，只追加目标里没有的新行；
   mergeV2LedgerText() 保证目标已有字节恒为新字节前缀，delete/restore 按 (id,ts)、
   conflicts 按 (id,ts,dedupeKey) 去重，坏行按整行去重；重复导入零新增（幂等）。
   records/summary/media 规则不变（media 只增、预检 sha256 不变）。
@@ -398,7 +384,7 @@ v2-<stamp>/
 **确定性**：zip 条目按 `(date,file)` 排序，桥 `zipWrite` 用固定 DOS 时间（1980-01-01）+
 STORE 压缩，因此同一份数据两次导出的 manifest / media.zip / 日文件逐字节相同（测试钉死）。
 
-**Bundle/version rule（续 §7.1）**：只支持 undleVersion:2 且带 media.zip 的当前 bundle；缺 mediaArchive 或 undleVersion!==2 一律 typed E_BUNDLE_VERSION，不再从按日散图 / 按日 zip 降级导入。
+**Bundle/version rule（续 §7.1）**：只支持 bundleVersion:2 且带 media.zip 的当前 bundle；缺 mediaArchive 或 bundleVersion!==2 一律 typed E_BUNDLE_VERSION，不再从按日散图 / 按日 zip 降级导入。
 
 **媒体校验规则（fail-closed，零写入）**：
 1. dry-run 读回 `media.zip` 字节，先比对整包 `mediaArchive.sha256` / `bytes`；不符 → `E_MEDIA_CORRUPT`；

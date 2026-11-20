@@ -475,13 +475,19 @@ describe('设置页接线（源码级）：分支固定 main、推送按钮、�
     assert.match(config[0], /branch: DEFAULT_BRANCH,/);
   });
 
-  test('手动推送按钮：按 pushBlockedReason 禁用，且给出禁用原因', () => {
-    // A 批（交互一致性）：按钮统一换成 `ActionButton`（禁用也可点、点了给原因），
-    // 不再是裸 `Button('推送')` + `.enabled(...)`。断言改为盯 ActionButton 的字段。
-    assert.match(PAGE, /label: '推送'/, '同步组要有手动推送按钮');
-    assert.match(PAGE, /this\.runAction\('push'\);/, '点推送要触发 push 动作');
-    assert.match(PAGE, /actionEnabled: this\.canPush\(\)/, '推送可用性必须走 canPush()（未就绪/SSH/无地址/分支非法都算阻塞）');
-    assert.match(PAGE, /推送不可用：\$\{this\.pushBlockedReason\(\)\}/, '禁用时要写原因');
+  // mod-auto-sync 重定位：原用例钉住「手动推送按钮 + 禁用原因」；用户改为由 app 自动
+  // 拉取/推送后，这个交互整体删除。新断言改钉「按钮确实消失 + 配置控件仍在」，
+  // 断言强度不降：既禁止旧控件复活，也防止把仓库地址/令牌一起误删。
+  test('手动推送 / 立即同步按钮已删除：设置页只留配置与自动同步状态行', () => {
+    for (const label of ['推送', '立即同步']) {
+      assert.equal(new RegExp(`label: '${label}'`).test(PAGE), false, `不该再有按钮 label: '${label}'`);
+      assert.equal(new RegExp(`Text\\('${label}'\\)`).test(PAGE), false, `不该再有可点文字 Text('${label}')`);
+    }
+    assert.equal(/this\.runAction\('push'\)/.test(PAGE), false, 'push 手动入口必须删除');
+    assert.equal(/this\.canPush\(\)/.test(PAGE), false, '推送可用性派生随按钮一起删除');
+    assert.equal(/推送不可用：/.test(PAGE), false, '按钮禁用原因行随按钮一起删除');
+    assert.match(PAGE, /Text\('仓库地址'\)/, '仓库地址配置控件必须保留');
+    assert.match(PAGE, /this\.FieldLabel\('访问令牌（仅存本机）'\)/, '令牌配置控件必须保留');
   });
 
   test('同步状态：statusLine 展示 + 同步成功后自动刷新（只读本地）', () => {

@@ -1,10 +1,10 @@
 // mod-home-filters / mod-home-filters-2：首页筛选控件收敛的源码级契约。
-// 最终控制集 = 恰好 2 个 tab（今日 / 未完成），没有完成状态开关：
-// - 今日 tab 显示当天**全部**记录（已完成 + 未完成，行上勾选只是状态指示，不参与过滤），
+// 最终控制集 = 恰好 2 个 tab（当日全部日程 / 未完成），没有完成状态开关：
+// - 当日全部日程 tab 显示当天**全部**记录（已完成 + 未完成，行上勾选只是状态指示，不参与过滤），
 //   计数 = 当天记录总数（tab 全量），排序规则不变；
 // - 未完成 tab 保留跨日未完成取数与「先日期、再 ts」排序，计数 = 未完成条数。
 //
-// ArkTS（.ets）依赖 @kit.ArkUI，Node 里跑不起来；沿用 quickRecordUi.test.mjs 的
+// ArkTS（.ets）依赖 @kit.ArkUI，Node 里跑不起来；沿用 b4DateUi.test.mjs / indexHeader.test.mjs 的
 // stripComments + bodyFrom 风格，只钉「能在源码里逐字复核」的事实：状态默认值、tab 取数、
 // 排序键、计数来源、空态文案，以及旧控件名 / 开关在 UI、测试与工具源码里彻底消失。
 // 被删控件名按字符拼出来，避免本测试文件自身被下面的「旧标签消失」扫描命中。
@@ -122,11 +122,21 @@ describe('mod-home-filters-2 · 控制集恰好两 tab，开关彻底删除', ()
     assert.equal(INDEX.includes('@State ' + SHOW_DONE), false, '开关 @State 必须删除');
   });
 
-  test('tab 文案恰好两项「今日 / 未完成」，两段各自的主次态绑定正确', () => {
+  test('tab 文案恰好两项「当日全部日程 / 未完成」，两段各自的主次态绑定正确', () => {
     const labels = [...MODE_TABS.matchAll(/label: '([^']+)'/g)].map((m) => m[1]);
-    assert.deepEqual(labels, ['今日', '未完成'], `tab 文案应为两项，实际 ${JSON.stringify(labels)}`);
+    assert.deepEqual(labels, ['当日全部日程', '未完成'], `tab 文案应为两项，实际 ${JSON.stringify(labels)}`);
     assert.ok(MODE_TABS.includes("this.tab === 'today' ? 'primary' : 'ghost'"));
     assert.ok(MODE_TABS.includes("this.tab === 'pending' ? 'primary' : 'ghost'"));
+  });
+
+  // mod-home-drop-quick：快捷记录行整条删除后的正向守卫（替代已删除的 quickRecordUi.test.mjs 跨文件断言）。
+  test('首页没有快捷记录行：组件 / builder / 在途状态 / 提示文案均已删除', () => {
+    const source = readFileSync(INDEX_PATH, 'utf8');
+    for (const dead of ['QuickRecordBar', 'QuickRecordRow', 'quickBusy', 'submitQuickRecord',
+      'defaultAuthorOrMe', '快速记一条', '回车保存', '已记下']) {
+      assert.equal(source.includes(dead), false, `Index.ets 不应再出现快捷记录痕迹：${dead}`);
+    }
+    assert.ok(INDEX.includes("Button('新建')"), '唯一创建入口「新建」必须仍在');
   });
 
   test('没有完成状态开关：无 Toggle / 文案 / @State / 回调', () => {
@@ -211,8 +221,8 @@ describe('mod-home-filters-2 · tab 取数、排序与今日全量', () => {
 describe('mod-home-filters-2 · 计数、空态与不变量', () => {
   test('今日计数 = 当天记录总数（tab 全量），不是未完成数、不是可见列表长度', () => {
     assert.ok(RELOAD.includes('this.statusText = this.todayCountText();'), 'reload 今日分支走统一计数文案');
-    assert.ok(TODAY_COUNT_TEXT.includes('`今日 ${this.records.length} 条（v2 时间线，自动同步）`'),
-      '今日 N 条 = 当天记录总数');
+    assert.ok(TODAY_COUNT_TEXT.includes('`当日全部日程 ${this.records.length} 条（v2 时间线，自动同步）`'),
+      '当日全部日程 N 条 = 当天记录总数');
     assert.equal(TODAY_COUNT_TEXT.includes('pendingCountOf'), false, '不再按未完成数计数');
     assert.equal(TODAY_COUNT_TEXT.includes('visibleRecords.length'), false, '计数不取被过滤的可见列表');
   });
@@ -254,7 +264,7 @@ describe('mod-home-filters-2 · 测试与工具里没有旧控件名', () => {
   test('retarget 过的测试文件不含旧状态名、旧控件名或已删开关名', () => {
     const files = [
       'b3Batch.test.mjs', 'timelineService.test.mjs', 'uiTokens.test.mjs',
-      'b4CalendarWiring.test.mjs', 'quickRecordUi.test.mjs', 'openIndex.test.mjs', 'query.test.mjs'
+      'b4CalendarWiring.test.mjs', 'openIndex.test.mjs', 'query.test.mjs'
     ];
     for (const name of files) {
       const text = readFileSync(new URL(name, HERE), 'utf8');

@@ -7,8 +7,10 @@
  * 本页保存时**不传**该字段（不传＝不改，见 `settingsStore.save` 的 patch 语义）。
  *
  * 「数据」组（导出 / 导入，`docs/EXPORT-IMPORT.md` §4）：只放 `ExportImportPanel` 一个组件，
- * 页面负责调 `services/exportService.ets` 并把结果写回 `exportImport`；导入**必须两步**
- * （选文件 → dry-run 统计 → 用户点确认才 `appendImportPlan` 落盘，且用同一份计划）。
+ * 是设置页唯一的导入 / 导出入口；页面负责调 `services/exportService.ets` 并把结果写回
+ * `exportImport`。主「导出完整包」产出 repo-shaped bundle（记录 + 媒体 + 账本）；导入**必须两步**
+ * （选文件 → dry-run 统计 → 用户点确认才落盘，且用同一份计划），同一流程自动识别
+ * 完整包 manifest 与兼容 JSON——独立的「日程备份」节已删除，能力保留、入口只有一个。
  *
  * AI 组内的「多源 fallback」（`docs/AI-FALLBACK.md` §8）排在「高级」折叠区之前：开关 +
  * 最多 3 个备用源 + 尝试次数 + 本次会话的诊断；三个持久化键由 `applySettings` / `saveSettings`
@@ -113,7 +115,6 @@ import type {
 import {
   AUTH_HTTPS,
   FIELD_AI_BASE_URL,
-  FIELD_AI_MODEL,
   FIELD_AUTHOR,
   FIELD_DEVICE_ID,
   FIELD_REPO_URL,
@@ -192,7 +193,6 @@ import {
   applyPlan,
   clearDryRun,
   defaultExportImportState,
-  todayText,
   v2PlanSummary,
   v2RefusalNext,
   withExportPath,
@@ -203,7 +203,6 @@ import type { ExportImportState, ExportRequest, ImportPlan, V2ImportPlan } from 
 import {
   appendImportPlan,
   applyV2Import,
-  exportSchedules,
   exportV2Timeline,
   exportsDirPath,
   pickImportFile,
@@ -211,7 +210,6 @@ import {
   planV2ImportFromPicked
 } from '../services/exportService';
 import type {
-  ExportFileResult,
   ExportRequestInput,
   ImportApplyResult,
   ImportFilePickResult,
@@ -312,8 +310,6 @@ struct Settings {
   @State issuesSummary: string = '';
   /** 第一条问题的「字段名 · 原因」：横幅第二行，用户不滚动也能看懂要改什么。 */
   @State firstIssueText: string = '';
-  /** AI 模型名的内联错误（其余字段各有自己的 *Error 状态）。 */
-  @State aiModelError: string = '';
   /** AI 接口地址的内联错误（自定义源专用）。 */
   @State aiBaseUrlError: string = '';
   /** Git 用户名（仅 HTTPS 认证用：GitHub 可留空，Gitee 必填登录名）。 */
@@ -359,8 +355,6 @@ struct Settings {
   @State contentWidth: number = 0;
   /** 当前打开的弹层（`PANEL_*`）。 */
   @State panel: string = PANEL_NONE;
-  /** 「高级」是否展开（选自定义源时自动展开）。 */
-  @State advancedOpen: boolean = false;
   /**
    * 同步组「高级 ▸」折叠区是否展开（**默认收起**）。
    *
@@ -390,16 +384,6 @@ struct Settings {
    * 回传；本页只负责把**结果**（导出路径 / dry-run 计数 / 提示文案 / busy）写回来。
    */
   @State exportImport: ExportImportState = defaultExportImportState();
-
-  // v2 时间线备份（ExportImportPanel.V2Section 的展示状态；纯展示回写，不含任何 IO）
-  /** dry-run 是否已产出可确认的 v2 导入计划。 */
-  @State v2PlanReady: boolean = false;
-  /** dry-run 计划行（days / records / media / bytes，由 v2PlanSummary 产出）。 */
-  @State v2PlanText: string = '';
-  /** 最近一次 v2 提示（导出摘要 / 导入结果 / 类型化拒绝原因，空串 = 无）。 */
-  @State v2Message: string = '';
-  /** v2 操作进行中（四个按钮共用的忙碌来源）。 */
-  @State v2Busy: boolean = false;
 
   /** 是否启用「多源 fallback」（默认关闭：关闭时内容只发给主源，见 `docs/AI-FALLBACK.md` §6）。 */
   @State aiFallbackEnabled: boolean = false;
@@ -494,11 +478,11 @@ struct Settings {
   private pendingImport: ImportPlan | null = null;
 
   /**
-   * 待确认的 v2 导入计划（**就是 dry-run 那一份**，确认时原样交给 applyV2Import，绝不重新解析）。
-   * `null` = 没有待确认的计划（没选备份 / 已取消 / 已确认落盘）。
+   * 待确认的完整包导入计划（**就是 dry-run 那一份**，确认时原样交给 applyV2Import，绝不重新解析）。
+   * `null` = 走兼容 JSON 导入；非 null = 走完整包导入（含媒体）。
    */
   private pendingV2Plan: V2ImportPlan | null = null;
-  /** 待确认计划所在的 bundle 目录（媒体兄弟文件从这里按 sha16 搬运，绝不写 devices/**）。 */
+  /** 待确认完整包所在的目录（媒体从 media.zip 预取后搬运，绝不写 devices/**）。 */
   private pendingV2BundleDir: string = '';
 
   aboutToAppear(): void {
@@ -571,7 +555,7 @@ struct Settings {
       // 让 Git 桥使用与应用一致的沙箱根目录（G 的服务支持静态预置，缺省时才回落 getContext()）
       GitSyncService.setFilesDir(context.filesDir);
       await scheduleStore.ensureReady(context);
-      // v2-only：v2 只读门槛与原子写口都在这里初始化；面板门禁和 v1 格式导入落盘都依赖它们。
+      // 日程目录的读门槛与原子写口都在这里初始化；面板与导入落盘都依赖它们。
       await timelineStore.ensureReady(context);
       await timelineWriteStore.ensureReady(context);
       if (this.disposed) {
@@ -704,7 +688,7 @@ struct Settings {
    * 平台以扩展设置为准（它能表达 gitlab/custom）；扩展设置为空时回落到 settingsStore 的
    * github/gitee，保证老数据不受影响。旧的 platformTouched 锁定标记在加载时退役：本页没有
    * 选平台的控件，平台一律按仓库地址重新推断，不再让历史锁定值永久生效。
-   * v2 起分支固定 `main`；旧 extras 里的 branch 会被忽略并在下次保存时写成 main（无迁移提示）。
+   * 分支固定 `main`；旧 extras 里的 branch 会被忽略并在下次保存时写成 main。
    */
   private applyExtras(extras: GitSyncExtras): void {
     // 旧的 platformTouched=true 会让 resolvePlatformSelection 永远返回历史平台，而本页没有清除入口，
@@ -758,7 +742,6 @@ struct Settings {
     this.authorError = '';
     this.repoUrlError = '';
     this.tokenError = '';
-    this.aiModelError = '';
     this.aiBaseUrlError = '';
     this.gitUsernameError = '';
     const applied: SettingsFieldIssue[] = [];
@@ -777,12 +760,9 @@ struct Settings {
       } else if (issue.field === FIELD_GIT_USERNAME) {
         this.gitUsernameError = issue.message;
         this.openSyncAdvanced(issue.message);
-      } else if (issue.field === FIELD_AI_MODEL) {
-        this.aiModelError = issue.message;
-        this.advancedOpen = true;
       } else if (issue.field === FIELD_AI_BASE_URL) {
+        // 接口地址行在自定义源下常驻显示（不再藏在「高级」折叠区），红字直接落在它下方
         this.aiBaseUrlError = issue.message;
-        this.advancedOpen = true;
       } else {
         // 未知字段：没有内联渲染位置，不计入横幅（守卫测试保证走不到这里）
         continue;
@@ -936,17 +916,6 @@ struct Settings {
     promptAction.showToast({ message: '已切换为 HTTPS + 令牌，保存后生效' });
   }
 
-  /** 推送按钮的阻塞原因（空串 = 可以推）：未就绪 / SSH / 无地址 / 无改动（分支恒为 main）。 */
-  private pushBlockedReason(): string {
-    if (isSshAuthMode(this.authMode)) {
-      return `${SSH_UNSUPPORTED_SHORT}：SSH 下无法推送`;
-    }
-    if (this.repoUrl.trim().length === 0) {
-      return '推送前需要先填写并保存仓库地址';
-    }
-    return '';
-  }
-
   // ------------------------------------------------------------------ 测试连接
 
   /** Git 探测用的 Basic 认证头（token 只在这里出现，不打印、不落盘）。 */
@@ -1076,12 +1045,13 @@ struct Settings {
   // ------------------------------------------------------------------ 导出 / 导入（A 线）
 
   /**
-   * 导出：把面板回传的区间 / 格式 / 两个开关交给 `exportSchedules`（只读派生，不改源文件）。
+   * 导出：主按钮导出**完整包**（repo-shaped bundle：记录 + 媒体 + 账本，只读派生，不改源文件）。
    *
-   * 说明：`ExportRequest` 的字段是 `fromText` / `toText`，服务层的 `ExportRequestInput` 是
-   * `from` / `to`——**不是同名透传**，这里显式映射（只改调用侧，不动服务层与组件）。
+   * 原来的 v1 JSON 导出与独立的「日程备份」节已合并到这一个入口：媒体由 `exportV2Timeline`
+   * 经 zip 桥统一写进 media.zip。`ExportRequest` 的字段是 `fromText` / `toText`，服务层的
+   * `ExportRequestInput` 是 `from` / `to`，这里显式映射（只改调用侧，不动服务层与组件）。
    */
-  private handleExport(request: ExportRequest): void {
+  private async handleExport(request: ExportRequest): Promise<void> {
     if (this.disposed) {
       return;
     }
@@ -1091,19 +1061,24 @@ struct Settings {
       to: request.toText
     };
     try {
-      const result: ExportFileResult = exportSchedules(input);
+      const zip: V2ZipBridge = new SettingsZipBridge(this.sync);
+      const result: V2ExportResult = await exportV2Timeline(input, zip);
       if (this.disposed) {
         return;
       }
       if (!result.ok) {
-        this.exportImport = withPanelMessage(this.exportImport, `导出失败：${result.reason}`, false);
+        this.exportImport = withPanelMessage(this.exportImport, this.v2RefusalLine(result.code, result.reason, '导出'), false);
         return;
       }
       this.exportImport = withExportPath(
-        withPanelMessage(this.exportImport, `已导出 ${result.recordCount} 条（${result.fileName}）`, false),
-        result.path
+        withPanelMessage(
+          this.exportImport,
+          `已导出完整包：${result.days} 天 / ${result.records} 条记录 / ${result.media} 个媒体文件（${result.dirPath}）`,
+          false
+        ),
+        result.dirPath
       );
-      promptAction.showToast({ message: '已导出', duration: toastMsFor(false) });
+      promptAction.showToast({ message: '已导出完整包', duration: toastMsFor(false) });
     } catch (error) {
       if (this.disposed) {
         return;
@@ -1122,7 +1097,7 @@ struct Settings {
     if (this.disposed) {
       return;
     }
-    // v2 唯一路径：空仓库照常 dry-run（落点由 writer 首用建骨架），无未迁移门槛。
+    // 空仓库照常 dry-run（落点由 writer 首用建骨架），无门槛。
     this.exportImport = withPanelMessage(this.exportImport, '', true);
     try {
       const context = getContext(this) as common.UIAbilityContext;
@@ -1135,6 +1110,25 @@ struct Settings {
         this.exportImport = withPanelMessage(this.exportImport, `选择文件失败：${picked.reason}`, false);
         return;
       }
+      // 一个入口识别两种文件：先按完整包 manifest 试算（带媒体），不是完整包再回落兼容 JSON。
+      // 两个 dry-run 都只算不写；确认时按 pendingV2Plan 是否为 null 走对应落盘路径。
+      const bundled: V2ImportPlanResult = planV2ImportFromPicked(picked.text, picked.uri);
+      if (this.disposed) {
+        return;
+      }
+      if (bundled.ok && bundled.plan !== null) {
+        this.pendingV2Plan = bundled.plan;
+        this.pendingV2BundleDir = bundled.bundleDir;
+        this.pendingImport = null;
+        this.exportImport = this.withBundleDryRun(
+          withImportFileName(this.exportImport, picked.fileName),
+          bundled.plan,
+          `已选完整包（先试算，未写入）：${bundled.summary}`
+        );
+        return;
+      }
+      this.pendingV2Plan = null;
+      this.pendingV2BundleDir = '';
       const planned: ImportPlanResult = planImportFromText(picked.text, picked.fileName);
       if (this.disposed) {
         return;
@@ -1161,17 +1155,46 @@ struct Settings {
   }
 
   /**
+   * 完整包的 dry-run 计数写回面板：复用同一个 `ExportImportState`，让「确认导入」按钮的
+   * 可用性判定（`canConfirmImport`）与兼容 JSON 完全共用一套规则（有新增、无非法、不忙）。
+   * 媒体的天数 / 字节数由 `bundled.summary` 单独展示，不伪造进记录计数字段。
+   */
+  private withBundleDryRun(
+    state: ExportImportState, plan: V2ImportPlan, message: string
+  ): ExportImportState {
+    const next: ExportImportState = {
+      fromText: state.fromText,
+      toText: state.toText,
+      importFileName: state.importFileName,
+      dryRunReady: plan.ok && plan.totals.records > 0,
+      dryRunAdded: plan.totals.records,
+      dryRunSkipped: 0,
+      dryRunConflict: 0,
+      dryRunInvalid: 0,
+      exportPath: state.exportPath,
+      message: message,
+      busy: false
+    };
+    return next;
+  }
+
+  /**
    * 导入第二步：用户点「确认导入」，把**同一份 dry-run 计划**追加落盘。
    *
+   * 有完整包计划时先走完整包确认（弹显式对话框、经 applyV2Import 搬运媒体），否则走兼容 JSON。
    * 落盘后清掉 dry-run（避免同一份文件被连点两次追加两遍），提示里保留追加 / 跳过 / 冲突计数。
    */
   private handleConfirmImport(): void {
+    if (this.pendingV2Plan !== null) {
+      this.confirmBundleImport();
+      return;
+    }
     const plan: ImportPlan | null = this.pendingImport;
     if (plan === null) {
       if (this.disposed) {
         return;
       }
-      this.exportImport = withPanelMessage(this.exportImport, '没有待确认的导入计划：请先选择 JSON 文件', false);
+      this.exportImport = withPanelMessage(this.exportImport, '没有待确认的导入计划：请先选择文件', false);
       return;
     }
     try {
@@ -1197,9 +1220,11 @@ struct Settings {
     }
   }
 
-  /** 取消导入：丢掉待确认计划 + 清空 dry-run 统计（本机记录没有任何改动）。 */
+  /** 取消导入：丢掉待确认计划（两种格式都清）+ 清空 dry-run 统计（本机记录没有任何改动）。 */
   private handleCancelImport(): void {
     this.pendingImport = null;
+    this.pendingV2Plan = null;
+    this.pendingV2BundleDir = '';
     if (this.disposed) {
       return;
     }
@@ -1233,19 +1258,10 @@ struct Settings {
     }
   }
 
-  // ------------------------------------------------------------------ v2 时间线导出 / 导入（additive）
+  // ------------------------------------------------------------------ 完整包导入（与兼容 JSON 共用同一入口）
   //
-  // 与 v1 完全分开：v1 的 exportImport / pendingImport 一行未改。这里只把
-  // services/exportService.ets 的 v2 API 接到面板已声明的四个回调上；面板保持纯展示，
-  // 类型化拒绝（E_SCHEMA_UNKNOWN / E_BUNDLE_CORRUPT / E_MEDIA_MISSING / E_V1_TARGET /
-  // E_TARGET_BUSY）统一由 v2RefusalNext 给出下一步，绝不静默吞点击。
-
-  /** v2 忙碌复位：页面已销毁时不再 setState（与 v1 的 disposed 纪律一致）。 */
-  private v2ResetBusy(): void {
-    if (!this.disposed) {
-      this.v2Busy = false;
-    }
-  }
+  // 独立「日程备份」节已删除：媒体能力通过主导入流程的完整包分支到达。
+  // 类型化拒绝统一由 v2RefusalNext 给出下一步，绝不静默吞点击。
 
   /** 类型化错误行：`动作失败：E_xxx 原因（下一步：…）`；无类型码时只给动作与原因。 */
   private v2RefusalLine(code: string, reason: string, action: string): string {
@@ -1254,119 +1270,23 @@ struct Settings {
   }
 
   /**
-   * v2 导出的区间：V2Section 没有自己的日期输入，按时间线现有全部日备份
-   * （listDates 升序，取首尾；空时间线取今天），避免让用户先去 v1 区间框填日期。
-   * exportV2Timeline 内部仍按这个区间过滤 listDates，不读任何 devices/**。
+   * 完整包的确认导入：**先弹显式确认框**，用户确认后才调 applyV2Import（dry-run 默认不写）。
+   * 成功 → 结果行（天 / 记录 / 媒体）+ 清计划；拒绝 → 类型化错误行，计划保留以便改好后重试。
    */
-  private v2ExportRequest(): ExportRequestInput {
-    const dates: string[] = timelineStore.listDates();
-    const from: string = dates.length > 0 ? dates[0] : todayText();
-    const to: string = dates.length > 0 ? dates[dates.length - 1] : from;
-    const request: ExportRequestInput = { from: from, to: to };
-    return request;
-  }
-
-  /** 导出 v2 备份：只读派生，成功后把 bundle 路径与计数写进 v2Message（不产出导入计划）。 */
-  private async handleV2Export(): Promise<void> {
-    if (this.disposed) {
-      return;
-    }
-    this.v2Busy = true;
-    this.v2Message = '';
-    // 导出是一次全新动作：清掉上一次的导入计划，避免旧计划被误确认。
-    this.pendingV2Plan = null;
-    this.pendingV2BundleDir = '';
-    this.v2PlanReady = false;
-    this.v2PlanText = '';
-    try {
-      const zip: V2ZipBridge = new SettingsZipBridge(this.sync);
-      const result: V2ExportResult = await exportV2Timeline(this.v2ExportRequest(), zip);
-      if (this.disposed) {
-        return;
-      }
-      if (!result.ok) {
-        this.v2Message = this.v2RefusalLine(result.code, result.reason, '导出 v2 备份');
-        return;
-      }
-      this.v2Message =
-        `已导出 v2 备份：${result.dirPath}（${result.days} 天 / ${result.records} 条记录 / ` +
-        `${result.media} 个媒体文件，共 ${result.bytes} 字节）`;
-    } catch (error) {
-      if (this.disposed) {
-        return;
-      }
-      this.v2Message = this.v2RefusalLine('', describeError(error), '导出 v2 备份');
-    } finally {
-      this.v2ResetBusy();
-    }
-  }
-
-  /**
-   * 选 v2 备份并 dry-run（一个字节都不写）：picker + planV2ImportFromPicked。
-   * 成功 → 把 v2PlanSummary 的逐日/记录/媒体计数写进 v2PlanText，供用户决定是否确认；
-   * 拒绝 → 清计划 + 写类型化原因（写入路径未激活时就是 E_TARGET_BUSY）。
-   */
-  private async handleV2Pick(): Promise<void> {
-    if (this.disposed) {
-      return;
-    }
-    this.v2Busy = true;
-    this.v2Message = '';
-    this.pendingV2Plan = null;
-    this.pendingV2BundleDir = '';
-    this.v2PlanReady = false;
-    this.v2PlanText = '';
-    try {
-      const context = getContext(this) as common.UIAbilityContext;
-      const picked: ImportFilePickResult = await pickImportFile(context);
-      if (this.disposed) {
-        return;
-      }
-      if (!picked.ok) {
-        this.v2Message = this.v2RefusalLine('', picked.reason, '选择 v2 备份');
-        return;
-      }
-      const planned: V2ImportPlanResult = planV2ImportFromPicked(picked.text, picked.uri);
-      if (this.disposed) {
-        return;
-      }
-      if (!planned.ok || planned.plan === null) {
-        this.v2Message = this.v2RefusalLine(planned.code, planned.reason, '试算 v2 备份');
-        return;
-      }
-      this.pendingV2Plan = planned.plan;
-      this.pendingV2BundleDir = planned.bundleDir;
-      this.v2PlanText = v2PlanSummary(planned.plan);
-      this.v2PlanReady = this.v2PlanText.length > 0;
-    } catch (error) {
-      if (this.disposed) {
-        return;
-      }
-      this.v2Message = this.v2RefusalLine('', describeError(error), '选择 v2 备份');
-    } finally {
-      this.v2ResetBusy();
-    }
-  }
-
-  /**
-   * 确认导入 v2：**先弹显式确认框**，用户点「确认导入」才调 applyV2Import（dry-run 默认不写）。
-   * 成功 → 结果行（days / records / media）+ 清计划；拒绝 → 类型化错误行，计划保留以便改好后重试。
-   */
-  private async handleV2Apply(): Promise<void> {
+  private async confirmBundleImport(): Promise<void> {
     const plan: V2ImportPlan | null = this.pendingV2Plan;
     if (this.disposed || plan === null || !plan.ok) {
       if (!this.disposed) {
-        this.v2Message = this.v2RefusalLine('', '没有待确认的 v2 导入计划，请先选择备份并试算', '导入 v2 备份');
+        this.exportImport = withPanelMessage(this.exportImport, '没有待确认的导入计划，请先选择文件并试算', false);
       }
       return;
     }
-    this.v2Busy = true;
-    this.v2Message = '';
+    this.exportImport = withPanelMessage(this.exportImport, '', true);
     try {
       const response = await promptAction.showDialog({
-        title: '确认导入 v2 备份',
+        title: '确认导入完整包',
         message:
-          `将按 dry-run 计划写入 timeline/：${this.v2PlanText}。` +
+          `将按试算计划写入日程：${v2PlanSummary(plan)}。` +
           '只追加记录与媒体，不覆盖更晚版本、不删除任何历史；点「取消」本机零改动。',
         buttons: [
           { text: '取消', color: $r('app.color.text_secondary') },
@@ -1377,7 +1297,7 @@ struct Settings {
         return;
       }
       if (response.index !== 1) {
-        this.v2Message = '已取消导入 v2 备份（本机记录没有任何改动）';
+        this.exportImport = withPanelMessage(this.exportImport, '已取消导入（本机记录没有任何改动）', false);
         return;
       }
       const zip: V2ZipBridge = new SettingsZipBridge(this.sync);
@@ -1386,35 +1306,24 @@ struct Settings {
         return;
       }
       if (!result.ok) {
-        this.v2Message = this.v2RefusalLine(result.code, result.reason, '导入 v2 备份');
+        this.exportImport =
+          withPanelMessage(this.exportImport, this.v2RefusalLine(result.code, result.reason, '导入'), false);
         return;
       }
       this.pendingV2Plan = null;
       this.pendingV2BundleDir = '';
-      this.v2PlanReady = false;
-      this.v2PlanText = '';
-      this.v2Message =
-        `已导入 v2 备份：${result.days} 天 / ${result.records} 条记录 / ` +
+      const done: string =
+        `已导入完整包：${result.days} 天 / ${result.records} 条记录 / ` +
         `${result.media} 个媒体文件（跳过 ${result.skipped} 条）`;
-      promptAction.showToast({ message: '已导入 v2 备份', duration: toastMsFor(false) });
+      this.exportImport = withPanelMessage(clearDryRun(this.exportImport), done, false);
+      promptAction.showToast({ message: '已导入完整包', duration: toastMsFor(false) });
     } catch (error) {
       if (this.disposed) {
         return;
       }
-      this.v2Message = this.v2RefusalLine('', describeError(error), '导入 v2 备份');
-    } finally {
-      this.v2ResetBusy();
+      this.exportImport =
+        withPanelMessage(this.exportImport, this.v2RefusalLine('', describeError(error), '导入'), false);
     }
-  }
-
-  /** 取消 v2 导入：丢掉待确认计划、清空计划行/提示/忙碌，本机零改动（与面板 EmptyState 同步）。 */
-  private handleV2Cancel(): void {
-    this.pendingV2Plan = null;
-    this.pendingV2BundleDir = '';
-    this.v2PlanReady = false;
-    this.v2PlanText = '';
-    this.v2Message = '';
-    this.v2Busy = false;
   }
 
   // ------------------------------------------------------------------ 多源 fallback（C 线）
@@ -1571,7 +1480,7 @@ struct Settings {
     return id.length > 0 ? id : defaultModelOf(this.aiProviderId);
   }
 
-  /** 切换服务：模型不在新源表里就回落到该源默认；选自定义源自动展开「高级」。 */
+  /** 切换服务：模型不在新源表里就回落到该源默认（模型只能通过下拉选，没有手输路径）。 */
   private pickProvider(id: string): void {
     const preset: AiProviderPreset = findProvider(id);
     this.aiProviderId = preset.id;
@@ -1584,9 +1493,6 @@ struct Settings {
     }
     if (!keep) {
       this.aiModel = defaultModelOf(preset.id);
-    }
-    if (preset.id === CUSTOM_PROVIDER_ID) {
-      this.advancedOpen = true;
     }
     this.panel = PANEL_NONE;
   }
@@ -2527,7 +2433,7 @@ struct Settings {
    * 分工：**页面持有全部 `@State` 与业务方法**（保存 / 同步 / 导出 / 远程控制 / 主题切换），
    * 组件只收单向 props + 回调（`@Prop` 值 + `onXxx`）。因此：
    * - 刷新语义不变（父页面值变了才重绘组件）；
-   * - 回调闭包始终读页面最新状态（`pushBlockedReason()` 之类的只读派生以函数 props 传入）；
+   * - 回调闭包始终读页面最新状态（`authBlocker()` 之类的只读派生以函数 props 传入）；
    * - 输入框仍是「受控」的：组件把输入回传给页面，页面写 `@State`，值再经 `@Prop` 铺回去。
    *
    * 紧凑屏与宽屏两套骨架都调用下面这五个 builder（组顺序与拆分前逐字一致）。
@@ -2562,7 +2468,6 @@ struct Settings {
       saveHint: this.saveHint,
       issuesSummary: this.issuesSummary,
       includeOtherDevices: this.includeOtherDevices,
-      pushBlockedReason: (): string => this.pushBlockedReason(),
       authBlocker: (): string => this.authBlocker(),
       gitUsernamePlaceholder: (): string => this.gitUsernamePlaceholder(),
       gitUsernameHint: (): string => this.gitUsernameHint(),
@@ -2624,12 +2529,9 @@ struct Settings {
   AiGroup() {
     AiSection({
       aiKey: this.aiKey,
-      aiModel: this.aiModel,
       aiProviderId: this.aiProviderId,
       aiBaseURL: this.aiBaseURL,
-      aiModelError: this.aiModelError,
       aiBaseUrlError: this.aiBaseUrlError,
-      advancedOpen: this.advancedOpen,
       aiTestText: this.aiTestText,
       aiTestHint: this.aiTestHint,
       aiTestBusy: this.aiTestBusy,
@@ -2653,13 +2555,6 @@ struct Settings {
       },
       onTestAi: (): void => {
         this.testAi();
-      },
-      onToggleAdvanced: (): void => {
-        this.advancedOpen = !this.advancedOpen;
-      },
-      onChangeAiModel: (value: string): void => {
-        this.aiModel = value;
-        this.aiModelError = '';
       },
       onChangeAiBaseURL: (value: string): void => {
         this.aiBaseURL = value;
@@ -2790,23 +2685,6 @@ struct Settings {
       },
       onCopyPath: (): void => {
         this.handleCopyPath();
-      },
-      // v2 时间线备份：空仓库也照常展示这一节（首用时由写入服务建骨架），四个回调全部接线。
-      v2PlanReady: this.v2PlanReady,
-      v2PlanText: this.v2PlanText,
-      v2Message: this.v2Message,
-      v2Busy: this.v2Busy,
-      onV2Export: (): void => {
-        this.handleV2Export();
-      },
-      onV2Pick: (): void => {
-        this.handleV2Pick();
-      },
-      onV2Apply: (): void => {
-        this.handleV2Apply();
-      },
-      onV2Cancel: (): void => {
-        this.handleV2Cancel();
       }
     })
   }
@@ -2976,24 +2854,11 @@ struct Settings {
     .alignItems(VerticalAlign.Center)
   }
 
-  /** 同步组「更多」：推送 / 查看状态 / 重试 / 测试连接（平台与分支已固定，无选择项）。 */
+  /** 同步组「更多」：查看状态 / 重试 / 测试连接（Git 操作自动完成，无手动推送入口）。 */
   @Builder
   SyncMoreSheet() {
     Column({ space: SPACING.md }) {
       this.SheetHeader('同步（Git）更多操作')
-
-      Text('推送')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .height(SHEET_ROW)
-        .textAlign(TextAlign.Start)
-        .enabled(!this.syncBusy)
-        .onClick(() => {
-          this.panel = PANEL_NONE;
-          this.runAction('push');
-        })
 
       Text('查看状态')
         .fontSize(FONT.body)
@@ -3065,7 +2930,7 @@ struct Settings {
               .lineHeight(LINE_HEIGHT.body)
               .fontColor($r('app.color.text_primary'))
               .width('100%')
-            Text('仓库地址可以先留空（只在本机记录日程）；留空时保存不报错，但「测试连接 / 立即同步 / 推送」前必须先填写。')
+            Text('仓库地址可以先留空（只在本机记录日程）；留空时保存不报错，但同步与测试连接前必须先填写。')
               .fontSize(FONT.caption)
               .lineHeight(LINE_HEIGHT.caption)
               .fontColor($r('app.color.text_secondary'))

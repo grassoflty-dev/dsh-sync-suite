@@ -38,6 +38,9 @@ const bridgeDir = joinPath(appRoot, 'entry', 'src', 'main', 'resources', 'rawfil
 const SERVICE = readFileSync(joinPath(appRoot, 'entry', 'src', 'main', 'ets', 'services', 'exportService.ets'), 'utf8')
   .replace(/\r\n/g, '\n');
 const BRIDGE = readFileSync(joinPath(bridgeDir, 'git-bridge.js'), 'utf8').replace(/\r\n/g, '\n');
+const PANEL = readFileSync(
+  joinPath(appRoot, 'entry', 'src', 'main', 'ets', 'components', 'ExportImportPanel.ets'), 'utf8'
+).replace(/\r\n/g, '\n');
 
 // ---------------------------------------------------------------- 内存 zip 桥
 
@@ -381,5 +384,13 @@ describe('mod-export-json：round-trip 与 typed 拒绝', () => {
       SERVICE.indexOf('v2WriteBinary(', start)
     );
     assert.ok(preflight > 0 && firstWrite > 0 && preflight < firstWrite, '预检早于一切写入');
+  });
+
+  test('唯一入口：media.zip 能力由主「导出完整包」按钮承载，不再有第二套备份按钮', () => {
+    assert.match(PANEL, /label: '导出完整包'/, '唯一导出按钮必须产出含 media.zip 的完整包');
+    assert.equal((PANEL.match(/label: '导出完整包'/g) ?? []).length, 1, '只能有一个导出按钮');
+    const code = PANEL.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    assert.doesNotMatch(code, /V2Section|日程备份|导出备份|onV2Export/, '备份节与它的四个回调必须整段删除');
+    assert.match(PANEL, /按日期区间导出完整包/, '导出区文案必须说明包含媒体');
   });
 });

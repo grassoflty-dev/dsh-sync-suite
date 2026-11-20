@@ -16,6 +16,11 @@
  * 这层过滤只影响「读」，不改变 `appendRecord` 的追加语义（历史行仍然只增不改）。
  *
  * 契约：`docs/CONTRACT.md` §3.3、BRIEF §3.4。
+ *
+ * **现行状态（mod-drop-v1 / fresh start）**：app 全程走 `timeline/**`；本类只保留
+ * 启动握手（`ensureReady` 取 filesDir / deviceId）与**只读**兼容查询（findByIdAny 等）。
+ * `devices/**` 永不创建、不写、不删：`ensureDirs()` 已降为 no-op，`appendRecord()` 是
+ * 无调用方的 v1 遗留路径（目录不存在时自然失败），现网保存一律经 `recordWriter`。
  */
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
@@ -79,7 +84,8 @@ export class ScheduleStore {
     const settings = await settingsStore.load(abilityContext);
     this.filesDir = abilityContext.filesDir;
     this.deviceId = normalizeDeviceId(settings.deviceId);
-    this.ensureDirsSync();
+    // 不再创建 devices/<id>/{schedules,attachments}：旧版目录仅在只读回退里出现，
+    // 现行 app 全程走 timeline 时间线目录，启动时建空目录只会制造垃圾（mod-drop-v1 fresh start）。
     this.ready = true;
   }
 
@@ -95,12 +101,9 @@ export class ScheduleStore {
     return this.filesDir;
   }
 
-  /** 切换设备标识（设置页修改后调用），并立即创建新目录。 */
+  /** 切换设备标识（设置页修改后调用）；只换路径字符串，不创建任何目录。 */
   setDeviceId(deviceId: string): void {
     this.deviceId = normalizeDeviceId(deviceId);
-    if (this.ready) {
-      this.ensureDirsSync();
-    }
   }
 
   /** 注册 / 清除派生索引维护钩子（`null` = 清除；主要用于测试与解耦）。 */
@@ -314,7 +317,6 @@ export class ScheduleStore {
       throw new Error(`日程记录不合法：${describeError(error)}`);
     }
     const date = resolveRecordDate(record.ts);
-    this.ensureDirsSync();
     const path = this.dayFilePath(date);
     try {
       this.appendLineSync(path, encoded);
@@ -325,9 +327,9 @@ export class ScheduleStore {
     this.notifyAppend(record);
   }
 
-  /** 确认目录存在（幂等）。 */
+  /** 兼容保留：`devices/**` 不再创建，本方法为 no-op（旧调用方无需改动）。 */
   ensureDirs(): void {
-    this.ensureDirsSync();
+    // 故意空：fresh start 下没有 devices/ 目录，也不该有。
   }
 
   // ------------------------------------------------------------------ 内部实现
@@ -353,25 +355,6 @@ export class ScheduleStore {
       this.appendHook(record);
     } catch {
       // 故意静默：钩子内部已负责记录 [idx] 日志；这里只保证不外抛
-    }
-  }
-
-  private ensureDirsSync(): void {
-    if (this.filesDir.length === 0) {
-      throw new Error('文件根目录尚未就绪：请先调用 scheduleStore.ensureReady(context)');
-    }
-    this.ensureDirSync(this.schedulesDir());
-    this.ensureDirSync(this.attachmentsDir());
-  }
-
-  private ensureDirSync(dir: string): void {
-    if (this.fileExists(dir)) {
-      return;
-    }
-    try {
-      fs.mkdirSync(dir, true);
-    } catch (error) {
-      throw new Error(`创建目录失败（${dir}）：${describeError(error)}`);
     }
   }
 

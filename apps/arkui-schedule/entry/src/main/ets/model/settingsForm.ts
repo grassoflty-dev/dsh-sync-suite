@@ -244,11 +244,9 @@ export function checkSettingsFields(input: SettingsFormInput, repoCheck: RepoUrl
     issues.push({ field: FIELD_AUTHOR, message: authorProblem });
   }
 
-  // AI：只有自定义源才需要用户填模型名与接口地址（预设源由预设表提供）
+  // AI：模型只能从预设「模型」下拉选择（含自定义源的 custom-model），没有手输路径，
+  // 因此不再校验 aiModel；只有自定义源仍需用户填接口地址（预设源由预设表提供）。
   if (input.customProvider) {
-    if (typeof input.aiModel !== 'string' || input.aiModel.trim().length === 0) {
-      issues.push({ field: FIELD_AI_MODEL, message: '自定义源必须填写模型名（点「高级」手输）' });
-    }
     const rawBase: string = typeof input.aiBaseURL === 'string' ? input.aiBaseURL.trim() : '';
     if (rawBase.length === 0) {
       issues.push({ field: FIELD_AI_BASE_URL, message: '自定义源必须填写接口地址（如 https://api.example.com/v1）' });

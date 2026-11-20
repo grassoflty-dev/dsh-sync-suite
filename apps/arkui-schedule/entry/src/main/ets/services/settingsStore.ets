@@ -564,8 +564,9 @@ export class SettingsStore {
     const current = await this.load();
     const nextProviderId: string =
       patch.aiProviderId === undefined ? current.aiProviderId : findProvider(patch.aiProviderId).id;
-    // 模型名允许手输（预设列表只是建议），因此只有「换源且没手填模型」时才重置成新源默认，
-    // 否则旧源的模型名会跟着带过去（例：deepseek-chat 落到 codex 上必 404）。
+    // 模型名不再有手输入口（只能从预设下拉选），但 resolveAiModel 对非空值原样保留：
+    // 存量 preferences 里手输过的旧模型名照常生效，不迁移、不清空（mod-ai-drop-advanced）。
+    // 只有「换源且请求模型为空」时才回落到新源默认。
     const requestedModel: string = patch.aiModel === undefined ? '' : patch.aiModel;
     const nextModel: string =
       requestedModel.length > 0

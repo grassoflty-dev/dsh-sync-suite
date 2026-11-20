@@ -1126,6 +1126,8 @@ PASS  完成反馈  编辑页显示「手迹 2 页」
 ### 15.1 总表
 
 > **mod-drop-v1 订正**：本节的迁移项（#2 未迁移 banner / 写拒绝、#3 应用内迁移、#6 迁移中途打断）保留为**历史设备证据**，但产品语义已被 `mod-drop-v1` **superseded**：横幅、`E_NOT_MIGRATED`、迁移 UI 与三个迁移代码文件已删除，空仓库改为正常起点（空列表 + 首用骨架）。这些历史 PASS / FAIL / BLOCKED 结论**不再代表现行行为**；现行空仓库流程端侧仍 `unverified`。
+>
+> **mod-home-drop-quick 订正（2026-11-20）**：上表 #2 的「点『保存』后 Toast 同码」以及 §15.3 的输入框 / `quick-record-refused-20261120.jpeg` 都属于已删除的**首页快捷记录行**，被 `mod-home-drop-quick` **superseded**（历史 PASS 原样保留，**不是 FAILED**）。现行首页只有一个「新建日程」完整编辑器入口、首段 tab 为「当日全部日程」；现行行为端侧 `unverified`。
 
 | # | 项 | 结论 | 一行证据 |
 | --- | --- | --- | --- |
@@ -1343,3 +1345,92 @@ Text click=false checked=false bounds=[57,1132][1222,1179] text=[电脑与平板
   `docs/MODULES.md`、`docs/REMOTE-INSTANCES.md`、`docs/ROADMAP.md`；新增 `instanceSeed.ts`、
   `pages/Instances.ets`、`instanceList.test.mjs`）+ 本文件修改；截图与日志在 gitignore 的 `.tmp/`。
 - 复现入口：构建/签名/安装/启动命令见 §15.2；dumpLayout 解析辅助 `.tmp/layout-nodes.mjs`（非仓库文件）。
+
+### 15.10 无线复验 pass（2026-11-20 夜，`ui-device-pass-2`，七项全 PASS）
+
+> 本节是**新增**的独立 pass，只追加、不改写 §15.1–§15.9 的历史结论。设备从 USB 改为**无线**
+> `hdc tconn 192.168.1.7:33023` → `Target is connected, repeat operation`；`hdc list targets` →
+> `192.168.1.7:33023`。所有命令均带 `-t 192.168.1.7:33023`。
+> 证据目录：`.tmp/device-shots/ui-batch-20261120/`（`home.png`、`layout-home.json`、`settings.png`、
+> `layout-settings.json`、`export-today.png`、`layout-export-today.json`、`sync-sheet2.png`、
+> `layout-sync-sheet2.json`、`layout-sync-advanced.json`、`layout-ai-advanced.json`、`enter-result.png`、
+> `layout-toast.json`、`layout-after-blur2.json`、`layout-fresh-empty.json`、`fresh-ls.txt`、
+> `records.json`、`schema.json`、`layout-fresh-restart.json` 等）。
+>
+> **安装事实**：`apps/arkui-schedule/dist-harmony/arkui-schedule-harmony-debug-signed.hap`
+> 实测 **4,783,525 B / SHA256=7F97647C9E1B2AAED546505470A9F0B971D04D4059A46E639E6069C36AB66A55**
+> （与派单里写的 4,783,480 B / `0B2163D5…` 不同：是同一路径、21:40 重新签名的产物；未重建）。
+> `install -r` → `install bundle successfully`（EXIT=0）；`aa start -a EntryAbility -b com.itwill.schedule`
+> → `start ability successfully`（EXIT=0）；`ps -ef` 见 `com.itwill.schedule` + `:render` 存活。
+>
+> **过程干扰（已排除）**：设备上的向日葵远控 `com.oray.sunloginclient` 反复弹出「PC 桌面 + 软键盘」
+> 浮层抢走点击；本 pass 中 `aa force-stop com.oray.sunloginclient` 后 UI 注入才落到本 App
+> （不影响 hdc 链路）。结束后如仍需在平板上看远控，需人工重开向日葵。
+
+> **mod-home-drop-quick 订正（2026-11-20）**：下表 item 1 的 `TextInput hint=[快速记一条：标题，回车保存]`、item 5 的「快捷记录（回车 + 失焦兜底）**PASS**」以及 item 7 的 `Text [今日 1 条（v2 时间线，自动同步）]` 都是 **21:40 那份 HAP 的真实历史设备证据，原样保留**；整条快捷记录行已被 `mod-home-drop-quick` **superseded（不是 FAILED）**。现行首页只有 `新建日程` 全编辑器一个创建入口，首段 tab 为「当日全部日程」、计数前缀同步改名；现行文案与单一入口的端侧表现 `unverified`（本模块不做构建 / 装机）。
+
+| # | 项 | 结论 | 逐字证据 / 证据文件 |
+| --- | --- | --- | --- |
+| 1 | 启动 / 首页 | **PASS** | `layout-home.json`：`Text [今天]`、`Button [今日]`、`Button [未完成]`；**无 保存 按钮**（唯一主按钮 `Button [新建]`）；`TextInput hint=[快速记一条：标题，回车保存]`。截图 `home.png`（1600×2560） |
+| 2 | 设置页文案 | **PASS** | `layout-settings.json` 全文 `v2`=0 / `时间线`=0 / `时间线开关`=0 / `只读`=0；`Text [仓库地址]`、`Text [访问令牌（仅存本机）]` 存在；同步状态行 `Text [还没有配置同步仓库]` + `Text [填好仓库地址和 token 后，这里会显示同步状态]` 存在。截图 `settings.png` |
+| 3 | 导出提示 | **PASS** | 点「今天」chip 后 `layout-export-today.json`：`Button [今天/本周/近 7 天]` + `TextInput text=[2026-11-20]` ×2（开始/结束日期）；`填今天` 全文 **0** 处。截图 `export-today.png` |
+| 4 | 无手动同步按钮 | **PASS** | 设置页「同步仓库」组头「更多」弹层 `layout-sync-sheet2.json` 仅 `Text [同步（Git）更多操作]`、`查看状态`、`测试连接`、`关闭`；`推送`=0 / `立即同步`=0。展开「同步 高级」`layout-sync-advanced.json`（Git 用户名说明 / 设备标识 / 作者名）同样 0 处。截图 `sync-sheet2.png` |
+| 5 | 快捷记录（回车 + 失焦兜底） | **PASS** | 回车：`inputText` + `keyEvent 2054` 后 `layout-toast.json` 同时含 `Text [已记下]`（Toast）、`Text [ENTER-UI-20261120-A]`、输入框已清空。失焦：输入 `BLUR-UI-20261120-B` 后点记录行走 `onBlur`，`layout-after-blur2.json` 中该标题**恰好 1 处**（无重复），输入框已清空。截图 `enter-result.png`、`blur3.png` |
+| 6 | 模型手输提示 | **PASS** | 配置模型 `DeepSeek Chat` 时，`layout-ai-advanced.json` 及设置页全文 `模型名`=0 / `手输`=0 / `可手输`=0 / `自定义模型`=0；AI「高级」只剩 `Text [预设源使用内置接口地址；要自定义地址请把「服务」切到「自定义」。]`。实现已无手输字段（`AiSection.ets:12-14, 245-246`），故「清空后出现」不适用。截图 `ai-advanced.png` |
+| 7 | 空仓库清单 | **PASS** | ① 备份：`baseline-files.txt` / `baseline-devices-md5.txt`（11 个 devices 文件 md5）；② 只删 `git-repo/timeline`（`rm -rf` 后 `ls git-repo` 仅 `devices/`），relaunch → `layout-fresh-empty.json`：`Text [今天还没有日程]`，无 banner / 无 `E_NOT_MIGRATED`；③ 回车写一条 → `fresh-ls.txt` 见 `timeline/schema.json`(20 B) 与 `timeline/2026-11-20/records.json`(270 B)；`records.json` 首行 = `{`（完整内容见证据文件，含 `FRESH-UI-20261120-D`、`"ts":"2026-11-20T22:19:19+08:00"`）；`devices/**` md5 与备份**逐行相同**；④ `aa force-stop` + `aa start` 后 `layout-fresh-restart.json`：`Text [FRESH-UI-20261120-D]` 仍在、`Text [今日 1 条（v2 时间线，自动同步）]`；同步状态行诚实显示 `Text [失败：未知错误]` + `Text [重试同步]`（无仓库配置，未伪造「已同步」）。截图 `fresh-empty.png`、`fresh-record.png`、`fresh-restart.png` |
+
+**本 pass 无源码改动**：七项均一次通过，未触发「失败即本批修」分支，因此未重跑 `tsc` / 全量 `node --test` / `validate-app`，也未重建、重签、重装；`tsc` / 测试 / validate / overlay 的基线仍是 §15.9 与 `项目理解.md` §3 记录的值（`overlay applied=false`）。**本 pass 自身未改任何源码**，只有本文件 §15.10 的新增与 gitignore 内 `.tmp/` 证据。注意 pass 期间**并行 Executor 仍在改工作树**（结束时 `git status` 相较开始时多出 `QuickRecordBar.ets` 删除、`model/settingsForm.ts`、`services/settingsStore.ts`、`b3Batch.test.mjs`、`exportImportV2.test.mjs`、`homeFilters.test.mjs`、`structureGuards.test.mjs`、`docs/UI-DESIGN.md` 等改动），本 pass 验证的是 **21:40 那份已签 HAP 的行为**，不代表这些后续源码改动已被验证。
+
+**unverified（本次未覆盖）**：软键盘回车在不同输入法 / 横竖屏下的行为差异；失焦在「收键盘」与「点别的控件」两种路径的时序差别（本次用点记录行触发）；同步状态 `失败：未知错误` 的具体底层原因（`重试同步` 未点，避免触发未配置的远端写入）；真实 Git commit/push 链路；双设备并发；OCR / 手写端到端；远程 Web 与云端对话；插件 live。`datacenter` 与 §15.8 的 STILL UNVERIFIED 列表继续有效。
+
+### 15.11 提交前最终对账 pass（2026-11-20 夜，`final-pass`；只追加，不改写 §15.1–§15.10）
+
+> 本 pass 是提交前的一次性对账：四道门闸全绿、只做一次 ArkTS 构建、重装并重验「本批改动过的界面」。
+> 证据目录：`.tmp/device-shots/final-pass-20261120/`（gitignore 内）。下表结论均为本 pass 新采，历史结论不动。
+
+**门闸 tail（逐字）**
+
+```
+===== GATE 1: tsc =====
+GATE1_EXIT=0
+...
+ℹ tests 2929
+ℹ suites 340
+ℹ pass 2928
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+ℹ todo 0
+ℹ duration_ms 39610.67
+GATE2_EXIT=0
+===== GATE 3: validate-app =====
+🔍 校验 ArkUI-X 工程：...\apps\arkui-schedule
+✅ 全部通过：8/8 条规则（JSON5/JSON 70 个、相对 import 421 条、main 静态 import 539 条、页面 8 个、rawfile/git 2 个文件）
+GATE3_EXIT=0
+===== GATE 4: overlay status =====
+覆盖层：未应用（工作区为「共享源码 + 平台目录」的原始形态）
+[overlay] applied=false
+GATE4_EXIT=0
+```
+四门 `EXIT=0`；2928 pass / 0 fail / 1 skipped（该 skipped 与一条被环境代理接管的 fetch 断言均为历史既有，非本批回归）。**本 pass 未 retarget 任何断言**。
+
+**构建 / 签名 / 装机（各一次）**
+
+- `build-harmony.ps1 -Cores 4 -Product default`：`BUILD SUCCESSFUL in 9 s 881 ms`；`✓ 产物验收通过`；覆盖层 `overlay(finally): applied=false（已断言）`；事后 `overlay.mjs status` 仍 `[overlay] applied=false`。
+- 未签 HAP `entry-default-unsigned.hap` **4,625,458 B** / SHA256 `254A87B587F81C3006B0A4A7FA33ADE6D770F1ACB1A313B52EA19DDFB840D613`。
+- `sign-hap.ps1 -Deliver`：签名工具告警「v2 signing material incomplete … falling back to v1 (LEAKED KEY)」（仍是 v1 调试材料，证书有效期至 2027-11-15；非本 pass 引入，未改签名材料）。`verify-app success`。交付 HAP `dist-harmony/arkui-schedule-harmony-debug-signed.hap` **4,698,734 B** / SHA256 `302F500A3EB89B8059611ED93DBB7668EF6770A088F7D3A8FCFF4CCDE48DC9E2`。
+- `hdc -t 192.168.1.7:33023 install -r` → `install bundle successfully`；`aa start -a EntryAbility -b com.itwill.schedule` → `start ability successfully`；`ps -ef` 见 `com.itwill.schedule` 与 `:render` 存活。
+- 干扰处置：每次 UI 注入前 `aa force-stop com.oray.sunloginclient`（向日葵远控浮层反复抢占点击与旋转），但守护会重新拉起；本 pass 后段平板进入「皮套模式 + 防误触 + 锁屏」的系统级循环（见下表 b–d），需人工处理硬件/系统设置后才能继续真机注入。
+
+**改动界面的短复核**
+
+| # | 项 | 结论 | 逐字节点 / 证据 |
+| --- | --- | --- | --- |
+| a | 首页首 tab / 无快捷记录 / 唯一创建入口 | **PASS** | `layout-home.json`：`Button click=true text=[当日全部日程] bounds=[57,427][791,522]`（横屏复核 `bounds=[57,427][475,522]`）、`Button text=[未完成]`；`快速记一条` / `快速记` / `保存` 均 **0 处**；页头日期标题为 `Text [今天]`，`今日` 仅出现在 `Text [✨ 今日汇总]` 中，没有任何 tab 叫 `今日`；唯一主按钮 `Button click=true text=[新建] bounds=[57,2380][1543,2494]`。截图 `home.png`（1600×2560）。**注意**：列表上方仍有一个 `TextInput hint=[搜索标题/正文/作者]`——这是 `mod-home-filters` / `docs/UI-DESIGN.md:405` 明确保留的搜索框，不是被删的快捷记录行；若验收口径是「列表上方不得有任何 TextInput」，需人工澄清。 |
+| b | 设置 → 数据：仅一个导入/导出入口 | **FAILED（环境阻断，非 App 回归）** | 未能取到设置页布局：首次点 `⚙ 设置` 被向日葵浮层截走，随后 `Text [检测到设备处于皮套模式，若要退出皮套休眠状态，…]`（`layout-lock.json`）、`Text [请勿遮挡屏幕顶端]` / `Text [防误触模式]` / `Text [在下方滑动两次可强行退出]`（`layout-anti.json`）与 `aa start` 报 `Error Code:10106102 The device screen is locked during the application launch, unlock screen failed. The current mode is developer mode, and the screen cannot be unlocked automatically`。截图 `settings.png`（被远控浮层截走那次）、`lock.png`、`awake.png`、`anti.png`。源码侧同项由门闸 `settingsCopyGuard.test.mjs` C2/C3 覆盖并全绿。 |
+| c | 设置 → AI：无「高级」、模型可选 | **FAILED（环境阻断，非 App 回归）** | 同 b 的锁屏 / 防误触循环，模型下拉未渲染，无法取布局或做选择。截图 `pin.png`。源码侧同项由 `modelHintGate` 8/8 + `settingsCopyGuard` C4 + `settingsFormValidation` 覆盖并全绿；模型选择器的真实交互仍 `unverified`。 |
+| d | 设置 → 同步：无推送/立即同步，状态诚实 | **FAILED（环境阻断，非 App 回归）** | 同 b/c。`layout-home.json` 上可见的同步状态行仍诚实：`Text [失败：未知错误]` + `Text [重试同步]`（首页也有该行）。源码侧同项由 `syncWiring.test.mjs` 覆盖并全绿；设置页「查看状态 / 测试连接 / 重试」三按钮的端侧呈现 `unverified`。 |
+
+**本 pass 的改动**：未改任何源码/断言；只新增本文 §15.11 与 gitignore 内 `.tmp/device-shots/final-pass-20261120/` 证据（另 `.tmp/fp-scan.mjs` 为一次性解析辅助，非仓库文件）。`git status --porcelain` 相对 pass 开始只多出并行执行者的 `docs/RELEASE-PLAN-APPGALLERY.md`（untracked）——本 pass 未触碰。
+
+**unverified（本 pass 未覆盖）**：b–d 的真机呈现与交互（含模型下拉选择、数据组唯一入口、同步三按钮）；锁屏/皮套模式解除后的全部 UI 注入；签名材料 v1 回退的处置；真实仓库配置下的 Git push/pull；手写/OCR 端到端；横竖屏切换后的设置页布局。§15.8 / §15.10 的 STILL UNVERIFIED 列表继续有效。
