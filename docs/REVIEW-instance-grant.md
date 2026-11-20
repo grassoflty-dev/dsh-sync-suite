@@ -65,3 +65,5 @@ node .../validate-app.mjs               → ✅ 全部通过：8/8 条规则（J
 - store 的"原子"依赖 `AppStorage`/`PersistentStorage` 刷盘语义，未做断电/并发写实测；Windows 上文件权限模式无意义。
 - 跨机 grant 一致性、确认卡与实际 `sessionPrompt` RPC 属于后续模块，本片未接线，无法验证。
 - 两个边界探针只在 Node 编译产物上执行，未在设备 store 上复现。
+
+> **追记（2026-11-21，同模块 id 后续批次）**：上文三项 P2 已修复并登记于 `docs/MODULES.md` §5 的 2026-11-21 行——P2-1 `revokeGrant` 改为先校验 `nowMs`，非法返回 `E_GRANT_NOW` typed 拒绝且原表不动，store 拒绝时不写回；P2-2 `decodeGrants` 按 grantKey 去重（最新 `grantedAt` 胜，同刻 `grantId` 大者胜）；P2-3 补齐 expiresAt 脱敏、revoke→再授、重复键信封等 6 例。定向测试 45/45、全量 2958/2957/0/1、tsc exit 0、validate-app 8/8。本节原有结论与行号记录保持历史原样，不随修复改写。

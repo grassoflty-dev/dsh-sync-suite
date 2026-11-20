@@ -316,31 +316,52 @@ describe('revokeGrant：吊销优先', () => {
   test('R-01 吊销后所有工具（含 command）立即失效，吊销前仍有效', () => {
     const g = normalized(rawGrant({ tools: [TOOL_SESSION_LIST, TOOL_SESSION_PROMPT] }));
     const revoked = revokeGrant([g], 'g-1', 200);
-    assert.equal(isGranted(revoked, ID_A, TOOL_SESSION_LIST, 200), false);
-    assert.equal(canPrompt(revoked, ID_A, 200), false);
-    assert.equal(canPrompt(revoked, ID_A, 199), true);
-    assert.equal(revoked[0].revokedAt, 200);
+    assert.equal(revoked.ok, true);
+    assert.equal(isGranted(revoked.items, ID_A, TOOL_SESSION_LIST, 200), false);
+    assert.equal(canPrompt(revoked.items, ID_A, 200), false);
+    assert.equal(canPrompt(revoked.items, ID_A, 199), true);
+    assert.equal(revoked.items[0].revokedAt, 200);
     assert.equal(g.revokedAt, undefined, '入参不被修改');
   });
 
   test('R-02 重复吊销保留更早的 revokedAt，不延长授权窗口', () => {
     const g = normalized(rawGrant({ revokedAt: 150, tools: [TOOL_SESSION_PROMPT] }));
     const again = revokeGrant([g], 'g-1', 400);
-    assert.equal(again[0].revokedAt, 150);
+    assert.equal(again.items[0].revokedAt, 150);
     const sooner = revokeGrant([g], 'g-1', 120);
-    assert.equal(sooner[0].revokedAt, 120);
-    assert.equal(canPrompt(sooner, ID_A, 200), false);
+    assert.equal(sooner.items[0].revokedAt, 120);
+    assert.equal(canPrompt(sooner.items, ID_A, 200), false);
   });
 
-  test('R-03 找不到 grantId 原样返回副本；非法 nowMs 不抛错', () => {
+  test('R-03 找不到 grantId 原样返回副本；非法 nowMs typed 拒绝且原表不动', () => {
     const g = normalized(rawGrant({ tools: [TOOL_SESSION_LIST] }));
     const input = [g];
     const result = revokeGrant(input, 'missing', 200);
-    assert.deepEqual(result, [g]);
-    assert.notEqual(result, input, '即使未命中也返回新数组');
-    const bad = revokeGrant([g], 'g-1', NaN);
-    assert.equal(bad[0].revokedAt, 0);
-    assert.equal(isGranted(bad, ID_A, TOOL_SESSION_LIST, 200), false);
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.items, [g]);
+    assert.notEqual(result.items, input, '即使未命中也返回新数组');
+    for (const badNow of [0, -1, NaN, Infinity, '200', null]) {
+      const bad = revokeGrant(input, 'g-1', badNow);
+      assert.equal(bad.ok, false, `nowMs=${String(badNow)} 必须拒绝`);
+      assert.equal(bad.problem, 'E_GRANT_NOW');
+      assert.equal(bad.reason, problemText('E_GRANT_NOW'));
+      assert.deepEqual(bad.items, [g], '原表原样，绝不写 revokedAt=0');
+    }
+    assert.equal(input[0].revokedAt, undefined, '入参不被修改');
+  });
+
+  test('R-04 非法 nowMs 吊销后整表仍可回读，不会清掉其它实例的授权', () => {
+    const a = normalized(rawGrant({ tools: [TOOL_SESSION_LIST] }));
+    const b = normalized(rawGrant({ grantId: 'g-2', instanceId: ID_B, tools: [TOOL_SESSION_PROMPT] }));
+    const table = [a, b];
+    const bad = revokeGrant(table, 'g-1', 0);
+    assert.equal(bad.ok, false);
+    assert.equal(bad.problem, 'E_GRANT_NOW');
+    assert.deepEqual(bad.items, table);
+    const decoded = decodeGrants(encodeGrants(bad.items));
+    assert.equal(decoded.ok, true, '回读不能因坏吊销失败');
+    assert.equal(decoded.items.length, 2, '所有实例授权都还在');
+    assert.equal(canPrompt(decoded.items, ID_B, 200), true);
   });
 });
 
@@ -351,20 +372,43 @@ describe('upsertGrant：按 grantKey 替换、确定性', () => {
     const a = normalized(rawGrant({ tools: [TOOL_SESSION_LIST] }));
     const b = normalized(rawGrant({ grantId: 'g-2', instanceId: ID_B, tools: [TOOL_SESSION_LIST] }));
     const inserted = upsertGrant([a], b);
-    assert.deepEqual(inserted.map((x) => x.instanceId), [ID_A, ID_B]);
-    const replaced = upsertGrant(inserted, normalized(rawGrant({ tools: [TOOL_SESSION_PROMPT] })));
-    assert.equal(replaced.length, 2, '同键替换不产生第二条');
-    assert.deepEqual(findGrant(replaced, 'g-1').tools, [TOOL_SESSION_PROMPT], 'g-1 被同键新授权替换');
-    assert.deepEqual(findGrant(replaced, 'g-2').tools, [TOOL_SESSION_LIST], '另一实例不受影响');
+    assert.equal(inserted.ok, true);
+    assert.deepEqual(inserted.items.map((x) => x.instanceId), [ID_A, ID_B]);
+    const replaced = upsertGrant(inserted.items, normalized(rawGrant({ tools: [TOOL_SESSION_PROMPT] })));
+    assert.equal(replaced.ok, true);
+    assert.equal(replaced.items.length, 2, '同键替换不产生第二条');
+    assert.deepEqual(findGrant(replaced.items, 'g-1').tools, [TOOL_SESSION_PROMPT], 'g-1 被同键新授权替换');
+    assert.deepEqual(findGrant(replaced.items, 'g-2').tools, [TOOL_SESSION_LIST], '另一实例不受影响');
   });
 
-  test('U-02 坏授权被忽略，返回排序后的副本；入参不被改', () => {
+  test('U-02 坏授权 typed 拒绝 + 原表副本；入参不被改', () => {
     const a = normalized(rawGrant());
     const input = [a];
     const next = upsertGrant(input, { grantId: '', instanceId: 'bad' });
-    assert.deepEqual(next, [a]);
-    assert.notEqual(next[0], a);
+    assert.equal(next.ok, false);
+    assert.equal(next.problem, 'E_GRANT_ID');
+    assert.equal(next.reason, problemText('E_GRANT_ID'));
+    assert.deepEqual(next.items, [a]);
+    assert.notEqual(next.items[0], a);
     assert.equal(input.length, 1);
+  });
+
+  test('U-04 吊销后显式再授：恢复 active，grantedAt 刷新，旧 revokedAt 清除', () => {
+    const g = normalized(rawGrant({ tools: [TOOL_SESSION_LIST, TOOL_SESSION_PROMPT] }));
+    const revoked = revokeGrant([g], 'g-1', 200);
+    assert.equal(revoked.ok, true);
+    assert.equal(canPrompt(revoked.items, ID_A, 200), false);
+    const regranted = upsertGrant(revoked.items, normalized(rawGrant({
+      grantedAt: 300, tools: [TOOL_SESSION_LIST, TOOL_SESSION_PROMPT]
+    })));
+    assert.equal(regranted.ok, true);
+    assert.equal(regranted.items.length, 1, '同键替换仍然只有一条');
+    const fresh = findGrant(regranted.items, 'g-1');
+    assert.equal(fresh.grantedAt, 300);
+    assert.equal(fresh.revokedAt, undefined, '旧吊销时间被清除');
+    assert.equal(Object.prototype.hasOwnProperty.call(fresh, 'revokedAt'), false);
+    assert.equal(canPrompt(regranted.items, ID_A, 250), false, '新授权生效前仍降权');
+    assert.equal(canPrompt(regranted.items, ID_A, 300), true, '新授权生效后恢复命令权');
   });
 
   test('U-03 sortGrants 幂等，按 grantKey 再按 grantId 排序', () => {
@@ -441,6 +485,32 @@ describe('持久化信封 {v:1,items:[...]}', () => {
     assert.deepEqual(result.items, []);
     assert.equal(result.problem, 'ok');
   });
+
+  test('E-05 手写重复键信封：最新 grantedAt 胜出，canPrompt 只反映胜者', () => {
+    const oldWithPrompt = rawGrant({ grantId: 'g-old', tools: [TOOL_SESSION_PROMPT], grantedAt: 100 });
+    const newViewOnly = rawGrant({ grantId: 'g-new', tools: [TOOL_SESSION_LIST], grantedAt: 200 });
+    const decoded = decodeGrants(JSON.stringify({ v: 1, items: [oldWithPrompt, newViewOnly] }));
+    assert.equal(decoded.ok, true);
+    assert.equal(decoded.items.length, 1, '同 grantKey 只留一条');
+    assert.equal(decoded.items[0].grantId, 'g-new');
+    assert.equal(decoded.items[0].grantedAt, 200);
+    assert.equal(canPrompt(decoded.items, ID_A, 300), false, '旧 prompt 权不得并进胜者');
+    assert.deepEqual(grantedTools(decoded.items, ID_A, 300), [TOOL_SESSION_LIST]);
+    assert.equal(JSON.parse(encodeGrants(decoded.items)).items.length, 1, '再编码仍是单条');
+  });
+
+  test('E-06 重复键同 grantedAt：grantId 字典序更大者胜，与信封顺序无关', () => {
+    const smaller = rawGrant({ grantId: 'g-a', tools: [TOOL_SESSION_PROMPT], grantedAt: 100 });
+    const larger = rawGrant({ grantId: 'g-z', tools: [TOOL_SESSION_LIST], grantedAt: 100 });
+    for (const order of [[smaller, larger], [larger, smaller]]) {
+      const decoded = decodeGrants(JSON.stringify({ v: 1, items: order }));
+      assert.equal(decoded.ok, true);
+      assert.equal(decoded.items.length, 1);
+      assert.equal(decoded.items[0].grantId, 'g-z');
+      assert.equal(canPrompt(decoded.items, ID_A, 200), false);
+      assert.deepEqual(grantedTools(decoded.items, ID_A, 200), [TOOL_SESSION_LIST]);
+    }
+  });
 });
 
 // ---------------------------------------------------------------- 脱敏视图
@@ -468,6 +538,21 @@ describe('redactGrant：无自由文本、派生 active / canPrompt', () => {
     assert.equal(after.active, false);
     assert.equal(after.canPrompt, false);
     assert.equal(after.revokedAt, 200);
+  });
+
+  test('D-03 expiresAt 分支：到期前 active/canPrompt=true，到点起=false', () => {
+    const g = normalized(rawGrant({ tools: [TOOL_SESSION_PROMPT], expiresAt: 300 }));
+    const before = redactGrant(g, 299);
+    const at = redactGrant(g, 300);
+    const after = redactGrant(g, 301);
+    assert.equal(before.active, true);
+    assert.equal(before.canPrompt, true);
+    assert.equal(before.expiresAt, 300);
+    assert.equal(at.active, false, 'expiresAt 当刻即失效');
+    assert.equal(at.canPrompt, false);
+    assert.equal(after.active, false);
+    assert.equal(after.canPrompt, false);
+    assert.equal(Object.prototype.hasOwnProperty.call(before, 'note'), false, '脱敏视图仍无自由文本');
   });
 });
 
@@ -512,5 +597,14 @@ describe('静态守卫：无凭据 / 无日志 / 存储接线', () => {
     // isGranted / grantedTools 只允许「工具显式出现在 tools 里」这一条路径
     assert.match(MODEL_SRC, /g\.tools\.indexOf\(wanted\) >= 0/);
     assert.equal(/VIEW_TOOLS\.indexOf\([^)]*PROMPT/.test(MODEL_SRC), false);
+  });
+
+  test('S-05 nowMs 先校验后改表；store 拒绝时不写回（store 类 .ets 无法在 Node 运行）', () => {
+    assert.match(MODEL_SRC, /export interface GrantMutationResult/);
+    assert.match(MODEL_SRC, /\| 'E_GRANT_NOW'/);
+    assert.match(MODEL_SRC, /if \(!validTime\(nowMs\)\) \{\s*return mutationRefused\('E_GRANT_NOW', grants\);/);
+    assert.equal(/revokedAt = 0/.test(MODEL_SRC), false, '不得再产生 normalize 拒收的 revokedAt');
+    assert.match(MODEL_SRC, /function winsDuplicate\(/);
+    assert.match(STORE_SRC, /if \(!result\.ok\) \{\s*this\.problem = result\.problem;/);
   });
 });

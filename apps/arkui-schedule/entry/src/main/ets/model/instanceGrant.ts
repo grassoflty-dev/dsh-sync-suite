@@ -15,8 +15,9 @@
  * 3. **per-instance 隔离**：`isGranted` / `grantedTools` 只匹配精确 instanceId；A 的 grant 永不授权 B。
  * 4. **fail-closed 时间语义**：仅在 `grantedAt <= t < (revokedAt|expiresAt)` 时有效；未生效、
  *    已吊销、已过期、时间非法均不授权；吊销后不自动续期、不换令牌重试。
- * 5. **typed 拒绝，不抛异常**：未知工具 / 空工具 / 未知 principal / 坏 instanceId 形状都返回 typed
- *    problem + 中文 reason；坏信封整表回落空表（与 `model/instances.ts` 同纪律）。
+ * 5. **typed 拒绝，不抛异常**：未知工具 / 空工具 / 未知 principal / 坏 instanceId / 非法 nowMs
+ *    都返回 typed problem + 中文 reason；变更 API 拒绝时原表不动、绝不落盘会被 normalize 拒收的项；
+ *    坏信封整表回落空表（与 `model/instances.ts` 同纪律）。
  * 6. **零凭据**：本模型与对应 store **没有任何令牌字段**，也没有日志调用；渲染视图 `RedactedGrant`
  *    结构上不带自由文本 `note`，只给派生的 `active` / `canPrompt`。
  */
@@ -106,6 +107,7 @@ export type GrantProblem =
   | 'E_GRANT_GRANTED_AT'
   | 'E_GRANT_REVOKED_AT'
   | 'E_GRANT_EXPIRES_AT'
+  | 'E_GRANT_NOW'
   | 'E_GRANT_ENVELOPE_EMPTY'
   | 'E_GRANT_ENVELOPE_JSON'
   | 'E_GRANT_ENVELOPE_SHAPE'
@@ -164,6 +166,17 @@ export interface GrantDecodeResult {
   reason: string;
 }
 
+/**
+ * 变更类 API（upsert / revoke）的 typed 结果：失败时 `items` 是原表副本，
+ * `problem`/`reason` 给出中文原因，调用方据此拒绝写回，绝不落盘 normalize 会拒绝的记录。
+ */
+export interface GrantMutationResult {
+  ok: boolean;
+  items: InstanceGrant[];
+  problem: GrantProblem;
+  reason: string;
+}
+
 /** 渲染 / 导出唯一视图：无自由文本 note，带派生的 active / canPrompt。 */
 export interface RedactedGrant {
   grantId: string;
@@ -202,6 +215,8 @@ export function problemText(problem: GrantProblem): string {
       return '授权吊销时间必须是正整数时间戳';
     case 'E_GRANT_EXPIRES_AT':
       return '授权到期时间必须是正整数时间戳';
+    case 'E_GRANT_NOW':
+      return '授权操作时间必须是正整数时间戳';
     case 'E_GRANT_ENVELOPE_EMPTY':
       return '还没有保存过 dots 授权';
     case 'E_GRANT_ENVELOPE_JSON':
@@ -258,6 +273,32 @@ function decodeFailed(problem: GrantProblem): GrantDecodeResult {
     items: [],
     problem: problem,
     reason: problemText(problem)
+  };
+  return result;
+}
+
+/** 内部：变更被拒绝的结果（永远带原表深拷贝，绝不产生会被 normalize 拒绝的项）。 */
+function mutationRefused(problem: GrantProblem, grants: InstanceGrant[]): GrantMutationResult {
+  const kept: InstanceGrant[] = [];
+  for (const g of grants) {
+    kept.push(copyGrant(g));
+  }
+  const result: GrantMutationResult = {
+    ok: false,
+    items: kept,
+    problem: problem,
+    reason: problemText(problem)
+  };
+  return result;
+}
+
+/** 内部：变更成功结果（排序后的新表）。 */
+function mutationAccepted(items: InstanceGrant[]): GrantMutationResult {
+  const result: GrantMutationResult = {
+    ok: true,
+    items: sortGrants(items),
+    problem: 'ok',
+    reason: ''
   };
   return result;
 }
@@ -425,6 +466,10 @@ export function isGranted(
 
 /** 该实例当前有效的工具并集（canonical 顺序）；不补入任何未显式授予的工具。 */
 export function grantedTools(grants: InstanceGrant[], instanceId: string, nowMs: number): GrantTool[] {
+  // 时间参数非法先短路；与 isGranted / grantActive 同一 fail-closed 判据，不返回半截并集。
+  if (!validTime(nowMs)) {
+    return emptyTools();
+  }
   const found: GrantTool[] = [];
   for (const g of grants) {
     if (g.instanceId !== instanceId || !grantActive(g, nowMs)) {
@@ -478,17 +523,13 @@ export function sortGrants(list: InstanceGrant[]): InstanceGrant[] {
 }
 
 /**
- * 插入或按 grantKey 替换（同一实例同一 principal 只有一条）；坏授权直接忽略（不抛错）。
- * 返回新数组且已排序，入参不被修改。
+ * 插入或按 grantKey 替换（同一实例同一 principal 只有一条）；坏授权返回 typed 拒绝 + 原表副本，
+ * 绝不落盘 normalize 会拒绝的项。返回新数组且已排序，入参不被修改。
  */
-export function upsertGrant(grants: InstanceGrant[], grant: InstanceGrant): InstanceGrant[] {
+export function upsertGrant(grants: InstanceGrant[], grant: InstanceGrant): GrantMutationResult {
   const normalized: GrantNormalizeResult = normalizeGrant(grant);
   if (!normalized.ok || normalized.grant === null) {
-    const kept: InstanceGrant[] = [];
-    for (const g of grants) {
-      kept.push(copyGrant(g));
-    }
-    return sortGrants(kept);
+    return mutationRefused(normalized.problem, grants);
   }
   const key: string = grantKey(normalized.grant);
   const next: InstanceGrant[] = [];
@@ -504,24 +545,37 @@ export function upsertGrant(grants: InstanceGrant[], grant: InstanceGrant): Inst
   if (!replaced) {
     next.push(normalized.grant);
   }
-  return sortGrants(next);
+  return mutationAccepted(next);
 }
 
 /**
  * 吊销：按 grantId 找到并写 revokedAt = nowMs；已是吊销态保留**更早**的 revokedAt
  * （重复吊销不延长授权窗口，fail-closed）；找不到 grantId 则原样返回副本。
+ *
+ * 先校验 nowMs 再改表：非法时间 typed 拒绝（`E_GRANT_NOW`）+ 原表副本。旧实现写 `revokedAt=0`，
+ * normalize 会拒收该条，整表回读变 `E_GRANT_ENVELOPE_ITEM` → 所有实例的授权一起丢失。
  */
-export function revokeGrant(grants: InstanceGrant[], grantId: string, nowMs: number): InstanceGrant[] {
-  if (findGrant(grants, grantId) === null) {
-    return grants.slice();
+export function revokeGrant(
+  grants: InstanceGrant[],
+  grantId: string,
+  nowMs: number
+): GrantMutationResult {
+  if (!validTime(nowMs)) {
+    return mutationRefused('E_GRANT_NOW', grants);
   }
-  const at: number = validTime(nowMs) ? Math.trunc(nowMs) : 0;
+  if (findGrant(grants, grantId) === null) {
+    return mutationAccepted(grants);
+  }
+  const at: number = Math.trunc(nowMs);
   const next: InstanceGrant[] = [];
   for (const g of grants) {
     if (g.grantId === grantId) {
       const revoked: InstanceGrant = copyGrant(g);
       const current: number | undefined = g.revokedAt;
       if (current !== undefined) {
+        if (!validTime(current)) {
+          return mutationRefused('E_GRANT_REVOKED_AT', grants);
+        }
         revoked.revokedAt = Math.min(current, at);
       } else {
         revoked.revokedAt = at;
@@ -531,7 +585,7 @@ export function revokeGrant(grants: InstanceGrant[], grantId: string, nowMs: num
       next.push(copyGrant(g));
     }
   }
-  return sortGrants(next);
+  return mutationAccepted(next);
 }
 
 /** 渲染 / 导出视图：剥掉自由文本 note，只给派生 active / canPrompt（不落盘）。 */
@@ -552,6 +606,17 @@ export function redactGrant(g: InstanceGrant, nowMs: number): RedactedGrant {
     view.expiresAt = g.expiresAt;
   }
   return view;
+}
+
+/**
+ * 重复 grantKey 的确定性决胜规则：`grantedAt` 更大（更新）者胜；同一时刻则 `grantId`
+ * 字典序更大者胜（不用 localeCompare，免得随系统 locale 变）。信封顺序不参与决胜。
+ */
+function winsDuplicate(candidate: InstanceGrant, kept: InstanceGrant): boolean {
+  if (candidate.grantedAt !== kept.grantedAt) {
+    return candidate.grantedAt > kept.grantedAt;
+  }
+  return candidate.grantId > kept.grantId;
 }
 
 /** 版本化信封里的单条记录（没有派生字段；与主对象同形）。 */
@@ -575,7 +640,8 @@ export function encodeGrants(list: InstanceGrant[]): string {
 
 /**
  * 反序列化整表：空串 / 坏 JSON / 结构错 / 版本错 / 任一记录坏 → 空表 + typed reason，
- * 绝不抛异常（这条路径在 UI 启动时跑）。成功时按 `sortGrants` 给确定性顺序。
+ * 绝不抛异常（这条路径在 UI 启动时跑）。合法记录按 grantKey 去重（最新 grantedAt 胜，
+ * 同刻 grantId 大者胜），再按 `sortGrants` 给确定性顺序。
  */
 export function decodeGrants(raw: string | null | undefined): GrantDecodeResult {
   const text: string = typeof raw === 'string' ? raw.trim() : '';
@@ -602,12 +668,29 @@ export function decodeGrants(raw: string | null | undefined): GrantDecodeResult 
   }
   const rawItems: LooseValue[] = parsed.items as LooseValue[];
   const items: InstanceGrant[] = [];
+  // 不变式 1：同 grantKey 只留一条，杜绝同键两条各自贡献工具形成隐式并集。
+  // 坏记录仍然整表拒绝；合法记录按键去重，规则见 winsDuplicate（最新 grantedAt 胜，
+  // 同刻 grantId 更大者胜），与信封里出现的先后无关。
   for (const rawItem of rawItems) {
     const result: GrantNormalizeResult = normalizeGrant(rawItem as RawGrant);
     if (!result.ok || result.grant === null) {
       return decodeFailed('E_GRANT_ENVELOPE_ITEM');
     }
-    items.push(result.grant);
+    const winner: InstanceGrant = result.grant;
+    const key: string = grantKey(winner);
+    let found: boolean = false;
+    for (let i = 0; i < items.length; i++) {
+      if (grantKey(items[i]) === key) {
+        found = true;
+        if (winsDuplicate(winner, items[i])) {
+          items[i] = winner;
+        }
+        break;
+      }
+    }
+    if (!found) {
+      items.push(winner);
+    }
   }
   const okResult: GrantDecodeResult = {
     ok: true,

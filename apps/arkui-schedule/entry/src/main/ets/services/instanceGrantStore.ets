@@ -24,7 +24,12 @@ import {
   sortGrants,
   upsertGrant
 } from '../model/instanceGrant';
-import type { GrantProblem, InstanceGrant, RedactedGrant } from '../model/instanceGrant';
+import type {
+  GrantMutationResult,
+  GrantProblem,
+  InstanceGrant,
+  RedactedGrant
+} from '../model/instanceGrant';
 
 /** 唯一持久键：JSON 字符串信封。 */
 const GRANT_STORAGE_KEY: string = 'instance-grants.json';
@@ -109,14 +114,27 @@ export class InstanceGrantStore {
     return this.problem;
   }
 
-  /** 插入或按 grantKey 替换（同实例同 principal 更新，不产生第二条），写回后返回新表。 */
+  /** 插入或按 grantKey 替换（同实例同 principal 更新，不产生第二条）；坏授权只标 typed problem，不写回。 */
   upsert(grant: InstanceGrant): InstanceGrant[] {
-    return this.commit(upsertGrant(this.load(), grant));
+    const result: GrantMutationResult = upsertGrant(this.load(), grant);
+    if (!result.ok) {
+      this.problem = result.problem;
+      return this.list();
+    }
+    return this.commit(result.items);
   }
 
-  /** 按 grantId 吊销；重复吊销保留更早的时间，找不到 grantId 则原样。 */
+  /**
+   * 按 grantId 吊销；重复吊销保留更早的时间，找不到 grantId 则原样。
+   * nowMs 非法时模型返回 `E_GRANT_NOW` 且原表不动，此处绝不写回——否则坏吊销清掉整表授权。
+   */
   revoke(grantId: string, nowMs: number): InstanceGrant[] {
-    return this.commit(revokeGrant(this.load(), grantId, nowMs));
+    const result: GrantMutationResult = revokeGrant(this.load(), grantId, nowMs);
+    if (!result.ok) {
+      this.problem = result.problem;
+      return this.list();
+    }
+    return this.commit(result.items);
   }
 
   /** 渲染 / 导出唯一入口：无自由文本 note，带派生 active / canPrompt（view 永不隐含 command）。 */
