@@ -66,6 +66,8 @@ git 历史删不掉 blob（`docs/CHAT-SYNC.md:268-269`）。`PersistentStorage` 
 口径：PC 插件侧「本机」= 该 PC；平板侧平板不跑 DSH，故「本机」= 默认连接实例（来自 `remoteLastOk`），
 UI 文案写「本机（默认）」。
 
+> **实现落地（2026-11-20，`mod-instance-model`，零 UI）**：§2 模型已落成 `model/instances.ts` + `services/instanceStore.ets`（`DsInstance` 字段按本批任务书：`name` / `token` / `reachable:'unknown'|'ok'|'fail'`，id = `local` 或 `inst-<sha16>`；本机显式首行、URL 恒空串、能力集 `webUI:false` + RPC 回环；单键 `instances.json` 信封 `{v:1,items}`、坏值回落空表 + typed reason）；字段命名与本文 `displayName` / `tokenRef` / 布尔三态的差异以已落地的模型为准，后续模块直接消费它。
+
 ## 3 协议
 
 **今天存在的 RPC**（`packages/dsh-dots/src/rpc.ts:677-730`，全部 `POST /dsh-dots/rpc`）：
