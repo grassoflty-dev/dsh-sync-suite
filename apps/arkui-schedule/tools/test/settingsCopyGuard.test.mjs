@@ -135,14 +135,19 @@ test('C2 中性区块标题 + 数据组只有一个导入/导出入口', () => {
   assert.match(sync, /this\.FieldLabel\('访问令牌（仅存本机）'\)/, '令牌输入必须保留');
   assert.match(sync, /Text\(this\.syncMessage\)/, '诚实同步状态行必须保留');
   assert.match(sync, /ErrorState\(\{/, '同步失败三段式（原因 + 重试）必须保留');
-  assert.match(sync, /this\.syncMessage\.startsWith\('❌'\)/, '状态行只按成功/失败着色，不按模式着色');
+  // mod-sync-silent-autoinit（old→new，非放宽）：失败前缀从 ❌ 改为三态词汇「失败：」，
+  // 着色判据仍只按成功/失败、不看模式；文案更严格（逐字钉三态，不再容忍任意 ❌ 开头）。
+  assert.match(sync, /this\.syncMessage\.startsWith\('失败：'\)/, '状态行只按成功/失败着色，不按模式着色');
 
   // 真页面（old→new，新增不替代）：标题 / 唯一主操作 / 两个字段 / 三态状态行 / 三个失败出口。
   assert.match(syncPage, /title: '同步仓库'/, '真页面标题必须是「同步仓库」');
   assert.match(syncPage, /Button\('保存'\)/, '唯一主操作是「保存」（wire 到同一校验入口）');
   assert.match(syncPage, /SyncSection\(\{/, '真页面装配 SyncSection 正文');
   assert.match(syncPage, /checkSettingsFields\(/, '保存复用拆分前同一整表校验');
-  assert.match(syncPage, /syncRowSummary\(/, '诚实状态行来自同一份已持久化状态');
+  // mod-sync-silent-autoinit（old→new）：页面不再调用 syncRowSummary；唯一来源直接喂给正文。
+  assert.match(syncPage, /syncMessage: this\.honestStatus\(\)/, '状态行唯一来源是 honestStatus()');
+  assert.doesNotMatch(syncPage, /syncRowSummary\(/, '根页摘要函数不得出现在同步页');
+  assert.doesNotMatch(syncPage, /nowIso\(\), this\.lastSyncError/, '保存 / 普通事件不得伪造成功时刻');
   assert.match(syncPage, /'同步中…'/, '忙碌态文案');
   for (const action of ['查看状态', '测试连接', '重试']) {
     assert.match(syncPage, new RegExp(`Text\\('${action}'\\)`), `失败出口「${action}」必须在真页面上`);
@@ -281,4 +286,41 @@ test('C7 四个子路由 + Instances 在两份页面清单都登记（main 12 / 
   assert.equal(main.length, 12, 'main 清单应为 12 页（原 9 + 三个设置子页）');
   assert.equal(harmony.length, 13, 'harmony 清单应为 13 页（原 10 + 三个设置子页）');
   assert.equal(new Set(main).size, main.length, 'main 清单不得重复登记');
+});
+
+// mod-sync-silent-autoinit：用户可见文案守新 truth —— 三态词汇 + 诊断区标注，
+// 「尚未初始化 / 先拉取 / 首次克隆 / HEAD / outbox」等事实只能在诊断区，不能是提示或死结。
+const SYNC_SURFACE_FILES = [
+  'pages/SettingsSync.ets',
+  'components/settings/SyncSection.ets',
+  'services/GitSyncService.ets'
+];
+/** 只扫可执行字符串字面量（literalsOf 已跳过注释与模板插值）。 */
+function syncLiterals(file) {
+  return literalsOf(readSettingsFile(file));
+}
+
+test('C8 同步用户可见文案只有三态 + 诊断区，旧的初始化死结文案绝迹', () => {
+  const all = SYNC_SURFACE_FILES.map((file) => syncLiterals(file).join('\n')).join('\n');
+  // 三态词汇逐字存在（忙碌 / 成功 / 失败，失败带可重试后缀）。
+  for (const token of ['同步中…', '已同步 · ', '失败：', '（可重试）']) {
+    assert.ok(all.includes(token), `三态词汇缺失：${token}`);
+  }
+  // 诊断区标注：页面「更多」弹层与同步正文各一处，事实不再是提示。
+  const page = readSettingsFile('pages/SettingsSync.ets');
+  const section = readSettingsFile('components/settings/SyncSection.ets');
+  for (const [name, source] of [['page', page], ['section', section]]) {
+    assert.ok(source.includes('诊断（仅排查用）'), `${name} 必须有标注为诊断的区域`);
+  }
+  const labelAt = section.indexOf('诊断（仅排查用）');
+  const statusAt = section.indexOf('Text(this.statusLine)');
+  assert.ok(labelAt > 0 && statusAt > labelAt, '分支/HEAD/领先落后事实必须落在诊断标注之后');
+  // 旧死结文案：这三个文件里一句都不许有（桥内部不变量不在此扫描范围，正常流程不可达）。
+  for (const file of SYNC_SURFACE_FILES) {
+    for (const text of syncLiterals(file)) {
+      for (const banned of [/尚未初始化/, /首次克隆/, /先执行「拉取」/, /先拉取克隆仓库/]) {
+        assert.equal(banned.test(text), false, `${file} 残留用户可见死结文案：${text}`);
+      }
+    }
+  }
 });

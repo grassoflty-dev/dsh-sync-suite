@@ -73,7 +73,9 @@ test('M-07 同步子页渲染真实正文：两个字段 + 诚实状态行 + 失
   assert.match(page, /title: '同步仓库'/, '页头标题');
   assert.match(page, /Button\('保存'\)/, '唯一主操作「保存」');
   assert.match(page, /checkSettingsFields\(/, '保存复用同一整表校验');
-  assert.match(page, /syncRowSummary\(/, '状态行来自同一份已持久化状态');
+  // mod-sync-silent-autoinit：状态行只有 honestStatus() 一个来源；syncRowSummary 只属根页摘要。
+  assert.match(page, /syncMessage: this\.honestStatus\(\)/, '状态行唯一来源是 honestStatus()');
+  assert.doesNotMatch(page, /syncRowSummary\(/, '同步页不得调用根页摘要函数');
   assert.match(page, /'同步中…'/, '忙碌态文案');
   for (const action of ['查看状态', '测试连接', '重试']) {
     assert.match(page, new RegExp(`Text\\('${action}'\\)`), `失败出口「${action}」`);
@@ -240,5 +242,23 @@ test('M-11 API 子页渲染真实正文：服务 / 模型 + 保存，无高级 /
     assert.equal(/高级/.test(src), false, 'API 子页 / 正文不得出现「高级」控件');
     assert.equal(/模型名（可手输|模型名（必填）|TextInput\(\{ text: this\.aiModel/.test(src), false,
       'API 子页 / 正文不得有手输模型名入口');
+  }
+});
+
+// mod-sync-silent-autoinit：三态词汇与诊断区的正向守卫（旧 M-07 的三态/失败出口断言一条未删）。
+test('M-12 同步子页三态词汇 + 诊断区标注，仓库事实不再当提示', () => {
+  const page = readSyncPage();
+  const section = readSyncSection();
+  for (const token of ['同步中…', '已同步 · ', '失败：', '（可重试）']) {
+    assert.ok(page.includes(token), `同步子页缺三态词汇：${token}`);
+  }
+  assert.ok(section.includes('诊断（仅排查用）'), 'SyncSection 必须有诊断区标注');
+  // 诊断区里仍能看到真实仓库事实（分支 / HEAD / 领先落后），只是位置与标注变了。
+  assert.ok(section.includes('Text(this.statusLine)'), '诊断区展示真实状态事实');
+  assert.equal(section.includes('this.statusReadiness'), false, '可执行文案不得留在诊断区');
+  assert.equal(section.includes('describePushReadiness'), false, '「先做什么」文案不进诊断区');
+  assert.ok(page.includes('onRetryStatus: (): void => {'), '状态行点一下仍能重试');
+  for (const banned of [/尚未初始化/, /首次克隆/, /先执行「拉取」/]) {
+    assert.equal(banned.test(page + '\n' + section), false, `同步面残留死结文案：${banned}`);
   }
 });

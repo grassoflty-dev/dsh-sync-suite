@@ -332,6 +332,16 @@ describe('冲突语义（沿用既有契约，不发明新格式）', () => {
     assert.equal(foldById(parsed.records)[0].title, '新');
   });
 
+  // mod-sync-silent-autoinit：旧桥死结即使（异常路径）漏到分级层，也只能降级为
+  // 「配置不完整」的 fatal 结果，不给出会误导用户「先拉取」的第三态；正常流程已由静默初始化消除它。
+  test('旧「尚未初始化」桥文案只落到 fatal/input，不给假的下一步', () => {
+    const legacy = classifySyncError(
+      'E_GIT', '本机仓库尚未初始化：请先执行「拉取」（首次会自动克隆）');
+    assertShape(legacy, 'fatal', 'input');
+    assert.match(legacy.title, /配置/);
+    assert.equal(legacy.retryable, false);
+  });
+
   test('契约里没有 deleted 墓碑：带 deleted 的行仍按普通记录折叠（不被隐藏）', () => {
     // docs/CONTRACT.md §3.2 的 ScheduleRecord 没有 deleted 字段，UI 也没有删除入口；
     // 这里固化「不要凭空发明墓碑语义」：额外字段原样保留，但折叠只看 ts。

@@ -1466,11 +1466,78 @@
     };
   }
 
-  async function opFetch(args) {
+  /** mod-sync-silent-autoinit：远端引用一个都没有 = 空仓库首跑态（不是传输故障）。 */
+  function remoteHasNoRefs(info) {
+    var refs = (info && info.refs) || {};
+    var keys = Object.keys(refs);
+    for (var i = 0; i < keys.length; i++) {
+      var group = refs[keys[i]];
+      if (typeof group === 'string' && group.length > 0) {
+        return false;
+      }
+      if (group && typeof group === 'object' && Object.keys(group).length > 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * 静默初始化前置步骤（mod-sync-silent-autoinit）：所有需要仓库的操作在触碰 .git 之前先过这里。
+   * - 已有仓库 → 空操作，直接返回；
+   * - 没有仓库且调用方带 `autoInit:'true'`（App 侧 configArgs 恒带）→ 静默 clone：
+   *   复用 opClone 的设备目录备份 / 并集恢复 / 失败隔离，失败抛 normalizeError 的 typed 错（可重试），
+   *   文案里不再出现「尚未初始化 / 先拉取」；
+   * - 空远端（服务端引用 advertisement 一个引用都没有）→ 本地 init + 配 origin，
+   *   交给 E_REMOTE_EMPTY 首跑引导继续，绝不覆盖别人的历史；
+   * - 直接调桥（单测 / 内部不变量）不带 autoInit 时本函数空跑，旧 E_GIT 不变量仍守住；
+   *   正常用户流程每条路径都带 autoInit，下面四个「先拉取」死结不可达、永不用户可见。
+   */
+  async function ensureRepoInitialised(args) {
     var config = applyConfig(args);
     var root = ensureRepo();
     var git = gitApi();
+    if (repoInitialized()) {
+      return {
+        cloned: false, alreadyInitialized: true, repoRoot: root,
+        branch: await currentBranchOf(git), head: await resolveHead(git)
+      };
+    }
+    if (!args || args.autoInit !== 'true') {
+      return { cloned: false, skipped: true, repoRoot: root };
+    }
+    var url = requireRepoUrl(config);
+    var branch = config.branch || 'main';
+    var backup = config.deviceId ? snapshotDeviceFiles(config.deviceId) : [];
+    var refsKnown = false;
+    var emptyRemote = false;
+    try {
+      var info = await git.getRemoteInfo({ http: session.http, url: url, onAuth: makeOnAuth(config) });
+      refsKnown = true;
+      emptyRemote = remoteHasNoRefs(info);
+    } catch (error) {
+      // 探测不到引用不算空仓库（fail-closed）：交给 clone 抛 typed 传输/认证错误
+    }
+    if (refsKnown && emptyRemote) {
+      await git.init({ fs: session.fs, dir: root, defaultBranch: branch });
+      await ensureRemote(git, config);
+      var preservedEmpty = backup.length > 0 ? restoreDeviceFiles(backup) : { restored: [], unioned: [], kept: [] };
+      return {
+        cloned: false, initialized: true, emptyRemote: true, repoRoot: root,
+        branch: await currentBranchOf(git), head: await resolveHead(git), localPreserved: preservedEmpty
+      };
+    }
+    return await opClone(args);
+  }
+
+  async function opFetch(args) {
+    var config = applyConfig(args);
+    await ensureRepoInitialised(args);
+    var root = ensureRepo();
+    var git = gitApi();
     if (!repoInitialized()) {
+      // 内部不变量（**非用户提示**）：正常流程 ensureRepoInitialised 已静默 clone/init，此处绝不可达；
+      // 下面这句只服务直接调桥的单测，任何 UI 路径都不会把它显示给用户。
       throw bridgeError('E_GIT', '本机仓库尚未初始化：请先执行「拉取」（首次会自动克隆）');
     }
     await ensureRemote(git, config);
@@ -1493,6 +1560,9 @@
 
   async function opPull(args) {
     var config = applyConfig(args);
+    // 静默前置：App 侧带 autoInit 时这里已完成 clone/init；下面的 opClone 分支只服务
+    // 「直接调桥」的内部不变量路径（单测仍钉住旧 E_GIT 文案），正常用户流程走不到。
+    await ensureRepoInitialised(args);
     var root = ensureRepo();
     var git = gitApi();
     if (!repoInitialized()) {
@@ -1546,9 +1616,11 @@
 
   async function opPush(args) {
     var config = applyConfig(args);
+    await ensureRepoInitialised(args);
     var root = ensureRepo();
     var git = gitApi();
     if (!repoInitialized()) {
+      // 内部不变量（**非用户提示**）：ensureRepoInitialised 已静默初始化，正常流程不可达。
       throw bridgeError('E_GIT', '本机仓库尚未初始化：请先执行「拉取」完成克隆');
     }
     var branch = config.branch || 'main';
@@ -1714,9 +1786,11 @@
    */
   async function opCommitPaths(args) {
     var config = applyConfig(args);
+    await ensureRepoInitialised(args);
     var root = ensureRepo();
     var git = gitApi();
     if (!repoInitialized()) {
+      // 内部不变量（**非用户提示**）：ensureRepoInitialised 已静默初始化，正常流程不可达。
       throw bridgeError('E_GIT', '本机仓库尚未初始化：请先执行「拉取」完成克隆');
     }
     var branch = config.branch || 'main';
@@ -1855,6 +1929,8 @@
 
   async function opStatus(args) {
     var config = applyConfig(args);
+    // 查看状态 / 测试连接也先静默初始化：不需要用户先手动拉取一次。
+    await ensureRepoInitialised(args);
     var root = ensureRepo();
     var git = gitApi();
     var report = {
@@ -1889,6 +1965,18 @@
     report.targetBranch = typeof config.branch === 'string' && config.branch.length > 0 ? config.branch : 'main';
     if (!report.initialized) {
       return report;
+    }
+    // 真实远端状态：查看状态 / 测试连接要求 ahead/behind/equal 是真值而非过期本地引用。
+    // 只更新远端跟踪引用，不改工作区、不 merge、不 push；失败只在诊断里留原因，不谎称已同步。
+    if (args.fetchRemote === 'true') {
+      try {
+        await git.fetch({
+          fs: session.fs, http: session.http, dir: root,
+          remote: 'origin', ref: report.targetBranch, singleBranch: true, onAuth: makeOnAuth(config)
+        });
+      } catch (error) {
+        report.remoteError = sanitizeMessage(error && error.message !== undefined ? error.message : error);
+      }
     }
     report.branch = await currentBranchOf(git);
     report.head = await resolveHead(git);
@@ -1943,6 +2031,7 @@
 
   async function opLog(args) {
     var config = applyConfig(args);
+    await ensureRepoInitialised(args);
     var root = ensureRepo();
     var git = gitApi();
     var depth = normalizeDepth(args.depth);
@@ -1965,7 +2054,7 @@
   }
 
   async function opCurrentBranch(args) {
-    applyConfig(args);
+    await ensureRepoInitialised(args);
     ensureRepo();
     var git = gitApi();
     if (!repoInitialized()) {
@@ -1979,7 +2068,7 @@
   }
 
   async function opResolveRef(args) {
-    applyConfig(args);
+    await ensureRepoInitialised(args);
     ensureRepo();
     var git = gitApi();
     var ref = args.ref;
@@ -2011,6 +2100,8 @@
 
   async function opV2Git(args) {
     var config = applyConfig(args);
+    // v2 周期的每个薄桥 op 都需要工作副本；统一先过静默前置，空仓库交给 E_REMOTE_EMPTY 引导。
+    await ensureRepoInitialised(args);
     var root = ensureRepo();
     var git = gitApi();
     var op = String(args.op || '');
@@ -2018,6 +2109,7 @@
 
     if (op === 'fetch') {
       if (!repoInitialized()) {
+        // 内部不变量（**非用户提示**）：ensureRepoInitialised 已静默初始化，正常流程不可达。
         throw bridgeError('E_GIT', '本机仓库尚未初始化：请先拉取克隆仓库');
       }
       await ensureRemote(git, config);
@@ -2037,7 +2129,15 @@
     }
     if (op === 'listDays') {
       // 远端有 records.json 的合法日目录（与 syncProtocolStore.remoteDates 同口径）。
-      var files = await git.listFiles({ fs: session.fs, dir: root, ref: 'origin/main' });
+      // 空远端首跑时本地只有骨架、还没有 origin/main 引用：返回空列表交给 E_REMOTE_EMPTY 引导，
+      // 绝不把「引用不存在」误报成传输故障。
+      var files = [];
+      try {
+        files = await git.listFiles({ fs: session.fs, dir: root, ref: 'origin/main' });
+      } catch (error) {
+        out.value = '[]';
+        return out;
+      }
       var days = [];
       for (var d = 0; d < files.length; d++) {
         var m = /^timeline\/(\d{4}-\d{2}-\d{2})\/records\.json$/.exec(files[d]);

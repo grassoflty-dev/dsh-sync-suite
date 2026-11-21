@@ -8,10 +8,12 @@
 // 已 retarget 到这里的「已删除 + 静默默认值」口径，不是简单删除。
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { readSettingsFile, readSettingsPage, readSettingsSources } from './settingsSources.mjs';
+import { readSettingsFile, readSettingsPage, readSettingsSources, readSyncPage } from './settingsSources.mjs';
 
 // mod-settings-root（old→new）：业务实现从 pages/Settings.ets 搬到组件宿主，断言不变。
 const PAGE = readSettingsPage();
+// mod-settings-sync-page（new）：真正的同步页面自带三态文案与失败出口，三态断言锚这里。
+const SYNC_PAGE = readSyncPage();
 const SYNC = readSettingsFile('components/settings/SyncSection.ets');
 const SOURCES = readSettingsSources();
 
@@ -77,6 +79,17 @@ describe('mod-settings-sync-min：同步组只留仓库地址 + 访问令牌', (
     assert.match(form, /this\.runAction\('pull'\)/, '错误态的重试路径仍在');
     assert.match(PAGE, /this\.runAction\(this\.lastSyncAction\)/, '组头「更多」的重试上次仍在');
     assert.match(PAGE, /canRetrySync\(this\.lastSyncAction, this\.syncBusy\)/, '可重试判定仍在');
+    // mod-sync-silent-autoinit（old→new，只加不删）：状态行文案改成三态；失败态按「失败：」着色，
+    // 仓库事实（HEAD / 分支 / 领先落后）退到标注为诊断的区块，不再是无下一步的死结提示。
+    assert.match(form, /this\.syncMessage\.startsWith\('失败：'\)/, '失败态按三态词汇着色');
+    assert.match(SYNC_PAGE, /return '同步中…'/, '忙碌态三态文案');
+    assert.match(SYNC_PAGE, /失败：\$\{this\.lastSyncError\}（可重试）/, '失败态三态文案 + 可重试');
+    assert.match(SYNC_PAGE, /已同步 · \$\{clock\}/, '成功态三态文案 HH:MM');
+    assert.match(form, /诊断（仅排查用）/, '正文有诊断区标注');
+    assert.match(form, /Text\(this\.statusLine\)/, '诊断区仍展示真实仓库事实（只换位置不删信息）');
+    for (const banned of [/尚未初始化/, /首次克隆/, /先执行「拉取」/]) {
+      assert.equal(banned.test(SYNC_PAGE + '\n' + SYNC), false, `用户可见文案残留死结：${banned}`);
+    }
   });
 
   test('静默固定默认值：用户名按地址推断 / 设备编号由仓库分配 / 作者名默认「我」', () => {

@@ -92,8 +92,6 @@ export struct SyncSection {
   @Prop syncBusy: boolean = false;
   @Prop webReady: boolean = false;
   @Prop statusLine: string = '';
-  /** `describePushReadiness(statusView())` 的结果（页面派生，空串 = 不显示）。 */
-  @Prop statusReadiness: string = '';
   @Prop lastSyncError: string = '';
   /** 上一次同步的动作（`pull` / `push` / `status`；空串 = 还没同步过）——错误态判断「能不能重试」用。 */
   @Prop lastSyncAction: string = '';
@@ -114,8 +112,10 @@ export struct SyncSection {
   onToggleIncludeOtherDevices: (isOn: boolean) => void = () => {};
   /** pull / push / status（与拆分前 `runAction(action)` 同一个入口）。 */
   runAction: (action: string) => void = () => {};
-  /** 打开唯一的「更多」弹层（组头「更多」、空态动作与状态行点击都走这里）。 */
+  /** 打开唯一的「更多」弹层（组头「更多」与空态动作都走这里）。 */
   onOpenSyncMore: () => void = () => {};
+  /** 状态行点一下即重试上次动作（零步恢复）；不可重试时页面侧自行忽略。 */
+  onRetryStatus: () => void = () => {};
   /** SSH 警告行的显式出口：页面切 authMode + toast；本组件不改状态、不自动保存。 */
   onSwitchToHttpsToken: () => void = () => {};
 
@@ -371,26 +371,39 @@ export struct SyncSection {
         Text(this.syncMessage)
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)
-          .fontColor(this.syncMessage.startsWith('❌') ? $r('app.color.danger') : $r('app.color.text_secondary'))
+          .fontColor(this.syncMessage.startsWith('失败：') ? $r('app.color.danger') : $r('app.color.text_secondary'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
           .textAlign(TextAlign.Start)
+          .onClick(() => {
+            this.onRetryStatus();
+          })
       }
 
-      // A2：同步状态（分支 / 领先 / 落后 / 冲突 / 本地改动）——桥就绪后自动刷新一次
-      if (this.statusLine.length > 0) {
-        Text(this.statusLine)
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-          .textAlign(TextAlign.Start)
-      }
-      if (this.statusLine.length > 0 && this.statusReadiness.length > 0) {
-        this.HintLine(this.statusReadiness)
+      // 诊断区（mod-sync-silent-autoinit）：分支 / HEAD / 领先落后 / 本地改动 / 等待重试数
+      // 都是**只读排障事实**，不是用户下一步动作，更不是「先拉取才能继续」的死结；
+      // 「能不能推」这类可执行文案已从本区块移除，只留只读事实。
+      // 用户可见状态行始终只有三态。
+      if (this.statusLine.length > 0 && !this.showEmptyState()) {
+        Column({ space: SPACING.xs }) {
+          Text('诊断（仅排查用）')
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.text_secondary'))
+            .width('100%')
+            .textAlign(TextAlign.Start)
+          Text(this.statusLine)
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.text_secondary'))
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .width('100%')
+            .textAlign(TextAlign.Start)
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
       }
 
       // 从首页搬来的过滤开关：首页列表是否同时展示其他设备的只读记录

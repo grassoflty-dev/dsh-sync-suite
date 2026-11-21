@@ -915,3 +915,93 @@ test('64 static: force / rebase / reset --hard confined to the documented reject
   assert.match(store, /'push', 'origin', 'main'/);
   assert.doesNotMatch(store, /--force|\brebase\b/);
 });
+
+// ---------------------------------------------------------------- mod-sync-silent-autoinit（正向守卫）
+
+test('65 static: every repo-needing bridge op funnels through ensureRepoInitialised()', () => {
+  const bridge = readFileSync(
+    join(APP, 'entry', 'src', 'main', 'resources', 'rawfile', 'git', 'git-bridge.js'), 'utf8');
+  assert.match(bridge, /async function ensureRepoInitialised\(args\) \{/,
+    '桥必须有唯一的静默初始化前置函数');
+  // opFetch / opPull / opPush / opCommitPaths / opStatus / opLog / opCurrentBranch /
+  // opResolveRef / opV2Git —— 每个需要工作副本的 op 都在触碰 git 之前调用它。
+  const calls = bridge.match(/await ensureRepoInitialised\(args\);/g) || [];
+  assert.equal(calls.length, 9, `九个 repo op 都必须调用静默前置，实际 ${calls.length}`);
+  // 缺仓库：复用 opClone 的备份/并集/隔离；空远端走本地 init 交给 E_REMOTE_EMPTY，绝不覆盖历史。
+  assert.match(bridge, /return await opClone\(args\);/);
+  assert.match(bridge, /emptyRemote: true/);
+  assert.match(bridge, /remoteHasNoRefs/);
+  // 四个旧死结只作为内部不变量保留，且有中文注释声明「非用户提示 / 不可达」。
+  const invariants = bridge.match(/内部不变量（\*\*非用户提示\*\*）/g) || [];
+  assert.equal(invariants.length, 4, '四处死结必须带内部不变量注释，且正常流程不可达');
+  assert.match(bridge, /本机仓库尚未初始化：请先执行「拉取」（首次会自动克隆）/);
+  assert.match(bridge, /本机仓库尚未初始化：请先拉取克隆仓库/);
+  // v2 空仓库 bootstrap 语义不能被静默初始化绕过：listDays 对缺失 origin/main 返回空列表。
+  assert.match(bridge, /out\.value = '\[\]';/);
+  // 门面每次调用都带 autoInit，直接调桥的单测不带（旧不变量断言保持绿）。
+  const service = src('services/GitSyncService.ets');
+  assert.match(service, /'autoInit': 'true'/);
+  assert.match(service, /async ensureRepoInitialised\(\): Promise<GitSyncResult>/);
+  for (const op of ['pull', 'push', 'status']) {
+    assert.match(service, new RegExp(`const init: GitSyncResult = await this\\.ensureRepoInitialised\\(\\);`));
+    assert.ok(service.includes(`this.callBridge('${op}'`), `门面 ${op} 仍走桥`);
+  }
+});
+
+test('66 static: 查看状态 / 测试连接 auto-initialise first, then report real remote state', () => {
+  const page = src('pages/SettingsSync.ets');
+  const service = src('services/GitSyncService.ets');
+  const bodyOf = (source, marker) => {
+    const at = source.indexOf(marker);
+    assert.ok(at >= 0, `${marker} not found`);
+    const [start, end] = matchBrace(source, source.indexOf('{', at));
+    return source.slice(start, end);
+  };
+  const testConnection = bodyOf(page, 'private async testConnection()');
+  assert.match(testConnection, /this\.sync\.ensureRepoInitialised\(\)/,
+    '测试连接必须先静默初始化，不能要求先手动拉取');
+  assert.match(testConnection, /this\.sync\.status\(true\)/,
+    '测试连接后再取真实远端状态（可达 / 领先 / 落后 / 一致）');
+  const runAction = bodyOf(page, 'private async runAction(action: string)');
+  assert.match(runAction, /this\.sync\.status\(true\)/, '查看状态走带 probe 的 bridge status');
+  assert.match(runAction, /result\.diagnostics/, '真实仓库事实只落诊断区');
+  // 桥的 status 在 fetchRemote 时先 fetch 再算 ahead/behind，不用过期的本地引用。
+  const bridge = readFileSync(
+    join(APP, 'entry', 'src', 'main', 'resources', 'rawfile', 'git', 'git-bridge.js'), 'utf8');
+  const status = bodyOf(bridge, 'async function opStatus(args)');
+  assert.ok(status.indexOf('await ensureRepoInitialised(args);') < status.indexOf('var report = {'),
+    'status 必须先静默初始化再读仓库');
+  assert.ok(status.indexOf("args.fetchRemote === 'true'") < status.indexOf('branchState(git'),
+    'ahead/behind 必须在 fetch 刷新跟踪引用之后计算');
+  assert.match(service, /args\['fetchRemote'\] = withProbe \? 'true' : 'false'/);
+});
+
+test('67 static (review M1/m1): one status source, no fabricated success, diagnostics are facts only', () => {
+  const page = src('pages/SettingsSync.ets');
+  const section = src('components/settings/SyncSection.ets');
+  const store = src('services/syncStatusStore.ets');
+  // 单一来源：页面把 honestStatus() 直接喂给正文，不持有字符串状态、不调根页摘要。
+  assert.match(page, /syncMessage: this\.honestStatus\(\)/);
+  assert.doesNotMatch(page, /@State syncMessage/);
+  assert.doesNotMatch(page, /syncRowSummary\(/);
+  // connectionText（诊断区）仍可保留 ❌；状态行写入不得再有 ❌ 前缀。
+  assert.doesNotMatch(page, /syncMessage\s*=\s*`❌/);
+  // 保存不是同步：保存方法里既不写成功时刻也不写失败原因。
+  const saveAt = page.indexOf('private async saveSettings()');
+  assert.ok(saveAt > 0, 'saveSettings not found');
+  const [saveStart, saveEnd] = matchBrace(page, page.indexOf('{', saveAt));
+  const save = page.slice(saveStart, saveEnd);
+  assert.doesNotMatch(save, /lastSyncAt\s*=/, 'save must never fabricate a sync time');
+  assert.doesNotMatch(save, /lastSyncError\s*=/);
+  // 只有 pull 成功分支能推进 lastSyncAt；status 查询不可以。
+  const actionAt = page.indexOf('private async runAction(');
+  const [actionStart, actionEnd] = matchBrace(page, page.indexOf('{', actionAt));
+  assert.match(page.slice(actionStart, actionEnd), /if \(op === 'pull'\) \{\s*this\.lastSyncAt = nowIso\(\);/);
+  // 诊断区只读：可执行文案不渲染；状态行点一下仍可重试。
+  assert.doesNotMatch(section, /statusReadiness/);
+  assert.doesNotMatch(section, /describePushReadiness/);
+  assert.match(section, /onRetryStatus\(\)/);
+  // 相对时间兜底已整支删除（Lead 追加要求）。
+  assert.doesNotMatch(store, /刚刚/);
+  assert.match(store, /label = TEXT_NEVER;/);
+});

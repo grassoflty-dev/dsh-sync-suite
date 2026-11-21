@@ -536,7 +536,10 @@ describe('F1（review P1）：SSH 警告行的显式出口（切换不落盘）'
     assert.ok(at > 0, '页面必须有 switchToHttpsToken handler');
     const handler = page.slice(at, page.indexOf('\n  }', at));
     assert.match(handler, /this\.authMode = AUTH_HTTPS;/, '必须显式切到 HTTPS（import AUTH_HTTPS）');
-    assert.match(handler, /this\.syncMessage = '';/, '清掉上次 SSH 拦截留下的过时红字');
+    // mod-sync-silent-autoinit（old→new，收紧）：旧断言要求清空 syncMessage @State；
+    // 现在诚实状态由 honestStatus() 现算、绝不赋值，切认证方式不触发任何状态写入或持久化。
+    assert.equal(/syncMessage\s*=/.test(handler), false, '切认证方式不得写状态行');
+    assert.equal(/honestStatus|statusStore|commit\(/.test(handler), false, '切认证方式不得触发任何状态写入/持久化');
     assert.match(
       handler,
       /promptAction\.showToast\(\{ message: '已切换为 HTTPS \+ 令牌，保存后生效' \}\)/,

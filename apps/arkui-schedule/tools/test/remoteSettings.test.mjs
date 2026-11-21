@@ -12,7 +12,8 @@ import { existsSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, test } from 'node:test';
-import { readSettingsFile, readSettingsPage, readSettingsRoot, readSettingsSources } from './settingsSources.mjs';
+import { readSettingsFile, readSettingsPage, readSettingsRoot, readSettingsSources, readSyncPage, readSyncSection } from './settingsSources.mjs';
+import { stripComments } from './helpers/etsSource.mjs';
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -146,6 +147,16 @@ describe('mod-settings-remote-dedupe：迁移幂等、令牌不丢（纯函数�
       assert.equal(second.find((item) => item.id === remote.id).token, remote.token, '不覆盖已迁好的令牌');
     }
   );
+
+  // mod-sync-silent-autoinit：设置面同步文案的新 truth —— 仓库事实只在诊断区，
+  // 用户不会看到「尚未初始化 / 首次克隆 / 先执行拉取」这种要先手动做事的死结。
+  test('同步面用户可见文案没有初始化死结，仓库事实有诊断区标注', () => {
+    const sync = stripComments(readSyncPage()) + '\n' + stripComments(readSyncSection());
+    for (const banned of [/尚未初始化/, /首次克隆/, /先执行「拉取」/, /先拉取克隆仓库/]) {
+      assert.equal(banned.test(sync), false, `同步面残留死结文案：${banned}`);
+    }
+    assert.ok(sync.includes('诊断（仅排查用）'), '同步面必须把仓库事实标成诊断');
+  });
 
   test(
     'normalizeRemoteUrl：裸 host 补 http:// 且识别 query 令牌（迁移前置不变量）',

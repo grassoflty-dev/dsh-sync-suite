@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { stripComments } from './helpers/etsSource.mjs';
+import { matchBrace, stripComments } from './helpers/etsSource.mjs';
 import { requireOverlayRestored } from './guard.mjs';
 
 requireOverlayRestored('fixSyncRetry.test.mjs');
@@ -161,4 +161,37 @@ test('R4 static: Settings → 同步仓库 has exactly ONE help/更多 entry, ca
     assert.match(sheet[1], new RegExp(`Text\\('${action}'\\)`), `更多 sheet must carry ${action}`);
   }
   assert.match(sheet[1], /仓库地址可以先留空/, 'repo help folded into the single sheet');
+});
+
+// mod-sync-silent-autoinit：失败后零步恢复——重试仍在同一「更多」出口，且重试前静默重建工作副本。
+test('R5 static: 查看状态 / 测试连接 / 重试 all re-run silent init, no manual clone prerequisite', () => {
+  const page = src('pages/SettingsSync.ets');
+  const section = src('components/settings/SyncSection.ets');
+  const service = src('services/GitSyncService.ets');
+  const bodyOf = (source, marker) => {
+    const at = source.indexOf(marker);
+    assert.ok(at >= 0, `${marker} not found`);
+    const [start, end] = matchBrace(source, source.indexOf('{', at));
+    return source.slice(start, end);
+  };
+  // 状态行点击与「更多 → 重试」都不消失；重试直接重放上次动作，不提示用户先做什么。
+  assert.match(page, /private retryFromStatus\(\): void/);
+  assert.match(page, /this\.runAction\(this\.lastSyncAction\)/);
+  assert.match(section, /Text\(this\.syncMessage\)/);
+  assert.match(section, /onRetry: \(\): void => \{[\s\S]{0,80}this\.runAction\('pull'\)/);
+  // 三条出口都先静默 init：测试连接显式调用；查看状态/重试经 status/pull → 门面 ensureRepoInitialised。
+  assert.match(bodyOf(page, 'private async testConnection()'), /this\.sync\.ensureRepoInitialised\(\)/);
+  for (const op of ['pull', 'push', 'status']) {
+    const at = service.indexOf(`this.callBridge('${op}'`);
+    assert.ok(at > 0, `门面 ${op} 必须走桥`);
+  }
+  assert.ok(service.indexOf('async ensureRepoInitialised()') < service.indexOf('this.callBridge(\'pull\''),
+    '静默前置在 pull 之前定义并统一调用');
+  // 失败文案只有第三态 + 可重试后缀；旧「先拉取 / 首次克隆」死结绝迹。
+  assert.match(page, /失败：\$\{this\.lastSyncError\}（可重试）/, '失败文案由唯一来源 honestStatus() 给出');
+  assert.doesNotMatch(page, /syncMessage\s*=\s*`❌/,
+    '状态行不再写 ❌ 前缀（诊断区 connectionText 的 ❌ 不在状态行）');
+  for (const banned of [/尚未初始化/, /首次克隆/, /先执行「拉取」/]) {
+    assert.equal(banned.test(page + '\n' + section), false, `失败出口残留死结文案：${banned}`);
+  }
 });

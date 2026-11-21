@@ -109,8 +109,13 @@ export interface GitSyncConfig {
 
 export interface GitSyncResult {
   ok: boolean;
-  /** 面向用户的中文结果或错误说明 */
+  /** 面向用户的中文结果或错误说明（成功恒为三态之一：`已同步 · HH:MM`） */
   message: string;
+  /**
+   * 仅诊断区展示的仓库事实（分支 / HEAD / 领先落后 / 连接探测 / 保留文件等）。
+   * 不是提示、不是下一步动作；用户可见的状态行永不读这个字段。
+   */
+  diagnostics?: string;
   /** 成功且产生了提交/HEAD 时给出 commit sha */
   commit?: string;
   /**
@@ -348,6 +353,8 @@ interface StatusPayload {
   comparable?: boolean;
   /** 冲突条目数（A2；应用不 merge，正常为 0）。 */
   conflicts?: number | null;
+  /** 诊断专用：`fetchRemote` 刷新跟踪引用失败的原因（不进用户可见状态行）。 */
+  remoteError?: string | null;
 }
 
 interface PullPayload {
@@ -436,6 +443,16 @@ const MODE_FILE: number = 33188;
 const MODE_DIR: number = 16384;
 
 const EMPTY_HEADERS: Record<string, string> = {};
+/** mod-sync-silent-autoinit：成功只有一种用户可见文案 `已同步 · HH:MM`（与状态行三态同一词汇）。 */
+const SYNCED_PREFIX: string = '已同步 · ';
+
+/** 本机时钟 `HH:MM`（24 小时制补零，只用于成功结果文案，不编造远端时间）。 */
+function syncedTextNow(): string {
+  const at: Date = new Date();
+  const hour: string = at.getHours().toString().padStart(2, '0');
+  const minute: string = at.getMinutes().toString().padStart(2, '0');
+  return SYNCED_PREFIX + hour + ':' + minute;
+}
 
 // ---------------------------------------------------------------- 错误
 
@@ -727,6 +744,35 @@ export class GitSyncService {
     return this.config;
   }
 
+  /**
+   * 静默初始化前置步骤（mod-sync-silent-autoinit）：任何需要工作副本的入口都先过这里。
+   *
+   * 一次幂等 `clone` 桥调用就是全部：桥侧 `opClone` 在仓库已存在时直接返回 `alreadyInitialized`，
+   * 不做任何网络往返；缺仓库时静默 clone（设备目录先备份后并集恢复），空远端本地 init 交给
+   * E_REMOTE_EMPTY 引导。失败一律是 typed 结果（E_GIT/E_AUTH/E_HTTP/E_FS，可重试），
+   * 页面仍保留「重试」，绝不提示用户「先拉取 / 首次克隆」。
+   */
+  async ensureRepoInitialised(): Promise<GitSyncResult> {
+    const guard: SyncPreconditionResult = this.precondition(false);
+    if (!guard.ok) {
+      return rejected('同步失败', guard.message);
+    }
+    if (this.config.repoUrl.trim().length === 0) {
+      return rejected('同步失败', '请先在设置页填写仓库地址（HTTPS）');
+    }
+    if (this.config.token.length === 0) {
+      return rejected('同步失败', '请填写访问令牌（GitHub/Gitee Personal Access Token）');
+    }
+    try {
+      await this.callBridge('clone', this.configArgs());
+      const ok: GitSyncResult = { ok: true, code: '', message: syncedTextNow() };
+      return ok;
+    } catch (error) {
+      // 静默初始化失败要照常走三态失败行 + 重试，不把桥的内部不变量文案抛给用户。
+      return failed('同步失败', error as Object);
+    }
+  }
+
   // -------------------------------------------------------------- 附件按天 zip（JSZip 在桥里）
 
   /**
@@ -887,26 +933,31 @@ export class GitSyncService {
     if (problem.length > 0) {
       return rejected('拉取失败', problem);
     }
+    // mod-sync-silent-autoinit：工作副本前置，缺仓库时静默 clone/init，失败仍可重试。
+    const init: GitSyncResult = await this.ensureRepoInitialised();
+    if (!init.ok) {
+      return init;
+    }
     try {
       const event: BridgeEvent = await this.callBridge('pull', this.configArgs());
       const data: PullPayload = event.data === undefined ? {} : event.data as PullPayload;
       const branch: string = GitSyncService.textOf(data.branch, this.branchName());
       const head: string = GitSyncService.textOf(data.head, '');
-      let message: string;
+      // 用户可见只有三态；分支 / HEAD / 克隆与否 / 保留文件等事实一律进 diagnostics。
+      let diagnostics: string = '分支 ' + branch + '｜HEAD ' + shortSha(head);
       if (data.cloned === true) {
-        message = '已克隆远端仓库（分支 ' + branch + '，HEAD ' + shortSha(head) + '）';
+        diagnostics = diagnostics + '｜已自动建立工作副本';
       } else if (data.alreadyUpToDate === true) {
-        message = '已是最新（分支 ' + branch + '，HEAD ' + shortSha(head) + '）';
+        diagnostics = diagnostics + '｜与远端一致';
       } else if (data.fastForward === true) {
-        message = '拉取完成（快进更新，分支 ' + branch + '，HEAD ' + shortSha(head) + '）';
-      } else {
-        message = '拉取完成（分支 ' + branch + '，HEAD ' + shortSha(head) + '）';
+        diagnostics = diagnostics + '｜快进更新';
       }
       const preserved: string = describePreserved(data.localPreserved);
       if (preserved.length > 0) {
-        message = message + '；' + preserved;
+        diagnostics = diagnostics + '｜' + preserved;
       }
-      const result: GitSyncResult = { ok: true, message: message, branch: branch };
+      const message: string = syncedTextNow();
+      const result: GitSyncResult = { ok: true, message: message, diagnostics: diagnostics, branch: branch };
       if (head.length > 0) {
         result.commit = head;
       }
@@ -917,7 +968,7 @@ export class GitSyncService {
         if (this.identityConflict) {
           result.identityConflict = true;
           result.identityWarning = this.identityNotice;
-          result.message = result.message + '；' + this.identityNotice;
+          result.diagnostics = (result.diagnostics === undefined ? '' : result.diagnostics) + '｜' + this.identityNotice;
         }
         // 拉取成功后把工作副本里的附件 sha 记成基线：下次推送据此判断「是不是别人改的」
         this.snapshotAttachmentBaselines();
@@ -937,11 +988,11 @@ export class GitSyncService {
           result.fingerprintRecreated = true;
         }
         if (registration.message.length > 0) {
-          result.message = result.message + '；' + registration.message;
+          result.diagnostics = (result.diagnostics === undefined ? '' : result.diagnostics) + '｜' + registration.message;
         }
       } else {
         result.deviceRegistrationError = registration.message;
-        result.message = result.message + '；' + registration.message;
+        result.diagnostics = (result.diagnostics === undefined ? '' : result.diagnostics) + '｜' + registration.message;
       }
       return result;
     } catch (error) {
@@ -976,6 +1027,11 @@ export class GitSyncService {
     const problem: string = this.validateForSync(false);
     if (problem.length > 0) {
       return rejected('推送失败', problem);
+    }
+    // mod-sync-silent-autoinit：静默前置必须在设备登记之前——登记的 pull / commitPaths 也依赖工作副本。
+    const init: GitSyncResult = await this.ensureRepoInitialised();
+    if (!init.ok) {
+      return init;
     }
     // 设备编号登记（数据边界，**fail-closed**）：必须先在 devices/registry.jsonl 里有本机的行，
     // 才能写 devices/<deviceId>/。抢不到编号 → 整次推送失败，绝不用一个可能撞车的号继续写。
@@ -1031,19 +1087,22 @@ export class GitSyncService {
       } else {
         detail = '没有新的改动可提交';
       }
-      let summary: string = (pushed ? '推送完成' : '推送未完成') + '（分支 ' + branch + '，' + detail + '）';
+      // 用户可见只有三态；提交数 / 建分支 / 附件暂停 / 身份冲突都只进 diagnostics。
+      let diagnostics: string = (pushed ? '推送完成' : '推送未完成') + '（分支 ' + branch + '，' + detail + '）';
       if (data.branchCreated === true) {
-        summary = summary + '；已在远端创建分支 ' + branch;
+        diagnostics = diagnostics + '；已在远端创建分支 ' + branch;
       } else if (data.branchCreatedLocal === true) {
-        summary = summary + '；已在本地创建分支 ' + branch;
+        diagnostics = diagnostics + '；已在本地创建分支 ' + branch;
       }
       if (attachmentGuard.blocked > 0) {
-        summary = summary + '；' + describeAttachmentPushBlock(attachmentGuard.blocked, attachmentGuard.reason);
+        diagnostics = diagnostics + '；' + describeAttachmentPushBlock(attachmentGuard.blocked, attachmentGuard.reason);
       }
       if (this.identityConflict) {
-        summary = summary + '；' + this.identityNotice;
+        diagnostics = diagnostics + '；' + this.identityNotice;
       }
-      const result: GitSyncResult = { ok: true, message: summary, branch: branch };
+      const result: GitSyncResult = {
+        ok: true, message: syncedTextNow(), diagnostics: diagnostics, branch: branch
+      };
       if (commit.length > 0) {
         result.commit = commit;
       }
@@ -1206,13 +1265,27 @@ export class GitSyncService {
     if (problem.length > 0) {
       return rejected('查询失败', problem);
     }
+    // mod-sync-silent-autoinit：查看状态 / 测试连接都先静默初始化，再看真实远端状态。
+    const init: GitSyncResult = await this.ensureRepoInitialised();
+    if (!init.ok) {
+      return init;
+    }
     try {
-      const event: BridgeEvent = await this.callBridge('status', this.configArgs());
+      const args: Record<string, string> = this.configArgs();
+      // 带 probe 的「查看状态」要求 ahead/behind/equal 是真值：桥先 fetch 更新跟踪引用。
+      args['fetchRemote'] = withProbe ? 'true' : 'false';
+      const event: BridgeEvent = await this.callBridge('status', args);
       const data: StatusPayload = event.data === undefined ? {} : event.data as StatusPayload;
       const view: SyncStatusView = this.statusViewOf(data);
+      let diagnostics: string = describeSyncStatus(view);
+      const remoteError: string = GitSyncService.textOf(data.remoteError, '');
+      if (remoteError.length > 0) {
+        diagnostics = diagnostics + '｜远端刷新失败：' + remoteError;
+      }
       const result: GitSyncResult = {
         ok: true,
-        message: describeSyncStatus(view),
+        message: syncedTextNow(),
+        diagnostics: diagnostics,
         branch: view.branch,
         ahead: view.ahead,
         behind: view.behind,
@@ -1224,7 +1297,7 @@ export class GitSyncService {
       };
       if (withProbe) {
         const probe: RemoteProbe = await this.probeRemote();
-        result.message = result.message + '｜连接 ' + probe.detail;
+        result.diagnostics = diagnostics + '｜连接 ' + probe.detail;
       }
       return result;
     } catch (error) {
@@ -2386,7 +2459,10 @@ export class GitSyncService {
       'authorName': this.config.authorName,
       'authorEmail': this.config.authorEmail,
       // 桥的 onAuth 用这个用户名（Gitee = 登录名；GitHub = x-access-token）
-      'username': this.authUsername()
+      'username': this.authUsername(),
+      // mod-sync-silent-autoinit：App 侧每次调用都带这个开关，桥内所有需要仓库的 op
+      // 据此先跑静默初始化；直接调桥的单测不带它，旧内部不变量断言保持不变。
+      'autoInit': 'true'
     };
     return args;
   }

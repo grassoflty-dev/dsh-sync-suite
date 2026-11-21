@@ -54,11 +54,10 @@ import {
   DEFAULT_BRANCH,
   canRetrySync,
   classifySyncError,
-  describePushReadiness,
   normalizeSyncAction,
   syncActionLabel
 } from '../model/syncError';
-import type { SyncErrorInfo, SyncStatusView } from '../model/syncError';
+import type { SyncErrorInfo } from '../model/syncError';
 import { CUSTOM_PROVIDER_ID } from '../model/aiProvider';
 import {
   GITEE_PLATFORM,
@@ -71,7 +70,7 @@ import {
   resolvePlatformSelection
 } from '../model/gitAuth';
 import type { PlatformResolution } from '../model/gitAuth';
-import { syncRowSummary } from '../model/settingsMenu';
+import { clockOf } from '../model/settingsMenu';
 import { gitExtrasStore } from '../services/syncController';
 import type { GitSyncExtras } from '../services/syncController';
 import { PageLayout } from '../components/PageLayout';
@@ -82,8 +81,10 @@ import { FieldLabel as FieldLabelBit, HintLine as HintLineBit } from '../compone
 /** 仓库探测超时（毫秒）：只判断域名可达，不需要长超时。 */
 const PROBE_TIMEOUT_MS: number = 10000;
 
-/** 诚实状态行在无数据时给「未同步」，不编造时间。 */
-const SYNC_NEVER: string = '未同步';
+/**
+ * Wave C：本页用户可见状态只有 `honestStatus()` 一个来源（三态 + 启动中性面）。
+ * `syncRowSummary` 只属于设置根页摘要，禁止在本页调用——保存不是一次同步，绝不写成功时刻。
+ */
 
 @Entry
 @Component
@@ -114,8 +115,8 @@ struct SettingsSync {
   @State lastSyncAt: string = '';
   @State lastSyncError: string = '';
   @State lastSyncAction: string = '';
-  /** 详细结果行（✅ / ❌ 文案），由 SyncSection 原样渲染；与本页的 `statusLine()` 摘要互补。 */
-  @State syncMessage: string = SYNC_NEVER;
+  // 用户可见状态行由 honestStatus() 单一来源生成并直接传给 SyncSection；
+  // 不再持有 syncMessage @State —— 保存 / 加载 / Web 就绪等事件都不许伪造同步结果。
   @State syncBusy: boolean = false;
   @State webReady: boolean = false;
   @State statusLine: string = '';
@@ -194,7 +195,7 @@ struct SettingsSync {
     this.lastSyncAction = normalizeSyncAction(settings.lastSyncAction);
     const storedFilter: boolean | undefined = AppStorage.get<boolean>(HOME_INCLUDE_OTHER_KEY);
     this.includeOtherDevices = storedFilter === true;
-    this.syncMessage = syncRowSummary(this.lastSyncAt, this.lastSyncError);
+    // 只读铺状态；状态文案由 honestStatus() 现算，加载配置不是一次同步。
   }
 
   /** 平台扩展设置（分支恒为 main）；旧 platformTouched 锁定标记一律退役、按地址重新推断。 */
@@ -311,7 +312,8 @@ struct SettingsSync {
       }
       this.issuesSummary = '';
       this.firstIssueText = '';
-      this.syncMessage = syncRowSummary(nowIso(), this.lastSyncError);
+      // 保存只写配置，不是一次同步：lastSyncAt / lastSyncError 一律不碰，
+      // honestStatus() 因此保持不变，绝不出现「保存即已同步」的假成功。
       let hint: string = `设置已保存（${nowIso()}）`;
       if (repoEmpty) {
         hint = `设置已保存（${nowIso()}）；仓库地址为空，同步前需要先填写`;
@@ -337,9 +339,7 @@ struct SettingsSync {
   /** SSH 警告行的显式出口：只切本地状态 + toast，落盘仍由「保存」完成。 */
   private switchToHttpsToken(): void {
     this.authMode = AUTH_HTTPS;
-    // 先清掉上次 SSH 拦截留下的 ❌ 红字，再按已持久化状态重算诚实状态行。
-    this.syncMessage = '';
-    this.syncMessage = syncRowSummary(this.lastSyncAt, this.lastSyncError);
+    // 只改认证方式，不动任何同步状态；诚实状态行由页内唯一来源现算，不写也不清。
     promptAction.showToast({ message: '已切换为 HTTPS + 令牌，保存后生效' });
   }
 
@@ -395,7 +395,14 @@ struct SettingsSync {
     }
     const probeUrl: string = repoProbeUrl(repoCheck.url);
     if (probeUrl.length === 0) {
-      this.connectionText = '❌ 无法生成探测地址：请填写 https:// 或 http:// 形式的仓库地址';
+      this.connectionText = '失败：无法生成探测地址，请填写 https:// 或 http:// 形式的仓库地址（可重试）';
+      return;
+    }
+    // mod-sync-silent-autoinit：测试连接不要求先手动拉取——先静默建好工作副本，再看真实远端状态。
+    this.configure();
+    const init: GitSyncResult = await this.sync.ensureRepoInitialised();
+    if (!init.ok) {
+      this.connectionText = `失败：${init.message}（可重试）`;
       return;
     }
     this.connectionBusy = true;
@@ -406,6 +413,11 @@ struct SettingsSync {
         return;
       }
       this.connectionText = describeRepoProbe(code, '');
+      // 真实远端状态（可达 / 领先 / 落后 / 一致 / 上次提交）只落诊断区，不进状态行。
+      const state: GitSyncResult = await this.sync.status(true);
+      if (!this.disposed && state.ok) {
+        this.statusLine = state.diagnostics === undefined ? '' : state.diagnostics;
+      }
     } catch (error) {
       if (this.disposed) {
         return;
@@ -429,18 +441,17 @@ struct SettingsSync {
     if (!this.sync.isReady()) {
       try {
         this.sync.registerProxy();
-        this.syncMessage = '同步内核已注册，正在初始化页面…';
       } catch (error) {
-        this.syncMessage = `注册同步代理失败：${describeError(error)}`;
+        // 内核注册失败是环境问题，不是同步结果：只写 saveHint，不碰状态行。
+        this.saveHint = `注册同步代理失败：${describeError(error)}`;
       }
       return;
     }
     this.webReady = true;
     if (!this.ready) {
-      this.syncMessage = '同步内核已就绪，正在读取设置…';
       return;
     }
-    this.syncMessage = syncRowSummary(this.lastSyncAt, this.lastSyncError);
+    // 状态行完全由 honestStatus() 现算；Web 就绪不产生任何同步结果。
     this.refreshStatus(true);
     this.refreshIdentityWarning();
   }
@@ -465,8 +476,11 @@ struct SettingsSync {
       }
       this.lastStatusResult = result;
       this.statusLine = result.message;
+      if (result.diagnostics !== undefined && result.diagnostics.length > 0) {
+        this.statusLine = result.diagnostics;
+      }
     } catch (error) {
-      // 状态刷新失败不影响主流程（同步结果已写在 syncMessage 里）
+      // 状态刷新失败不影响主流程（状态行由 honestStatus() 现算，诊断事实留旧值即可）
     }
   }
 
@@ -509,34 +523,22 @@ struct SettingsSync {
     }
   }
 
-  /** 最近一次 status 结果 → 纯逻辑视图（供「能不能推」说明行复用）。 */
-  private statusView(): SyncStatusView {
-    const result: GitSyncResult | null = this.lastStatusResult;
-    const view: SyncStatusView = {
-      initialized: result !== null && result.initialized === true,
-      branch: result === null || result.branch === undefined ? DEFAULT_BRANCH : result.branch,
-      head: result === null || result.commit === undefined ? '' : result.commit,
-      ahead: result === null || result.ahead === undefined ? 0 : result.ahead,
-      behind: result === null || result.behind === undefined ? 0 : result.behind,
-      diverged: result !== null && result.diverged === true,
-      conflicts: result === null || result.conflicts === undefined ? 0 : result.conflicts,
-      changedCount: result === null || result.changedCount === undefined ? 0 : result.changedCount,
-      remoteConfigured: result !== null && result.remoteConfigured === true,
-      lastCommitMessage: ''
-    };
-    return view;
-  }
+  /** 状态行只有 honestStatus() 一个来源；「能不能推」类可执行文案已随 m1 移出诊断区。 */
 
-  private statusReadiness(): string {
-    return describePushReadiness(this.statusView());
-  }
-
-  /** 诚实状态行：忙碌「同步中…」；否则按 persisted 状态给「已同步·HH:MM / 失败：原因 / 未同步」。 */
+  /**
+   * 用户可见状态行只有三态（mod-sync-silent-autoinit）：
+   * `同步中…` / `已同步 · HH:MM` / `失败：<原因>（可重试）`。
+   * 仓库是否已克隆、分支 / HEAD / 领先落后 / outbox 等待数一律只在诊断区出现。
+   */
   private honestStatus(): string {
     if (this.syncBusy) {
       return '同步中…';
     }
-    return syncRowSummary(this.lastSyncAt, this.lastSyncError);
+    if (this.lastSyncError.length > 0) {
+      return `失败：${this.lastSyncError}（可重试）`;
+    }
+    const clock: string = clockOf(this.lastSyncAt);
+    return clock.length > 0 ? `已同步 · ${clock}` : '尚未同步';
   }
 
   /** 失败时点状态行即重放上次动作（不可重放则点不动、不假重试）。 */
@@ -567,49 +569,56 @@ struct SettingsSync {
     }
   }
 
-  /** 失败结果折成诚实文案 + 持久化；原因保留 typed 原文，不静默吞。 */
+  /**
+   * 失败结果折成第三态 `失败：<原因>（可重试）` + 持久化；原因保留 typed 原文，不静默吞。
+   * 失败后 `lastSyncAction` 不动，状态行点击与「更多 → 重试」都仍在（零步恢复）。
+   */
   private async applySyncFailure(code: string, message: string): Promise<void> {
     const info: SyncErrorInfo = classifySyncError(code, message);
-    const suffix: string = info.retryable ? '（可直接重试）' : '';
-    this.syncMessage = `❌ ${info.title}：${info.detail}${suffix}`;
+    // 只写 typed 原因；文案由 honestStatus() 折成第三态，页面不持有状态字符串。
     this.lastSyncError = `${info.title}：${info.detail}`;
     await this.persistSyncState();
+  }
+
+  /** 配置 / 环境类提示走 toast 或 saveHint，绝不写进同步状态行（不是同步结果）。 */
+  private notice(message: string): void {
+    promptAction.showToast({ message: message, duration: toastMsFor(false) });
   }
 
   /** 同步动作入口：只有 status / pull（重试用），没有推送 / 立即同步按钮。 */
   private async runAction(action: string): Promise<void> {
     if (action === 'cancel-wait') {
       this.syncBusy = false;
-      this.syncMessage = '已停止等待：后台可能仍在执行，稍后点「查看状态」确认结果';
+      this.notice('已停止等待：后台可能仍在执行，稍后点「查看状态」确认结果');
       return;
     }
     if (!this.webReady) {
-      this.syncMessage = '同步内核尚未就绪，请稍候再试（隐藏 Web 环境仍在加载）';
+      this.notice('同步内核尚未就绪，请稍候再试（隐藏 Web 环境仍在加载）');
       return;
     }
     const repoCheck: RepoUrlCheck = validateRepoUrl(this.repoUrl);
     this.repoUrlError = repoCheck.ok ? '' : repoCheck.error;
     if (!repoCheck.ok) {
-      this.syncMessage = `请先修正仓库地址：${repoCheck.error}`;
+      this.notice(`请先修正仓库地址：${repoCheck.error}`);
       return;
     }
     if (repoCheck.scheme !== 'https' && repoCheck.scheme !== 'http') {
-      this.syncMessage = `${SSH_UNSUPPORTED_SHORT}：请把仓库地址改成 https:// 并点「改用 HTTPS 令牌」`;
+      this.notice(`${SSH_UNSUPPORTED_SHORT}：请把仓库地址改成 https:// 并点「改用 HTTPS 令牌」`);
       return;
     }
     const authBlocker: string = this.authBlocker();
     if (authBlocker.length > 0) {
-      this.syncMessage = `❌ ${authBlocker}`;
+      this.notice(`失败：${authBlocker}（可重试）`);
       return;
     }
     const op: string = normalizeSyncAction(action);
     if (op.length === 0) {
-      this.syncMessage = '未知的同步动作：只支持拉取 / 查看状态';
+      this.notice('未知的同步动作：只支持拉取 / 查看状态');
       return;
     }
     const label: string = syncActionLabel(op);
+    // 忙碌态由 syncBusy 驱动 honestStatus() 输出「同步中…」，不再写字符串。
     this.syncBusy = true;
-    this.syncMessage = `正在${label}…`;
     this.lastSyncAction = op;
     let succeeded: boolean = false;
     try {
@@ -629,10 +638,15 @@ struct SettingsSync {
         await this.applySyncFailure(code, result.message);
         return;
       }
-      const commit = result.commit === undefined || result.commit.length === 0 ? '' : `（commit ${result.commit}）`;
-      this.syncMessage = `✅ ${result.message}${commit}`;
+      // 事实只进诊断区；成功时刻只在**真正跑过同步（pull）**后写，
+      // 纯 status 查询不是一次同步，不得把「已同步 · HH:MM」刷新成现在。
+      if (result.diagnostics !== undefined && result.diagnostics.length > 0) {
+        this.statusLine = result.diagnostics;
+      }
       this.lastSyncError = '';
-      this.lastSyncAt = nowIso();
+      if (op === 'pull') {
+        this.lastSyncAt = nowIso();
+      }
       succeeded = true;
       await this.persistSyncState();
     } catch (error) {
@@ -646,7 +660,6 @@ struct SettingsSync {
       }
     }
     if (succeeded) {
-      this.syncMessage = syncRowSummary(this.lastSyncAt, this.lastSyncError);
       await this.refreshStatus(true);
     }
   }
@@ -690,21 +703,7 @@ struct SettingsSync {
     }
   }
 
-  /** 诚实状态行：三态口径统一在这里，失败态点一下即重试。 */
-  @Builder
-  StatusLine() {
-    Text(this.honestStatus())
-      .fontSize(FONT.caption)
-      .lineHeight(LINE_HEIGHT.caption)
-      .fontColor(this.lastSyncError.length > 0 ? $r('app.color.danger') : $r('app.color.text_secondary'))
-      .maxLines(1)
-      .textOverflow({ overflow: TextOverflow.Ellipsis })
-      .width('100%')
-      .textAlign(TextAlign.Start)
-      .onClick(() => {
-        this.retryFromStatus();
-      })
-  }
+  /** 状态行已统一到 SyncSection 的 `syncMessage`（由 honestStatus() 提供），本页不再渲染第二行。 */
 
   /**
    * 唯一的「更多」弹层（mod-fix-sync-affordance）：组头「更多」是唯一帮助/动作入口，
@@ -775,6 +774,12 @@ struct SettingsSync {
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
       if (this.connectionText.length > 0) {
+        // 诊断区：连接探测的 HTTP 事实只在这里出现，不是提示也不是「先做什么」的死结。
+        Text('诊断（仅排查用）')
+          .fontSize(FONT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
         this.HintLine(this.connectionText)
       }
       this.HintLine('仓库地址可以先留空（只在本机记录日程）；留空时保存不报错，但同步与测试连接前必须先填写。')
@@ -826,11 +831,11 @@ struct SettingsSync {
                 deviceId: this.deviceId,
                 identityWarning: this.identityWarning,
                 attachmentWarning: this.attachmentWarning,
-                syncMessage: this.syncMessage,
+                // 唯一状态来源：honestStatus() 现算的三态/中性文案，直接喂给正文区的状态行。
+                syncMessage: this.honestStatus(),
                 syncBusy: this.syncBusy,
                 webReady: this.webReady,
                 statusLine: this.statusLine,
-                statusReadiness: this.statusReadiness(),
                 lastSyncError: this.lastSyncError,
                 lastSyncAction: this.lastSyncAction,
                 saveHint: this.saveHint,
@@ -852,6 +857,9 @@ struct SettingsSync {
                 runAction: (action: string): void => {
                   this.runAction(action);
                 },
+                onRetryStatus: (): void => {
+                  this.retryFromStatus();
+                },
                 onOpenSyncMore: (): void => {
                   this.panel = 'more';
                 },
@@ -864,11 +872,11 @@ struct SettingsSync {
                 },
                 onWebError: (): void => {
                   if (!this.disposed) {
-                    this.syncMessage = '❌ 同步内核加载失败：rawfile/git/index.html 无法加载';
+                    // 内核加载失败是环境问题，不是同步结果：只写 saveHint。
+                    this.saveHint = '同步内核加载失败：rawfile/git/index.html 无法加载';
                   }
                 }
               })
-              this.StatusLine()
             }
             .width('100%')
             .alignItems(HorizontalAlign.Start)
