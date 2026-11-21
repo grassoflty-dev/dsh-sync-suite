@@ -260,11 +260,11 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** 取失败文案：拿到响应时按状态码映射，否则用网络/超时文案（源名由调用方给出）。 */
-function failureMessage(outcome: AiHttpOutcome, providerLabel: string): string {
+function failureMessage(outcome: AiHttpOutcome, providerLabel: string, providerId: string, model: string): string {
   if (outcome.responded) {
-    return classifyAiError(outcome.status, outcome.body, providerLabel);
+    return classifyAiError(outcome.status, outcome.body, providerLabel, providerId, model);
   }
-  return classifyAiError(outcome.status, outcome.error, providerLabel);
+  return classifyAiError(outcome.status, outcome.error, providerLabel, providerId, model);
 }
 
 /**
@@ -383,7 +383,7 @@ async function callChat(
         break;
       }
     }
-    lastError = failureMessage(outcome, providerLabel);
+    lastError = failureMessage(outcome, providerLabel, route.providerId, route.model);
     attempts++;
     if (attempts >= maxAttempts || !shouldRetry(outcome.status)) {
       break;
@@ -738,7 +738,12 @@ export async function testAiConnection(
   const failedResult: AiTestResult = {
     ok: false,
     status: outcome.status,
-    message: describeAiTestResult(false, outcome.status, route.model, failureMessage(outcome, label)),
+    message: describeAiTestResult(
+      false,
+      outcome.status,
+      route.model,
+      failureMessage(outcome, label, route.providerId, route.model)
+    ),
     elapsedMs: elapsedMs
   };
   return failedResult;

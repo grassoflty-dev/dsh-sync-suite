@@ -72,7 +72,7 @@ describe('AI_PROVIDERS：预设表', () => {
 
   test('端点与模型按发布版预设钉住', () => {
     assert.equal(findProvider('deepseek').baseURL, 'https://api.deepseek.com/v1');
-    assert.equal(findProvider('opencode-go').baseURL, 'https://opencode.ai/inference/go/v1');
+    assert.equal(findProvider('opencode-go').baseURL, 'https://opencode.ai/inference/go/openai/v1');
     assert.equal(findProvider('codex').baseURL, 'https://api.openai.com/v1');
     assert.equal(findProvider('openrouter').baseURL, 'https://openrouter.ai/api/v1');
     assert.equal(findProvider('custom').baseURL, '');
@@ -457,23 +457,37 @@ describe('hintForProvider：失败后的下一步建议', () => {
 });
 
 // ---------------------------------------------------------------- OpenCode Go live-test 400 的源/模型入口
-describe('OpenCode Go：所选源/模型与会话头修复的适用范围', () => {
+describe('OpenCode Go：所选源/模型与端点修复的适用范围', () => {
   test('预设钉住 live-test 那一对：opencode-go + deepseek-v4.1-flash', () => {
     const preset = findProvider('opencode-go');
     assert.equal(preset.id, 'opencode-go');
-    assert.equal(preset.baseURL, 'https://opencode.ai/inference/go/v1');
+    assert.equal(preset.baseURL, 'https://opencode.ai/inference/go/openai/v1');
     assert.equal(defaultModelOf('opencode-go'), 'deepseek-v4.1-flash');
     assert.equal(
       chatCompletionsURL(preset.baseURL),
-      'https://opencode.ai/inference/go/v1/chat/completions',
-      '服务层实际 POST 的端点'
+      'https://opencode.ai/inference/go/openai/v1/chat/completions',
+      '服务层实际 POST 的端点（官方模型目录 api.chat-completions.base_url）'
     );
   });
 
-  test('保留用户手选模型；不切到 pay-as-you-go 端点（key/billing 不同）', () => {
+  test('模型 slug 钉死为官方 id：无 opencode/ 前缀、无 -free 后缀、大小写逐字一致', () => {
+    // 官方 Go 模型目录（GET https://opencode.ai/inference/go/v1/models）的 id 就是这个值；
+    // canonical_id 是 deepseek/deepseek-v4.1-flash-1017，但请求体只认 id，不认 canonical_id。
+    // 直接钉两个模型的映射：任何改成带前缀 / 后缀 / 换大小写的改动都会让本用例变红。
+    assert.deepEqual(modelsOf('opencode-go').map((model) => model.id), ['deepseek-v4.1-flash', 'deepseek-v4-pro']);
     assert.equal(resolveModel('opencode-go', 'deepseek-v4.1-flash'), 'deepseek-v4.1-flash');
+    assert.equal(resolveModel('opencode-go', 'deepseek-v4-pro'), 'deepseek-v4-pro');
+    for (const model of modelsOf('opencode-go')) {
+      assert.equal(model.id.startsWith('opencode/'), false, `${model.id} 是 API 请求体 id，不加 OpenCode 配置前缀`);
+      assert.equal(model.id.startsWith('opencode-go/'), false, `${model.id} 是 API 请求体 id，不加 provider 前缀`);
+      assert.equal(model.id.endsWith('-free'), false, `${model.id} 不是免费档，别静默换模型`);
+    }
+  });
+
+  test('保留 Go 计划端点；不切到 pay-as-you-go 端点（key/billing 不同）', () => {
     const url = chatCompletionsURL(findProvider('opencode-go').baseURL);
-    assert.match(url, /^https:\/\/opencode\.ai\/inference\/go\/v1\/chat\/completions$/);
-    assert.equal(url.includes('/inference/openai/'), false, 'Go 端点是用户 key 所属计划，不能改投按量端点');
+    assert.match(url, /^https:\/\/opencode\.ai\/inference\/go\/openai\/v1\/chat\/completions$/);
+    assert.equal(url.startsWith('https://opencode.ai/inference/go/'), true, 'Go 端点是用户 key 所属计划');
+    assert.equal(url.startsWith('https://opencode.ai/inference/openai/'), false, '不能改投按量端点');
   });
 });

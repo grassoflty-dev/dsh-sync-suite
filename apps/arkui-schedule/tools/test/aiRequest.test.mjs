@@ -42,8 +42,10 @@ const {
   DEFAULT_AI_BASE_URL,
   DEFAULT_AI_MODEL,
   AiFallbackError,
+  AiModelRefusalError,
   AiRouteRefusalError,
   aiChatUrl,
+  aiModelRefusalError,
   aiRouteRefusalError,
   buildAiRequest,
   clampAiTimeout,
@@ -52,6 +54,7 @@ const {
   defaultAiOptions,
   describeAiTestResult,
   describeUsage,
+  isAiModelRefusal,
   isAiRouteRefusal,
   newAiSessionId,
   normalizeAiOptions,
@@ -724,5 +727,92 @@ describe('网关路由拒绝：类型化错误 + 中文可操作文案', () => {
     assert.match(DEEPSEEK_SRC, /throw refusal;/);
     assert.match(FALLBACK_SRC, /aiRouteRefusalError\(response\.status, response\.body, preset\.label\)/);
     assert.match(FALLBACK_SRC, /refusal !== null\s*\?\s*refusal\.message/);
+  });
+});
+
+// ---------------------------------------------------------------- OpenCode Go live-test 400 的模型拒绝修复
+//
+// 会话头修复后线上仍报 400「请求无效，请检查模型名 / ai_generate」。排查结论：模型 slug
+// deepseek-v4.1-flash 是官方 id（不加 opencode/ 前缀），真正错的是端点路径：Go 网关的
+// Chat Completions 在 /inference/go/openai/v1，旧预设 /inference/go/v1 只服务 /models。
+// 这里钉住修正后的请求形状 + 兜底的类型化文案（万一服务端仍拒模型，用户能一眼看到源与模型）。
+
+describe('OpenCode Go 请求形状：fake request 的 body 恰好五个键，无额外字段', () => {
+  test('POST 体逐字钉住 model / messages / temperature / max_tokens / stream', () => {
+    const request = buildAiRequest(
+      'https://opencode.ai/inference/go/openai/v1',
+      'deepseek-v4.1-flash',
+      'ping',
+      { ...defaultAiOptions(), maxTokens: 8, retries: 0 }
+    );
+    assert.equal(request.url, 'https://opencode.ai/inference/go/openai/v1/chat/completions');
+    const body = JSON.parse(request.body);
+    assert.deepEqual(Object.keys(body).sort(), ['max_tokens', 'messages', 'model', 'stream', 'temperature']);
+    assert.equal(body.model, 'deepseek-v4.1-flash');
+    assert.deepEqual(body.messages, [{ role: 'user', content: 'ping' }]);
+    assert.equal(body.temperature, 0.7);
+    assert.equal(body.max_tokens, 8, 'DeepSeek/OpenCode 兼容端点用 max_tokens，不是 max_completion_tokens');
+    assert.equal(body.stream, false, '必须一次性拿 JSON，不能开流');
+    for (const extra of ['reasoning_effort', 'top_p', 'session_id', 'apiKey', 'key']) {
+      assert.equal(extra in body, false, `请求体不该出现额外字段 ${extra}`);
+    }
+    assert.equal(JSON.stringify(body).includes(request.sessionId), false, '会话 id 只走 HTTP 头');
+  });
+
+  test('服务层两条路径都带 Content-Type / Bearer 头模板 / x-opencode-session（源码断言）', () => {
+    for (const [name, src] of [
+      ['deepseek.ets', DEEPSEEK_SRC],
+      ['aiFallbackRunner.ets', FALLBACK_SRC]
+    ]) {
+      assert.match(src, /'Content-Type': 'application\/json'/, `${name} 缺 Content-Type`);
+      assert.equal(/'Authorization': `Bearer \$\{apiKey\}`/.test(src), true, `${name} 的 Authorization 必须是 Bearer 模板`);
+      assert.equal(/'x-opencode-session': request\.sessionId/.test(src), true, `${name} 缺会话头`);
+    }
+  });
+});
+
+describe('模型拒绝：类型化文案同时点名 provider + model，不回显原始 body', () => {
+  // 线上响应体的形状（只含错误码与文案，绝不含 key），用于判定与「不回显」回归。
+  const RAW_MODEL_400 = JSON.stringify({ error: { code: 'ai_generate', message: '请求无效，请检查模型名' } });
+  const TYPED =
+    'AI 服务拒绝了请求（provider=opencode-go，model=deepseek-v4.1-flash）：模型名无效或该源不支持该模型，请在设置里改选模型或切换 AI 源。';
+
+  test('只把 400/404/422 + 模型特征判为模型拒绝，路由拒绝与普通 400 不误判', () => {
+    assert.equal(isAiModelRefusal(400, RAW_MODEL_400), true);
+    assert.equal(isAiModelRefusal(400, JSON.stringify({ error: { message: 'invalid model name' } })), true);
+    assert.equal(isAiModelRefusal(400, 'request is missing x-opencode-session and cannot be routed'), false);
+    assert.equal(isAiModelRefusal(400, ''), false);
+    assert.equal(isAiModelRefusal(401, RAW_MODEL_400), false);
+    assert.equal(isAiModelRefusal(200, RAW_MODEL_400), false);
+  });
+
+  test('类型化错误点名源 id 与实际模型名；原始响应体与 key 都不出现在文案里', () => {
+    const refusal = aiModelRefusalError(400, RAW_MODEL_400, 'opencode-go', 'deepseek-v4.1-flash');
+    assert.ok(refusal instanceof AiModelRefusalError);
+    assert.ok(refusal instanceof Error);
+    assert.equal(refusal.name, 'AiModelRefusalError');
+    assert.equal(refusal.status, 400);
+    assert.equal(refusal.providerId, 'opencode-go');
+    assert.equal(refusal.model, 'deepseek-v4.1-flash');
+    assert.equal(refusal.message, TYPED);
+    assert.equal(refusal.message.includes('请求无效，请检查模型名'), false, '不回显网关原始文案');
+    assert.equal(refusal.message.includes('ai_generate'), false, '错误码只用于判定，不摊给用户');
+    assert.equal(KEYISH.test(refusal.message), false, '文案不含 key');
+  });
+
+  test('classifyAiError：传源 id + 模型名走类型化文案；不传仍走原状态码映射', () => {
+    assert.equal(classifyAiError(400, RAW_MODEL_400, 'OpenCode Go', 'opencode-go', 'deepseek-v4.1-flash'), TYPED);
+    assert.match(classifyAiError(400, '', 'OpenCode Go', 'opencode-go', 'deepseek-v4.1-flash'), /请求无效/);
+    assert.match(classifyAiError(400, RAW_MODEL_400, 'OpenCode Go'), /请求无效/, '中性调用不变');
+    // 路由拒绝优先于模型拒绝（两者都是 400）
+    const routeBody = 'request is missing x-opencode-session and cannot be routed';
+    assert.match(classifyAiError(400, routeBody, 'OpenCode Go', 'opencode-go', 'deepseek-v4.1-flash'), /网关无法路由/);
+  });
+
+  test('服务层：单源与多源都把源 id + 实际模型名交给文案层（源码断言）', () => {
+    assert.match(DEEPSEEK_SRC, /failureMessage\(outcome, providerLabel, route\.providerId, route\.model\)/);
+    assert.match(DEEPSEEK_SRC, /classifyAiError\(outcome\.status, outcome\.body, providerLabel, providerId, model\)/);
+    assert.match(FALLBACK_SRC, /aiModelRefusalError\(response\.status, response\.body, preset\.id, model\)/);
+    assert.match(FALLBACK_SRC, /modelRefusal !== null\s*\?\s*modelRefusal\.message/);
   });
 });

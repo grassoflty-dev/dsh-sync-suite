@@ -42,6 +42,7 @@ import type { AiProviderPreset } from '../model/aiProvider';
 import {
   AI_STATUS_NETWORK,
   AI_STATUS_TIMEOUT,
+  aiModelRefusalError,
   aiRouteRefusalError,
   buildAiRequest,
   classifyAiError,
@@ -331,15 +332,10 @@ async function attemptSource(
   if (key.length === 0) {
     return configAttempt(`未设置 ${preset.label} 密钥：请先在设置页填写（密钥只保存在本机）`, startedAt);
   }
+  const model: string = resolveModel(preset.id, source.modelId);
   let request: AiRequest;
   try {
-    request = buildAiRequest(
-      chatCompletionsURL(baseURLOf(source)),
-      resolveModel(preset.id, source.modelId),
-      prompt,
-      options,
-      SYSTEM_PROMPT
-    );
+    request = buildAiRequest(chatCompletionsURL(baseURLOf(source)), model, prompt, options, SYSTEM_PROMPT);
   } catch (error) {
     return configAttempt(describeError(error as Object), startedAt);
   }
@@ -372,15 +368,20 @@ async function attemptSource(
       return unparsable;
     }
   }
-  // 路由拒绝：用类型化错误的中文可操作文案（不回显网关原始响应体）；本运行器保持「不抛异常」契约，
-  // 诊断照常逐条上界面。单源路径 services/deepseek.ets 则在 callChat 里直接抛同一个类型化错误。
+  // 路由拒绝 / 模型拒绝：都用类型化中文可操作文案（不回显网关原始响应体）；本运行器保持「不抛异常」契约，
+  // 诊断照常逐条上界面。模型拒绝的文案同时点名源 id 与实际发送的模型名，便于用户在设置里改选或换源。
   const refusal = response.responded ? aiRouteRefusalError(response.status, response.body, preset.label) : null;
+  const modelRefusal = response.responded
+    ? aiModelRefusalError(response.status, response.body, preset.id, model)
+    : null;
   const message: string =
     refusal !== null
       ? refusal.message
-      : response.responded
-        ? classifyAiError(response.status, response.body, preset.label)
-        : classifyAiError(response.status, response.error, preset.label);
+      : modelRefusal !== null
+        ? modelRefusal.message
+        : response.responded
+          ? classifyAiError(response.status, response.body, preset.label, preset.id, model)
+          : classifyAiError(response.status, response.error, preset.label, preset.id, model);
   const failed: SourceAttempt = {
     ok: false,
     status: response.status,

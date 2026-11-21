@@ -385,6 +385,89 @@ export function aiRouteRefusalError(status: number, bodyText: string, providerLa
   return new AiRouteRefusalError(label, status, aiErrorCode(bodyText));
 }
 
+/**
+ * 网关「模型名无效 / 该源不支持该模型」的错误码特征（OpenCode Go live-test 400 实测）。
+ * 只用于识别，不回显给用户；key 永远不进响应体，也不进这个常量。
+ */
+const AI_ERROR_CODE_MODEL_REJECTED: string = 'ai_generate';
+
+/**
+ * 模型被服务端拒绝时的类型化错误（典型：HTTP 400 `ai_generate`，文案像「请检查模型名」）。
+ *
+ * 服务端原始响应体只用于判定，**绝不回显**（它可能带网关内部细节）；本错误只带：
+ * - `status`：原始 HTTP 状态码（诊断用）；
+ * - `providerId` / `model`：实际使用的源 id 与模型名——用户据此在设置里改选或换源；
+ * - `message`：中文、同时点名 provider 与 model 的一行可操作文案（页面直接展示）。
+ */
+export class AiModelRefusalError extends Error {
+  /** 原始 HTTP 状态码（通常是 400）。 */
+  status: number;
+  /** 实际使用的源 id（如 opencode-go）。 */
+  providerId: string;
+  /** 实际发送的模型名（如 deepseek-v4.1-flash）。 */
+  model: string;
+
+  constructor(providerId: string, model: string, status: number) {
+    super(
+      `AI 服务拒绝了请求（provider=${providerId}，model=${model}）：模型名无效或该源不支持该模型，请在设置里改选模型或切换 AI 源。`
+    );
+    this.name = 'AiModelRefusalError';
+    this.status = status;
+    this.providerId = providerId;
+    this.model = model;
+  }
+}
+
+/**
+ * 判定是否为「模型名无效 / 该源不支持该模型」的响应。
+ *
+ * 只认 400/404/422，且响应体出现强特征：错误码 `ai_generate`，或中英文的模型无效措辞。
+ * 路由拒绝（缺会话头）由 `isAiRouteRefusal` 先判，命中后不会走到这里；普通 400 也不误判。
+ */
+export function isAiModelRefusal(status: number, bodyText: string): boolean {
+  if (status !== 400 && status !== 404 && status !== 422) {
+    return false;
+  }
+  const text: string = typeof bodyText === 'string' ? bodyText.toLowerCase() : '';
+  if (text.length === 0) {
+    return false;
+  }
+  if (text.indexOf(AI_ERROR_CODE_MODEL_REJECTED) >= 0) {
+    return true;
+  }
+  const phrases: string[] = [
+    '请检查模型名',
+    '模型名无效',
+    'invalid model',
+    'model not found',
+    'unknown model',
+    'unsupported model',
+    'model_not_found',
+    'model is not supported'
+  ];
+  for (const phrase of phrases) {
+    if (text.indexOf(phrase) >= 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 命中模型拒绝时返回类型化错误，否则返回 `null`（调用方据此换文案，不回显原始 body）。 */
+export function aiModelRefusalError(
+  status: number,
+  bodyText: string,
+  providerId: string,
+  model: string
+): AiModelRefusalError | null {
+  if (!isAiModelRefusal(status, bodyText)) {
+    return null;
+  }
+  const id: string = typeof providerId === 'string' && providerId.trim().length > 0 ? providerId.trim() : 'unknown';
+  const name: string = typeof model === 'string' && model.trim().length > 0 ? model.trim() : 'unknown';
+  return new AiModelRefusalError(id, name, status);
+}
+
 /** 默认参数（每次返回新对象，避免调用方改到共享常量）。 */
 export function defaultAiOptions(): AiOptions {
   const options: AiOptions = {
@@ -557,15 +640,31 @@ function aiErrorDetail(bodyText: string): string {
  * @param status   HTTP 状态码；`AI_STATUS_NETWORK`（0）= 网络层失败，`AI_STATUS_TIMEOUT`（-1）= 超时
  * @param bodyText 响应体文本（用于提取 `error.message`，可为空）
  * @param providerLabel 源名（如 `OpenCode Go`），空白/缺省 → `AI 服务`
+ * @param providerId 源 id（如 `opencode-go`）；与 `model` 同时给出时启用「模型被拒绝」类型化文案
+ * @param model 实际发送的模型名；类型化文案会同时点名它与 `providerId`
  * @returns 中文文案；状态码 200 返回空串（没有错误）
  */
-export function classifyAiError(status: number, bodyText: string, providerLabel: string = AI_SERVICE_LABEL): string {
+export function classifyAiError(
+  status: number,
+  bodyText: string,
+  providerLabel: string = AI_SERVICE_LABEL,
+  providerId: string = '',
+  model: string = ''
+): string {
   const label: string =
     typeof providerLabel === 'string' && providerLabel.trim().length > 0 ? providerLabel.trim() : AI_SERVICE_LABEL;
   // 路由拒绝是「可操作」错误：优先给类型化文案，绝不把网关原始响应体摊给用户
   const refusal: AiRouteRefusalError | null = aiRouteRefusalError(status, bodyText, label);
   if (refusal !== null) {
     return refusal.message;
+  }
+  // 模型被拒绝：类型化文案同时点名 provider 与 model，且不回显服务端原始响应体。
+  // 只有服务层把两者都传进来才启用（中性调用/老测试仍走下面的状态码映射）。
+  if (typeof providerId === 'string' && providerId.trim().length > 0 && typeof model === 'string' && model.trim().length > 0) {
+    const modelRefusal: AiModelRefusalError | null = aiModelRefusalError(status, bodyText, providerId, model);
+    if (modelRefusal !== null) {
+      return modelRefusal.message;
+    }
   }
   switch (status) {
     case AI_STATUS_OK:

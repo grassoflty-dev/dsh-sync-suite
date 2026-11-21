@@ -43,7 +43,11 @@ export const AI_PROVIDERS: AiProviderPreset[] = [
   {
     id: 'opencode-go',
     label: 'OpenCode Go',
-    baseURL: 'https://opencode.ai/inference/go/v1',
+    // 官方 Go 网关把 Chat Completions 挂在 /inference/go/openai/v1（模型目录的
+    // api.chat-completions.base_url 也是这个值）；旧值 /inference/go/v1 只服务 /models，
+    // 拿它拼 /chat/completions 会被网关判为无效请求（400 ai_generate，看着像模型名错）。
+    // 模型 slug 本身是对的：deepseek-v4.1-flash 就是官方 id，不加 opencode/ 前缀。
+    baseURL: 'https://opencode.ai/inference/go/openai/v1',
     models: [
       { id: 'deepseek-v4.1-flash', label: 'DeepSeek V4.1 Flash' },
       { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' }

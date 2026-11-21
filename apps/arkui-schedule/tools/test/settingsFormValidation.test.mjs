@@ -561,7 +561,7 @@ describe('AI 源/模型字段：预设 opencode-go 不被整表校验误拦', ()
   test('opencode-go + deepseek-v4.1-flash 走预设（无需手填地址），校验通过', async () => {
     const { findProvider, resolveModel } = await import('../.build/model/aiProvider.js');
     const preset = findProvider('opencode-go');
-    assert.equal(preset.baseURL, 'https://opencode.ai/inference/go/v1');
+    assert.equal(preset.baseURL, 'https://opencode.ai/inference/go/openai/v1');
     assert.equal(resolveModel('opencode-go', 'deepseek-v4.1-flash'), 'deepseek-v4.1-flash');
 
     const issues = check({ customProvider: false, aiModel: 'deepseek-v4.1-flash', aiBaseURL: '' });
