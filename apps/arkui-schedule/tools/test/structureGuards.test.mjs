@@ -9,9 +9,10 @@
 // 这三条都不是「文本在不在」的问题，是「结构连不连得上」的问题，所以单独一组断言盯着，
 // 判据来自 `helpers/structureGuards.mjs`（`build()` / `@Builder` 区间 + 读写计数 + 双向装配）。
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
-import { APP_ROOT } from './helpers/etsSource.mjs';
+import { APP_ROOT, stripComments } from './helpers/etsSource.mjs';
 import { requireOverlayRestored } from './guard.mjs';
 import {
   collectIssueFields,
@@ -31,6 +32,13 @@ import {
 requireOverlayRestored('structureGuards.test.mjs');
 
 const PAGE_SETTINGS = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'pages', 'Settings.ets');
+// S4 外壳真值：装配（Home ↔ ShellRail）+ 两份页面清单登记。
+const PAGE_HOME = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'pages', 'Home.ets');
+const SHELL_RAIL = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'components', 'shell', 'ShellRail.ets');
+const HOME_CODE = stripComments(readFileSync(PAGE_HOME, 'utf8'));
+const RAIL_CODE = stripComments(readFileSync(SHELL_RAIL, 'utf8'));
+const MAIN_PAGES = JSON.parse(readFileSync(join(APP_ROOT, 'entry', 'src', 'main', 'resources', 'base', 'profile', 'main_pages.json'), 'utf8'));
+const HARMONY_PAGES = JSON.parse(readFileSync(join(APP_ROOT, 'entry', 'src', 'harmony', 'resources', 'base', 'profile', 'main_pages.json'), 'utf8'));
 const SECTION_FILES = [
   'components/settings/SyncSection.ets',
   'components/settings/AiSection.ets',
@@ -209,11 +217,64 @@ describe('结构断言：@State 至少被读一次 / issue 必须有渲染落点
     assert.ok(messages.includes('noSuchField: 白名单条目已过期（源码里没有这个 @State），请删掉'), `应报「字段不存在」：\n${messages.join('\n')}`);
   });
 
-  test('collectStateFields 覆盖到页面与组件（不是只扫一个文件）', () => {
+  test('collectStateFields 覆盖到页面与组件（不是只扫一个文件；S4 追加外壳两文件）', () => {
     const fields = collectStateFields(componentFiles());
     const files = new Set(fields.map((item) => item.file));
     assert.ok(files.has('main/ets/pages/Settings.ets'), '必须扫到 Settings 页面');
     assert.ok(files.has('main/ets/pages/Index.ets'), '必须扫到 Index 页面');
+    // S4：新增的两个文件必须进扫描范围（否则外壳的 @State 死状态检查等于没跑）。
+    assert.ok(files.has('main/ets/pages/Home.ets'), '必须扫到新的外壳页 Home.ets');
+    assert.ok(files.has('main/ets/components/shell/ShellRail.ets'), '必须扫到 ShellRail.ets');
     assert.ok(fields.length > 100, `@State 总数 ${fields.length} 明显偏少`);
+  });
+});
+
+// ---------------------------------------------------------------- 外壳装配（S4 新增）
+//
+// 旧断言 → 新断言（都不是削弱）：
+//   · 「页面传给五个 section 的 props 双向一致」→ SG-S1：Home 两处 ShellRail 装配的四个 props 双向齐全；
+//   · 「@State 扫描覆盖 Index/Settings」→ 上方同一条用例扩展为 +Home/+ShellRail；
+//   · 「结构守卫只管组件内部」→ SG-S2/SG-S3：把页面清单登记与四节/齿轮结构纳入结构检查。
+describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
+  test('SG-S1 两处 ShellRail 装配的四个 props 双向齐全（宽屏常驻轨 + compact 抽屉轨）', () => {
+    const calls = [...HOME_CODE.matchAll(/ShellRail\(\{/g)];
+    assert.equal(calls.length, 2, '常驻轨与抽屉轨各一处装配，缺一即某断点无导航');
+    const expected = ['compact', 'onOpenSettings', 'onSelect', 'section'].sort();
+    for (const call of calls) {
+      const keys = passedKeys(HOME_CODE.slice(call.index), 'ShellRail');
+      assert.ok(keys !== null, 'ShellRail 装配点必须有属性区');
+      assert.deepEqual([...keys].sort(), expected, '少传 = 永远默认值，多传 = 拼错被静默忽略');
+    }
+    // 组件侧四个对外成员必须在（内部 @State 不算对外契约）。
+    for (const member of ['@Prop section:', '@Prop compact:', 'onSelect:', 'onOpenSettings:']) {
+      assert.ok(RAIL_CODE.includes(member), `ShellRail 缺少对外成员 ${member}`);
+    }
+  });
+
+  test('SG-S2 外壳登记进两份页面清单（main 9 页，harmony 为超集）', () => {
+    assert.ok(MAIN_PAGES.src.includes('pages/Home'), 'main main_pages.json 缺少 pages/Home');
+    assert.ok(HARMONY_PAGES.src.includes('pages/Home'), 'harmony main_pages.json 缺少 pages/Home');
+    assert.equal(MAIN_PAGES.src.length, 9, 'main 清单应为 9 页（与 validate-app 的 pages 9 一致）');
+    assert.equal(new Set(MAIN_PAGES.src).size, MAIN_PAGES.src.length, 'main 清单不得重复');
+    for (const entry of MAIN_PAGES.src) {
+      assert.ok(HARMONY_PAGES.src.includes(entry), `harmony 清单必须是 main 的超集，缺少 ${entry}`);
+    }
+  });
+
+  test('SG-S3 四节平级顺序表 + 齿轮行与回调装配，齿轮不是第五个 section', () => {
+    const order = /SHELL_SECTION_ORDER: ShellSectionInfo\[\] = \[([\s\S]*?)\];/.exec(RAIL_CODE);
+    assert.ok(order, '必须存在 SHELL_SECTION_ORDER 顺序表');
+    const ids = [...order[1].matchAll(/SHELL_INFO_([A-Z_]+)/g)].map((match) => match[1]);
+    assert.deepEqual(ids, ['DOTS', 'SCHEDULE', 'INSTANCES', 'CLOUD_CHAT'],
+      '顺序固定为 dots / schedule / instances / cloudChat');
+    const build = RAIL_CODE.slice(RAIL_CODE.indexOf('  build() {'));
+    assert.match(build, /ForEach\(SHELL_SECTION_ORDER,[\s\S]{0,140}this\.SectionRow\(info\)/, '四节共用一个顺序表');
+    assert.equal((build.match(/this\.SectionRow\(/g) ?? []).length, 1, '不手写第五个节行');
+    assert.match(build, /Divider\(\)[\s\S]{0,200}this\.SettingsRow\(\)/, '齿轮行在分隔线之后');
+    const settingsRow = RAIL_CODE.slice(RAIL_CODE.indexOf('  SettingsRow() {'));
+    assert.match(settingsRow, /\.onClick\(\(\) => \{\s*\n\s*this\.onOpenSettings\(\);/, '齿轮只发 onOpenSettings');
+    assert.match(HOME_CODE, /onOpenSettings: \(\): void => \{\s*\n\s*this\.openSettings\(\);/, '父页接住齿轮事件');
+    const fired = RAIL_CODE.match(/this\.onOpenSettings\(\)/g) ?? [];
+    assert.equal(fired.length, 1, 'rail 只在齿轮行 onClick 发一次事件，不得自行跳页或重复触发');
   });
 });

@@ -32,6 +32,9 @@ const DETAIL_PAGE = readFileSync(new URL('../../entry/src/main/ets/pages/Detail.
 const EDIT_PAGE = readFileSync(new URL('../../entry/src/main/ets/pages/Edit.ets', import.meta.url), 'utf8')
 const DETAIL_VIEW = readFileSync(new URL('../../entry/src/main/ets/components/RecordDetailView.ets', import.meta.url), 'utf8')
 const EDITOR_VIEW = readFileSync(new URL('../../entry/src/main/ets/components/RecordEditorView.ets', import.meta.url), 'utf8')
+// S4 外壳：`pages/Home.ets` 是真首页，`ShellRail` 是它的导航轨。
+const HOME = readFileSync(new URL('../../entry/src/main/ets/pages/Home.ets', import.meta.url), 'utf8')
+const SHELL_RAIL = readFileSync(new URL('../../entry/src/main/ets/components/shell/ShellRail.ets', import.meta.url), 'utf8')
 
 /** 去掉块注释与整行行注释：结构守卫只对「代码」生效，注释里允许写「已删除」之类的说明 */
 function stripComments(source) {
@@ -431,4 +434,65 @@ test('主从右栏支持下拉刷新，且编辑有未保存内容时不推进 p
   assert.match(INDEX_CODE, /this\.onPullRefresh\(\)/, '复用左栏同一套 pull + reload 逻辑')
   assert.match(INDEX_CODE, /this\.paneMode === 'editor' && this\.editorDirty/, '编辑脏态要特殊处理')
   assert.match(INDEX_CODE, /this\.paneRefreshing = false/, '刷新结束必须复位')
+})
+
+// ---------------------------------------------------------------- 外壳断点 / 令牌 / 页头（S4 新增）
+//
+// 旧断言 → 新断言（都不是削弱）：
+//   · 「PageLayout 用 onAreaChange + resolveBreakpoint + isLandscapeSize」→ U-S1：Home 复用同一套，且不写死 600/840；
+//   · 「页头副标题走 subtitleText()/相对日期」→ U-S2：日程 pane 断言原样保留，外壳页头改钉分段标签；
+//   · 「TOUCH_MIN / SPACING / FONT 常量与无裸色值」→ U-S3：轨道 240/72/48 + 同一套令牌；
+//   · 「首页头只留 ⚙ 设置」→ U-S4：外壳唯一设置出口在 rail 齿轮，面板动作槽全禁用。
+test('U-S1 外壳断点与 Index / PageLayout 同源：onAreaChange + resolveBreakpoint，compact <600 走抽屉', () => {
+  assert.match(HOME, /\.onAreaChange\(/, 'Home 必须从 Area 取真实宽高')
+  assert.match(HOME, /resolveBreakpoint\(width, isLandscapeSize\(width, height\)\)/, '断点判据必须复用 uiTokens')
+  assert.match(HOME, /@State breakpoint: string/, '断点必须对外暴露为 @State')
+  assert.match(HOME, /return this\.breakpoint === 'compact';/, '页面只判 compact 一档')
+  assert.equal(/600|840/.test(HOME), false, '断点阈值只允许写在 uiTokens.ts / PageLayout，不得写死在本页')
+  assert.match(HOME, /if \(this\.isCompact\(\) && this\.drawerOpen\)/, 'compact 抽屉蒙层分支')
+  assert.match(HOME, /\.visibility\(this\.drawerOpen \? Visibility\.Visible : Visibility\.None\)/, '抽屉轨挂起')
+  // 纯函数口径：599 → compact（抽屉）、600 → medium（常驻轨），与上一节的边界测试同源。
+  assert.equal(resolveBreakpoint(599, false), 'compact')
+  assert.equal(resolveBreakpoint(600, false), 'medium')
+})
+
+test('U-S2 外壳页头标题是分段标签；日程 pane 的相对日期标题契约仍在（不删旧断言）', () => {
+  const labels = HOME.match(/this\.PaneHeader\('[^']+', '[^']+', REASON_[A-Z]+\)/g) ?? []
+  assert.equal(labels.length, 4, '四个面板各一个带分段标签的页头')
+  for (const label of ['dots', '日程', '远程 DSH', '云端对话']) {
+    assert.ok(labels.some((call) => call.includes(`'${label}'`)), `缺少分段标签「${label}」`)
+  }
+  assert.match(SHELL_RAIL, /label: 'dots'/)
+  assert.match(SHELL_RAIL, /label: '云端对话'/)
+  assert.equal(/pageTitle\(\)|subtitleText\(\)/.test(HOME), false, '相对日期标题属于日程面板，不属于外壳')
+  // 旧断言仍钉在 Index.ets（S3 迁入 日程 pane 后改锚点，断言不动）。
+  assert.match(INDEX, /subtitle: this\.subtitleText\(\)/)
+  assert.match(INDEX, /return this\.selectedDate === localDateKey\(new Date\(\)\) \? '今天' : '日程';/)
+})
+
+test('U-S3 导航轨尺寸令牌化：240 / 72 / 48 ≥ TOUCH_MIN，颜色全走 $r()', () => {
+  const rail = stripComments(SHELL_RAIL)
+  assert.match(rail, /const RAIL_WIDTH: number = 240;/, '常驻轨 240vp')
+  assert.match(rail, /const RAIL_COMPACT_WIDTH: number = 72;/, '抽屉窄轨 72vp')
+  assert.match(rail, /const RAIL_ROW_HEIGHT: number = 48;/, '四节与齿轮行同高 48vp')
+  assert.ok(48 >= TOUCH_MIN, '行高 48 必须 ≥ TOUCH_MIN 40')
+  for (const token of ['DIVIDER', 'FONT', 'LINE_HEIGHT', 'SPACING', 'TOUCH_MIN']) {
+    assert.match(rail, new RegExp(`\\b${token}\\b`), `轨道必须引用令牌 ${token}`)
+  }
+  assert.equal(/(?:#[0-9A-Fa-f]{3,8}|Color\.[A-Z]|rgba?\()/.test(rail), false, '轨道不得写裸色值')
+  assert.match(rail, /\.height\(RAIL_ROW_HEIGHT\)/, '节行与齿轮行同高')
+})
+
+test('U-S4 外壳只有一个设置出口：rail 齿轮 + 父页 openSettings，面板动作全禁用', () => {
+  const rail = stripComments(SHELL_RAIL)
+  const home = stripComments(HOME)
+  assert.match(rail, /const SETTINGS_GLYPH: string = '⚙';/)
+  assert.match(rail, /this\.SettingsRow\(\)/, '齿轮行必须渲染')
+  assert.equal(/router|@kit\.ArkUI/.test(rail), false, 'rail 只发事件，不自己跳页')
+  const pushes = home.match(/pushUrl\(\{ url: 'pages\/Settings' \}\)/g) ?? []
+  assert.equal(pushes.length, 1, '外壳里只能有一处进设置页')
+  assert.match(home, /private openSettings\(\): void/, '跳转集中在 openSettings()')
+  assert.equal((home.match(/\.enabled\(false\)/g) ?? []).length, 2, 'PaneHeader 动作槽 + dots 输入框禁用')
+  // 旧断言未删：Index 仍钉着「页头唯一动作 ⚙ 设置」（S3 后随日程 pane body 迁移）。
+  assert.match(INDEX, /headerActionTwo: '⚙ 设置'/)
 })

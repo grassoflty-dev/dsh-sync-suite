@@ -472,3 +472,26 @@ Index 侧 :146-153 的断言（`settingsStore.load(` 必须早于 `await summari
 ### 11.5 步数与未验证
 
 步数按 §1 口径 **Δ0**（删的是输入控件与折叠开关，不是可计数的 tap / scroll / wait）。`unverified`：真机观感（本机 `hdc list targets` 为空，按调度不做 ArkTS 构建 / 装机）；`TextInput.onChange` 与自定义源 baseURL 内联渲染的真机行为未验证。
+
+## 12. 外壳导航轨（`mod-shell-rail`，2026-11-21）
+
+> 本节**只追加**，不改 §1–§11 的结论。新增 `pages/Home.ets`（外壳页）+ `components/shell/ShellRail.ets`（左轨）；
+> 两份 `main_pages.json` 各加一行 `pages/Home`（main 清单 9 页，harmony 为超集）。《项目理解》所述「每屏 1 个主操作」
+> 继续成立——四个分段平级，没有「哪个更重要」的主按钮。
+
+| 项 | 定版 |
+| --- | --- |
+| 四节平级 | 顺序固定 `dots / 日程 / 远程 DSH / 云端对话`（id `dots / schedule / instances / cloudChat`），同一份 `SHELL_SECTION_ORDER` 表驱动 `ForEach`；选中态只改底色/字色 + 2vp 品牌竖条，不加图标、角标或主按钮 |
+| 默认分段 | `dots`（未知深链 id 也 fail-closed 回落 dots）；`onBackPress`：抽屉开→收抽屉并吃掉、非 dots→回 dots 并吃掉、dots→放行 |
+| 轨宽 / 行高 | 常驻轨 **240vp**（宽屏/横屏）、抽屉窄轨 **72vp**（icon-only，label 进 accessibilityText）；四节与页脚齿轮行同高 **48vp**（≥ `TOUCH_MIN` 40），分隔线在齿轮之前——齿轮是**出口不是第五个 section** |
+| 页头 | 每个面板自带 `PaneHeader(分段标签, 动作名, 禁用原因)`：左侧分段名（compact 时加 ☰ 开抽屉），右侧动作槽显示「动作（原因）」且 `.enabled(false)`；设置出口唯一——`ShellRail` 齿轮只发 `onOpenSettings`，由 `Home.openSettings()` 唯一一处 `pushUrl('pages/Settings')` |
+| 保活 | 四个 `@Builder` 面板在**同一个 Stack** 里全部无条件实例化（不写 `if/else`），非当前面板用 `.visibility(active ? Visibility.Visible : Visibility.Hidden)` 隐藏——Hidden 仍留在组件树上，切换后 `@State` / 滚动位置 / 选中态不丢；S3 把占位换成真实 body 时必须保留这条 `active → Visibility` 接线 |
+| 唯一 flex 层 | `Row { ShellRail, Stack(panes).layoutWeight(1) }` 是整页唯一一处结构性 `layoutWeight(1)` 切分；内容区是 **Stack 而非固定高度 Column**，`.height('100%')` 撑满，滚动由各面板自己的 `Scroll` 承担，没有嵌套的「固定页头 + 内容」外壳；`PaneHeader` 标题的 `layoutWeight(1)` 只是文本省略号，不是第二层切分 |
+| 断点 / 抽屉 | 与 `Index` / `PageLayout` 同一套 `onAreaChange → resolveBreakpoint(width, isLandscapeSize(...))`；只判 `breakpoint === 'compact'`（<600vp，横屏至少 medium）。compact 下导航条从 Row 撤出，改挂 root Stack 的抽屉：☰ / 点分段 / 点 scrim 关闭；抽屉轨用 `Visibility.None` 挂起（不占布局、不 unmount） |
+| 占位无假行 | 四个面板当前是占位：dots 有禁用输入框 + 逐字原因 `dots 尚未接线`；其余三节各一句「…即将迁入，本页暂不展示任何记录。」；没有任何 `ForEach` / 假记录行 / 可点的空入口 |
+
+**测试与未验证**：`tools/test/shellLayout.test.mjs`（16 例，L-01–L-16）钉住上述几何/保活/断点契约；
+`indexHeader` / `uiTokens` / `structureGuards` 的旧页头断言已 retarget（旧 4 条一条未删，改标「日程面板契约」，
+S3 迁入时只换文件锚点），并新增外壳页头/断点/令牌/装配守卫共 11 例。`tsc` 只覆盖 `tools/tsconfig.json`
+的纯 TS（`components/` 与 `pages/` 被排除），所以 **`Home.ets` / `ShellRail.ets` 的 ArkTS 编译与真机观感
+`unverified`**，首次真实编译留给下一次设备 pass。

@@ -8,6 +8,7 @@
     "pages/RemoteControl",
     "pages/Instances",
     "pages/Chats",
-    "pages/ChatDetail"
+    "pages/ChatDetail",
+    "pages/Home"
   ]
 }

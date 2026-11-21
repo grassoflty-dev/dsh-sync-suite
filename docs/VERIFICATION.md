@@ -1595,3 +1595,37 @@ GATE3_EXIT=0                       # validate-app
 真实 Git push/pull 与「已同步·HH:MM」；双设备并发；OCR / 手写端到端；远程 Web 与 dots 命令链；插件 live；
 签名材料 v1 回退处置。横屏截图取自临时 landscape-locked 验证构建（同一份修复源码），非交付 HAP 本身；
 交付 HAP 的横屏行为由该验证构建等价推断。
+
+### 15.14 S5 首次 shell 编译与横屏回归复检（2026-11-21，`s5-*`；只追加，不改写 §15.1–§15.13）
+
+**构建（2 次尝试，第 2 次为交付）**
+
+- 尝试 1：`BUILD SUCCESSFUL in 9 min 25 s 21 ms`，但随后 `verify-hap` **6 项失败**——HAP 内 `main_pages.json` 仅 9 页（无 `pages/Handwriting`），`modules.abc` 无 `Handwriting` / `OcrBatch` / `hw-page-` / `PageBook` 符号；产物 4,175,724 B / SHA256=F25A082F2B946721F06FACC12103CCC6C77C1AF68B46724E94716EF3CBFC8C16。覆盖层在编译期不在树上（构建中途被还原），该产物作废、未装机；根因为外部并发还原覆盖层，非源码错误。
+- 尝试 2（交付）：`BUILD SUCCESSFUL in 9 min 3 s 971 ms`，42 tasks = 26 executed / 16 up-to-date，`CompileArkTS` **4 min 27 s 651 ms**；`✓ 产物验收通过`（main_pages 含 `pages/Handwriting`；`modules.abc` 含 Handwriting×16 / OcrBatch×7 / `hw-page-`×1 / PageBook×2）。
+  - unsigned HAP `entry-default-unsigned.hap` **4,730,023 B / SHA256=F31C4BDB4A77BB7D91E724D548A55BB6F241762E6085AB52B0745419CF29102D**。
+  - 签名（`-ExecutionPolicy Bypass`，`$env:JAVA_HOME='D:\jdk17\jdk-17'`，`$env:SIGN_PASS='itwill123'`）：`Sign Hap success!` / `verify-app success`（v2 材料不全 → v1 回退告警仍在）；交付 HAP `dist-harmony/arkui-schedule-harmony-debug-signed.hap` **4,789,445 B / SHA256=493364E26AFD645AA46BEA74CEEEFF7D9C1CC71D3363C135802153AC10B8F084**。
+  - `overlay(finally): applied=false（已断言）`；`node tools/overlay.mjs status` → `[overlay] applied=false`。
+- **ShellRail + Home: compile-verified**。最终 `modules.abc`（2,698,640 B）含 `ShellRail`（偏移 159244）与 `Home`（354401）；编译日志唯一相关告警是 `Home.ets:95 getParams` / `:171 pushUrl` / `:173 showToast` 已废弃，**无 ArkTS 错误，无需修源码**。
+- `services/instanceGrantStore.ets`：仍未被任何模块引用，最终 `modules.abc` 中**无** `instanceGrantStore` 符号 → **SKIPPED（未编入产物）**，与预期一致。
+- 装机：`hdc -t 192.168.1.7:33023 install -r` → `install bundle successfully`；`aa start` → `start ability successfully`；装后首页仍是 `pages/Index`。
+
+**横屏回归复检（BLOCKED — 任务前提与设备实测不符）**
+
+- 任务称「平板处于横屏」，但实测 `uitest screenCap` 与 `dumpLayout` 根边界均为 **1600×2560（竖屏）**；`module.json5` 为 `auto_rotation`。快捷设置中「旋转锁定」初始为**开启**，本次将其关闭后屏幕仍为 1600×2560（设备物理竖屏）；受限 shell 无 `wm` / `settings` / `screencap`，无软件旋转手段，且未改源码。因此**本次未取得新的 2560×1600 布局**，横屏专属断言仍沿用 §15.13 的 landscape-locked 验证构建证据。
+- 在可用朝向下按 `fix-landscape-list` 逐项复检（1 条记录，今日 tab）：
+  - `Text [当日全部日程 1 条（v2 时间线，自动同步）] bounds=[19,208][1407,255]`；
+  - `Scroll bounds=[57,970][1543,1284]`（SummaryCard 有界兄弟，止于 1284）→ `List bounds=[57,1284][1543,1465]`，`ListItem bounds=[57,1284][1543,1465]`，`Text [FRESH-UI-PASS3-20261121] bounds=[199,1317][1419,1374]`；
+  - `Button [纯云端对话] bounds=[57,2257][791,2352]`、`Button [与 dots 对话] bounds=[810,2257][1544,2352]`（ChatEntries 在加权区外）。
+  - 计数 1 条 = 可见 1 行，SummaryCard / ChatEntries 均未吃掉列表高度 → **PASS（竖屏等价路径）**。
+  - 未完成 tab 对照：`Text [未完成 1 条（v2 时间线，自动同步）] bounds=[19,208][1407,255]`，`List bounds=[57,970][1543,1151]`，同一行可见且 SummaryCard 不渲染。
+
+**Shell smoke（BLOCKED — not the launch page yet）**
+
+- `EntryAbility.onWindowStageCreate` 仍 `loadContent('pages/Index')`；`pages/Home` 只在 `main_pages.json` 注册为第 9 项；应用内无任何 `pages/Home` 入口（grep 仅 Home.ets 自引用）。装机后 `dumpLayout` 仍是 `今天 / 当日全部日程 1 条`，无四节导航轨。
+- 故 dots 默认选中 / 点节换 pane / 齿轮进设置 / 禁用输入与 `dots 尚未接线` 文案等交互**未验证**，不可声称 PASS；`modules.abc` 中含 ShellRail/Home 符号只证明编译通过。
+
+**证据**：`.tmp/device-shots/s5-02-today-portrait.png` / `.json`、`.tmp/device-shots/s5-03-undone-portrait.png` / `.json`、`.tmp/device-shots/s5-06-qs2.png`（旋转锁定开启）、`.tmp/device-shots/s5-07-rotation-unlocked.png`（关闭后仍竖屏）、`.tmp/device-shots/s5-09-app-orientation.png` / `.json`（装后首页）。
+
+**本 pass 的改动**：仅本文 §15.14 与 gitignore 内 `.tmp/device-shots/s5-*`（另 `.tmp/s5-walk.mjs` / `.tmp/s5-abc-scan.mjs` / `.tmp/s5-hap-scan.mjs` 为一次性解析辅助脚本，非仓库文件）。**未改任何源码**（无 compile error 需修），未触发「失败即本批修」分支，故未重跑四门；门闸 tail 沿用 §15.13 基线（GATE1/2/3=0、overlay applied=false）。
+
+**unverified**：本次横屏 2560×1600 真机布局（设备物理竖屏）；shell 四节交互（Home 尚未成为入口）；`instanceGrantStore`（SKIPPED）；§15.13 所列其余项。
