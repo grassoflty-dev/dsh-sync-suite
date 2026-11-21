@@ -28,7 +28,9 @@ import type { OutboxEntry } from '../model/syncProtocol';
 import type { ScheduleRecord } from '../model/types';
 import { syncProtocolStore } from './syncProtocolStore';
 import type { CycleResult } from './syncProtocolStore';
+import { bindBridgeRunner } from './gitRunner';
 import { syncStatusStore } from './syncStatusStore';
+import { common } from '@kit.AbilityKit';
 
 /** 本模块会停放的三种意图（outbox 的 purge 由同步协议自身产生，这里不生成）。 */
 type ParkOp = 'upsert' | 'delete' | 'restore';
@@ -105,6 +107,9 @@ export class RecordWriter {
    * 失败如实显示原因；没有 runner / 未启用时周期返回 null，只跳过不伪造「已同步」。
    */
   private triggerSync(): void {
+    // 建记录后的 fire-and-forget 也走同一条确定性绑定：不依赖「EntryAbility.onCreate 一定先跑过」
+    // 或「页面 bootstrap 已完成」这种时序假设；即使两者都缺席，runner 也在此一次到位。
+    bindBridgeRunner(getContext() as common.UIAbilityContext);
     // 三态行先切「同步中…」，周期返回后再由 fromCycle 落到「已同步 · HH:MM」或 typed 失败。
     syncStatusStore.setSyncing();
     syncProtocolStore.runConfiguredCycle()

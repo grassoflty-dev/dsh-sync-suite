@@ -13,8 +13,9 @@
  *   作者名默认「我」，全部由软件静默安排；旧值仍可读于 settingsStore，只是不再上屏；
  * - 设备标识重复是**常驻** warning（不是 toast），附件被暂停推送同样常驻一行；
  * - Git 操作全部由 app 自动完成（创建记录后拉取 → 并集 → 推送，首页下拉刷新拉取 + 推送），
- *   本组件**没有**「推送 / 立即同步」手动按钮；查看状态 / 测试连接在组头「更多」弹层里
- *   （弹层仍在页面，见 `pages/Settings.ets`）；已保存的认证方式是 SSH 时
+ *   本组件**没有**「推送 / 立即同步」手动按钮；查看状态 / 测试连接 / 重试与仓库地址帮助
+ *   都在组头**唯一**的「更多」弹层里（弹层在页面，见 `pages/SettingsSync.ets`）；
+ *   已保存的认证方式是 SSH 时
  *   本组件给一行只读警告 + 一个显式「改用 HTTPS 令牌」按钮（不是认证方式选择器；只切状态、
  *   不自动保存，落盘仍由用户点「保存设置」完成）；
  * - 隐藏的 Git 运行环境（1x1 全透明 Web）必须挂在本组内（`controller` 与页面是**同一个实例**，
@@ -113,10 +114,8 @@ export struct SyncSection {
   onToggleIncludeOtherDevices: (isOn: boolean) => void = () => {};
   /** pull / push / status（与拆分前 `runAction(action)` 同一个入口）。 */
   runAction: (action: string) => void = () => {};
-  /** 打开「更多」弹层（组头「更多」与状态行点击都走这里）。 */
+  /** 打开唯一的「更多」弹层（组头「更多」、空态动作与状态行点击都走这里）。 */
   onOpenSyncMore: () => void = () => {};
-  /** 打开仓库地址 `?` 帮助弹层。 */
-  onOpenRepoHelp: () => void = () => {};
   /** SSH 警告行的显式出口：页面切 authMode + toast；本组件不改状态、不自动保存。 */
   onSwitchToHttpsToken: () => void = () => {};
 
@@ -228,27 +227,13 @@ export struct SyncSection {
     Column({ space: SPACING.md }) {
       this.SyncHeader()
 
-      Row({ space: SPACING.sm }) {
-        Text('仓库地址')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-        Blank()
-        ActionButton({
-          label: '?',
-          actionEnabled: true,
-          disabledReason: '',
-          busy: false,
-          variant: 'ghost',
-          block: false,
-          onTap: (): void => {
-            this.onOpenRepoHelp();
-          },
-          onBlockedTap: null
-        })
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
+      // mod-fix-sync-affordance：仓库地址行的 `?` 与组头「更多」曾打开同一个仓库地址帮助弹层，
+      // 是同一入口的两次露脸。只保留组头「更多」（它承载查看状态 / 测试连接 / 重试），
+      // 帮助文案并入同一个弹层；本行不再放第二个帮助按钮。
+      Text('仓库地址')
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor($r('app.color.text_secondary'))
 
       TextInput({ text: this.repoUrl, placeholder: repoUrlPlaceholderFor(this.gitPlatform, this.authMode) })
         .width('100%')

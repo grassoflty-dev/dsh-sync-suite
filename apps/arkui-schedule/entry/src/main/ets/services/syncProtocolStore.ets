@@ -286,7 +286,9 @@ export class SyncProtocolStore {
       if (text.indexOf(E_SYNC_UNAVAILABLE_CODE) === 0) {
         return this.outcomeToResult(unavailableOutcome(outbox));
       }
-      throw error;
+      // ArkTS strict（arkts-limited-throw）只允许抛 Error：原错误的 typed 文案已由 errorText 原样保留，
+      // 重新包一层 Error 不丢分类信息，也让上层 catch（error as Error).message 稳定拿到同一串。
+      throw new Error(text);
     }
   }
 

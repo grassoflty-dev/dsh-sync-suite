@@ -128,7 +128,7 @@ struct SettingsSync {
   @State includeOtherDevices: boolean = false;
   @State connectionText: string = '';
   @State connectionBusy: boolean = false;
-  /** 帮助 / 更多弹层标识（空串 = 关闭；同一时刻只开一层）。 */
+  /** 唯一「更多」弹层的开关（空串 = 关闭）。 */
   @State panel: string = '';
 
   private disposed: boolean = false;
@@ -706,56 +706,16 @@ struct SettingsSync {
       })
   }
 
-  /** 失败出口：查看状态 / 测试连接 / 重试（没有手动推送 / 立即同步）。 */
+  /**
+   * 唯一的「更多」弹层（mod-fix-sync-affordance）：组头「更多」是唯一帮助/动作入口，
+   * 承载查看状态 / 测试连接 / 重试（没有手动推送 / 立即同步）+ 仓库地址帮助文案。
+   * 原先仓库地址行的 `?` 打开的是同一个弹层，重复入口已移除。
+   */
   @Builder
-  SyncAffordances() {
-    Row({ space: SPACING.sm }) {
-      Text('查看状态')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.brand'))
-        .height(TOUCH_MIN)
-        .layoutWeight(1)
-        .textAlign(TextAlign.Center)
-        .enabled(!this.syncBusy)
-        .onClick(() => {
-          this.runAction('status');
-        })
-      Text('测试连接')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.brand'))
-        .height(TOUCH_MIN)
-        .layoutWeight(1)
-        .textAlign(TextAlign.Center)
-        .enabled(!this.connectionBusy)
-        .onClick(() => {
-          this.testConnection();
-        })
-      if (canRetrySync(this.lastSyncAction, this.syncBusy)) {
-        Text('重试')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.warning'))
-          .height(TOUCH_MIN)
-          .layoutWeight(1)
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
-            this.runAction(this.lastSyncAction);
-          })
-      }
-    }
-    .width('100%')
-    .alignItems(VerticalAlign.Center)
-    .border({ width: { bottom: DIVIDER }, color: $r('app.color.divider') })
-  }
-
-  /** 仓库地址 `?` 帮助弹层（只有这一处帮助入口）。 */
-  @Builder
-  HelpSheet() {
+  SyncMoreSheet() {
     Column({ space: SPACING.md }) {
       Row({ space: SPACING.sm }) {
-        Text('仓库地址')
+        Text('更多')
           .fontSize(FONT.body)
           .lineHeight(LINE_HEIGHT.body)
           .fontWeight(FontWeight.Medium)
@@ -772,6 +732,48 @@ struct SettingsSync {
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
+
+      Text('查看状态')
+        .fontSize(FONT.body)
+        .lineHeight(LINE_HEIGHT.body)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .height(TOUCH_MIN)
+        .textAlign(TextAlign.Start)
+        .enabled(!this.syncBusy)
+        .onClick(() => {
+          this.panel = '';
+          this.runAction('status');
+        })
+      Text('测试连接')
+        .fontSize(FONT.body)
+        .lineHeight(LINE_HEIGHT.body)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .height(TOUCH_MIN)
+        .textAlign(TextAlign.Start)
+        .enabled(!this.connectionBusy)
+        .onClick(() => {
+          this.panel = '';
+          this.testConnection();
+        })
+      if (canRetrySync(this.lastSyncAction, this.syncBusy)) {
+        Text('重试')
+          .fontSize(FONT.body)
+          .lineHeight(LINE_HEIGHT.body)
+          .fontColor($r('app.color.warning'))
+          .width('100%')
+          .height(TOUCH_MIN)
+          .textAlign(TextAlign.Start)
+          .onClick(() => {
+            this.panel = '';
+            this.runAction(this.lastSyncAction);
+          })
+      }
+
+      Divider()
+        .strokeWidth(DIVIDER)
+        .color($r('app.color.divider'))
       if (this.connectionText.length > 0) {
         this.HintLine(this.connectionText)
       }
@@ -853,9 +855,6 @@ struct SettingsSync {
                 onOpenSyncMore: (): void => {
                   this.panel = 'more';
                 },
-                onOpenRepoHelp: (): void => {
-                  this.panel = 'repo';
-                },
                 onSwitchToHttpsToken: (): void => {
                   this.switchToHttpsToken();
                 },
@@ -870,7 +869,6 @@ struct SettingsSync {
                 }
               })
               this.StatusLine()
-              this.SyncAffordances()
             }
             .width('100%')
             .alignItems(HorizontalAlign.Start)
@@ -887,7 +885,7 @@ struct SettingsSync {
         .height('100%')
       }
 
-      // 帮助 / 更多弹层（仓库地址 ? 与测试连接结果）；同一时刻只开一层，点 scrim 关闭。
+      // 唯一的「更多」弹层（查看状态 / 测试连接 / 重试 + 仓库地址帮助与测试连接结果）；点 scrim 关闭。
       if (this.panel.length > 0) {
         Column()
           .width('100%')
@@ -899,7 +897,7 @@ struct SettingsSync {
         Column() {
           Blank()
           Column() {
-            this.HelpSheet()
+            this.SyncMoreSheet()
           }
           .width('100%')
           .backgroundColor($r('app.color.surface'))

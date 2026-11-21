@@ -62,6 +62,7 @@ import { timelineStore } from '../services/timelineStore';
 import { recordWriter } from '../services/recordWriter';
 import { syncProtocolStore } from '../services/syncProtocolStore';
 import { bridgeGitRunner } from '../services/gitRunner';
+import { bindBridgeRunner } from '../services/gitRunner';
 import { syncStatusStore } from '../services/syncStatusStore';
 import type { SyncStatusView } from '../services/syncStatusStore';
 import { outboxStore } from '../services/outboxStore';
@@ -273,6 +274,7 @@ struct Index {
    */
   private async onPullRefresh(): Promise<void> {
     try {
+      bindBridgeRunner(getContext(this) as common.UIAbilityContext);
       syncStatusStore.setSyncing();
       const result = await syncProtocolStore.runConfiguredCycle();
       this.syncStatus = result !== null
@@ -293,6 +295,7 @@ struct Index {
    */
   private async retrySync(): Promise<void> {
     try {
+      bindBridgeRunner(getContext(this) as common.UIAbilityContext);
       for (const entry of outboxStore.list()) {
         if (entry.state === 'failed') {
           outboxStore.retry(entry.intentId);

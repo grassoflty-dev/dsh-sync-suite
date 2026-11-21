@@ -173,6 +173,14 @@ class SyncController {
     return this.service !== null && this.service.isBridgeReady();
   }
 
+  /**
+   * v2 runner 确定性取桥用的唯一入口：只返回本控制器在启动链上绑定、
+   * 且已注册代理的那个服务。设置页自建的 GitSyncService 不算（不能抢走 activeService）。
+   */
+  readyService(): GitSyncService | null {
+    return this.service !== null && this.service.isBridgeReady() ? this.service : null;
+  }
+
   /** 桥不可用的原因（`isReady()` 为 true 时为空串）：页面用它做说明行/禁用理由。 */
   notReadyReason(): string {
     if (this.service === null) {

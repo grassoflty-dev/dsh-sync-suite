@@ -12,8 +12,11 @@
  * `E_SYNC_UNAVAILABLE`，由 syncStatusStore 显示为可点「重试同步」的失败行，绝不静默降级为「假同步」。
  */
 import { GitSyncService } from './GitSyncService';
+import { syncController } from './syncController';
+import { syncProtocolStore } from './syncProtocolStore';
 import { runnerReadyDecision, E_SYNC_UNAVAILABLE_MESSAGE } from '../model/syncCycle';
 import type { GitPort, RunnerReadyDecision } from '../model/syncCycle';
+import type { common } from '@kit.AbilityKit';
 
 /** 首轮周期早于隐藏 Web 的 onPageEnd 时，最多等 10 秒再报 typed 错（不静默失败、不无限等）。 */
 const READY_TIMEOUT_MS: number = 10000;
@@ -21,6 +24,19 @@ const READY_POLL_MS: number = 50;
 
 export class BridgeGitRunner implements GitPort {
   private pendingPaths: string[] = [];
+
+  /**
+   * 确定性取桥：优先 App 级 `syncController` 绑定的那个服务（启动链唯一真值），
+   * 只有它尚未就绪时才退回 `GitSyncService.active()` 这个「最后创建的实例」。
+   *
+   * 为什么不能只用 active()：设置页 `SettingsSync` 会 new 第二个 GitSyncService，
+   * 顺手把 activeService 抢走。用户「设置 → 同步仓库 → 返回 → 重试同步」时，
+   * 旧实现会盯住那个可能永远 onPageEnd 不到的设置页实例，10s 后误报 E_SYNC_UNAVAILABLE。
+   */
+  private resolveService(): GitSyncService | null {
+    const canonical: GitSyncService | null = syncController.readyService();
+    return canonical !== null ? canonical : GitSyncService.active();
+  }
 
   /**
    * 取可用的服务实例：隐藏 Web 的 onPageEnd 与首条记录写入的先后是不确定的。
@@ -31,7 +47,7 @@ export class BridgeGitRunner implements GitPort {
   private async requireService(): Promise<GitSyncService> {
     const started: number = Date.now();
     for (;;) {
-      const active: GitSyncService | null = GitSyncService.active();
+      const active: GitSyncService | null = this.resolveService();
       const ready: boolean = active !== null && active.isBridgeReady();
       const waited: number = Date.now() - started;
       const decision: RunnerReadyDecision = runnerReadyDecision(ready, waited, READY_TIMEOUT_MS);
@@ -49,7 +65,7 @@ export class BridgeGitRunner implements GitPort {
 
   /** 桥是否可用（供激活闸与 UI 预检；不抛异常）。 */
   available(): boolean {
-    const active: GitSyncService | null = GitSyncService.active();
+    const active: GitSyncService | null = this.resolveService();
     return active !== null && active.isBridgeReady();
   }
 
@@ -143,3 +159,12 @@ export class BridgeGitRunner implements GitPort {
 
 /** 全局单例：syncProtocolStore.setRunner() 注入；页面 bootstrap 绑定。 */
 export const bridgeGitRunner: BridgeGitRunner = new BridgeGitRunner();
+
+/**
+ * 确定性绑定：任何能发起同步周期的入口（启动、建记录后的 fire-and-forget、
+ * 首页「重试同步」/下拉刷新）都先经这里把 runner + filesDir 一次到位。
+ * 幂等：重复调用只覆盖同一份单例状态，不会重复建桥或重复注册代理。
+ */
+export function bindBridgeRunner(ability: common.UIAbilityContext): void {
+  syncProtocolStore.bindAtStartup(bridgeGitRunner, ability);
+}
