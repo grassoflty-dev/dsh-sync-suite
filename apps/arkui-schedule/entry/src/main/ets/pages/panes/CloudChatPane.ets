@@ -20,6 +20,14 @@ import {
 /** 禁用原因（无假入口）。 */
 const REASON_CLOUD: string = '云端对话即将迁入';
 
+/**
+ * 只读来源说明（mod-settings-cloud-no-config）：会话不需要任何云端配置，
+ * 它们保存在同步仓库的 `chats/` 目录，靠 Git 多端同步；本页只读，续接在电脑上继续。
+ * 这是常驻说明行、不是设置行，页面上没有可编辑的云端地址 / 令牌字段。
+ */
+const CHAT_GIT_EXPLANATION: string =
+  '会话保存在同步仓库的 chats/ 目录，通过 Git 在多端同步；本页只读，对话续接请在电脑上继续。';
+
 @Component
 export struct CloudChatPane {
   /** 深链 id：预留给后续按 id 打开指定云端会话。 */
@@ -62,6 +70,14 @@ export struct CloudChatPane {
           .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.text_secondary'))
           .width('100%')
+        Text(CHAT_GIT_EXPLANATION)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+          .textAlign(TextAlign.Start)
         Text(REASON_CLOUD)
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)

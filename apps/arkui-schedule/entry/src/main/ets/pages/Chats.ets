@@ -59,6 +59,14 @@ const EMPTY_DOTS_DETAIL: string =
   '从首页「与 dots 对话」进入本页；dots 可查看实例并对会话发指令，所有操作需你确认，当前为只读预览';
 const EMPTY_ACTION: string = '下拉刷新试试';
 
+/**
+ * 只读来源说明（mod-settings-cloud-no-config）：会话不在此页配置，也不需要任何云端服务地址 / 令牌。
+ * 它们就保存在同步仓库的 `chats/` 目录里，靠 Git 多端同步；续接在电脑上完成（单写者）。
+ * 这是常驻的只读说明行，**不是设置行**，页面上没有任何可编辑的云端配置入口。
+ */
+const CHAT_GIT_EXPLANATION: string =
+  '会话保存在同步仓库的 chats/ 目录，通过 Git 在多端同步；本页只读，对话续接请在电脑上继续。';
+
 /** 错误态文案：为什么失败由 `errorText` 运行时给。 */
 const ERROR_WHAT: string = '读取会话列表失败';
 const ERROR_NEXT: string = '先确认本机拉取过同步仓库（设置 → 同步 → 立即同步）';
@@ -511,6 +519,15 @@ struct Chats {
     Column({ space: SPACING.md }) {
       // 分段常驻：错误态下也能切段看另一段（错误来自本地读文件，与 kind 无关）
       this.KindSegment()
+      // 只读来源说明：会话来自同步仓库的 chats/，没有云端配置行（mod-settings-cloud-no-config）
+      Text(CHAT_GIT_EXPLANATION)
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontColor($r('app.color.text_secondary'))
+        .maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .width('100%')
+        .textAlign(TextAlign.Start)
       if (this.errorText.length > 0) {
         this.ErrorBlock()
       } else {
