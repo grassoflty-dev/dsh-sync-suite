@@ -168,7 +168,9 @@ describe('设置页保存校验：与页面源码的接线（防止退回「只�
     );
     assert.ok(builder.length > 0, 'SettingsBits 里必须能找到 ErrorText 的实现');
     assert.match(builder, /app\.color\.danger/, 'ErrorText 必须用 danger');
-    for (const field of ['repoUrlError', 'tokenError', 'deviceIdError', 'authorError']) {
+    // mod-settings-sync-min（old→new）：deviceIdError / authorError 随「高级」折叠区删除，
+    // 页面只保留三处有输入控件的错误落点；断言改钉这三处，仍逐字段检查 ErrorText 渲染。
+    for (const field of ['repoUrlError', 'tokenError', 'aiBaseUrlError']) {
       assert.match(SETTINGS_PAGE, new RegExp(`this\\.ErrorText\\(this\\.${field}\\)`), `${field} 必须用红色 ErrorText 渲染`);
       assert.equal(
         new RegExp(`this\\.FieldLabel\\(this\\.${field}\\)`).test(SETTINGS_PAGE),
@@ -236,15 +238,17 @@ function readText(url) {
 // 这组用例把「每个 field ↔ 内联状态 ↔ 渲染分支」钉成一张表，任何一边缺失就红。
 
 describe('幽灵报错守卫：每个 issue 都必须有可见落点', () => {
-  /** field → Settings 页面里的内联错误状态名。 */
+  /**
+   * field → Settings 页面里的内联错误状态名。
+   *
+   * mod-settings-sync-min（old→new）：deviceId / author / gitUsername 三个字段的输入控件与
+   * 「高级」折叠区一并删除，页面不再为它们保留内联错误状态（留着会触发 structureGuards 的
+   * 「幽灵报错：字段没有渲染落点」）。它们由页面传静默兜底值保证 issue 不可达，见下方用例。
+   */
   const FIELD_TO_STATE = {
-    [FIELD_DEVICE_ID]: 'deviceIdError',
-    [FIELD_AUTHOR]: 'authorError',
     [FIELD_REPO_URL]: 'repoUrlError',
     [FIELD_TOKEN]: 'tokenError',
-    [FIELD_AI_BASE_URL]: 'aiBaseUrlError',
-    // P0：HTTPS 用户名（Gitee 必填登录名）。字段常量定义在 Settings 页里（model 侧由别人维护）
-    gitUsername: 'gitUsernameError'
+    [FIELD_AI_BASE_URL]: 'aiBaseUrlError'
   };
 
   /** `checkSettingsFields`（model 侧）能返回的 field：不含页面自行追加的 gitUsername。 */
@@ -256,7 +260,7 @@ describe('幽灵报错守卫：每个 issue 都必须有可见落点', () => {
     FIELD_AI_BASE_URL
   ];
 
-  test('checkSettingsFields 可能返回的 field 全部有页面映射', () => {
+  test('checkSettingsFields 的 model field 集合不变；无控件的三个由页面静默兜底值消解', () => {
     // 一次把所有分支都踩中：空设备标识 / 空作者 / 坏地址 / 无 token / 自定义源缺地址（模型名已不校验）
     const issues = check({
       deviceId: '',
@@ -269,36 +273,44 @@ describe('幽灵报错守卫：每个 issue 都必须有可见落点', () => {
       aiBaseURL: ''
     });
     const returned = [...new Set(issues.map((issue) => issue.field))].sort();
-    assert.deepEqual(returned, [...MODEL_FIELDS].sort(), 'model 侧 field 集合变了就要同步补 UI');
-    for (const field of returned) {
+    assert.deepEqual(returned, [...MODEL_FIELDS].sort(), 'model 侧 field 集合变了就要同步核对该模块');
+    // 有输入控件的三个仍逐字段映射（不是删断言）
+    for (const field of [FIELD_REPO_URL, FIELD_TOKEN, FIELD_AI_BASE_URL]) {
       assert.ok(field in FIELD_TO_STATE, `field ${field} 没有页面映射（会变成幽灵报错）`);
     }
+    // 无控件的三个：页面在校验入口传已归一 / 已兜底的值，issue 不可达；不再有内联状态。
+    for (const field of [FIELD_DEVICE_ID, FIELD_AUTHOR]) {
+      assert.equal(field in FIELD_TO_STATE, false, `${field} 的输入控件已删，不该再有内联错误落点`);
+    }
+    const page = readSettingsPage();
+    assert.match(page, /deviceId: normalizeDeviceId\(this\.deviceId\)/, '设备标识必须传归一值');
+    assert.match(page, /const silentAuthor: string = this\.author\.trim\(\)\.length > 0 \? this\.author\.trim\(\) : '我'/, '作者名必须传兜底值');
+    assert.match(page, /author: silentAuthor/, '保存 patch 也写回兜底值（不丢存量作者名）');
   });
 
-  test('P0：HTTPS 用户名复用 assertHttpsUsername，且 FIELD_GIT_USERNAME 走同一套管线', () => {
+  test('P0（old→new）：用户名无输入控件，改由 httpsUsernameFor 静默推断且存量值不清空', () => {
+    // 旧断言钉住 assertHttpsUsername + FIELD_GIT_USERNAME 校验管线 + 用户名框仅 HTTPS 显示；
+    // mod-settings-sync-min 删除了用户名字段与「高级」折叠区，故 retarget 到静默派生入口：
+    // 不再是「校验/回填/红字」三件套，而是「推断/保留/写回」三件事，强度不降。
     const page = readSettingsPage();
-    assert.match(page, /const FIELD_GIT_USERNAME: string = 'gitUsername';/, '页面必须有该字段常量');
+    assert.equal(/FIELD_GIT_USERNAME|gitUsernameIssue|assertHttpsUsername\(/.test(page), false, '用户名校验管线必须随字段一起删除');
+    assert.equal(/用户名（HTTPS 认证）/.test(page), false, '不该再有用户名输入控件文案');
     assert.match(
       page,
-      /assertHttpsUsername\(platform, this\.authMode, this\.gitUsername\)/,
-      '必须复用 model/gitAuth 的规则（不要页面自带一套）'
+      /private ensureGiteeUsernameResolved\(\): void \{[\s\S]{0,320}?httpsUsernameFor\(this\.gitPlatform, this\.repoUrl, ''\)/,
+      '必须按仓库地址静默推断用户名'
     );
-    assert.match(page, /if \(usernameIssue !== null\) \{\s*\n\s*issues\.push\(usernameIssue\);/, '用户名问题要进同一份 issues');
-    assert.match(page, /gitUsername: this\.gitUsername\.trim\(\)/, '保存时必须写进 SettingsPatch');
-    assert.match(page, /this\.gitUsername = settings\.gitUsername;/, '进页面时要回填已保存的用户名');
+    assert.match(page, /gitUsername: this\.gitUsername\.trim\(\)/, '保存时仍写回派生用户名');
+    assert.match(page, /this\.gitUsername = settings\.gitUsername;/, '存量用户名仍可读回（不清空）');
   });
 
-  test('P0：用户名占位文案跟着平台变（GitHub 可留空 / Gitee 必填 / 其它可选）', () => {
-    // A1 之后这几句文案搬到了 model/gitAuth.ts（平台预设表），页面只调用
-    // gitUsernamePlaceholderFor()/gitUsernameHintFor()，避免「两处文案各写一套」再次漂移。
+  test('P0：用户名占位文案仍留在 model/gitAuth（其它调用方复用），页面只做静默推断', () => {
     const model = readFileSyncSafe('../../entry/src/main/ets/model/gitAuth.ts');
     assert.match(model, /'必填：Gitee 登录名'/, 'Gitee 占位必须写「必填」');
     assert.match(model, /'可留空（默认 x-access-token）'/, 'GitHub 占位要说明可留空');
     assert.match(model, /'可选（留空用 x-access-token）'/, '未知平台占位');
     const page = readSettingsPage();
-    assert.match(page, /gitUsernamePlaceholderFor\(this\.gitPlatform\)/, '页面必须复用平台的占位文案');
-    // 只在 HTTPS 下渲染用户名框（SSH 不该出现）
-    assert.match(page, /if \(this\.authMode === AUTH_HTTPS\) \{[\s\S]{0,400}用户名（HTTPS 认证）/, '用户名框仅 HTTPS 显示');
+    assert.equal(/gitUsernamePlaceholderFor\(|gitUsernameHintFor\(/.test(page), false, '占位/提示函数不再由设置页调用');
   });
 
   for (const [field, state] of Object.entries(FIELD_TO_STATE)) {
@@ -372,83 +384,74 @@ describe('幽灵报错守卫：每个 issue 都必须有可见落点', () => {
   });
 });
 
-// ---------------------------------------------------------------- 同步组三个字段的「人话说明」
+// ---------------------------------------------------------------- 三个字段的说明随折叠区一起删除
 //
-// 用户反馈：Git 用户名 / 设备标识 / 作者名 三个标题看起来都像「填个名字」，
-// 没人知道它们分别影响什么（认证？写入目录？只影响展示？）。
-// 说明文案是产品语义的一部分：重构可以挪位置、换写法，但不能整段丢掉。
+// mod-settings-sync-min（old→new）：旧版在这里钉住 Git 用户名 / 设备标识 / 作者名三条「人话说明」
+// 及其排版（FieldNote + 紧跟 FieldLabel）。用户要求「删掉高级选项及配置，其他都软件静默安排」后，
+// 三条说明随输入控件与折叠区整条删除；这里改成钉住「说明已删 + 静默默认值仍在代码中」，
+// 防止后来者把字段加回来却忘记补说明（或反过来只删说明、留着控件）。
 
-describe('同步组字段说明：写明「它到底影响什么」', () => {
+describe('同步组：三个字段的标题/说明/输入框已删除，静默默认值仍在', () => {
   const page = readSettingsPage();
+  const sync = readSettingsFile('components/settings/SyncSection.ets');
 
-  test('Git 用户名：HTTPS 认证用 / GitHub 可留空（x-access-token）/ Gitee 自动取仓库 owner', () => {
-    assert.match(page, /HTTPS 认证用；GitHub 可留空（自动 x-access-token），Gitee 自动取仓库 owner/);
+  test('三条字段说明与三个标题都不再出现（随折叠区删除）', () => {
+    for (const gone of [
+      /HTTPS 认证用；GitHub 可留空（自动 x-access-token），Gitee 自动取仓库 owner/,
+      /自动分配；仅当你要手工指定时才改/,
+      /默认「我」，只影响记录里的"谁记的"/,
+      /用户名（HTTPS 认证）/,
+      /this\.FieldLabel\('设备标识'\)/,
+      /this\.FieldLabel\('作者名'\)/
+    ]) {
+      assert.equal(gone.test(page), false, `不该再有已删字段的标题/说明：${gone}`);
+    }
   });
 
-  test('设备标识：自动分配 + 只在你手改时才需要动', () => {
-    assert.match(page, /自动分配；仅当你要手工指定时才改/);
+  test('SyncSection 不再调用 FieldNote，也不再有「高级」折叠区', () => {
+    assert.equal(/this\.FieldNote\(/.test(sync), false, '同步组不该再渲染字段说明');
+    assert.equal(/SyncAdvancedFields|高级\s*[▸▾]|syncAdvancedOpen/.test(sync), false, '同步组不该再有折叠区');
   });
 
-  test('作者名：默认「我」，只影响记录里的「谁记的」', () => {
-    assert.match(page, /默认「我」，只影响记录里的"谁记的"/);
+  test('静默默认值仍在：作者名默认「我」、设备标识归一、用户名按地址推断', () => {
+    assert.match(page, /this\.author\.trim\(\)\.length > 0 \? this\.author\.trim\(\) : '我'/, '作者名默认「我」');
+    assert.match(page, /deviceId: normalizeDeviceId\(this\.deviceId\)/, '设备标识仍按既有 identity 归一');
+    assert.match(page, /httpsUsernameFor\(this\.gitPlatform, this\.repoUrl, ''\)/, '用户名按仓库地址推断');
   });
 
-  test('说明用小字（FONT.caption + text_secondary），且允许多行读完（不是单行省略）', () => {
-    // 因 A2 拆分移动：FieldNote 抽到 components/settings/SettingsBits.ets（SyncHeader 留在
-    // components/settings/SyncSection.ets），切片锚点改成 bits 文件里 FieldNote 的实现段；
-    // 断言（caption 字号 + text_secondary + 不许 maxLines(1)）不变。
+  test('共享 FieldNote 构件仍在（其它 section 可复用），其排版契约不变', () => {
     const bits = readSettingsFile('components/settings/SettingsBits.ets');
     const builder = bits.slice(bits.indexOf('FieldNote(text: string)'));
     assert.ok(builder.length > 0, 'SettingsBits 里必须能找到 FieldNote 的实现');
     assert.match(builder, /FONT\.caption/, '说明字号必须是 caption');
     assert.match(builder, /text_secondary/, '说明颜色必须是 text_secondary');
     assert.equal(/maxLines\(1\)/.test(builder), false, '字段语义说明不能被单行省略号截断');
-    const notes = [...page.matchAll(/this\.FieldNote\(/g)];
-    assert.ok(notes.length >= 3, `三个字段都要有说明，实际只有 ${notes.length} 处`);
-  });
-
-  test('说明紧跟标题（FieldLabel）之后，且在输入框之前', () => {
-    const labels = ['this.FieldLabel(\'用户名（HTTPS 认证）\')', "this.FieldLabel('设备标识')", "this.FieldLabel('作者名')"];
-    for (const label of labels) {
-      const at = page.indexOf(label);
-      assert.ok(at > 0, `页面上找不到标题：${label}`);
-      const noteAt = page.indexOf('this.FieldNote(', at);
-      assert.ok(noteAt > at, `${label} 下面必须有一行说明`);
-      assert.ok(noteAt - at < 400, `${label} 与说明之间不该隔着一大段界面`);
-      const inputAt = page.indexOf('TextInput(', at);
-      assert.ok(noteAt < inputAt, `${label} 的说明必须在输入框之前（标题下一行）`);
-    }
   });
 });
 
 // ---------------------------------------------------------------- 数据边界：主表单只留两个控件
 //
-// 产品决定（mod-settings-lean）：用户只需要填「仓库地址 + 访问令牌」。设备编号由仓库自动分配
-// （`devices/registry.jsonl` + uuid 抢占），用户名按地址推断、作者名默认「我」，平台按地址推断、
-// 分支固定 main。因此那三个原字段必须**默认不可见**（收在「高级 ▸」里），而不是继续占着主表单。
+// mod-settings-sync-min（old→new）：旧版在这里钉住「三个原字段藏在高级里、三种情况自动展开」。
+// 用户要求删掉高级选项及配置后，折叠区整条删除、三字段改为软件静默安排；这里把断言 retarget 到
+// 「控件确实消失 + 静默默认值仍在 + 失败仍有诚实状态行与重试」，不是放宽、也不是只删断言。
 
-describe('数据边界：主表单只有两个控件，三个原字段藏在「高级」里', () => {
+describe('数据边界（mod-settings-sync-min）：主表单只有两个控件，「高级」折叠区已删除', () => {
   const page = readSettingsPage();
-  // 因 A2 拆分移动：`SyncAdvancedFields` / 同步组主表单搬进了
-  // components/settings/SyncSection.ets（组件的根 builder 就是 `build()`）。
-  // 切片的锚点改成该文件（同一个文件里「高级」仍排在主表单之前），断言内容不变。
   const syncSection = readSettingsFile('components/settings/SyncSection.ets');
-  /** 「高级」折叠区 builder 正文。 */
-  const advanced = syncSection.slice(
-    syncSection.indexOf('SyncAdvancedFields() {'),
-    syncSection.indexOf('build() {')
-  );
-  /** 主表单（同步组根 builder 里、折叠区调用之前的部分）。 */
+  /** 同步组根 builder（就是整个表单区）。 */
   const mainForm = syncSection.slice(syncSection.indexOf('build() {'));
 
-  test('「高级」默认收起（状态初值 false + 只有展开时才渲染折叠区）', () => {
-    assert.match(page, /@State syncAdvancedOpen: boolean = false/, '「高级」必须默认收起');
-    assert.match(page, /if \(this\.syncAdvancedOpen\) \{\s*\n\s*this\.SyncAdvancedFields\(\)/, '折叠区只在展开时渲染');
-    assert.match(page, /this\.syncAdvancedOpen \? '高级 ▾' : '高级 ▸'/, '折叠区要有可点的「高级 ▸」开关');
-    assert.match(page, /private toggleSyncAdvanced\(\): void/, '点击开关走独立方法（便于清掉自动展开原因）');
+  test('「高级」折叠区 / 开关 / 自动展开入口全部消失', () => {
+    for (const gone of [
+      /@State syncAdvancedOpen/, /@State syncAdvancedReason/, /SyncAdvancedFields/,
+      /高级\s*[▸▾]/, /toggleSyncAdvanced/, /openSyncAdvanced/, /syncAdvancedReason/
+    ]) {
+      assert.equal(gone.test(page), false, `不该再有折叠区残留：${gone}`);
+    }
+    assert.equal(/SyncAdvancedFields|syncAdvancedOpen/.test(syncSection), false, '组件里不该再有折叠区');
   });
 
-  test('主表单只剩「仓库地址 / 访问令牌」两个控件 + 固定说明 + SSH 只读警告', () => {
+  test('主表单只剩「仓库地址 / 访问令牌」两个输入框 + 固定说明 + SSH 只读警告 + 诚实状态行', () => {
     assert.match(mainForm, /Text\('仓库地址'\)/, '仓库地址是主表单字段');
     assert.match(mainForm, /this\.FieldLabel\('访问令牌（仅存本机）'\)/, '访问令牌是主表单字段');
     assert.equal((mainForm.match(/TextInput\(/g) ?? []).length, 2, '主表单恰好两个输入框：仓库地址 + 访问令牌');
@@ -457,50 +460,32 @@ describe('数据边界：主表单只有两个控件，三个原字段藏在「�
     assert.equal(/pickAuthMode\(/.test(mainForm), false, '主表单不该有认证方式选择器');
     assert.match(mainForm, /this\.HintLine\(SYNC_CAPTION\)/, '固定说明必须渲染');
     assert.match(mainForm, /Text\(SSH_STORED_WARNING\)/, '已保存 SSH 的只读警告必须渲染');
+    assert.match(mainForm, /Text\(this\.syncMessage\)/, '诚实状态行必须保留');
+    assert.match(mainForm, /ErrorState\(\{/, '失败三段式（原因 + 重试）必须保留');
   });
 
-  test('三个原字段（用户名 / 设备标识 / 作者名）不在主表单里', () => {
-    for (const hidden of ['用户名（HTTPS 认证）', '设备标识', '作者名']) {
-      assert.equal(mainForm.includes(`this.FieldLabel('${hidden}')`), false, `${hidden} 不该出现在主表单`);
+  test('三个原字段（用户名 / 设备标识 / 作者名）连折叠区一起消失，不再有任何输入框', () => {
+    for (const gone of ['用户名（HTTPS 认证）', '设备标识', '作者名']) {
+      assert.equal(syncSection.includes(`this.FieldLabel('${gone}')`), false, `${gone} 的标题不该出现`);
     }
-    assert.equal(/this\.gitUsername\b/.test(mainForm), false, '主表单不该有用户名输入框');
-    assert.equal(/this\.deviceId\b/.test(mainForm), false, '主表单不该有设备标识输入框（只读的 deviceIdNotice 不算）');
-    assert.equal(/this\.author\b/.test(mainForm), false, '主表单不该有作者名输入框');
-  });
-
-  test('三个原字段在「高级」折叠区里（含说明与输入框）', () => {
-    for (const hidden of ['用户名（HTTPS 认证）', '设备标识', '作者名']) {
-      assert.ok(advanced.includes(`this.FieldLabel('${hidden}')`), `${hidden} 必须收在「高级」里`);
+    for (const gone of [/TextInput\(\{ text: this\.gitUsername/, /TextInput\(\{ text: this\.deviceId/, /TextInput\(\{ text: this\.author/]) {
+      assert.equal(gone.test(syncSection), false, `${gone} 输入框不该存在`);
     }
-    assert.match(advanced, /TextInput\(\{ text: this\.gitUsername/, '用户名输入框在「高级」里');
-    assert.match(advanced, /TextInput\(\{ text: this\.deviceId/, '设备标识输入框在「高级」里');
-    assert.match(advanced, /TextInput\(\{ text: this\.author/, '作者名输入框在「高级」里');
-    // 手工改设备标识 = 放弃「自动分配」（否则下次同步会把它当成沿用老标识）
-    // 因 A2 拆分移动：输入框的 onChange 回调由页面承接（子组件只上报 onChangeDeviceId），
-    // 「手改设备标识 = 放弃自动分配」这句因此在页面的回调里，不在组件的 builder 里。
-    // 等价语义（不是放宽成「全文出现一次」）：仍然钉住「设备标识输入框的 onChange → deviceIdAuto = false」，
-    // 只是把切片从 `advanced` 换成页面里 `onChangeDeviceId` 回调那一段。
-    const deviceIdCallbackAt = page.indexOf('onChangeDeviceId: (value: string)');
-    assert.ok(deviceIdCallbackAt > 0, '页面必须承接 onChangeDeviceId 回调（子组件只上报）');
-    const deviceIdCallback = page.slice(deviceIdCallbackAt, page.indexOf('\n      },', deviceIdCallbackAt));
-    assert.match(deviceIdCallback, /this\.deviceId = value;/, '回调里要先写回用户输入');
-    assert.match(deviceIdCallback, /this\.deviceIdAuto = false;/, '手改设备标识要标记为「非自动」');
+    assert.equal(/onChangeDeviceId|onChangeAuthor|onChangeGitUsername/.test(syncSection), false, '三个字段的回调不该残留');
   });
 
-  test('设备编号是只读一行（自动分配），不是输入框', () => {
-    assert.match(mainForm, /if \(this\.deviceIdNotice\.length > 0\) \{\s*\n\s*this\.HintLine\(this\.deviceIdNotice\)/);
-    assert.match(page, /import \{ describeClaimOutcome \} from '\.\.\/model\/deviceRegistry';/);
-    assert.match(page, /describeClaimOutcome\(settings\.deviceId, true\)/, '自动分配的编号要显示成只读一行');
+  test('静默默认值仍在代码中：自动分配 / 作者名兜底 / 用户名推断，旧值仍可读于 store', () => {
+    assert.match(page, /this\.deviceIdAuto = settings\.deviceIdAuto/, '设备编号来源仍从 store 读出');
+    assert.match(page, /this\.author = settings\.author\.trim\(\)\.length > 0 \? settings\.author : '我'/, '存量作者名仍可读');
+    assert.match(page, /this\.gitUsername = settings\.gitUsername/, '存量用户名仍可读');
+    assert.match(page, /httpsUsernameFor\(this\.gitPlatform, this\.repoUrl, ''\)/, '用户名按地址推断');
   });
 
-  test('「高级」只有三种情况自动展开并给原因', () => {
-    assert.match(page, /private openSyncAdvanced\(reason: string\): void/, '自动展开必须走统一入口');
-    // ① 设备标识重复
-    assert.match(page, /result\.identityConflict === true[\s\S]{0,400}this\.openSyncAdvanced\(this\.identityWarning\)/);
-    // ② 编号分配失败 / 仓库不可读
-    assert.match(page, /result\.deviceRegistrationError[\s\S]{0,200}this\.openSyncAdvanced\(registrationError\)/);
-    // ③ Gitee 用户名推不出来
-    assert.match(page, /needsManualGiteeUsername\(this\.gitPlatform, this\.repoUrl, this\.gitUsername\)[\s\S]{0,200}this\.openSyncAdvanced\(GITEE_OWNER_INFER_FAILED\)/);
+  test('失败仍有出口：身份冲突常驻警告 + 状态行 + ErrorState 重试（原「展开高级给原因」的替代）', () => {
+    assert.match(mainForm, /this\.identityWarning\.length > 0/, '设备标识冲突仍是常驻警告');
+    assert.match(mainForm, /ErrorState\(\{/, '同步失败仍给三段式 + 重试');
+    assert.match(page, /private async runAction\(action: string\): Promise<void>/, '重试路径入口仍在');
+    assert.match(page, /this\.syncMessage = `❌ \$\{info\.title\}/, '失败仍写入诚实状态行');
   });
 
   test('页面不打印凭据（新增代码也遵守）：无 console/hilog', () => {

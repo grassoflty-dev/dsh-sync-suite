@@ -19,37 +19,23 @@
  * 本页仍做四件事（逻辑未改）：内嵌隐藏 Web 跑 isomorphic-git、注册代理、按钮触发
  * pull/push/status、保存前做表单校验。
  *
- * 远程控制组（最后一个功能组，排在「关于」之前）：
- * 1. 「访问方式」六选一（`model/remoteAccess.ts` 的 `REMOTE_MODES`，与插件侧同一套枚举与字段）；
- * 2. 按方式的 `fields` 渲染输入（局域网 / IPv6 → 地址+端口，Tailscale → 主机+端口，
- *    Cloudflare → 域名，手动 → 完整地址；`lan`/`ipv6`/`tailscale` 另有「访问令牌（可选）」
- *    密码框，已保存的令牌只打码显示、不回填明文），`unsupported`（网易 UU 远程）只显示原因、不给假开关；
- * 3. 「DSH 地址」是最终要打开的地址（`lan`/`ipv6`/`tailscale`/`cloudflare` 由字段自动拼出来，
- *    `manual` 就是手输那一行）；点「打开远程控制」时 `buildRemoteAccessUrl` 拼地址、`normalizeRemoteUrl`
- *    再归一，`settingsStore.save` 落盘（含方式与各字段）后才 `router.pushUrl` 到内嵌页
- *    （`routeToRemote()` + params.url）。地址里的 token 只存本机，不进同步载荷。
+ * 远程控制组（mod-settings-remote-dedupe）：设置页**只保留一行入口**打开 `pages/Instances`。
+ * 方式选择、地址、令牌、最近成功等字段全部收敛到实例页（`instanceStore`），本页不再重复配置。
+ * 旧 `settingsStore.remote*` 键值仍可读，启动时由 `Instances.bootstrap()` 幂等迁移进实例表。
  *
- * 同步组（mod-settings-lean：设置只留仓库地址 + 令牌）：
+ * 同步组（mod-settings-lean → mod-settings-sync-min：设置只留仓库地址 + 令牌）：
  * - **主表单只留两个控件**：仓库地址 / 访问令牌，地址下固定一行
  *   「平台按地址自动识别 · 分支固定 main」；平台随地址自动推断、分支恒为 main，
- *   没有平台/分支选择控件（设备编号仍由仓库自动分配，「高级 ▸」里能看到只读一行
- *   「本机：device-2（自动分配）」）；
- * - Git 用户名 / 设备标识 / 作者名收进「高级 ▸」折叠区（默认收起）：它们都有安全默认值
- *   （用户名按仓库地址推断、编号自动分配、作者名默认「我」），不该成为同步的前置门槛；
+ *   没有平台/分支选择控件；
+ * - Git 用户名 / 设备标识 / 作者名的输入控件与折叠区**整条删除**：它们都有安全默认值
+ *   （用户名按仓库地址推断、编号由仓库自动分配、作者名默认「我」），全部由软件静默安排。
+ *   旧值仍可读于 settingsStore（不迁移、不清空），只是不再上屏、不再成为同步的前置门槛；
  * - 「立即同步」（= pull）与「推送」是组内两个主按钮，查看状态 / 重试上次 / 测试连接
  *   在组头「更多」里；
  * - 同步状态（分支 / 领先 / 落后 / 冲突 / 本地改动）与最近一次同步时间+成败都在本页展示；
  * - **SSH 在本版本不可用**（内置内核只有 HTTP(S) 传输）：已保存的是 SSH 时主表单给一行
  *   只读警告，同步按钮照旧拦住，不提供切换控件、不做「看起来支持」的假入口。
  *
- * 「高级」折叠区三个字段的**人话说明**（`FieldNote`）：
- * - Git 用户名 = `HTTPS 认证用；GitHub 可留空（自动 x-access-token），Gitee 自动取仓库 owner`；
- * - 设备标识 = `自动分配；仅当你要手工指定时才改`；
- * - 作者名 = `默认「我」，只影响记录里的"谁记的"`。
- * 「高级」默认收起，只有三种情况**自动展开并给原因**：
- * ① 设备标识重复（`model/deviceIdentity.ts` 指纹 / registry 冲突）；
- * ② 设备编号分配失败或仓库不可读（`E_DEVICE_ID_CONFLICT` / `E_DEVICE_ID_UNREADABLE`）；
- * ③ Gitee 用户名从仓库地址推不出来（`GITEE_OWNER_INFER_FAILED`）。
  * 设备标识重复（两台设备同一个 id）由 `model/deviceIdentity.ts` + `GitSyncService` 的指纹比对
  * 识别：冲突时本页显示**常驻** warning（不是 toast），同步结果带 `identityConflict: true`。
  *
@@ -58,8 +44,8 @@
  *
  * token / AI key 只存本机 preferences，不进同步载荷与日志；本页不打印它们。
  *
- * **A2 拆分（纯重构，行为不变）**：五个功能组的界面从本页搬到了
- * `components/settings/{SyncSection,RemoteSection,AiSection,DataSection,AboutSection}.ets`：
+ * **A2 拆分（纯重构，行为不变）**：四个功能组的界面从本页搬到了
+ * `components/settings/{SyncSection,AiSection,DataSection,AboutSection}.ets`：
  * - 本页仍然是**唯一的状态持有者**（全部 `@State` 与业务方法：保存 / 同步 / 导出 / 远程控制 /
  *   主题切换 / 弹层），并负责装配（`SyncGroup()` 等 5 个 builder，紧凑屏与宽屏共用）；
  * - 子组件只收**单向 props + 回调**（`@Prop` 值 + `onXxx`），不持有共享状态 —— 因此刷新语义
@@ -84,28 +70,6 @@ import { GitSyncService } from '../services/GitSyncService';
 import type { GitSyncConfig, GitSyncResult, ZipWriteBundleInput } from '../services/GitSyncService';
 import { describeRepoProbe, repoProbeUrl, validateRepoUrl } from '../model/repoUrl';
 import type { RepoUrlCheck } from '../model/repoUrl';
-import { normalizeRemoteUrl, routeToRemote } from '../model/remoteUrl';
-// 一键重连（§B.4）：只把记录还原成可打开的地址并派生按钮文案，令牌不进记录
-import { decodeLastOk, mergeRemoteToken, reconnectLabel } from '../model/remoteUrl';
-// D1 的 P2：「DSH 地址」失焦即归一 —— 只借 parseRemoteInput 分辨「地址 / 令牌片段 / 非法」，
-// 地址校验仍走 normalizeRemoteUrl 那一份规则（见 model/remoteUrl 的分工注释）。
-import { parseRemoteInput } from '../model/remoteUrl';
-import type { RemoteUrlCheck, RemoteInputResult } from '../model/remoteUrl';
-import type { LastOkEntry } from '../model/remoteUrl';
-import {
-  REMOTE_AVAILABILITY_NEEDS_SETUP,
-  REMOTE_AVAILABILITY_UNSUPPORTED,
-  REMOTE_MODE_LAN,
-  REMOTE_MODE_MANUAL,
-  REMOTE_MODE_ORDER,
-  REMOTE_MODES,
-  buildRemoteAccessUrl,
-  defaultRemoteAccessConfig,
-  findRemoteMode,
-  maskRemoteToken,
-  normalizeRemoteMode,
-  normalizeRemotePort
-} from '../model/remoteAccess';
 import type {
   RemoteAccessConfig,
   RemoteAccessUrlResult,
@@ -115,8 +79,6 @@ import type {
 import {
   AUTH_HTTPS,
   FIELD_AI_BASE_URL,
-  FIELD_AUTHOR,
-  FIELD_DEVICE_ID,
   FIELD_REPO_URL,
   FIELD_TOKEN,
   checkSettingsFields,
@@ -155,28 +117,21 @@ import {
   GITEE_PLATFORM,
   PLATFORM_GITHUB,
   SSH_UNSUPPORTED_SHORT,
-  assertHttpsUsername,
   authHintFor,
   describeAuthModeBlocker,
-  gitUsernameHintFor,
-  gitUsernamePlaceholderFor,
   isSshAuthMode,
   repoUrlExamplesFor,
   resolveGitUsername,
   resolvePlatformSelection,
-  GITEE_OWNER_INFER_FAILED,
-  httpsUsernameFor,
-  needsManualGiteeUsername
+  httpsUsernameFor
 } from '../model/gitAuth';
 import type { PlatformResolution } from '../model/gitAuth';
-import { describeClaimOutcome } from '../model/deviceRegistry';
 import { gitExtrasStore } from '../services/syncController';
 import type { GitSyncExtras } from '../services/syncController';
 import { PageLayout } from '../components/PageLayout';
-// A2 拆分：五个 section 组件（页面只做装配；共享字段构件在 SettingsBits）
+// A2 拆分：四个 section 组件（页面只做装配；共享字段构件在 SettingsBits）
 import { SyncSection } from '../components/settings/SyncSection';
 import { AiSection } from '../components/settings/AiSection';
-import { RemoteSection } from '../components/settings/RemoteSection';
 import { DataSection } from '../components/settings/DataSection';
 import { AboutSection } from '../components/settings/AboutSection';
 import { FieldLabel as FieldLabelBit, HintLine as HintLineBit } from '../components/settings/SettingsBits';
@@ -252,15 +207,6 @@ const PANEL_MODEL: string = 'model';
 const PANEL_PRIVACY: string = 'privacy';
 const PANEL_REPO: string = 'repo';
 /**
- * Git 用户名字段标识。
- *
- * 与 `model/settingsForm.ts` 里的 `FIELD_*` 同构，但那个文件由另一位执行者维护
- * （他正在加 `gitUsername` 与 `assertHttpsUsername`），所以先放在页面里，
- * 两份常量值必须一致（守卫测试会盯）。
- */
-const FIELD_GIT_USERNAME: string = 'gitUsername';
-
-/**
  * exportService 与 GitSyncService 之间的显式适配器（ArkTS 禁止结构化类型，不能直接把
  * GitSyncService 当 V2ZipBridge 用）。只做参数形状转换，不含任何 IO 决策。
  */
@@ -312,12 +258,12 @@ struct Settings {
   @State firstIssueText: string = '';
   /** AI 接口地址的内联错误（自定义源专用）。 */
   @State aiBaseUrlError: string = '';
-  /** Git 用户名（仅 HTTPS 认证用：GitHub 可留空，Gitee 必填登录名）。 */
+  /**
+   * Git 用户名（仅 HTTPS 认证用）：**无输入控件**，由 `ensureGiteeUsernameResolved()` 按仓库地址静默推断；
+   * 旧值从 settingsStore 读出后原样保留（不迁移、不清空），只是不再上屏。
+   */
   @State gitUsername: string = '';
-  @State gitUsernameError: string = '';
-  // 表单校验提示（逐字段红字）
-  @State deviceIdError: string = '';
-  @State authorError: string = '';
+  // 表单校验提示（逐字段红字）：只剩仓库地址 / 令牌 / AI 接口地址三处（mod-settings-sync-min）
   @State repoUrlError: string = '';
   @State tokenError: string = '';
   @State connectionText: string = '';
@@ -355,25 +301,8 @@ struct Settings {
   @State contentWidth: number = 0;
   /** 当前打开的弹层（`PANEL_*`）。 */
   @State panel: string = PANEL_NONE;
-  /**
-   * 同步组「高级 ▸」折叠区是否展开（**默认收起**）。
-   *
-   * 主表单只留两个控件：仓库地址 / 访问令牌。Git 用户名、设备标识、作者名
-   * 全部收在这个折叠区里 —— 它们都有安全的默认值（用户名按地址推断、编号自动分配、
-   * 作者名默认「我」），用户不需要为了同步去理解它们。
-   */
-  @State syncAdvancedOpen: boolean = false;
-  /**
-   * 「高级」被**自动**展开时的一行原因（空串 = 用户自己点开的 / 没展开）。
-   *
-   * 只有三种情况会自动展开并给原因：
-   * ① 设备标识重复（指纹/registry 冲突）② 编号分配失败 / 仓库不可读 ③ Gitee 用户名推不出来。
-   */
-  @State syncAdvancedReason: string = '';
-  /** 本机设备编号是否由仓库自动分配（true = 只读展示；用户手改后置 false）。 */
+  /** 本机设备编号是否由仓库自动分配（true = 仓库分配；存量非自动值仍可读、不改）。 */
   @State deviceIdAuto: boolean = false;
-  /** 设备编号的只读一行（`本机：device-2（自动分配）`；空串 = 还没登记，不占行）。 */
-  @State deviceIdNotice: string = '';
   /** 首页是否展示其他设备的只读记录（写 AppStorage，首页读取）。 */
   @State includeOtherDevices: boolean = false;
 
@@ -405,37 +334,7 @@ struct Settings {
    * 用户点「深色」就是为了立刻看效果，中间不该再要一次确认。
    */
   @State themeMode: string = 'system';
-  /** 电脑上的 DSH Web 地址（「远程控制」内嵌加载；地址可能含 token，只存本机）。 */
-  @State remoteUrl: string = '';
-  /** 远程控制地址的内联错误（非法地址 / 保存失败），非空时按钮上方显示红字。 */
-  @State remoteUrlError: string = '';
-  /** 远程访问方式（`lan`/`tailscale`/`ipv6`/`cloudflare`/`manual`/`uu`，见 `model/remoteAccess.ts`）。 */
-  @State remoteMode: string = REMOTE_MODE_LAN;
-  /** 局域网方式要填的具体 IPv4。 */
-  @State remoteLanAddress: string = '';
-  /** 端口输入框的原始文本（`InputType.Number` 仍按文本回调；空串/非法 → 0 = 跟 DSH 同端口）。 */
-  @State remotePortText: string = '0';
-  /** Tailscale 方式要填的 100.x 地址或 MagicDNS 名。 */
-  @State remoteTailscaleHost: string = '';
-  /** Cloudflare 隧道域名（不带 https://、不带路径）。 */
-  @State remoteCloudflareHost: string = '';
-  /** 公网 IPv6 地址（不带方括号；拼地址时由 `buildRemoteAccessUrl` 补 `[ ]`）。 */
-  @State remoteIpv6Address: string = '';
-  /** 手动方式的完整地址（与「DSH 地址」那一行共用同一份值，见 `manualUrl` 的取值逻辑）。 */
-  @State remoteManualUrl: string = '';
-  /**
-   * 「访问令牌（可选）」的**输入框值**（只写通道）。
-   *
-   * 这里只存「用户这次想改成的新令牌」，**永不**回填已保存的明文：已保存的令牌在
-   * `savedRemoteToken`（private，不给输入框），页面只用 `maskRemoteToken` 显示「已保存」。
-   * 输入框留空 = 不改（沿用已保存的令牌），见 `effectiveRemoteToken()`。
-   */
-  @State remoteToken: string = '';
-  /**
-   * 最近一次成功连接的单行 JSON 记录 `{"url","at"}`；空串=无记录。
-   * 仅供「一键重连」按钮派生文案与还原地址用，记录里绝不含令牌（令牌仍只存 `remoteToken`）。
-   */
-  @State remoteLastOk: string = '';
+  // 远程控制字段已收敛到 pages/Instances（mod-settings-remote-dedupe）；本页只保留入口行。
 
   /** 从列表页跳转过来时要自动执行的同步动作（pull / push / status）。 */
   private autoAction: string = '';
@@ -444,13 +343,6 @@ struct Settings {
   private disposed: boolean = false;
   /** 已保存的 token：输入框留空时沿用（用户「不改 token」不该被拦）。 */
   private savedToken: string = '';
-  /**
-   * 已保存的「访问令牌」（明文，页面内部只用于 mask 显示与"沿用"语义）。
-   *
-   * 刻意不是 `@State`：它**不进任何输入框**，改动它也不需要触发重绘（mask 显示读的是方法）。
-   * 声明成普通字段能提醒后来者：这个值只允许 mask 后上屏。
-   */
-  private savedRemoteToken: string = '';
   /** 最近一次同步状态结果（只在页面内部用于派生「推送是否就绪」的说明行）。 */
   private lastStatusResult: GitSyncResult | null = null;
   /** 页面主滚动容器：校验失败时滚回顶部，让红色汇总与第一个错误字段进入视野。 */
@@ -461,13 +353,6 @@ struct Settings {
    * 若写成 @State 反而会给人「已经会刷新」的错觉。
    */
   private groupOffsets: number[] = [-1, -1, -1, -1, -1];
-  /** 远程控制的「旧数据 → manual」迁移是否已经做过（只做一次，见 `applySettings`）。 */
-  private remoteMigrated: boolean = false;
-  /**
-   * 「DSH 地址」失焦归一的一次性 toast 去重键：记用户原文，同一段原文只提示一次。
-   * 刻意不是 @State：它只用于去重、不参与渲染（同 `savedRemoteToken` 的纪律）。
-   */
-  private lastBlurNormalizeText: string = '';
   /**
    * 待用户确认的导入计划（**就是 dry-run 那一份**）。
    *
@@ -500,26 +385,6 @@ struct Settings {
     // 页面销毁后不要再改状态（异步回调里用 disposed 拦截），避免销毁后 setState 崩溃
     this.disposed = true;
     this.webReady = false;
-  }
-
-  /**
-   * 每次回到本页都补读一次「最近一次成功」记录（从远程控制页返回时可能刚写了新记录）。
-   */
-  onPageShow(): void {
-    this.refreshRemoteLastOk();
-  }
-
-  /** 只刷新重连记录：绝不用 applySettings 整表 reload，否则会覆盖用户正在编辑的表单。 */
-  private async refreshRemoteLastOk(): Promise<void> {
-    try {
-      const settings = await settingsStore.load();
-      if (this.disposed) {
-        return;
-      }
-      this.remoteLastOk = settings.remoteLastOk;
-    } catch {
-      // 纯展示状态：读失败就当没有新记录，不打扰用户
-    }
   }
 
   private readAutoAction(): void {
@@ -588,14 +453,10 @@ struct Settings {
   /** 把存储里的设置铺到表单上（读取与保存后共用）。 */
   private applySettings(settings: ScheduleSettings): void {
     this.deviceId = settings.deviceId;
-    // 作者名默认「我」：它被收进「高级」后，默认值必须在这里兜住，
-    // 否则用户会在不展开的情况下被「作者名不能为空」拦住（幽灵报错）。
+    // 作者名默认「我」：输入控件删掉后默认值必须在这里兜住（mod-settings-sync-min），
+    // 存量非空作者名原样保留，只是不再上屏。
     this.author = settings.author.trim().length > 0 ? settings.author : '我';
     this.deviceIdAuto = settings.deviceIdAuto;
-    this.deviceIdNotice =
-      settings.deviceId.length > 0 && settings.deviceIdAuto
-        ? describeClaimOutcome(settings.deviceId, true)
-        : '';
     this.repoUrl = settings.repoUrl;
     this.token = settings.token;
     // 记住已保存的 token：输入框被清空时按「沿用旧 token」处理，不要误判为空
@@ -615,39 +476,7 @@ struct Settings {
     this.authMode = normalizeAuthMode(settings.authMode);
     // 深色模式三态（旧数据没有该键 → system，由 settingsStore / normalizeThemeMode 归一）
     this.themeMode = normalizeThemeMode(settings.themeMode);
-    this.remoteUrl = settings.remoteUrl;
-    // 远程访问方式与各字段（旧数据没有这些键 → lan / 0 / 空串，由 settingsStore 归一）
-    this.remoteMode = normalizeRemoteMode(settings.remoteMode);
-    this.remoteLanAddress = settings.remoteLanAddress;
-    this.remotePortText = String(normalizeRemotePort(settings.remotePort));
-    this.remoteTailscaleHost = settings.remoteTailscaleHost;
-    this.remoteCloudflareHost = settings.remoteCloudflareHost;
-    this.remoteIpv6Address = settings.remoteIpv6Address;
-    // 旧版本只存过 remoteUrl：仍是 manual 方式的唯一来源，不能丢
-    this.remoteManualUrl = settings.remoteManualUrl.length > 0 ? settings.remoteManualUrl : settings.remoteUrl;
-    // 访问令牌：读到的明文只留在 savedRemoteToken（供 mask 显示 / 拼地址 / 「没改就沿用」），
-    // **不回填输入框**——输入框只存"用户这次想改成的值"，留空即"不改"。
-    this.savedRemoteToken = settings.remoteToken.trim();
-    this.remoteToken = '';
-    this.remoteLastOk = settings.remoteLastOk;
-    // 升级迁移（**只在首次铺表单时做一次**）：老数据只有 `remoteUrl`、没有任何方式字段。
-    // 若按默认的 `lan` 走，「局域网地址」是空的 → 原来能打开的地址会突然点不动。
-    // 因此把它当成「手动填的完整地址」打开；用户点一次「打开远程控制」后方式就落盘成 manual。
-    // 用 `remoteMigrated` 兜住：否则用户主动选了「局域网直连」再点保存，会被这段迁移拽回手动方式。
-    if (!this.remoteMigrated) {
-      this.remoteMigrated = true;
-      if (
-        this.remoteMode === REMOTE_MODE_LAN &&
-        settings.remoteUrl.trim().length > 0 &&
-        settings.remoteLanAddress.trim().length === 0 &&
-        settings.remoteTailscaleHost.trim().length === 0 &&
-        settings.remoteCloudflareHost.trim().length === 0 &&
-        settings.remoteIpv6Address.trim().length === 0 &&
-        settings.remoteManualUrl.trim().length === 0
-      ) {
-        this.remoteMode = REMOTE_MODE_MANUAL;
-      }
-    }
+    // 远程配置不在设置页铺表单：旧值仍留在 settingsStore，由实例页 bootstrap() 幂等迁移。
     this.lastSyncAt = settings.lastSyncAt;
     this.lastSyncError = settings.lastSyncError;
     this.lastSyncAction = normalizeSyncAction(settings.lastSyncAction);
@@ -738,33 +567,22 @@ struct Settings {
    * 2. 顶部横幅只统计**真正写进了内联状态的**问题（`applied`），绝不出现「说有 N 项但看不到」。
    */
   private applyIssues(issues: SettingsFieldIssue[]): void {
-    this.deviceIdError = '';
-    this.authorError = '';
     this.repoUrlError = '';
     this.tokenError = '';
     this.aiBaseUrlError = '';
-    this.gitUsernameError = '';
     const applied: SettingsFieldIssue[] = [];
     for (const issue of issues) {
-      if (issue.field === FIELD_DEVICE_ID) {
-        this.deviceIdError = issue.message;
-        // 隐藏字段的校验红字必须可见：否则用户只会看到「有 1 项需要处理」却找不到在哪
-        this.openSyncAdvanced(issue.message);
-      } else if (issue.field === FIELD_AUTHOR) {
-        this.authorError = issue.message;
-        this.openSyncAdvanced(issue.message);
-      } else if (issue.field === FIELD_REPO_URL) {
+      if (issue.field === FIELD_REPO_URL) {
         this.repoUrlError = issue.message;
       } else if (issue.field === FIELD_TOKEN) {
         this.tokenError = issue.message;
-      } else if (issue.field === FIELD_GIT_USERNAME) {
-        this.gitUsernameError = issue.message;
-        this.openSyncAdvanced(issue.message);
       } else if (issue.field === FIELD_AI_BASE_URL) {
-        // 接口地址行在自定义源下常驻显示（不再藏在「高级」折叠区），红字直接落在它下方
+        // 接口地址行在自定义源下常驻显示，红字直接落在它下方
         this.aiBaseUrlError = issue.message;
       } else {
-        // 未知字段：没有内联渲染位置，不计入横幅（守卫测试保证走不到这里）
+        // 设备标识 / 作者名 / 用户名已无输入控件（mod-settings-sync-min）：
+        // 页面在校验入口传的就是「已归一 / 已兜底」的静默值，这三类 issue 不可达；
+        // 万一模型侧新增了无落点的字段，宁可不计入横幅，也不制造「说有 N 项却看不到红字」的幽灵报错。
         continue;
       }
       applied.push(issue);
@@ -785,10 +603,13 @@ struct Settings {
     );
     const platform: string = platformResolution.platform;
     // 整表校验交给纯函数：一次返回**全部**问题，页面逐字段标红 + 顶部汇总
+    // 设备标识 / 作者名已无输入控件：传「已归一 / 已兜底」的静默值，保证这两类 issue 不可达，
+    // 也就不存在「横幅说有 N 项、界面却没有红字」的幽灵报错（旧值仍在 store，只是不上屏）。
+    const silentAuthor: string = this.author.trim().length > 0 ? this.author.trim() : '我';
     const issues: SettingsFieldIssue[] = checkSettingsFields(
       {
-        deviceId: this.deviceId,
-        author: this.author,
+        deviceId: normalizeDeviceId(this.deviceId),
+        author: silentAuthor,
         repoUrl: this.repoUrl,
         token: this.token,
         authMode: this.authMode,
@@ -799,13 +620,8 @@ struct Settings {
       },
       repoCheck
     );
-    // 主表单没有用户名：保存前先按仓库地址推断（Gitee = owner），推不出来才展开「高级」让人填
+    // 用户名无输入控件：保存前按仓库地址静默推断（Gitee = owner），推不出来也不打断用户。
     this.ensureGiteeUsernameResolved();
-    // HTTPS 用户名（Gitee 必填）：用**纠正后**的平台判定，URL 改了平台没改也不会漏报
-    const usernameIssue: SettingsFieldIssue | null = this.gitUsernameIssue(platform);
-    if (usernameIssue !== null) {
-      issues.push(usernameIssue);
-    }
     this.applyIssues(issues);
     // 无可见落点的 issue 不拦保存（Settings 属凭据敏感文件，禁止 console/hilog，故这里静默跳过）。
     const blocking: boolean = this.issuesSummary.length > 0;
@@ -819,7 +635,7 @@ struct Settings {
     try {
       const patch: SettingsPatch = {
         deviceId: normalizeDeviceId(this.deviceId),
-        // 编号来源（自动分配 / 沿用原标识）：用户没在「高级」里手改过就保持原值
+        // 编号来源（自动分配 / 沿用存量标识）：无手改入口，保持读到的原值
         deviceIdAuto: this.deviceIdAuto,
         // 保留用户输入的地址原文，只去掉首尾空白（末尾 .git 不擅自增删）；空地址存空串
         repoUrl: repoEmpty ? '' : repoCheck.url,
@@ -829,27 +645,14 @@ struct Settings {
         aiProviderId: this.aiProviderId,
         aiModel: this.aiModel,
         aiBaseURL: this.aiBaseURL,
-        author: this.author,
+        author: silentAuthor,
         // settingsStore 只认 github/gitee（它的 normalizePlatform 会把 gitlab/custom 折成 github），
         // 真正的四值平台存在 gitExtrasStore 里，这里写回一个它认识的等价物即可。
         gitPlatform: platform === GITEE_PLATFORM ? GITEE_PLATFORM : PLATFORM_GITHUB,
         authMode: this.authMode,
         // HTTPS 用户名（Gitee 必填登录名；GitHub 留空由同步层回落 x-access-token）
         gitUsername: this.gitUsername.trim(),
-        // 远程控制地址也随整表保存：否则「保存设置」后 applySettings 会把刚输入的值退回旧值。
-        // 这里存原文，点「打开远程控制」时再由 normalizeRemoteUrl 归一。
-        remoteUrl: this.remoteUrl,
-        // 访问方式与各方式字段一并落盘（与 remoteUrl 成对，缺一项下次进设置页就会退回默认）
-        remoteMode: this.remoteMode,
-        remoteLanAddress: this.remoteLanAddress,
-        remotePort: normalizeRemotePort(Number.parseInt(this.remotePortText.trim(), 10)),
-        remoteTailscaleHost: this.remoteTailscaleHost,
-        remoteCloudflareHost: this.remoteCloudflareHost,
-        remoteIpv6Address: this.remoteIpv6Address,
-        remoteManualUrl: this.remoteManualUrl,
-        // 访问令牌：输入框留空 = 沿用已保存的（**不能**把空串写进去，那等于悄悄清除令牌）；
-        // 想清除只有「清除令牌」那一个入口。
-        remoteToken: this.effectiveRemoteToken(),
+        // 远程字段不再随本页整表保存：配置入口已迁到 pages/Instances（旧键值仍原样留在 store）。
         // 多源 fallback：开关 / 次数 / 备用顺序（顺序先过 serializeFallbackOrder：去重 + 最多 3 条）。
         // 备用源的共用 key（`aiFallbackKey`）**不传**——不传即保留 preferences 里的原值，
         // 本页没有这个输入框，也就不该在保存时把它写空。
@@ -1510,64 +1313,13 @@ struct Settings {
     return `${this.platformText} · ${this.handwritingText} · ${this.ocrText}`;
   }
 
-  /** 用户名输入框占位文案（跟着平台变）。 */
-  private gitUsernamePlaceholder(): string {
-    return gitUsernamePlaceholderFor(this.gitPlatform);
-  }
-
-  /** 用户名下方的一行说明（无错误时显示）。 */
-  private gitUsernameHint(): string {
-    return gitUsernameHintFor(this.gitPlatform);
-  }
-
   /**
-   * HTTPS 用户名规则：直接复用 `model/gitAuth.ts` 的 `assertHttpsUsername`
-   * （设置页与同步入口共用同一条规则，避免两处判定漂移）。
+   * Git 用户名：**没有输入控件**，完全静默派生（mod-settings-sync-min）。
    *
-   * 平台用**自动纠正后**的值判断，避免「URL 是 gitee、平台还是 github」时漏报。
-   */
-  private gitUsernameIssue(platform: string): SettingsFieldIssue | null {
-    const message: string | null = assertHttpsUsername(platform, this.authMode, this.gitUsername);
-    if (message === null) {
-      return null;
-    }
-    return { field: FIELD_GIT_USERNAME, message: message };
-  }
-
-  // ------------------------------------------------------------------ 「高级」折叠区
-
-  /** 用户手动点「高级 ▸ / ▾」：点开时清掉自动展开的原因（那是系统提示，不是用户的选择）。 */
-  private toggleSyncAdvanced(): void {
-    this.syncAdvancedOpen = !this.syncAdvancedOpen;
-    if (this.syncAdvancedOpen) {
-      this.syncAdvancedReason = '';
-    }
-  }
-
-  /**
-   * 自动展开「高级」并给一行原因。
-   *
-   * 只允许三种情况调用：① 设备标识重复 ② 编号分配失败 / 仓库不可读 ③ Gitee 用户名推不出来
-   * （外加「隐藏字段有校验红字」这一种自保：宁可展开并说清楚，也不让用户对着不可见的红字点保存）。
-   */
-  private openSyncAdvanced(reason: string): void {
-    this.syncAdvancedOpen = true;
-    const text: string = typeof reason === 'string' ? reason.trim() : '';
-    if (text.length > 0) {
-      this.syncAdvancedReason = text;
-    }
-  }
-
-  /**
-   * Gitee 用户名：能按仓库地址推断（owner）就自动填上；推不出来才展开「高级」请他手填。
-   *
-   * 主表单不再有用户名字段，所以「自动推断 + 推不出来才打断」是唯一的交互路径。
+   * 非空存量值原样保留（不迁移、不清空）；为空时按仓库地址推断（Gitee = owner，GitHub 由同步层
+   * 回落 x-access-token）。推不出来也不打断用户——同步失败会由诚实状态行给出原因与重试路径。
    */
   private ensureGiteeUsernameResolved(): void {
-    if (needsManualGiteeUsername(this.gitPlatform, this.repoUrl, this.gitUsername)) {
-      this.openSyncAdvanced(GITEE_OWNER_INFER_FAILED);
-      return;
-    }
     if (this.gitUsername.trim().length > 0) {
       return;
     }
@@ -1671,17 +1423,15 @@ struct Settings {
   /**
    * 把同步结果里的「设备身份 / 附件暂停」标记铺到常驻状态上（成功与失败都要过一遍）。
    *
-   * 冲突只在**改设备标识**后才有可能消失，因此这里不会自动清空；没有冲突标记时复查一次。
+   * 冲突由仓库登记结果决定，不再有「改设备标识」的入口；冲突与编号分配失败的原文都会随
+   * 同步结果进入诚实状态行 / 错误态（含重试），所以「高级」自动展开线可以整条删除。
    */
   private applySyncFlags(result: GitSyncResult): void {
     // 设备编号（数据边界）：同步服务登记成功会把编号带回来 → 立刻回填并推给服务（后续 push 用它）。
-    // 失败则带上原因，下面统一自动展开「高级」。
     const claimedId: string = result.deviceId === undefined ? '' : result.deviceId.trim();
     if (claimedId.length > 0) {
       this.deviceId = claimedId;
       this.deviceIdAuto = result.deviceIdAuto === true;
-      const notice: string = result.deviceIdNotice === undefined ? '' : result.deviceIdNotice.trim();
-      this.deviceIdNotice = notice.length > 0 ? notice : describeClaimOutcome(claimedId, this.deviceIdAuto);
       this.configure();
       this.storageHint = `日程目录：${scheduleStore.deviceRoot()}/schedules/`;
     }
@@ -1689,16 +1439,8 @@ struct Settings {
       const warning: string =
         result.identityWarning === undefined ? '' : result.identityWarning.trim();
       this.identityWarning = warning.length > 0 ? warning : describeIdentityConflict(normalizeDeviceId(this.deviceId));
-      // ① 设备标识重复：这是唯一会让两台设备写进同一目录的情况，必须让用户看见并改
-      this.openSyncAdvanced(this.identityWarning);
     } else {
       this.refreshIdentityWarning();
-    }
-    const registrationError: string =
-      result.deviceRegistrationError === undefined ? '' : result.deviceRegistrationError.trim();
-    if (registrationError.length > 0) {
-      // ② 编号分配失败 / 仓库不可读：推送已经 fail-closed，用户需要知道为什么没同步成功
-      this.openSyncAdvanced(registrationError);
     }
     if (result.attachmentsBlocked !== undefined && result.attachmentsBlocked > 0) {
       const count: string = result.attachmentsBlocked.toString();
@@ -1849,382 +1591,6 @@ struct Settings {
     // A2：动作成功后刷新一次本地状态（领先/落后/冲突），失败不影响已经展示的结果
     if (succeeded) {
       await this.refreshStatus(true);
-    }
-  }
-
-  // ------------------------------------------------------------------ 远程控制
-
-  /** 按枚举值取方式元数据（未知/空已由 `normalizeRemoteMode` 回落 `lan`）。 */
-  private remoteSpecOf(mode: string): RemoteModeSpec {
-    const spec: RemoteModeSpec | null = findRemoteMode(normalizeRemoteMode(mode));
-    return spec === null ? REMOTE_MODES[REMOTE_MODE_LAN] : spec;
-  }
-
-  /** 当前「访问方式」的元数据（下拉框文案、字段、可用性都从这里读，页面不另写一份）。 */
-  private remoteSpec(): RemoteModeSpec {
-    return this.remoteSpecOf(this.remoteMode);
-  }
-
-  /** 当前方式在「访问方式」下拉框里的下标（找不到 → 0 = 局域网直连）。 */
-  private remoteModeIndex(): number {
-    const index: number = REMOTE_MODE_ORDER.indexOf(this.remoteSpec().mode);
-    return index < 0 ? 0 : index;
-  }
-
-  /** 下拉框第 index 项的文案（`unsupported` 项明确标「不可用」，不做假开关）。 */
-  private remoteModeOptionLabel(index: number): string {
-    if (index < 0 || index >= REMOTE_MODE_ORDER.length) {
-      return '';
-    }
-    const spec: RemoteModeSpec = this.remoteSpecOf(REMOTE_MODE_ORDER[index]);
-    return spec.availability === REMOTE_AVAILABILITY_UNSUPPORTED ? `${spec.label}（不可用）` : spec.label;
-  }
-
-  /** 端口输入框的文本 → 合法端口（非数字/负数 → 0 = 跟 DSH 同端口）。 */
-  private remotePortValue(): number {
-    return normalizeRemotePort(Number.parseInt(this.remotePortText.trim(), 10));
-  }
-
-  /** 某个方式字段的元数据（标签/占位符/提示都来自 `REMOTE_MODES`，不在页面里重复）。 */
-  private remoteField(key: string): RemoteModeField {
-    for (const field of this.remoteSpec().fields) {
-      if (field.key === key) {
-        return field;
-      }
-    }
-    const fallback: RemoteModeField = { key: key, label: '', placeholder: '', hint: '' };
-    return fallback;
-  }
-
-  private remoteFieldLabel(key: string): string {
-    return this.remoteField(key).label;
-  }
-
-  private remoteFieldPlaceholder(key: string): string {
-    return this.remoteField(key).placeholder;
-  }
-
-  private remoteFieldHint(key: string): string {
-    return this.remoteField(key).hint;
-  }
-
-  /**
-   * 方式可用性提示：`unsupported` 给原因、`needs-setup` 给第一条前置条件、`ready` 空串。
-   *
-   * 12fp 的小字在 `uiTokens` 里没有对应令牌（只有 14/16/20 三级），所以统一用 `FONT.caption`
-   * 的中性色（`text_secondary`）——「小一号、灰一点」的意图保留，字号不与设计令牌打架。
-   */
-  private remoteAvailabilityHint(): string {
-    const spec: RemoteModeSpec = this.remoteSpec();
-    if (spec.availability === REMOTE_AVAILABILITY_UNSUPPORTED) {
-      return spec.unavailableReason;
-    }
-    if (spec.availability === REMOTE_AVAILABILITY_NEEDS_SETUP && spec.requires.length > 0) {
-      return `需先准备：${spec.requires[0]}`;
-    }
-    return '';
-  }
-
-  /**
-   * 当前方式有没有「访问令牌（可选）」字段（只有 `lan` / `ipv6` / `tailscale` 有）。
-   *
-   * 判据来自 `REMOTE_MODES[mode].fields`，不在页面里另写一份方式名单：插件侧改字段表时
-   * 这里自动跟上，不会出现「模型说有、页面不画」或反向的漂移。
-   */
-  private remoteUsesToken(): boolean {
-    for (const field of this.remoteSpec().fields) {
-      if (field.key === 'token') {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /** 已保存的访问令牌是否存在（空串 = 未设置）。 */
-  private hasSavedRemoteToken(): boolean {
-    return this.savedRemoteToken.trim().length > 0;
-  }
-
-  /**
-   * 最终要用的访问令牌：输入框有值就用它（用户正在改成新的），否则沿用已保存的。
-   *
-   * 与 `effectiveToken`（Git token）同一套语义：留空 ≠ 清除，清除必须点「清除令牌」。
-   */
-  private effectiveRemoteToken(): string {
-    return effectiveToken(this.remoteToken, this.savedRemoteToken);
-  }
-
-  /**
-   * 令牌状态小字：输入框有值 → 「保存后生效」；否则已保存 → 「已保存访问令牌（打码）」。
-   *
-   * 打码走 `maskRemoteToken`（前 4 + … + 后 4，太短一律 `***`），**明文永不上屏**。
-   */
-  private remoteTokenStatus(): string {
-    if (this.remoteToken.trim().length > 0) {
-      return '保存后生效';
-    }
-    if (this.hasSavedRemoteToken()) {
-      return `已保存访问令牌（${maskRemoteToken(this.savedRemoteToken)}）`;
-    }
-    return '';
-  }
-
-  /**
-   * 「清除令牌」：把已保存的令牌置空并立即落盘（与深色模式同样是即时生效项）。
-   *
-   * 失败时把内存里的旧值放回去，避免界面显示"已清除"但下次读盘又冒出来。
-   */
-  private async clearRemoteToken(): Promise<void> {
-    const previous: string = this.savedRemoteToken;
-    const context = getContext(this) as common.UIAbilityContext;
-    this.savedRemoteToken = '';
-    this.remoteToken = '';
-    this.remoteUrlError = '';
-    try {
-      await settingsStore.save({ remoteToken: '' }, context);
-      if (this.disposed) {
-        return;
-      }
-      this.refreshRemotePreview();
-      promptAction.showToast({ message: '已清除访问令牌', duration: toastMsFor(false) });
-    } catch (error) {
-      if (this.disposed) {
-        return;
-      }
-      this.savedRemoteToken = previous;
-      this.remoteUrlError = `访问令牌保存失败：${describeError(error)}`;
-    }
-  }
-
-  /**
-   * 方式字段 + 「DSH 地址」当前值 → 完整配置。
-   *
-   * `manual` 的完整地址优先取手输框（`remoteManualUrl`），为空时退回「DSH 地址」那一行：
-   * 旧版本只存过 `remoteUrl`，这样升级后不会丢用户原来填的地址。
-   */
-  private remoteAccessConfig(): RemoteAccessConfig {
-    const config: RemoteAccessConfig = defaultRemoteAccessConfig();
-    config.mode = normalizeRemoteMode(this.remoteMode);
-    config.lanAddress = this.remoteLanAddress.trim();
-    config.port = this.remotePortValue();
-    config.tailscaleHost = this.remoteTailscaleHost.trim();
-    config.cloudflareHost = this.remoteCloudflareHost.trim();
-    config.ipv6Address = this.remoteIpv6Address.trim();
-    const manual: string = this.remoteManualUrl.trim();
-    config.manualUrl = manual.length > 0 ? manual : this.remoteUrl.trim();
-    // 令牌：输入框优先、留空沿用已保存值（`lan`/`ipv6`/`tailscale` 才参与拼装）
-    config.token = this.effectiveRemoteToken();
-    return config;
-  }
-
-  /**
-   * 方式字段一变就重算「DSH 地址」那一行（它就是最终要打开的链接，用户看得到拼出来的结果）。
-   *
-   * `manual` 不重算：那一行就是用户正在手输的完整地址，边打边归一（补 `http://`）会把光标顶走。
-   *
-   * `uu` 与其它方式一样参与重算：它把「对外入口地址」归一成可打开链接（第 5 轮订正 ——
-   * UU 远程确实有图形化端口映射，见 `docs/REMOTE-ACCESS-OPTIONS.md` §2.6）。
-   */
-  private refreshRemotePreview(): void {
-    const mode: string = normalizeRemoteMode(this.remoteMode);
-    if (mode === REMOTE_MODE_MANUAL) {
-      return;
-    }
-    const built: RemoteAccessUrlResult = buildRemoteAccessUrl(this.remoteAccessConfig());
-    this.remoteUrl = built.ok ? built.url : '';
-  }
-
-  /** 选择访问方式；`unsupported` 只显示原因（按钮随之禁用），不做假开关。 */
-  private pickRemoteMode(index: number): void {
-    const picked: string = index >= 0 && index < REMOTE_MODE_ORDER.length ? REMOTE_MODE_ORDER[index] : REMOTE_MODE_LAN;
-    this.remoteMode = normalizeRemoteMode(picked);
-    this.remoteUrlError = '';
-    if (this.remoteMode === REMOTE_MODE_MANUAL) {
-      // 切到手动方式时把当前地址接管进手输框（反向也补一次），用户不用重新敲一遍；
-      // 两者只在这一行上来回同步，别处不会悄悄改「完整地址」。
-      if (this.remoteManualUrl.trim().length === 0) {
-        this.remoteManualUrl = this.remoteUrl;
-      } else if (this.remoteUrl.trim().length === 0) {
-        this.remoteUrl = this.remoteManualUrl;
-      }
-      return;
-    }
-    this.refreshRemotePreview();
-  }
-
-  /**
-   * 「地址未包含 token」的橙色次要提示（**不是**错误）。
-   *
-   * 地址为空、或地址本身就不合法时不显示：非法由红色 `ErrorText` 表达，两种提示不打架。
-   */
-  private remoteTokenHint(): string {
-    if (this.remoteUrl.trim().length === 0) {
-      return '';
-    }
-    const check: RemoteUrlCheck = normalizeRemoteUrl(this.remoteUrl);
-    if (!check.ok || check.hasToken) {
-      return '';
-    }
-    return '地址未包含 token，DSH 可能要求登录';
-  }
-
-  /**
-   * 一键重连按钮文案（§B.4）：没有记录 / 记录里地址已不合法时为空串，按钮不出现。
-   *
-   * 三条纪律：① 只在「最近成功时间」非空时出按钮；② 文案由 `reconnectLabel` 派生，
-   * 只到 host:port，**绝不含令牌**；③ 点下去照上次那条连接重开，不重新推导访问方式顺序。
-   */
-  private reconnectText(): string {
-    return reconnectLabel(decodeLastOk(this.remoteLastOk), Date.now());
-  }
-
-  /**
-   * 一键重连：把记录里的地址（无令牌）合上当前令牌，交给 `openRemote` 原路重开。
-   *
-   * 成功更新时间戳、失败保留旧时间戳都由远程控制页负责（§B.4）；本页只读记录、不改变方式字段。
-   * 记录损坏时给一句可操作红字，绝不拿半截地址去打开一个注定不可达的内嵌 Web。
-   */
-  private async reconnectLastOk(): Promise<void> {
-    const entry: LastOkEntry | null = decodeLastOk(this.remoteLastOk);
-    if (entry === null) {
-      this.remoteUrlError = '重连失败：最近一次成功的记录已损坏，请重新填写地址';
-      return;
-    }
-    // mergeRemoteToken 在记录里的地址已不合法时返回空串。空串**不能**交给 openRemote：
-    // 它会退化成「按当前方式字段重新拼」，把「重连失败」变成「按别的方式打开」，
-    // 红字还会变成「请先填写电脑上的 DSH 地址」——与真实原因（记录失效）不符。
-    const merged: string = mergeRemoteToken(entry.url, this.effectiveRemoteToken());
-    if (merged.length === 0) {
-      this.remoteUrlError = '重连失败：最近一次成功的地址已失效，请重新填写地址';
-      return;
-    }
-    this.remoteUrlError = '';
-    await this.openRemote(merged);
-  }
-
-  /**
-   * 「DSH 地址」输入框失焦即归一（D1 的 P2）。
-   *
-   * 只管两件事：① 把用户自己敲/粘贴的那段地址规整成可打开的形式（补 http:// 、去首尾空格）；
-   * ② 真的改动了才给一次 toast。**不落盘、不跳转** —— 保存与跳转仍然只发生在 `openRemote()`，
-   * 顺序不许变（评审要求：归一不能提前产生「看似已保存」的副作用）。
-   *
-   * 三条安全边界：
-   * - 纯令牌片段（`k=…` / `?token=…`）与非法地址**不**改写输入框：`parseRemoteInput` 判 kind≠url
-   *   就直接返回，把解释留给 `openRemote()` 的红字（这里猜错等于把地址改成垃圾）；
-   * - **绝不**调用 `mergeRemoteToken` / 绝不把已保存的令牌合进输入框（凭据卫生）；
-   * - 同一段原文只提示一次（`lastBlurNormalizeText`），反复焦点进出不刷屏。
-   */
-  private normalizeRemoteOnBlur(): void {
-    const raw: string = this.remoteUrl;
-    if (raw.trim().length === 0) {
-      return;
-    }
-    const parsed: RemoteInputResult = parseRemoteInput(raw);
-    if (!parsed.ok || parsed.kind !== 'url') {
-      return;
-    }
-    const normalized: string = parsed.url;
-    if (normalized === raw) {
-      return;
-    }
-    if (this.lastBlurNormalizeText === raw) {
-      return;
-    }
-    this.lastBlurNormalizeText = raw;
-    this.remoteUrl = normalized;
-    // 手动方式下这一行就是「完整地址」字段：两份状态同步，语义与 onChangeRemoteUrl 一致
-    if (this.remoteMode === REMOTE_MODE_MANUAL) {
-      this.remoteManualUrl = normalized;
-    }
-    // 与 onChange 一致：用户改了就不再用旧红字压着
-    this.remoteUrlError = '';
-    if (!parsed.hadScheme) {
-      promptAction.showToast({ message: '已自动补 http://', duration: toastMsFor(false) });
-    } else {
-      promptAction.showToast({ message: '已把地址整理成可打开的形式', duration: toastMsFor(false) });
-    }
-  }
-
-  /**
-   * 「打开远程控制」：按访问方式拼地址 → 归一 → 落盘 → 再跳内嵌页。
-   *
-   * 顺序是刻意的：先保存再跳转，远程控制页拿到的一定是已经落盘的新地址；
-   * 拼不出地址（缺字段 / `uu` 不可用）或地址非法时只标红、**不**跳转
-   * （不要打开一个注定不可达的内嵌 Web）。
-   *
-   * `overrideUrl` 非空 = 一键重连：直接用记录里的地址，**不按当前方式字段重新拼**；
-   * 归一、保存、跳转的链路与普通打开完全一致（§B.4）。
-   */
-  private async openRemote(overrideUrl: string = ''): Promise<void> {
-    const override: string = overrideUrl.trim();
-    if (override.length === 0) {
-      const config: RemoteAccessConfig = this.remoteAccessConfig();
-      const built: RemoteAccessUrlResult = buildRemoteAccessUrl(config);
-      if (!built.ok) {
-        // 方式侧的中文原因（缺字段 / 隧道域名带路径 / UU 入口为空 等）
-        const why: string = built.reason.trim();
-        this.remoteUrlError = why.length > 0 ? `地址不可用：${why}` : '地址不可用：请先填写电脑上的 DSH 地址';
-        return;
-      }
-      this.remoteUrl = built.url;
-    } else {
-      // 一键重连：照记录里的地址重开，不用当前方式字段重新拼（§B.4）
-      this.remoteUrl = override;
-    }
-    const check: RemoteUrlCheck = normalizeRemoteUrl(this.remoteUrl);
-    if (!check.ok) {
-      // 红字直接用 model/remoteUrl 给的中文原因（缺协议/有空格/不完整），空则退回通用提示
-      const reason: string = check.reason.trim();
-      this.remoteUrlError = reason.length > 0 ? `地址不可用：${reason}` : '地址不可用：请先填写电脑上的 DSH 地址';
-      return;
-    }
-    this.remoteUrlError = '';
-    this.remoteUrl = check.url;
-    try {
-      // 只写远程控制这一项（SettingsPatch 未出现的字段保持原值）
-      await settingsStore.save({ remoteUrl: check.url });
-      if (override.length === 0) {
-        // 重连不重新推导方式字段：下面这段只在普通打开时执行
-        if (this.remoteMode === REMOTE_MODE_MANUAL) {
-          // 手动方式的「完整地址」以归一后的地址为准，避免存一份 `192.168.1.6:3080` 半成品
-          this.remoteManualUrl = check.url;
-        }
-        // 访问方式与各字段再存一次：第一条已经把「能打开的地址」落盘，即使第二条写入失败，
-        // 用户下次进设置页仍有可用地址（不会两样都丢）。
-        // 令牌走「输入框优先、留空沿用已保存」的语义：这里传的是真正拼进地址的那个值，
-        // 所以「打开远程控制」也顺手把刚填的令牌保存下来（不会出现地址带新令牌、字段还是旧的）。
-        const nextRemoteToken: string = this.effectiveRemoteToken();
-        await settingsStore.save({
-          remoteMode: this.remoteMode,
-          remoteLanAddress: this.remoteLanAddress,
-          remotePort: this.remotePortValue(),
-          remoteTailscaleHost: this.remoteTailscaleHost,
-          remoteCloudflareHost: this.remoteCloudflareHost,
-          remoteIpv6Address: this.remoteIpv6Address,
-          remoteManualUrl: this.remoteManualUrl,
-          remoteToken: nextRemoteToken
-        });
-        this.savedRemoteToken = nextRemoteToken;
-        this.remoteToken = '';
-      }
-    } catch (error) {
-      if (this.disposed) {
-        return;
-      }
-      this.remoteUrlError = `远程地址保存失败：${describeError(error)}`;
-      return;
-    }
-    if (this.disposed) {
-      return;
-    }
-    promptAction.showToast({ message: '已保存', duration: toastMsFor(false) });
-    try {
-      router.pushUrl({ url: routeToRemote(), params: { url: check.url } });
-    } catch (error) {
-      if (!this.disposed) {
-        this.remoteUrlError = `打开远程控制失败：${describeError(error)}`;
-      }
     }
   }
 
@@ -2428,7 +1794,7 @@ struct Settings {
   // ------------------------------------------------------------------ 装配（A2 拆分）
 
   /**
-   * 五个 section 组件（`components/settings/*.ets`）的装配点。
+   * 四个 section 组件（`components/settings/*.ets`）的装配点。
    *
    * 分工：**页面持有全部 `@State` 与业务方法**（保存 / 同步 / 导出 / 远程控制 / 主题切换），
    * 组件只收单向 props + 回调（`@Prop` 值 + `onXxx`）。因此：
@@ -2447,15 +1813,8 @@ struct Settings {
       repoUrlError: this.repoUrlError,
       token: this.token,
       tokenError: this.tokenError,
-      syncAdvancedOpen: this.syncAdvancedOpen,
-      syncAdvancedReason: this.syncAdvancedReason,
-      gitUsername: this.gitUsername,
-      gitUsernameError: this.gitUsernameError,
+      // 设备标识只进可复制诊断文本；无「高级」折叠区、无用户名/编号/作者名输入控件
       deviceId: this.deviceId,
-      deviceIdError: this.deviceIdError,
-      deviceIdNotice: this.deviceIdNotice,
-      author: this.author,
-      authorError: this.authorError,
       identityWarning: this.identityWarning,
       attachmentWarning: this.attachmentWarning,
       syncMessage: this.syncMessage,
@@ -2469,8 +1828,6 @@ struct Settings {
       issuesSummary: this.issuesSummary,
       includeOtherDevices: this.includeOtherDevices,
       authBlocker: (): string => this.authBlocker(),
-      gitUsernamePlaceholder: (): string => this.gitUsernamePlaceholder(),
-      gitUsernameHint: (): string => this.gitUsernameHint(),
       onChangeRepoUrl: (value: string): void => {
         this.repoUrl = value;
         this.repoUrlError = '';
@@ -2478,23 +1835,6 @@ struct Settings {
       onChangeToken: (value: string): void => {
         this.token = value;
         this.tokenError = '';
-      },
-      onChangeGitUsername: (value: string): void => {
-        this.gitUsername = value;
-        this.gitUsernameError = '';
-      },
-      onChangeDeviceId: (value: string): void => {
-        this.deviceId = value;
-        this.deviceIdError = '';
-        // 用户手改了就等于「手工指定」，不再是自动分配（下次同步会重新算号）
-        this.deviceIdAuto = false;
-      },
-      onChangeAuthor: (value: string): void => {
-        this.author = value;
-        this.authorError = '';
-      },
-      toggleSyncAdvanced: (): void => {
-        this.toggleSyncAdvanced();
       },
       onToggleIncludeOtherDevices: (isOn: boolean): void => {
         this.includeOtherDevices = isOn;
@@ -2581,85 +1921,13 @@ struct Settings {
     })
   }
 
+  /**
+   * 远程控制组现在只有一行入口：打开 `pages/Instances`（本机 + 远程实例表）。
+   * 原方式下拉 / 地址 / 令牌 / 提示行全部删除，配置只在实例页发生——避免两处漂移。
+   */
   @Builder
   RemoteGroup() {
-    RemoteSection({
-      remoteMode: this.remoteMode,
-      remoteLanAddress: this.remoteLanAddress,
-      remotePortText: this.remotePortText,
-      remoteTailscaleHost: this.remoteTailscaleHost,
-      remoteCloudflareHost: this.remoteCloudflareHost,
-      remoteIpv6Address: this.remoteIpv6Address,
-      remoteManualUrl: this.remoteManualUrl,
-      remoteToken: this.remoteToken,
-      remoteUrl: this.remoteUrl,
-      remoteUrlError: this.remoteUrlError,
-      reconnectText: this.reconnectText(),
-      remoteSpec: (): RemoteModeSpec => this.remoteSpec(),
-      remoteModeIndex: (): number => this.remoteModeIndex(),
-      remoteModeOptionLabel: (index: number): string => this.remoteModeOptionLabel(index),
-      remoteFieldLabel: (key: string): string => this.remoteFieldLabel(key),
-      remoteFieldPlaceholder: (key: string): string => this.remoteFieldPlaceholder(key),
-      remoteFieldHint: (key: string): string => this.remoteFieldHint(key),
-      remoteAvailabilityHint: (): string => this.remoteAvailabilityHint(),
-      remoteUsesToken: (): boolean => this.remoteUsesToken(),
-      remoteTokenStatus: (): string => this.remoteTokenStatus(),
-      hasSavedRemoteToken: (): boolean => this.hasSavedRemoteToken(),
-      remoteTokenHint: (): string => this.remoteTokenHint(),
-      onSelectMode: (index: number): void => {
-        this.pickRemoteMode(index);
-      },
-      onChangeLanAddress: (value: string): void => {
-        this.remoteLanAddress = value;
-        this.remoteUrlError = '';
-        this.refreshRemotePreview();
-      },
-      onChangeIpv6Address: (value: string): void => {
-        this.remoteIpv6Address = value;
-        this.remoteUrlError = '';
-        this.refreshRemotePreview();
-      },
-      onChangeTailscaleHost: (value: string): void => {
-        this.remoteTailscaleHost = value;
-        this.remoteUrlError = '';
-        this.refreshRemotePreview();
-      },
-      onChangeCloudflareHost: (value: string): void => {
-        this.remoteCloudflareHost = value;
-        this.remoteUrlError = '';
-        this.refreshRemotePreview();
-      },
-      onChangePort: (value: string): void => {
-        this.remotePortText = value;
-        this.remoteUrlError = '';
-        this.refreshRemotePreview();
-      },
-      onChangeRemoteToken: (value: string): void => {
-        this.remoteToken = value;
-        this.remoteUrlError = '';
-        this.refreshRemotePreview();
-      },
-      onChangeRemoteUrl: (value: string): void => {
-        this.remoteUrl = value;
-        // 手动方式下这一行就是「完整地址」字段：两份状态同步，拼地址与落盘才不会打架
-        if (this.remoteMode === REMOTE_MODE_MANUAL) {
-          this.remoteManualUrl = value;
-        }
-        this.remoteUrlError = '';
-      },
-      onBlurRemoteUrl: (): void => {
-        this.normalizeRemoteOnBlur();
-      },
-      onClearToken: (): void => {
-        this.clearRemoteToken();
-      },
-      onOpenRemote: (): void => {
-        this.openRemote();
-      },
-      onReconnect: (): void => {
-        this.reconnectLastOk();
-      }
-    })
+    this.ChatEntryRow()
   }
 
   @Builder
@@ -2744,10 +2012,6 @@ struct Settings {
           Divider()
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
-          this.ChatEntryRow()
-          Divider()
-            .strokeWidth(DIVIDER)
-            .color($r('app.color.divider'))
           Column() { this.AboutGroup() }
             .width('100%')
             .alignItems(HorizontalAlign.Start)
@@ -2786,10 +2050,6 @@ struct Settings {
                 .strokeWidth(DIVIDER)
                 .color($r('app.color.divider'))
               this.DataGroup()
-              Divider()
-                .strokeWidth(DIVIDER)
-                .color($r('app.color.divider'))
-              this.ChatEntryRow()
               Divider()
                 .strokeWidth(DIVIDER)
                 .color($r('app.color.divider'))

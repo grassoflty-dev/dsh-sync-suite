@@ -10,11 +10,10 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
-import { readRemoteSection, readSettingsFile, readSettingsPage } from './settingsSources.mjs';
+import { readSettingsFile, readSettingsPage } from './settingsSources.mjs';
 
 const STORE = readSettingsFile('services/settingsStore.ets');
 const PAGE = readSettingsPage();
-const REMOTE_SECTION = readRemoteSection();
 const REMOTE_CONTROL = readFileSync(
   new URL('../../entry/src/main/ets/pages/RemoteControl.ets', import.meta.url),
   'utf8'
@@ -130,178 +129,68 @@ describe('A. settingsStore.ets：remoteLastOk 在接口与三处落盘方法里�
 // B. pages/Settings.ets：一键重连按钮 + onPageShow 只做局部刷新。
 //    整表 applySettings 会把用户正在编辑的输入框退回旧值，所以 onPageShow 里明令禁止调用它。
 // ---------------------------------------------------------------------------
-describe('B. pages/Settings.ets：一键重连入口 + onPageShow 局部刷新', () => {
-  const applySettingsBody = methodBody(PAGE, 'private applySettings(');
-  const reconnectTextBody = methodBody(PAGE, 'private reconnectText(');
-  const reconnectLastOkBody = methodBody(PAGE, 'private async reconnectLastOk(');
-  const onPageShowBody = methodBody(PAGE, 'onPageShow(');
-  const remoteGroup = builderBody(PAGE, 'RemoteGroup');
-  const openRemoteBody = methodBody(PAGE, 'private async openRemote(');
+// ---------------------------------------------------------------------------
+// B/C. mod-settings-remote-dedupe（old→new）：设置页一键重连 / RemoteSection 已删除。
+// 旧 B1–B9 + C1–C3 钉住 reconnectText / reconnectLastOk / openRemote 的 override 守卫 /
+// RemoteSection 按钮顺序；配置收敛到实例页后这些入口整条删除，断言 retarget 到：
+// ① 旧控件与逻辑确实消失；② 唯一入口在；③ 旧值仍可读且全量迁移进实例表。
+// 原 D/E 段（RemoteControl 落盘脱敏 / ChatDetail 只读出口）不受本模块影响，保持原样。
+// ---------------------------------------------------------------------------
+describe('B/C. 设置页远程配置删除 + 唯一入口 + 旧值迁移（retarget）', () => {
+  const instances = readFileSync(
+    new URL('../../entry/src/main/ets/pages/Instances.ets', import.meta.url), 'utf8'
+  );
+  const seed = readFileSync(
+    new URL('../../entry/src/main/ets/model/instanceSeed.ts', import.meta.url), 'utf8'
+  );
 
-  test('B1 @State remoteLastOk 存在，且 applySettings 把它铺回表单', () => {
-    assert.match(PAGE, /@State remoteLastOk: string = '';/, '契约丢了：设置页缺 @State remoteLastOk: string = \'\';');
-    assert.match(
-      applySettingsBody,
-      /this\.remoteLastOk = settings\.remoteLastOk;/,
-      '契约丢了：applySettings 没把读到的记录铺回表单'
-    );
+  test('B1（old→new）@State remoteLastOk / onPageShow 局部刷新随远程组删除', () => {
+    assert.equal(/@State remoteLastOk/.test(PAGE), false, '设置页不该再有 remoteLastOk 表单状态');
+    assert.equal(/onPageShow\(\): void/.test(PAGE), false, 'onPageShow 只为刷新重连记录，随组一起删');
+    assert.equal(/refreshRemoteLastOk/.test(PAGE), false, '刷新方法不该残留');
   });
 
-  test('B2 reconnectText() 用 reconnectLabel(decodeLastOk(...), Date.now()) 生成文案', () => {
-    assert.match(PAGE, /private reconnectText\(\): string/, '契约丢了：缺 private reconnectText(): string');
-    assert.match(
-      reconnectTextBody,
-      /reconnectLabel\(\s*decodeLastOk\(this\.remoteLastOk\)\s*,\s*Date\.now\(\)\s*\)/,
-      '契约丢了：reconnectText 没按同一口径生成重连按钮文案'
-    );
+  test('B2（old→new）reconnectText / reconnectLastOk / openRemote 全部删除', () => {
+    for (const gone of [
+      /private reconnectText\(/, /private async reconnectLastOk\(/, /private async openRemote\(/,
+      /reconnectLabel\(/, /decodeLastOk\(/, /mergeRemoteToken\(/, /buildRemoteAccessUrl\(/
+    ]) {
+      assert.equal(gone.test(PAGE), false, `设置页残留已删远程方法：${gone}`);
+    }
   });
 
-  test('B3 reconnectLastOk() 解码记录 → 现拼令牌 → 打开远程；失败分支给红字', () => {
-    assert.match(
-      PAGE,
-      /private async reconnectLastOk\(\): Promise<void>/,
-      '契约丢了：缺 private async reconnectLastOk(): Promise<void>'
-    );
-    assert.match(reconnectLastOkBody, /decodeLastOk\(this\.remoteLastOk\)/, '契约丢了：重连没解码最近一次成功记录');
-    assert.match(
-      reconnectLastOkBody,
-      /mergeRemoteToken\(\s*entry\.url\s*,\s*this\.effectiveRemoteToken\(\)\s*\)/,
-      '契约丢了：重连没用已保存令牌现拼地址（记录里不带 secret）'
-    );
-    assert.match(reconnectLastOkBody, /this\.openRemote\(/, '契约丢了：重连没调用 openRemote 打开页面');
-    assert.match(reconnectLastOkBody, /重连失败：/, '契约丢了：重连失败分支缺「重连失败：」红字');
+  test('B3（old→new）RemoteGroup 只剩一行入口，指向 pages/Instances', () => {
+    const group = PAGE.slice(PAGE.indexOf('RemoteGroup() {'), PAGE.indexOf('DataGroup() {'));
+    assert.equal((group.match(/this\.ChatEntryRow\(\)/g) ?? []).length, 1, '唯一入口行');
+    assert.equal((group.match(/TextInput\(/g) ?? []).length, 0, '无输入框');
+    assert.match(PAGE, /router\.pushUrl\(\{ url: 'pages\/Instances' \}\)/, '入口指向实例页');
   });
 
-  test('B4 onPageShow() 只刷新最近成功记录，不整表 reload（防止覆盖正在编辑的表单）', () => {
-    assert.match(PAGE, /onPageShow\(\): void/, '契约丢了：缺 onPageShow(): void');
-    assert.match(onPageShowBody, /refreshRemoteLastOk/, '契约丢了：onPageShow 没刷新最近成功记录');
-    assert.doesNotMatch(
-      onPageShowBody,
-      /applySettings/,
-      '契约丢了：onPageShow 调用了 applySettings，会把用户正在编辑的表单覆盖成旧值'
-    );
+  test('C1（old→new）RemoteSection.ets 文件删除，设置页不再导入或装配', () => {
+    let exists = true;
+    try {
+      readSettingsFile('components/settings/RemoteSection.ets');
+    } catch {
+      exists = false;
+    }
+    assert.equal(exists, false, 'RemoteSection.ets 必须删除');
+    assert.equal(PAGE.includes("from '../components/settings/RemoteSection'"), false, '不该再导入');
   });
 
-  test('B5 RemoteGroup() 把 reconnectText / onReconnect 传给 RemoteSection', () => {
-    assert.match(
-      remoteGroup,
-      /reconnectText: this\.reconnectText\(\),/,
-      '契约丢了：RemoteGroup 没把重连按钮文案传给 RemoteSection'
-    );
-    assert.match(remoteGroup, /onReconnect:/, '契约丢了：RemoteGroup 没把重连回调传给 RemoteSection');
-  });
-
-  test('B6 openRemote 带可选 overrideUrl 参数（重连时传入现拼的地址）', () => {
-    assert.match(
-      PAGE,
-      /private async openRemote\(overrideUrl: string = ''\): Promise<void>/,
-      '契约丢了：openRemote 缺可选参数 overrideUrl: string = \'\''
-    );
-  });
-
-  test('B7 openRemote 仍是「先 save 再 push」（重连走同一条落盘路径）', () => {
-    const saveIndex = openRemoteBody.indexOf('await settingsStore.save({ remoteUrl: check.url });');
-    const pushIndex = openRemoteBody.indexOf('router.pushUrl(');
-    assert.ok(saveIndex >= 0, '契约丢了：openRemote 缺「先保存归一地址」的调用');
-    assert.ok(pushIndex > saveIndex, '契约丢了：必须先 save 再 pushUrl');
-  });
-
-  test('B8 重连（override 非空）跳过方式推导：build/save 都在 override 为空的守卫内', () => {
-    // §B.4 核心语义：重连传入现拼地址（override 非空）时，openRemote 不得再用当前方式字段重新
-    // 推导地址，也不得回写「方式字段 / 手输地址」。实现方式是把这两段逻辑分别关进两处
-    // `if (override.length === 0) {` 守卫。这里用下标关系钉住「顺序 + 归属」，防止重构改坏不红。
-    const firstGuard = openRemoteBody.indexOf('if (override.length === 0) {');
-    const buildIdx = openRemoteBody.indexOf('buildRemoteAccessUrl(');
-    const firstSaveIdx = openRemoteBody.indexOf('await settingsStore.save({ remoteUrl: check.url });');
-    const manualIdx = openRemoteBody.indexOf('this.remoteManualUrl = check.url;');
-    const secondGuard = openRemoteBody.indexOf('if (override.length === 0) {', firstGuard + 1);
-
-    // 先用 >=0 兜底，避免某个下标为 -1 时后面的大小比较「看似通过」而实际无意义。
-    assert.ok(firstGuard >= 0, '§B.4 语义丢了：openRemote 缺第一处 override 守卫（重连会重新拼地址）');
-    assert.ok(buildIdx >= 0, '§B.4 语义丢了：openRemote 找不到 buildRemoteAccessUrl(，无法判定是否进了守卫');
-    assert.ok(firstSaveIdx >= 0, '§B.4 语义丢了：openRemote 找不到第一次 save，无法判定守卫顺序');
-    assert.ok(secondGuard >= 0, '§B.4 语义丢了：openRemote 缺第二处 override 守卫（重连会回写方式字段）');
-    assert.ok(manualIdx >= 0, '§B.4 语义丢了：openRemote 找不到 remoteManualUrl 同步，无法判定是否在守卫内');
-
-    // 顺序：第一处守卫 → 按方式拼地址 → 第一次 save → 第二处守卫 → 手输地址同步。
-    assert.ok(
-      buildIdx > firstGuard,
-      '§B.4 语义丢了：「按方式拼地址」必须关在第一处 override 为空的守卫内（重连不重新推导）'
-    );
-    assert.ok(
-      firstSaveIdx > buildIdx,
-      '§B.4 语义丢了：顺序应为「守卫 → buildRemoteAccessUrl → 第一次 save」'
-    );
-    assert.ok(
-      secondGuard > firstSaveIdx,
-      '§B.4 语义丢了：第二处 override 守卫必须在第一次 save 之后（重连不写方式字段）'
-    );
-    assert.ok(
-      manualIdx > secondGuard,
-      '§B.4 语义丢了：remoteManualUrl 同步必须在第二处守卫内（重连不误改手输地址）'
-    );
-    // 恰好两处守卫：多一处=语义漂移，少一处=漏守卫。
-    assert.equal(
-      openRemoteBody.split('if (override.length === 0) {').length - 1,
-      2,
-      '§B.4 语义丢了：override 守卫必须恰好两处（少一处漏守卫，多一处语义漂移）'
-    );
-  });
-
-  test('B9 重连地址失效（merged 为空）→ 先给红字并 return，绝不把空串交给 openRemote', () => {
-    // mergeRemoteToken 在记录里的地址已不合法时返回空串；空串交给 openRemote 会退化成
-    // 「按当前方式字段重新拼」，把一次「重连失败」悄悄变成「按别的方式打开」，红字也会
-    // 变成「请先填写电脑上的 DSH 地址」（与真实原因「记录失效」不符）。这里用下标关系
-    // 钉住「先算 merged → 空串早退 → 再 openRemote(merged)」的顺序，防止重构改坏不红。
-    const mergedIdx = reconnectLastOkBody.indexOf('const merged: string = mergeRemoteToken(entry.url, this.effectiveRemoteToken());');
-    const guardIdx = reconnectLastOkBody.indexOf('if (merged.length === 0) {', mergedIdx);
-    const returnIdx = reconnectLastOkBody.indexOf('return;', guardIdx);
-    const openIdx = reconnectLastOkBody.indexOf('this.openRemote(merged)', mergedIdx);
-
-    assert.ok(mergedIdx >= 0, '契约丢了：缺 merged 变量（重连必须先算合并地址）');
-    assert.ok(guardIdx > mergedIdx, '契约丢了：merged 为空必须早退（不能把空串交给 openRemote）');
-    assert.ok(returnIdx > guardIdx, '契约丢了：空 merged 分支缺 return');
-    assert.ok(openIdx > returnIdx, '契约丢了：openRemote(merged) 必须在守卫之后调用');
-    assert.match(reconnectLastOkBody, /重连失败：最近一次成功的地址已失效/, '契约丢了：地址失效的红字文案不符');
-    assert.equal(reconnectLastOkBody.indexOf('this.openRemote(mergeRemoteToken('), -1, '契约丢了：不得再把 mergeRemoteToken 的结果内联传给 openRemote');
+  test('C2（old→new）旧 remote* 键仍可读、全量播种且令牌不丢（不是静默丢弃）', () => {
+    for (const [field, key] of [
+      ['remoteUrl', 'KEY_REMOTE_URL'], ['remoteLastOk', 'KEY_REMOTE_LAST_OK'], ['remoteToken', 'KEY_REMOTE_TOKEN']
+    ]) {
+      assert.match(STORE, new RegExp(`${field}: string;`), `${field} 仍可读`);
+      assert.match(STORE, new RegExp(`prefs\\.put\\(${key}`), `${field} 仍写回`);
+    }
+    for (const field of ['remoteUrl', 'remoteLastOk', 'remoteMode', 'remoteToken']) {
+      assert.match(instances, new RegExp(`${field}: settings\\.${field}`), `播种带上旧 ${field}`);
+    }
+    assert.match(seed, /candidate\.token = legacyToken/, '旧令牌迁进实例 token 字段');
   });
 });
 
-// ---------------------------------------------------------------------------
-// C. components/settings/RemoteSection.ets：重连按钮排在「打开远程控制」之前，且文案不带令牌。
-// ---------------------------------------------------------------------------
-describe('C. components/settings/RemoteSection.ets：重连按钮的位置与形态', () => {
-  const reconnectIndex = REMOTE_SECTION.indexOf('label: this.reconnectText');
-  const openIndex = REMOTE_SECTION.indexOf("label: '打开远程控制'");
-
-  test('C1 props：reconnectText 文案与 onReconnect 回调都接进来了', () => {
-    assert.match(
-      REMOTE_SECTION,
-      /@Prop reconnectText: string = '';/,
-      '契约丢了：RemoteSection 缺 @Prop reconnectText: string = \'\';'
-    );
-    assert.match(REMOTE_SECTION, /onReconnect:\s*\(\)\s*=>\s*void/, '契约丢了：RemoteSection 缺 onReconnect: () => void');
-  });
-
-  test('C2 重连 ActionButton 存在，且排在「打开远程控制」之前', () => {
-    assert.ok(reconnectIndex > -1, '契约丢了：找不到重连按钮（label: this.reconnectText）');
-    assert.ok(openIndex > -1, '契约丢了：找不到「打开远程控制」按钮');
-    assert.ok(reconnectIndex < openIndex, '契约丢了：重连按钮必须排在「打开远程控制」之前');
-  });
-
-  test('C3 重连按钮是 secondary + block 的次要动作，label 直接取 reconnectText（不拼 token）', () => {
-    assert.ok(reconnectIndex > -1, '契约丢了：找不到重连按钮，无法校验按钮形态');
-    const nextLabel = REMOTE_SECTION.indexOf('label:', reconnectIndex + 1);
-    const button = REMOTE_SECTION.slice(reconnectIndex, nextLabel > reconnectIndex ? nextLabel : reconnectIndex + 600);
-    assert.match(button, /variant: 'secondary'/, '契约丢了：重连按钮必须是 secondary（次要动作）');
-    assert.match(button, /block: true/, '契约丢了：重连按钮必须占满整行（block: true）');
-    assert.match(button, /label: this\.reconnectText/, '契约丢了：label 必须用 reconnectText，不能自己拼 token 进文案');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// D. pages/RemoteControl.ets：onPageEnd 落盘「最近一次成功」，且记录里不含 secret。
-// ---------------------------------------------------------------------------
 describe('D. pages/RemoteControl.ets：onPageEnd 记录最近一次成功（记录不含 secret）', () => {
   const importLine = REMOTE_CONTROL.split('\n').find((line) => line.includes("from '../model/remoteUrl'")) ?? '';
   const recordBody = methodBody(REMOTE_CONTROL, 'private recordLastOk(');

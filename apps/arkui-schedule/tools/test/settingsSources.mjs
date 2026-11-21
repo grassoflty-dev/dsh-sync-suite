@@ -31,10 +31,10 @@ export function readSyncSection() {
   return readSettingsFile('components/settings/SyncSection.ets');
 }
 
-/** 远程控制 section。 */
-export function readRemoteSection() {
-  return readSettingsFile('components/settings/RemoteSection.ets');
-}
+/**
+ * 远程控制 section 已随 mod-settings-remote-dedupe 删除：配置统一在 pages/Instances。
+ * 旧 readRemoteSection() 调用点须 retarget 到实例页守卫，不再提供这个读取口。
+ */
 
 /** 关于 section（含深色模式 `ThemeRow`）。 */
 export function readAboutSection() {
@@ -58,7 +58,6 @@ export function readSettingsSources() {
     'components/settings/SettingsBits.ets',
     'components/settings/SyncSection.ets',
     'components/settings/AiSection.ets',
-    'components/settings/RemoteSection.ets',
     'components/settings/DataSection.ets',
     'components/settings/AboutSection.ets'
   ];

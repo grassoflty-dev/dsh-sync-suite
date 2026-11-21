@@ -12,7 +12,7 @@ const FILES = [
   'components/settings/SettingsBits.ets',
   'components/settings/SyncSection.ets',
   'components/settings/AiSection.ets',
-  'components/settings/RemoteSection.ets',
+  // RemoteSection.ets 随 mod-settings-remote-dedupe 删除（配置统一在 pages/Instances）
   'components/settings/DataSection.ets',
   'components/settings/AboutSection.ets',
   'components/ExportImportPanel.ets', // 由 DataSection 直接渲染，属设置页界面树

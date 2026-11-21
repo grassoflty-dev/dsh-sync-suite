@@ -121,6 +121,21 @@ describe('播种与旧配置迁移', () => {
     assert.equal(list[1].id, instanceIdFromUrl(`http://h:3080/?k=${SECRET}`));
   });
 
+  test('S-08（mod-settings-remote-dedupe）旧 remoteToken 与地址分开存放也一并迁移，且幂等不丢', () => {
+    const separate = 'SEPARATE_LEGACY_TOKEN';
+    const input = { remoteUrl: 'http://h:3080/?a=1', remoteLastOk: '', remoteMode: 'manual', remoteToken: separate };
+    const once = seedInstances([], input);
+    assert.equal(once.length, 2, '本机行 + 一条迁移实例');
+    assert.equal(once[1].token, separate, '分开存的旧令牌必须进 token 字段（不能只迁地址）');
+    assert.equal(once[1].url.includes(separate), false, '令牌不得拼进可读 url');
+    const twice = seedInstances(once, input);
+    assert.equal(encodeInstances(twice), encodeInstances(once), '再播一次信封逐字节相等（幂等）');
+    // 地址里已有令牌时，显式传入的旧 remoteToken 优先（normalizeInstance 的 token 优先级）
+    const both = seedInstances([], { ...input, remoteUrl: `http://h:3080/?token=${SECRET}`, remoteToken: separate });
+    assert.equal(both[1].token, separate, '显式旧令牌优先于 URL 里的旧令牌');
+    assert.equal(both[1].url.includes(SECRET), false, 'URL 令牌也不得进可读 url');
+  });
+
   test('S-08 旧 mode 非法 / 缺失回落 manual，不静默变成 lan', () => {
     const bad = seedInstances([], legacy({ remoteMode: 'wifi' }));
     const missing = seedInstances([], legacy({ remoteMode: undefined }));

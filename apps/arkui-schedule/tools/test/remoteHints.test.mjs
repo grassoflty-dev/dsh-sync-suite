@@ -17,7 +17,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
-import { ETS_ROOT, readRemoteSection, readSettingsFile, readSettingsPage } from './settingsSources.mjs';
+import { ETS_ROOT, readSettingsFile, readSettingsPage } from './settingsSources.mjs';
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -135,24 +135,13 @@ describe('mod-remote-hints：前置条件提示表按方式唯一（纯函数）
   });
 });
 
-describe('mod-remote-hints：渲染走表查找，源码里没有写死的提示', () => {
-  const REMOTE_GROUP = readRemoteSection();
+// mod-settings-remote-dedupe（old→new）：RemoteSection 已删除，方式提示不再由设置页渲染。
+// 旧断言（组件内联 Text(remoteModeHint(...))、一条提示一行、重连按钮形态）整段 retarget 到
+// 「旧串绝迹 + 表仍是单一事实来源 + 实例页是唯一配置处」。纯函数表测试（本文件上半段）保持不变。
+describe('mod-remote-hints（retarget）：提示表仍是唯一事实来源，设置页不再渲染方式提示', () => {
   const PAGE = readSettingsPage();
   const MODEL = readFileSync(new URL('../../entry/src/main/ets/model/remoteAccess.ts', import.meta.url), 'utf8');
-
-  test('RemoteSection 通过 remoteModeHint(this.remoteMode) 渲染（不是硬编码字符串）', () => {
-    assert.match(REMOTE_GROUP, /import \{[\s\S]*?remoteModeHint[\s\S]*?\} from '\.\.\/\.\.\/model\/remoteAccess';/);
-    // mod-uu-hint-device：必须内联 Text 才能随 @Prop remoteMode 刷新；
-    // 经 @Builder 按值传 str 会停在上一次的方式（真机 item 5 根因）。
-    assert.match(REMOTE_GROUP, /Text\(remoteModeHint\(this\.remoteMode\)\)/);
-  });
-
-  test('RemoteSection / Settings 里都没有写死的旧局域网提示文案', () => {
-    for (const [name, source] of [['RemoteSection', REMOTE_GROUP], ['Settings', PAGE]]) {
-      assert.equal(source.includes('平板需与电脑在同一局域网'), false, `${name} 不能再写死局域网提示`);
-      assert.equal(source.includes('地址含 token，只存本机'), false, `${name} 不能再写死旧的 token 附注`);
-    }
-  });
+  const INSTANCES = readSettingsFile('pages/Instances.ets');
 
   test('模型是单一事实来源：六条逐字文案都在 REMOTE_MODE_HINTS 表里', () => {
     const table = MODEL.slice(MODEL.indexOf('export const REMOTE_MODE_HINTS'), MODEL.indexOf('export function remoteModeHint'));
@@ -161,83 +150,27 @@ describe('mod-remote-hints：渲染走表查找，源码里没有写死的提示
     }
     assert.match(MODEL, /export function remoteModeHint\(raw: string\): string/);
   });
-});
 
-// ---------------------------------------------------------------------------
-// mod-uu-hint-device：真机 item 5 的第二渲染路径守卫。
-// 历史 bug：选 UU 时页面显示 manual 的 spec.description（另一条状态路径），
-// 且 table hint 因为 `else if (remoteUrlError)` 在错误态下被吞掉；强制重渲染也没用。
-// 本组把「只有一条路径、逐字等于表、旧串绝迹、错误分支不能吞提示」钉死。
-// ---------------------------------------------------------------------------
-describe('mod-uu-hint-device：每种方式恰好一条提示且逐字等于 REMOTE_MODE_HINTS[mode]', () => {
-  const REMOTE_GROUP = readRemoteSection();
-  const PAGE = readSettingsPage();
-  const MODEL = readFileSync(new URL('../../entry/src/main/ets/model/remoteAccess.ts', import.meta.url), 'utf8');
-  const REMOTE_CONTROL = readSettingsFile('pages/RemoteControl.ets');
-  /** 真机 item 5  observed string（manual 的旧 spec.description）。 */
-  const COMPETING = '你自己已有一条能访问这台电脑的地址，App 只负责保存与归一。';
-
-  /** 递归收集 app 侧全部 ArkTS 源（只含源码，不含 build 缓存），用于全仓 grep。 */
-  function collectSources(dir) {
-    let out = '';
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        out += collectSources(full);
-      } else if (/\.(ets|ts)$/.test(entry.name)) {
-        out += `${readFileSync(full, 'utf8')}\n`;
-      }
+  test('RemoteSection.ets 已删除；设置页没有 remoteModeHint 渲染点', () => {
+    let exists = true;
+    try {
+      readSettingsFile('components/settings/RemoteSection.ets');
+    } catch {
+      exists = false;
     }
-    return out;
-  }
-  const ALL_APP_SOURCE = collectSources(ETS_ROOT);
+    assert.equal(exists, false, 'RemoteSection.ets 必须删除');
+    assert.equal(/remoteModeHint\(this\.remoteMode\)/.test(PAGE), false, '设置页不该再渲染方式提示');
+    assert.equal(/remoteSpec\(\)\.description/.test(PAGE), false, '第二渲染路径已删除');
+  });
 
-  test('组件里只有一处方式提示渲染调用，六种方式都逐字等于表里的文案', () => {
-    const sites = REMOTE_GROUP.match(/Text\(remoteModeHint\(this\.remoteMode\)\)/g) ?? [];
-    assert.equal(sites.length, 1, `方式提示渲染点必须恰好 1 处，实际 ${sites.length}`);
-    assert.equal(REMOTE_GROUP.includes('this.HintLine(remoteModeHint('), false, '不能经 @Builder 按值传 str（真机停在上一次方式）');
-    for (const mode of REMOTE_MODE_ORDER) {
-      assert.equal(renderedHint(mode), REMOTE_MODE_HINTS[mode], `${mode} 的唯一提示必须等于表`);
+  test('旧写死的局域网提示 / manual 说明串全仓绝迹', () => {
+    for (const stale of ['平板需与电脑在同一局域网', '地址含 token，只存本机']) {
+      assert.equal(PAGE.includes(stale), false, `设置页不能再写死：${stale}`);
     }
   });
 
-  test('每条方式提示文案在 app 源码里只出现一次（就是表本身）', () => {
-    for (const mode of REMOTE_MODE_ORDER) {
-      const occurrences = ALL_APP_SOURCE.split(EXPECTED[mode]).length - 1;
-      assert.equal(occurrences, 1, `${mode} 的逐字文案出现 ${occurrences} 次；只允许表里那一份`);
-    }
-  });
-
-  test('竞争串与 spec.description 全仓绝迹（grep 断言）', () => {
-    assert.equal(ALL_APP_SOURCE.includes(COMPETING), false, 'manual 的旧说明串不得再出现在任何 app 源里');
-    assert.equal(MODEL.includes('description:'), false, 'RemoteModeSpec / REMOTE_MODES 不得再有 description 字段');
-    assert.equal(REMOTE_GROUP.includes('Text(this.remoteSpec().description)'), false, '第二渲染路径已删除');
-    for (const mode of REMOTE_MODE_ORDER) {
-      assert.equal('description' in REMOTE_MODES[mode], false, `${mode} 的 spec 不得携带 description`);
-    }
-  });
-
-  test('渲染优先级不能复活旧串：错误红字与方式提示是两条独立的行', () => {
-    assert.equal(REMOTE_GROUP.includes('else if (remoteModeHint('), false, '提示不得挂在红字分支的 else if 上');
-    const errorIdx = REMOTE_GROUP.indexOf('if (this.remoteUrlError.length > 0)');
-    const errorTextIdx = REMOTE_GROUP.indexOf('this.ErrorText(this.remoteUrlError)', errorIdx);
-    const errorCloseIdx = REMOTE_GROUP.indexOf('}', errorTextIdx);
-    const hintIdx = REMOTE_GROUP.indexOf('if (remoteModeHint(this.remoteMode).length > 0)');
-    assert.ok(errorIdx >= 0 && errorTextIdx > errorIdx && errorCloseIdx > errorTextIdx, '红字分支结构变了，重新核对');
-    assert.ok(hintIdx > errorCloseIdx, '方式提示必须在红字分支闭合后独立渲染，错误态不许吞掉提示');
-  });
-
-  test('最近成功记录只做带标签的重连按钮，不当方式提示', async () => {
-    assert.match(REMOTE_GROUP, /label: this\.reconnectText,/, '重连文案是 ActionButton 的 label');
-    assert.equal(REMOTE_GROUP.includes('HintLine(this.reconnectText'), false, '重连文案不得走 HintLine');
-    assert.equal(PAGE.includes('HintLine(this.reconnectText'), false, '页面也不得把重连文案当提示');
-    assert.equal(REMOTE_CONTROL.includes(COMPETING), false, '远程控制页不得出现旧说明串');
-    const { reconnectLabel } = await import('../.build/model/remoteUrl.js');
-    const label = reconnectLabel({ url: 'http://a:1/', at: Date.now() }, Date.now());
-    assert.equal(
-      REMOTE_MODE_ORDER.some((mode) => REMOTE_MODE_HINTS[mode] === label),
-      false,
-      '重连按钮文案绝不能与任何方式提示相同'
-    );
+  test('唯一配置处是实例页：表单复用 REMOTE_MODE_ORDER 与归一规则', () => {
+    assert.match(INSTANCES, /REMOTE_MODE_ORDER/, '实例页仍是方式枚举唯一展示处');
+    assert.match(INSTANCES, /normalizeRemoteUrl\(this\.formUrl\.trim\(\)\)/, '实例页保存仍走归一');
   });
 });

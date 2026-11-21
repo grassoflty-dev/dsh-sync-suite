@@ -1,15 +1,16 @@
 /**
  * 设置页「同步（Git）」section。
  *
- * A2 拆分：内容从 `pages/Settings.ets` 的 `SyncHeader()` / `SyncAdvancedFields()` / `SyncGroup()`
- * 逐字搬出。页面持有全部 `@State`，这里只收**单向 props + 回调**（`@Prop` 值 + `onXxx`），
+ * A2 拆分：内容从 `pages/Settings.ets` 逐字搬出。页面持有全部 `@State`，
+ * 这里只收**单向 props + 回调**（`@Prop` 值 + `onXxx`），
  * 本组件不写任何状态 —— 刷新语义因此与拆分前一致：父页面值变了才重绘，重绘时读到的
  * 就是最新值（`authBlocker()` 之类的只读派生方法由父页面以函数 props 传入）。
  *
- * 契约（与拆分前逐条对齐，改动前先读 `docs/UI-DESIGN.md`）：
+ * 契约（改动前先读 `docs/UI-DESIGN.md`；mod-settings-sync-min：高级折叠区整条删除）：
  * - 主表单只有「仓库地址 / 访问令牌」两个控件，地址下固定一行说明
  *   「平台按地址自动识别 · 分支固定 main」；平台随地址推断、分支恒为 main，无选择控件；
- * - Git 用户名 / 设备标识 / 作者名在「高级 ▸」折叠区里，**默认收起**（三种情况由页面自动展开）；
+ * - Git 用户名 / 设备标识 / 作者名不再有输入控件：用户名按地址推断、编号由仓库自动分配、
+ *   作者名默认「我」，全部由软件静默安排；旧值仍可读于 settingsStore，只是不再上屏；
  * - 设备标识重复是**常驻** warning（不是 toast），附件被暂停推送同样常驻一行；
  * - Git 操作全部由 app 自动完成（创建记录后拉取 → 并集 → 推送，首页下拉刷新拉取 + 推送），
  *   本组件**没有**「推送 / 立即同步」手动按钮；查看状态 / 测试连接在组头「更多」弹层里
@@ -42,7 +43,6 @@ import { LoadingState } from '../state/LoadingState';
 import {
   ErrorText as ErrorTextBit,
   FieldLabel as FieldLabelBit,
-  FieldNote as FieldNoteBit,
   HintLine as HintLineBit
 } from './SettingsBits';
 
@@ -75,17 +75,12 @@ export struct SyncSection {
   @Prop token: string = '';
   @Prop tokenError: string = '';
 
-  // ---------------------------------------------------------------- 「高级」折叠区
-  @Prop syncAdvancedOpen: boolean = false;
-  @Prop syncAdvancedReason: string = '';
-  @Prop gitUsername: string = '';
-  @Prop gitUsernameError: string = '';
+  // ---------------------------------------------------------------- 静默派生的设备标识
+  /**
+   * 设备标识**只进可复制的诊断文本**（版本/设备/错误码/时间四要素），不是配置字段、不上屏为输入框。
+   * 值来自页面已归一的设备标识（仓库自动分配或存量值），mod-settings-sync-min 后「高级」折叠区整条删除。
+   */
   @Prop deviceId: string = '';
-  @Prop deviceIdError: string = '';
-  /** 设备编号的只读一行（`本机：device-2（自动分配）`；空串 = 还没登记，不占行）。 */
-  @Prop deviceIdNotice: string = '';
-  @Prop author: string = '';
-  @Prop authorError: string = '';
 
   // ---------------------------------------------------------------- 常驻状态
   /** 设备标识重复的常驻警告（空串 = 正常）。 */
@@ -110,19 +105,10 @@ export struct SyncSection {
   // ---------------------------------------------------------------- 页面只读派生（函数 props）
   /** 当前认证方式的阻塞原因（空串 = 可同步）。 */
   authBlocker: () => string = () => '';
-  /** 用户名输入框占位文案（跟着平台变）。 */
-  gitUsernamePlaceholder: () => string = () => '';
-  /** 用户名下方的一行说明（无错误时显示）。 */
-  gitUsernameHint: () => string = () => '';
 
   // ---------------------------------------------------------------- 回调（页面改状态）
   onChangeRepoUrl: (value: string) => void = () => {};
   onChangeToken: (value: string) => void = () => {};
-  onChangeGitUsername: (value: string) => void = () => {};
-  onChangeDeviceId: (value: string) => void = () => {};
-  onChangeAuthor: (value: string) => void = () => {};
-  /** 用户手动点「高级 ▸ / ▾」。 */
-  toggleSyncAdvanced: () => void = () => {};
   /** 首页过滤开关（页面同时写 AppStorage）。 */
   onToggleIncludeOtherDevices: (isOn: boolean) => void = () => {};
   /** pull / push / status（与拆分前 `runAction(action)` 同一个入口）。 */
@@ -162,11 +148,6 @@ export struct SyncSection {
     HintLineBit(text)
   }
 
-  @Builder
-  FieldNote(text: string) {
-    FieldNoteBit(text)
-  }
-
   /** 组标题 + 右侧「更多」入口。 */
   @Builder
   SyncHeader() {
@@ -193,87 +174,6 @@ export struct SyncSection {
     }
     .width('100%')
     .alignItems(VerticalAlign.Center)
-  }
-
-  /**
-   * 同步组「高级」折叠区：Git 用户名 / 设备标识 / 作者名。
-   *
-   * 这三项都有安全的默认值（用户名按仓库地址推断、编号自动分配、作者名默认「我」），
-   * 所以**默认收起**：用户要做的只有「填仓库地址 + token」。只有三种情况会自动展开
-   * （页面 `openSyncAdvanced`）：① 设备标识重复 ② 编号分配失败 / 仓库不可读 ③ Gitee 用户名推不出来。
-   */
-  @Builder
-  SyncAdvancedFields() {
-    Column({ space: SPACING.md }) {
-      // HTTPS 认证必须带用户名：GitHub 可留空（默认 x-access-token），Gitee 自动取仓库 owner
-      if (this.authMode === AUTH_HTTPS) {
-        this.FieldLabel('用户名（HTTPS 认证）')
-        // 语义说明（用户最常见的困惑：GitHub 要不要填？Gitee 填什么？）
-        this.FieldNote('HTTPS 认证用；GitHub 可留空（自动 x-access-token），Gitee 自动取仓库 owner')
-        TextInput({ text: this.gitUsername, placeholder: this.gitUsernamePlaceholder() })
-          .width('100%')
-          .height(TOUCH_MIN + SPACING.xs)
-          .fontSize(FONT.body)
-          .backgroundColor($r('app.color.page_background'))
-          .borderRadius(RADIUS.none)
-          .padding({ left: 0, right: 0 })
-          .onChange((value: string) => {
-            this.onChangeGitUsername(value);
-          })
-        Divider()
-          .strokeWidth(DIVIDER)
-          .color($r('app.color.divider'))
-        if (this.gitUsernameError.length > 0) {
-          this.ErrorText(this.gitUsernameError)
-        } else {
-          this.HintLine(this.gitUsernameHint())
-        }
-      }
-
-      // 设备标识：编号由仓库自动分配（`devices/registry.jsonl`），这里只是「手工指定」的逃生门
-      this.FieldLabel('设备标识')
-      this.FieldNote('自动分配；仅当你要手工指定时才改')
-      TextInput({ text: this.deviceId, placeholder: '自动分配（例如 device-2）' })
-        .width('100%')
-        .height(TOUCH_MIN + SPACING.xs)
-        .fontSize(FONT.body)
-        .backgroundColor($r('app.color.page_background'))
-        .borderRadius(RADIUS.none)
-        .padding({ left: 0, right: 0 })
-        .onChange((value: string) => {
-          this.onChangeDeviceId(value);
-        })
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-      if (this.deviceIdError.length > 0) {
-        this.ErrorText(this.deviceIdError)
-      } else if (this.deviceIdNotice.length > 0) {
-        this.HintLine(this.deviceIdNotice)
-      }
-
-      // 作者名：只影响记录里的「谁记的」，与同步/认证无关
-      this.FieldLabel('作者名')
-      this.FieldNote('默认「我」，只影响记录里的"谁记的"')
-      TextInput({ text: this.author, placeholder: '我' })
-        .width('100%')
-        .height(TOUCH_MIN + SPACING.xs)
-        .fontSize(FONT.body)
-        .backgroundColor($r('app.color.page_background'))
-        .borderRadius(RADIUS.none)
-        .padding({ left: 0, right: 0 })
-        .onChange((value: string) => {
-          this.onChangeAuthor(value);
-        })
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
-      if (this.authorError.length > 0) {
-        this.ErrorText(this.authorError)
-      }
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
   }
 
   // ---------------------------------------------------------------- 状态行派生
@@ -323,7 +223,7 @@ export struct SyncSection {
     return formatDiagnostics(input);
   }
 
-  /** 同步组：仓库地址 / 访问令牌（主表单两个控件 + 一行固定说明）+「高级」折叠区 + 1 行状态。 */
+  /** 同步组：仓库地址 / 访问令牌（主表单两个控件 + 一行固定说明）+ 1 行诚实状态。 */
   build() {
     Column({ space: SPACING.md }) {
       this.SyncHeader()
@@ -418,33 +318,9 @@ export struct SyncSection {
         .alignItems(VerticalAlign.Center)
       }
 
-      // ---- 主表单到此结束：只剩「仓库地址 / 访问令牌」两个控件 ----
-      // 设备编号是仓库自动分配的：成功登记后这里只显示一行只读文字（用户不需要、也不应该手填）。
-      if (this.deviceIdNotice.length > 0) {
-        this.HintLine(this.deviceIdNotice)
-      }
-
-      // 「高级 ▸」折叠区：Git 用户名 / 设备标识 / 作者名（默认收起，见 SyncAdvancedFields）
-      Row({ space: SPACING.xs }) {
-        Text(this.syncAdvancedOpen ? '高级 ▾' : '高级 ▸')
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.brand'))
-        Blank()
-      }
-      .width('100%')
-      .height(TOUCH_MIN)
-      .alignItems(VerticalAlign.Center)
-      .onClick(() => {
-        this.toggleSyncAdvanced();
-      })
-      // 自动展开时的那一行原因（只有 ① 设备标识重复 ② 分配失败/仓库不可读 ③ Gitee 用户名推不出来）
-      if (this.syncAdvancedReason.length > 0) {
-        this.HintLine(this.syncAdvancedReason)
-      }
-      if (this.syncAdvancedOpen) {
-        this.SyncAdvancedFields()
-      }
+      // ---- 主表单到此结束：只有「仓库地址 / 访问令牌」两个控件 ----
+      // mod-settings-sync-min：原折叠区（用户名 / 设备标识 / 作者名）整条删除，
+      // 三者改由软件静默派生（用户名按地址推断、编号自动分配、作者名默认「我」），旧值仍留在 store。
 
       // 设备标识重复：**常驻**警告（不是 toast）。两台设备同一个 id 时，附件 zip 互相覆盖、
       // 历史混在一起，而且旧校验根本挡不住——所以这里必须一直红着，直到用户改成唯一值。

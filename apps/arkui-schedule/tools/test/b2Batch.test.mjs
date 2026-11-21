@@ -291,7 +291,12 @@ describe('B2 设置页 Settings.ets（紧凑屏）：组锚点真跳转的源码
         `契约丢了：measureGroup(${index}, ...) 必须恰好一次`
       );
     }
-    assert.ok(COMPACT.includes('this.ChatEntryRow()'), '契约丢了：ChatEntryRow 应保持裸调用、仍在紧凑屏里');
+    // mod-settings-remote-dedupe（old→new）：旧断言钉住 ChatEntryRow 在紧凑屏里**裸调用**；
+    // 现在唯一入口行收进 RemoteGroup（RemoteGroup 本身只剩这一行），断言改钉「调用一次 + 组内一行」。
+    assert.equal((COMPACT.match(/this\.RemoteGroup\(\)/g) ?? []).length, 1, '紧凑屏应恰好调用一次 RemoteGroup（唯一入口组）');
+    const PAGE_SRC = readSettingsPage();
+    const remoteGroup = PAGE_SRC.slice(PAGE_SRC.indexOf('RemoteGroup() {'), PAGE_SRC.indexOf('DataGroup() {'));
+    assert.equal((remoteGroup.match(/this\.ChatEntryRow\(\)/g) ?? []).length, 1, 'RemoteGroup 只渲染一行入口，不能重复');
   });
 
   test('B2-23 WideBody 完全没被锚点污染，五个组的调用仍在', () => {

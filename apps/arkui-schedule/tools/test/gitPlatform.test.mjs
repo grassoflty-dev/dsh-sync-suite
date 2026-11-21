@@ -300,16 +300,22 @@ describe('设置页接线（源码级）：无平台/认证选择器，平台仍
     assert.ok(PAGE.includes('平台按地址自动识别 · 分支固定 main'), '固定说明必须存在');
   });
 
-  test('平台文案/示例/用户名占位都复用 model/gitAuth（不再页面自带一套）', () => {
+  test('平台文案/示例都复用 model/gitAuth；用户名占位随「高级」折叠区一并删除', () => {
+    // mod-settings-sync-min（old→new）：旧断言钉住页面调用 gitUsernamePlaceholderFor /
+    // gitUsernameHintFor 两个「用户名输入框占位」函数；用户要求删掉高级选项及配置后，
+    // 用户名没有输入控件，改由 httpsUsernameFor 按仓库地址静默推断。这里把断言 retarget 到
+    // 真正的推断入口（不是删断言、也不是放宽成「全文出现」），其余平台文案复用断言保持不变。
     for (const call of [
       /repoUrlPlaceholderFor\(this\.gitPlatform, this\.authMode\)/,
       /repoUrlExamplesFor\(this\.gitPlatform, this\.authMode\)/,
-      /gitUsernamePlaceholderFor\(this\.gitPlatform\)/,
-      /gitUsernameHintFor\(this\.gitPlatform\)/,
+      /httpsUsernameFor\(this\.gitPlatform, this\.repoUrl, ''\)/,
       /tokenPlaceholderFor\(this\.gitPlatform\)/,
       /authHintFor\(this\.gitPlatform, this\.authMode\)/
     ]) {
       assert.match(PAGE, call, `页面没有复用：${call}`);
+    }
+    for (const gone of [/gitUsernamePlaceholderFor\(/, /gitUsernameHintFor\(/, /用户名（HTTPS 认证）/]) {
+      assert.equal(gone.test(PAGE), false, `不该再有用户名输入控件文案：${gone}`);
     }
   });
 

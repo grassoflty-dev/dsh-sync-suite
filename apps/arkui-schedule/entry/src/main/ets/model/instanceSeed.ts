@@ -33,6 +33,13 @@ export interface LegacyInstanceSettings {
   remoteLastOk: string;
   /** 旧访问方式（非法 / 空一律回落到 `manual`）。 */
   remoteMode?: string;
+  /**
+   * 旧「访问令牌（可选）」明文（mod-settings-remote-dedupe）。
+   *
+   * 它常与 `remoteUrl` 分开存放，所以必须显式带进实例行，否则「地址迁过来了、令牌没了」。
+   * 只写进实例的 `token` 字段，绝不拼进 `url`；settingsStore 里的旧键仍原样可读（不删除）。
+   */
+  remoteToken?: string;
 }
 
 /** 相对时间分档（毫秒）：1 分钟 / 1 小时 / 1 天。 */
@@ -114,6 +121,15 @@ export function seedInstances(
     mode: legacyMode(legacy),
     reachable: 'unknown'
   };
+  // 旧令牌与地址分开存：显式带上，避免「地址迁过来了、令牌丢了」。
+  // normalizeInstance 优先用这里的非空 token，其次才从 URL query 抽取；两者都不进可读 url。
+  const legacyToken: string =
+    legacy === null || legacy === undefined || typeof legacy.remoteToken !== 'string'
+      ? ''
+      : legacy.remoteToken.trim();
+  if (legacyToken.length > 0) {
+    candidate.token = legacyToken;
+  }
   const seen: number = legacyLastSeen(legacy);
   if (seen > 0) {
     candidate.lastSeen = seen;

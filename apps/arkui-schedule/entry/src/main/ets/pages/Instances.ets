@@ -100,13 +100,15 @@ struct Instances {
         instanceStore.ensureSeeded({
           remoteUrl: settings.remoteUrl,
           remoteLastOk: settings.remoteLastOk,
-          remoteMode: settings.remoteMode
+          remoteMode: settings.remoteMode,
+          // 旧令牌与地址分开存，必须一并迁进实例行（mod-settings-remote-dedupe）
+          remoteToken: settings.remoteToken
         });
       }
     } catch (error) {
       // 设置读不到不影响实例表：只播种本机，不在 UI 回显错误细节
       if (!this.disposed) {
-        instanceStore.ensureSeeded({ remoteUrl: '', remoteLastOk: '', remoteMode: '' });
+        instanceStore.ensureSeeded({ remoteUrl: '', remoteLastOk: '', remoteMode: '', remoteToken: '' });
       }
     }
     if (!this.disposed) {
