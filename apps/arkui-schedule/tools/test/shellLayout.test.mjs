@@ -24,7 +24,8 @@ const HARMONY_PAGES = JSON.parse(
 const ENTRY_ABILITY = stripComments(
   readFileSync(new URL('../../entry/src/main/ets/entryability/EntryAbility.ets', import.meta.url), 'utf8')
 );
-const PANE_DIR = new URL('../../entry/src/main/ets/pages/panes/', import.meta.url);
+const ETS_ROOT_URL = new URL('../../entry/src/main/ets/', import.meta.url);
+const PANE_DIR = new URL('pages/panes/', ETS_ROOT_URL);
 
 /** 取 marker 之后那对花括号的内部文本（marker 形如 `build() ` / `onBackPress() `）。 */
 function blockAfter(source, marker) {
@@ -54,10 +55,12 @@ const PANES = [
   { name: 'InstancesPane', file: 'InstancesPane.ets', constant: 'SHELL_SECTION_INSTANCES' },
   { name: 'CloudChatPane', file: 'CloudChatPane.ets', constant: 'SHELL_SECTION_CLOUD_CHAT' }
 ];
-/** 三个「即将迁入」占位（日程已是真 body，不属于占位）。 */
+/**
+ * 剩余的「即将迁入」占位。mod-shell-instances-pane 已把 InstancesPane 换成真 body，
+ * 日程更早就是真 body，因此占位只剩 dots / 云端对话两个（日程与远程不再列入）。
+ */
 const SCAFFOLDS = [
   { name: 'DotsPane', file: 'DotsPane.ets', label: 'dots', action: '新建对话', reason: 'REASON_DOTS', empty: '还没有 dots 对话' },
-  { name: 'InstancesPane', file: 'InstancesPane.ets', label: '远程 DSH', action: '添加实例', reason: 'REASON_REMOTE', empty: '远程 DSH' },
   { name: 'CloudChatPane', file: 'CloudChatPane.ets', label: '云端对话', action: '新建对话', reason: 'REASON_CLOUD', empty: '云端对话' }
 ];
 const PANE_SOURCE = new Map(
@@ -92,7 +95,7 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     }
   });
 
-  test('L-02 唯一的 flex 切分在内容 Stack；三个占位页头各一处标题省略号', () => {
+  test('L-02 唯一的 flex 切分在内容 Stack；两个占位页头各一处标题省略号', () => {
     const buildSplits = BUILD.match(/layoutWeight\(1\)/g) ?? [];
     assert.equal(buildSplits.length, 1, `build() 里只允许一处 layoutWeight(1) flex 切分，实际 ${buildSplits.length} 处`);
     // 唯一的那一处紧跟在四面板 Stack 的闭合之后（width/height 100% → layoutWeight）。
@@ -101,13 +104,19 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       /CloudChatPane\(\{[\s\S]*?\}\)\s*\n\s*\}\s*\n\s*\.width\('100%'\)\s*\n\s*\.height\('100%'\)\s*\n\s*\.layoutWeight\(1\)/,
       'flex 切分必须是包住四个面板的内容 Stack 的属性'
     );
-    // 旧「PaneHeader 标题省略号」那一处随页头一起搬进三个占位组件；Home 自身只剩内容 Stack。
+    // 旧「PaneHeader 标题省略号」随页头搬进占位组件；Home 自身只剩内容 Stack。
     const all = HOME.match(/layoutWeight\(1\)/g) ?? [];
     assert.equal(all.length, 1, `外壳页只允许已登记的一处 layoutWeight(1)，实际 ${all.length} 处`);
     for (const scaffold of SCAFFOLDS) {
       const inHeader = (paneBody(scaffold.name).match(/layoutWeight\(1\)/g) ?? []).length;
       assert.equal(inHeader, 1, `${scaffold.name} 的标题省略号只能占一处，不是新的 flex 切分`);
     }
+    // 远程 DSH 现在是真 body：页头标题与行内名称各一处省略号，build() 根层不新增切分。
+    const instances = PANE_SOURCE.get('InstancesPane');
+    assert.equal((paneBody('InstancesPane').match(/layoutWeight\(1\)/g) ?? []).length, 0,
+      'InstancesPane.build() 不得自己新增 flex 切分');
+    assert.equal((blockAfter(instances, '\n  Header() ').match(/layoutWeight\(1\)/g) ?? []).length, 1);
+    assert.equal((blockAfter(instances, '\n  InstanceRow(').match(/layoutWeight\(1\)/g) ?? []).length, 1);
   });
 
   test('L-03 没有嵌套的固定高度 Column 包住内容区（只有一层 Row → Stack）', () => {
@@ -128,8 +137,9 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     const content = contentStackBody();
     assert.equal(/Scroll\(/.test(content), false, '内容 Stack 不得再包一层 Scroll');
     assert.equal(/Column\(/.test(content), false, '内容 Stack 只能是面板叠放层，不得有布局 Column');
-    for (const scaffold of SCAFFOLDS) {
-      assert.match(paneBody(scaffold.name), /^\s*Scroll\(\) \{/, `${scaffold.name} 必须以自己的 Scroll 开头`);
+    // 日程面板根是 Stack（内部汇总块自带 Scroll），其余三个面板根即 Scroll。
+    for (const name of [...SCAFFOLDS.map((s) => s.name), 'InstancesPane']) {
+      assert.match(paneBody(name), /^\s*Scroll\(\) \{/, `${name} 必须以自己的 Scroll 开头`);
     }
     // 日程真 body 的滚动纪律：汇总块自带 Scroll、列表区是唯一的加权兄弟（横屏修复不回退）。
     const schedule = PANE_SOURCE.get('SchedulePane');
@@ -211,7 +221,7 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.match(RAIL, /const RAIL_COMPACT_WIDTH: number = 72;/, '抽屉窄轨 72vp');
   });
 
-  test('L-11 三个占位各有带分段标签的页头，动作槽禁用并写出原因；日程用真页头', () => {
+  test('L-11 两个占位各有带分段标签的页头，动作槽禁用并写出原因；日程 / 远程用真页头', () => {
     for (const { name, label, action, reason } of SCAFFOLDS) {
       const body = paneBody(name);
       assert.match(body, new RegExp(`Text\\('${label}'\\)`), `${name} 必须有「${label}」分段标签`);
@@ -219,10 +229,17 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       assert.ok(body.includes(actionSlot), `${name} 的动作槽必须显示「${action}（原因）」`);
       assert.match(body, /\.enabled\(false\)/, `${name} 的占位动作必须禁用（无假入口）`);
     }
-    // 日程不再是占位：它保留 Index 的真页头（PageLayout 的唯一设置出口），没有禁用原因。
+    // 日程不再是占位：真页头只留标题/副标题 + pane 专属「新建」；设置出口唯一在 rail 齿轮。
     const schedule = PANE_SOURCE.get('SchedulePane');
-    assert.match(schedule, /headerActionTwo: '⚙ 设置'/, '日程面板沿用真页头的唯一设置出口');
+    assert.equal(/headerActionTwo|onHeaderActionTwo|⚙ 设置|private openSettings/.test(schedule), false,
+      '日程面板页头不得有设置动作（唯一出口 = rail 齿轮 → Home.openSettings）');
+    assert.match(schedule, /Button\('新建'\)/, '日程面板的主操作是「新建」');
     assert.equal(/即将迁入/.test(schedule), false, '日程面板不得残留占位文案');
+    // 远程 DSH 不再是占位：真页头带可点「添加实例」，禁用原因常量 / 逐字说明都已移除。
+    const instances = PANE_SOURCE.get('InstancesPane');
+    assert.match(blockAfter(instances, '\n  Header() '), /Text\('添加实例'\)/, '主操作可点，不是禁用占位');
+    assert.equal(/REASON_REMOTE|远程面板即将迁入|本页暂不展示任何记录/.test(instances), false,
+      '远程面板不得残留占位原因 / 说明');
   });
 
   test('L-12 dots 占位：禁用输入框 + 字面原因「dots 尚未接线」', () => {
@@ -235,7 +252,7 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.match(body, /还没有 dots 对话/, 'dots 空聊天气态文案');
   });
 
-  test('L-13 三个占位都不渲染假记录行；日程面板反而必须渲染真行', () => {
+  test('L-13 两个占位都不渲染假记录行；日程 / 远程面板必须渲染真行', () => {
     for (const { name } of SCAFFOLDS) {
       const body = paneBody(name);
       for (const fake of ['ForEach(', 'RecordRow(', 'Checkbox(', '示例', 'Lorem', '假数据']) {
@@ -244,11 +261,31 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     }
     const explanatory = [...SCAFFOLDS].flatMap(({ name }) =>
       PANE_SOURCE.get(name).match(/本页暂不展示任何记录。/g) ?? []).length;
-    assert.equal(explanatory, 2, '日程占位已换成真 body：只剩远程 / 云端两句「本页暂不展示任何记录。」');
+    assert.equal(explanatory, 1, '日程 + 远程都已换成真 body：只剩云端一句「本页暂不展示任何记录。」');
     assert.equal(/ForEach\(/.test(HOME), false, '外壳页整体不渲染任何列表行');
     const schedule = PANE_SOURCE.get('SchedulePane');
     assert.match(schedule, /ForEach\(\s*this\.visibleRecords/, '日程面板必须渲染真实记录行');
     assert.match(schedule, /RecordRow\(\{/, '日程面板必须装配 RecordRow');
+    const instances = PANE_SOURCE.get('InstancesPane');
+    assert.match(instances, /ForEach\(\s*this\.views/, '远程面板必须渲染真实实例行');
+    assert.match(instances, /this\.InstanceRow\(view\)/, '远程面板必须装配 InstanceRow');
+  });
+
+  test('L-19 远程 DSH 真 body：本机首行 + 三动作 + 空态 + 播种，占位文案绝迹', () => {
+    const instances = PANE_SOURCE.get('InstancesPane');
+    for (const token of [
+      'instanceStore.ensureSeeded(', 'instanceStore.redacted()', 'instanceStore.lastProblem()',
+      'ForEach(this.views', "label: '打开'", "label: '编辑'", "label: '删除'",
+      '还没有可管理的 DSH 实例', 'view.id !== LOCAL_INSTANCE_ID'
+    ]) {
+      assert.ok(instances.includes(token), `远程面板必须拥有 ${token}`);
+    }
+    for (const stale of ['远程面板即将迁入', '实例列表与连接操作即将迁入', '本页暂不展示任何记录。']) {
+      assert.equal(instances.includes(stale), false, `远程面板不得残留占位串「${stale}」`);
+    }
+    // 单一事实来源：路由页只装配面板，不复制正文。
+    const route = stripComments(readFileSync(new URL('pages/Instances.ets', ETS_ROOT_URL), 'utf8'));
+    assert.match(route, /InstancesPane\(\{/, 'pages/Instances 路由必须装配 InstancesPane');
   });
 
   test('L-14 齿轮是出口不是第五个 section：四节顺序 + 分隔线 + SettingsRow', () => {
@@ -306,5 +343,28 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.match(list, /\.layoutWeight\(1\)/, '列表必须持有唯一吃余量的 layoutWeight(1)');
     assert.equal(/ChatEntries|openChats|ChatKind/.test(schedule.replace(/^\s*\*.*$/gm, '')), false,
       '日程面板不得保留被导航轨取代的两格入口（注释里的迁移说明不算）');
+  });
+
+  test('L-20 设置出口唯一（mod-settings-entry-dedupe）：恰好一处 Settings push 在 Home，rail 齿轮是唯一 UI 入口', () => {
+    const sources = [['Home.ets', HOME], ['ShellRail.ets', RAIL], ...PANES.map((p) => [p.file, PANE_SOURCE.get(p.name)])];
+    const hits = sources
+      .filter(([, code]) => /pushUrl\(\{ url: 'pages\/Settings' \}\)/.test(code))
+      .map(([name]) => name);
+    assert.deepEqual(hits, ['Home.ets'],
+      '正向断言：外壳 + 四面板中 Settings push 恰好一处、位于 Home.ets（rail 齿轮 → Home.openSettings）');
+    for (const { name } of PANES) {
+      assert.equal(/headerActionTwo|onHeaderActionTwo|⚙ 设置|private openSettings/.test(PANE_SOURCE.get(name)), false,
+        `${name} 不得含有设置动作（唯一出口 = rail 齿轮）`);
+    }
+    // 齿轮是唯一 UI 入口：rail 声明 + 渲染 SettingsRow，Home 两处装配都接 openSettings。
+    assert.match(RAIL, /const SETTINGS_GLYPH: string = '⚙';/);
+    assert.match(RAIL, /this\.SettingsRow\(\)/, '齿轮行必须渲染');
+    assert.equal((HOME.match(/onOpenSettings: \(\): void => \{\s*\n\s*this\.openSettings\(\);/g) ?? []).length, 2,
+      '常驻轨与抽屉轨都把齿轮事件接到 openSettings');
+    // 面板主操作必须 pane 专属，不能有设置动作。
+    assert.match(PANE_SOURCE.get('SchedulePane'), /Button\('新建'\)/, '日程：新建');
+    assert.match(PANE_SOURCE.get('InstancesPane'), /Text\('添加实例'\)/, '远程 DSH：添加实例');
+    assert.match(PANE_SOURCE.get('DotsPane'), /新建对话/, 'dots：新建对话');
+    assert.match(PANE_SOURCE.get('CloudChatPane'), /新建对话/, '云端对话：新建对话');
   });
 });

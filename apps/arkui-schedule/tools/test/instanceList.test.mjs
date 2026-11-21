@@ -6,7 +6,9 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { registerHooks } from 'node:module';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -32,7 +34,12 @@ const SECRET = 'LEGACY_SECRET_9f3a2b';
 const RAW_LEGACY = `192.168.1.6:3080/?token=${SECRET}&a=1`;
 const LAST_OK = JSON.stringify({ url: 'http://192.168.1.6:3080/?a=1', at: 1700000000000 });
 
-const PAGE = readFileSync(new URL('../../entry/src/main/ets/pages/Instances.ets', import.meta.url), 'utf8');
+// mod-shell-instances-pane（old→new）：正文锚点 `pages/Instances.ets` → 真 body 所在的
+// `pages/panes/InstancesPane.ets`；顶层页只留一层 @Entry 路由壳。断言本身不删、不放宽，
+// 只把「读哪个文件」跟着正文走；另增 ROUTE 断言钉住单一事实来源。
+const PAGE = readFileSync(
+  new URL('../../entry/src/main/ets/pages/panes/InstancesPane.ets', import.meta.url), 'utf8');
+const ROUTE = readFileSync(new URL('../../entry/src/main/ets/pages/Instances.ets', import.meta.url), 'utf8');
 const SETTINGS = readFileSync(new URL('../../entry/src/main/ets/pages/Settings.ets', import.meta.url), 'utf8');
 const STORE = readFileSync(new URL('../../entry/src/main/ets/services/instanceStore.ets', import.meta.url), 'utf8');
 const MAIN_PAGES = JSON.parse(
@@ -41,6 +48,20 @@ const MAIN_PAGES = JSON.parse(
 const HARMONY_PAGES = JSON.parse(
   readFileSync(new URL('../../entry/src/harmony/resources/base/profile/main_pages.json', import.meta.url), 'utf8')
 );
+const ETS_ROOT = fileURLToPath(new URL('../../entry/src/main/ets/', import.meta.url));
+
+/** 全量 app 源码（.ets/.ts）：「占位串绝迹」断言的扫描集，避免只查一个文件漏掉别处残留。 */
+function appSources(dir = ETS_ROOT, out = []) {
+  for (const name of readdirSync(dir)) {
+    const path = join(dir, name);
+    if (statSync(path).isDirectory()) {
+      appSources(path, out);
+    } else if (path.endsWith('.ets') || path.endsWith('.ts')) {
+      out.push({ path, text: readFileSync(path, 'utf8') });
+    }
+  }
+  return out;
+}
 
 function legacy(overrides = {}) {
   return { remoteUrl: RAW_LEGACY, remoteLastOk: LAST_OK, remoteMode: 'lan', ...overrides };
@@ -290,14 +311,16 @@ describe('静态断言：页面、入口与存储接线', () => {
     assert.match(PAGE, /EMPTY_TITLE: string = '还没有可管理的 DSH 实例'/);
   });
 
-  test('U-11 设置入口升级后仍可从实例页桥接回原云端对话列表', () => {
+  test('U-11 设置入口升级后仍可从实例面板桥接回原云端对话列表', () => {
     assert.match(PAGE, /router\.pushUrl\(\{ url: 'pages\/Chats' \}\)/);
-    assert.match(PAGE, /headerActionTwo: '云端对话'/);
+    // old: PageLayout.headerActionTwo:'云端对话' → new: 面板页头的 Text('云端对话') 出口。
+    assert.match(PAGE, /Text\('云端对话'\)/);
   });
 
   test('U-12 令牌出口边界：Want.uri 只能来自 stripRemoteToken() 后的地址', async () => {
     // 带 token 的原始 settings 值绝不直接进 Want / startAbility / 日志。
-    assert.match(PAGE, /import \{[^}]*\bstripRemoteToken\b[^}]*\} from '\.\.\/model\/remoteUrl'/,
+    // old: '../model/remoteUrl' → new: '../../model/remoteUrl'（文件下沉到 pages/panes/）。
+    assert.match(PAGE, /import \{[^}]*\bstripRemoteToken\b[^}]*\} from '\.\.\/\.\.\/model\/remoteUrl'/,
       '必须 import 已有的去令牌纯函数');
     const browser = PAGE.slice(PAGE.indexOf('private async openInBrowser()'), PAGE.indexOf('// ------------------------------------------------------------------ 渲染'));
     assert.ok(browser.length > 0, 'openInBrowser 段必须存在');
@@ -316,5 +339,46 @@ describe('静态断言：页面、入口与存储接线', () => {
     assert.equal(U.stripRemoteToken(`http://h:3080/?token=${SECRET}&a=1`), 'http://h:3080/?a=1');
     assert.equal(U.stripRemoteToken(`http://h:3080/?k=${SECRET}`), 'http://h:3080/');
     assert.equal(U.stripRemoteToken('http://h:3080/?a=1'), 'http://h:3080/?a=1');
+  });
+
+  test('U-13 单一事实来源：顶层页只装配 InstancesPane，不复制正文', () => {
+    assert.match(ROUTE, /import \{ InstancesPane \} from '\.\/panes\/InstancesPane'/);
+    assert.match(ROUTE, /InstancesPane\(\{\s*deepLinkId: '', active: true \}\)/);
+    // 路由壳不得自己持有实例正文状态 / 动作（否则双份播种、双份渲染）。
+    for (const body of ['instanceStore.', 'settingsStore.', 'EMPTY_TITLE', 'InstanceRow(', 'ForEach(']) {
+      assert.equal(ROUTE.includes(body), false, `路由壳不得复制正文：${body}`);
+    }
+    assert.ok(PAGE.includes('export struct InstancesPane'), '真 body 必须在面板里');
+  });
+
+  test('U-14 面板渲染本机首行 + 远程行 + 三动作（打开/编辑/删除；本机无删除）', () => {
+    assert.match(PAGE, /ForEach\(\s*this\.views,\s*\(view: RedactedInstance\)/, '渲染真实实例视图');
+    assert.match(PAGE, /this\.InstanceRow\(view\)/, '每行装配 InstanceRow');
+    assert.match(PAGE, /ensureSeeded\(\{/, '面板仍负责首次播种（本机首行）');
+    assert.match(PAGE, /view\.id !== LOCAL_INSTANCE_ID/, '删除只对远程行渲染');
+    for (const label of ['打开', '编辑', '删除']) {
+      assert.match(PAGE, new RegExp(`label: '${label}'`), `必须有「${label}」动作`);
+    }
+    // 本机排序第一由 L-02 的纯逻辑钉住；面板消费 store 的 sortInstances 后副本。
+    assert.match(STORE, /redacted\(\): RedactedInstance\[\]/, '渲染视图来自 store 的排序副本');
+  });
+
+  test('U-15 面板页头 + 自带 Scroll + 保活接线，无 PageLayout 双层壳', () => {
+    assert.match(PAGE, /Text\('远程 DSH'\)/, '分段标题');
+    assert.match(PAGE, /Text\('添加实例'\)/, '主操作');
+    assert.match(PAGE, /^\s*Scroll\(\) \{/m, '面板自带 Scroll');
+    assert.match(PAGE, /\.visibility\(this\.active \? Visibility\.Visible : Visibility\.Hidden\)/);
+    assert.equal(/PageLayout\(/.test(PAGE), false, '面板不得再套固定页头 + 内容双层壳');
+  });
+
+  test('U-16 占位串绝迹：远程面板即将迁入 / 逐字说明不在任何 app 源码里', () => {
+    const stale = ['远程面板即将迁入', '实例列表与连接操作即将迁入，本页暂不展示任何记录。'];
+    const sources = appSources();
+    assert.ok(sources.length > 0, '必须扫描到 app 源码');
+    for (const { path, text } of sources) {
+      for (const needle of stale) {
+        assert.equal(text.includes(needle), false, `${path} 残留占位串「${needle}」`);
+      }
+    }
   });
 });

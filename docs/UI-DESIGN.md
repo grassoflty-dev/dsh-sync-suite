@@ -511,3 +511,22 @@ S3 迁入时只换文件锚点），并新增外壳页头/断点/令牌/装配�
 - `validate-app` 的页面发现改为只认 `pages/` 顶层 `.ets`（子目录组件不登记为路由页），因此页数仍为 9；
   `Color.Transparent` 因日程 body 的逐字复制由 1 处变 2 处（Index fallback + SchedulePane），预算显式登记并
   用逐文件断言防止扩散。真机 ArkTS 编译 / 四节交互仍 `unverified`。
+
+**远程 DSH 面板落真更新（`mod-shell-instances-pane`，2026-11-21）**：上表「占位无假行」与 S3「其余三面仍是
+表格所述的占位」两条对 `InstancesPane` 已失效——
+- **远程 DSH 现在是真 body**：`pages/panes/InstancesPane.ets` 逐字承接 `pages/Instances.ets` 的实例正文
+  （本机首行 + 远程行 name / mode / reachable / 相对 `lastSeen` / 二次打码 URL + 打开·编辑·删除三动作 +
+  typed 问题行 + 四段空态 + `ensureSeeded` 幂等播种迁移）；页头换为可点「添加实例」与「云端对话」桥接；
+  自带 `Scroll` + `active→Visibility.Hidden` 保活，无嵌套固定高度 Column，`deepLinkId`/`active` 两个 prop 不变。
+- **顶层页不再持有正文**：`pages/Instances.ets` 瘦身为只装配同一个 InstancesPane 的 `@Entry` 路由壳
+  （单一事实来源；设置页仍 `pushUrl('pages/Instances')`，两份 `main_pages.json` 未改）。
+- **占位只剩两个**：`DotsPane` / `CloudChatPane` 仍为表格所述的 scaffold；三占位的禁用计数 4→3，
+  「本页暂不展示任何记录。」说明 2→1；`REASON_REMOTE` / `远程面板即将迁入` 在 app 源码中绝迹。
+- `docs/VERIFICATION.md` §15.15 的 FAILED 项「2b 远程 DSH 实例列表」由本模块重验，证据写入 §15.16。
+
+**设置出口去重（`mod-settings-entry-dedupe`，2026-11-21）**：`ShellRail` 页脚齿轮是全外壳**唯一**的设置入口
+（齿轮 → `Home.openSettings()` → 唯一一处 `pushUrl('pages/Settings')`）；日程面板页头不再有「⚙ 设置」，
+错误态也不再提供第二个「去设置」按钮，其余三面的动作槽本来就是 pane 专属（新建对话 / 添加实例 / 新建对话）。
+fallback 路由 `pages/Index.ets` 在自己的页头保留齿轮，直到 fallback 退役；`Chats` / `RemoteControl` 的
+「去设置」是错误恢复按钮、不是导航入口，保持不动。五份守卫正向钉住「外壳 + 四面板中恰好一处 Settings push、
+位于 `Home.openSettings()`，且面板页头无设置动作」。

@@ -31,7 +31,8 @@ const PAGE = readSettingsFile('pages/Settings.ets');
 const SOURCES = readSettingsSources();
 const STORE = readSettingsFile('services/settingsStore.ets');
 const SEED = readSettingsFile('model/instanceSeed.ts');
-const INSTANCES = readSettingsFile('pages/Instances.ets');
+// mod-shell-instances-pane（old→new）：实例正文锚点 pages/Instances.ets → pages/panes/InstancesPane.ets。
+const INSTANCES = readSettingsFile('pages/panes/InstancesPane.ets');
 const SECTION_DIR = 'components/settings/RemoteSection.ets';
 
 const BUILT_SEED = fileURLToPath(new URL('../.build/model/instanceSeed.js', import.meta.url));

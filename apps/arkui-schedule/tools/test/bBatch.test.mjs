@@ -137,8 +137,9 @@ describe('A. settingsStore.ets：remoteLastOk 在接口与三处落盘方法里�
 // 原 D/E 段（RemoteControl 落盘脱敏 / ChatDetail 只读出口）不受本模块影响，保持原样。
 // ---------------------------------------------------------------------------
 describe('B/C. 设置页远程配置删除 + 唯一入口 + 旧值迁移（retarget）', () => {
+  // mod-shell-instances-pane（old→new）：正文锚点 pages/Instances.ets → pages/panes/InstancesPane.ets。
   const instances = readFileSync(
-    new URL('../../entry/src/main/ets/pages/Instances.ets', import.meta.url), 'utf8'
+    new URL('../../entry/src/main/ets/pages/panes/InstancesPane.ets', import.meta.url), 'utf8'
   );
   const seed = readFileSync(
     new URL('../../entry/src/main/ets/model/instanceSeed.ts', import.meta.url), 'utf8'

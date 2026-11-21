@@ -323,4 +323,24 @@ describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
       assert.ok(pages.src.includes('pages/Index'), '页面清单必须保留 fallback Index');
     }
   });
+
+  test('SG-S6 设置出口唯一（mod-settings-entry-dedupe）：外壳 + 四面板恰好一处 Settings push、位于 Home，面板页头无设置动作', () => {
+    const sources = [
+      ['Home.ets', HOME_CODE],
+      ['ShellRail.ets', RAIL_CODE],
+      ...PANE_FILES.map((file) => [file.split(/[\\/]/).pop(), stripComments(readFileSync(file, 'utf8'))])
+    ];
+    const hits = sources
+      .filter(([, code]) => /pushUrl\(\{\s*url:\s*'pages\/Settings'\s*\}\)/.test(code))
+      .map(([name]) => name);
+    assert.deepEqual(hits, ['Home.ets'],
+      '正向断言：Settings push 恰好一处、位于 Home.ets（rail 齿轮 → Home.openSettings）');
+    for (const [name, code] of sources.filter(([file]) => file.endsWith('Pane.ets'))) {
+      assert.equal(/headerActionTwo|onHeaderActionTwo|⚙ 设置|private openSettings/.test(code), false,
+        `${name} 不得含有设置动作（唯一出口 = rail 齿轮）`);
+    }
+    assert.match(RAIL_CODE, /this\.SettingsRow\(\)/, '唯一 UI 入口是 rail 页脚齿轮');
+    assert.equal((HOME_CODE.match(/onOpenSettings: \(\): void => \{\s*\n\s*this\.openSettings\(\);/g) ?? []).length, 2,
+      '宽屏常驻轨与 compact 抽屉轨都必须把齿轮事件接到 openSettings');
+  });
 });

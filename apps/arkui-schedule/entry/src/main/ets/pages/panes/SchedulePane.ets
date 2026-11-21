@@ -1,12 +1,14 @@
 /**
  * 日程面板（mod-shell-schedule-pane / S3）：把原 pages/Index.ets 的日程正文原样迁入外壳分段。
  *
- * 真值来源：pages/Index.ets（保留为 fallback 路由，故意不删）。这里除以下四处外逐字复制：
+ * 真值来源：pages/Index.ets（保留为 fallback 路由，故意不删）。这里除以下五处外逐字复制：
  *   ① struct Index → export struct SchedulePane，并新增 id / active 两个 @Prop；
  *   ② 相对 import 从 ../ 改为 ../../（文件下沉到 pages/panes/）；
  *   ③ 删掉首页「纯云端对话 / 与 dots 对话」双格条（ChatEntries / openChats / ChatKind import）——
  *      外壳左侧导航轨已经提供 dots 与云端对话两个分段，页内双格条属于重复入口；
- *   ④ 根 Stack 增加 active → Visibility.Hidden 的保活接线（原 Home @Builder 的同一条契约）。
+ *   ④ 根 Stack 增加 active → Visibility.Hidden 的保活接线（原 Home @Builder 的同一条契约）；
+ *   ⑤ 删掉页头「⚙ 设置」动作与 openSettings()（mod-settings-entry-dedupe）：设置出口唯一 =
+ *      导航轨页脚齿轮（ShellRail.SettingsRow → Home.openSettings()），错误态的「去设置」也一并移除。
  * 列表区仍由唯一一个 .layoutWeight(1) 的加权兄弟吃掉余量（fix-landscape-list 的横屏修法不回退）。
  *
  * 已知边界：onPageShow() 的「保存返回一次性标记」消费在 fallback 路由（Index）照常触发；
@@ -15,14 +17,19 @@
  */
 /**
  * 主页：日期条 + 当日全部日程/未完成 两段 + 列表（左勾选 / 中标题+时间 / 右手迹）
- * + 「新建」主操作 + 页头唯一动作「⚙ 设置」。
+ * + 「新建」主操作；页头没有设置动作。
+ *
+ * ## 页头动作收敛（mod-settings-entry-dedupe）
+ * 页头曾经有「⚙ 设置」，与外壳左下角 `ShellRail` 的页脚齿轮重复（用户反馈：日程页右上角与
+ * 主页左下角各有一个设置）。现在设置出口唯一 = 导航轨页脚齿轮 → `Home.openSettings()`；
+ * 本面板页头只保留标题与副标题，主操作是「新建」。错误态也不再提供「去设置」按钮，
+ * 需要改配置时用轨道齿轮。守卫测试：`tools/test/indexHeader.test.mjs`。
  *
  * ## 页头 AI 汇总入口已删除（用户反馈：点了没反应，但图标还占着位置）
  * AI 汇总本来就是**列表第一项**（`SummaryCard`，数据源 `summaryStore.read` / `generate`），
- * 页头再放一个 AI 汇总图标属于同一动作两处入口，且点了没有可见反馈。现在页头只留
- * `今天`（左）+ `⚙ 设置`（右），中间不放任何空按钮；AI 汇总只能从汇总块进入
+ * 页头再放一个 AI 汇总图标属于同一动作两处入口，且点了没有可见反馈。现在页头不放任何
+ * 空按钮；AI 汇总只能从汇总块进入
  * （空态「生成汇总」/ 失败态「重试」/「重新生成」/「查看全部」/ 点标题与要点）。
- * 守卫测试：`tools/test/indexHeader.test.mjs`。
  *
  * 契约：BRIEF §3.5、`docs/CONTRACT.md` §3.4：
  * - 勾选完成 = `appendRecord` 追加一条同 id 新记录（ts=nowIso()），绝不改写历史行；
@@ -572,13 +579,6 @@ export struct SchedulePane {
     const params: Record<string, string> = { 'id': '', 'date': this.selectedDate };
     router.pushUrl({ url: 'pages/Edit', params: params }).catch((error: Error) => {
       promptAction.showToast({ message: `打开编辑页失败：${describeError(error)}` });
-    });
-  }
-
-  /** 进设置页：仓库 / token / 含其他设备等配置在那里；Git 操作本页与设置页都不手动触发。 */
-  private openSettings(): void {
-    router.pushUrl({ url: 'pages/Settings' }).catch((error: Error) => {
-      promptAction.showToast({ message: `打开设置页失败：${describeError(error)}` });
     });
   }
 
@@ -1342,9 +1342,8 @@ export struct SchedulePane {
           onRetry: (): void => {
             this.generateSummary();
           },
-          onOpenSettings: (): void => {
-            this.openSettings();
-          }
+          // 设置出口唯一：导航轨页脚齿轮；错误态不提供第二个「去设置」入口。
+          onOpenSettings: null
         })
       } else if (!this.hasSummary() && this.summaryError.length === 0 && !this.aiBusy) {
         // ④ 无汇总：空态（一句说明 + 下一步动作，不允许只留一句话）
@@ -1891,9 +1890,8 @@ export struct SchedulePane {
           onRetry: (): void => {
             this.runAi();
           },
-          onOpenSettings: (): void => {
-            this.openSettings();
-          }
+          // 设置出口唯一：导航轨页脚齿轮；错误态不提供第二个「去设置」入口。
+          onOpenSettings: null
         })
       }
 
@@ -2065,11 +2063,7 @@ export struct SchedulePane {
       PageLayout({
         title: this.pageTitle(),
         subtitle: this.subtitleText(),
-        // 页头唯一动作：进设置。AI 汇总入口只在列表第一项的汇总块（页头不再重复）
-        headerActionTwo: '⚙ 设置',
-        onHeaderActionTwo: () => {
-          this.openSettings();
-        },
+        // 页头无动作：设置出口唯一 = 外壳导航轨页脚齿轮；AI 汇总只在列表第一项的汇总块。
         onBreakpointChange: (breakpoint: string, widthVp: number) => {
           this.breakpoint = breakpoint;
           this.contentWidth = widthVp;

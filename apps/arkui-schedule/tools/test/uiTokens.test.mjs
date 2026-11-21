@@ -36,9 +36,12 @@ const EDITOR_VIEW = readFileSync(new URL('../../entry/src/main/ets/components/Re
 // S4 外壳：`pages/Home.ets` 是真首页，`ShellRail` 是它的导航轨。
 const HOME = readFileSync(new URL('../../entry/src/main/ets/pages/Home.ets', import.meta.url), 'utf8')
 const SHELL_RAIL = readFileSync(new URL('../../entry/src/main/ets/components/shell/ShellRail.ets', import.meta.url), 'utf8')
-// S3：三个「即将迁入」占位的页头动作搬进各自文件，不再是 Home 的 @Builder。
-const PANE_CODES = ['DotsPane.ets', 'InstancesPane.ets', 'CloudChatPane.ets'].map((name) =>
+// S3：占位页头动作搬进各自文件，不再是 Home 的 @Builder。
+// mod-shell-instances-pane：远程 DSH 已迁真 body，剩余占位只 dots / 云端对话两个。
+const PANE_CODES = ['DotsPane.ets', 'CloudChatPane.ets'].map((name) =>
   stripComments(readFileSync(new URL(`../../entry/src/main/ets/pages/panes/${name}`, import.meta.url), 'utf8')))
+const INSTANCES_CODE = stripComments(readFileSync(
+  new URL('../../entry/src/main/ets/pages/panes/InstancesPane.ets', import.meta.url), 'utf8'))
 
 /** 去掉块注释与整行行注释：结构守卫只对「代码」生效，注释里允许写「已删除」之类的说明 */
 function stripComments(source) {
@@ -47,6 +50,22 @@ function stripComments(source) {
 
 const INDEX_CODE = stripComments(INDEX)
 const SETTINGS_CODE = stripComments(SETTINGS)
+
+/**
+ * 正向契约（mod-settings-entry-dedupe）：外壳 + 四面板里恰好一处 Settings push，
+ * 且它只能在 `Home.openSettings()`（rail 齿轮 → Home 的唯一跳转）。
+ */
+const SETTINGS_SHELL_SOURCES = [
+  ['Home.ets', stripComments(HOME)],
+  ['ShellRail.ets', stripComments(SHELL_RAIL)],
+  ['SchedulePane.ets', INDEX_CODE],
+  ['DotsPane.ets', PANE_CODES[0]],
+  ['CloudChatPane.ets', PANE_CODES[1]],
+  ['InstancesPane.ets', INSTANCES_CODE]
+]
+const settingsPushFiles = () => SETTINGS_SHELL_SOURCES
+  .filter(([, text]) => /pushUrl\(\{ url: 'pages\/Settings' \}\)/.test(text))
+  .map(([file]) => file)
 
 // ---------------------------------------------------------------- 断点边界
 
@@ -199,15 +218,18 @@ test('宽屏视觉四条：页头不重复日期 / 空态居中 CTA / 列表最�
   assert.match(INDEX, /return '未完成';/, '未完成 tab 仍用于页头相对标签')
 })
 
-test('首页头只留「⚙ 设置」：AI 汇总图标入口已删除，也没有「更多」/ActionSheet', () => {
+test('日程面板页头无设置动作：AI 汇总图标入口已删除，也没有「更多」/ActionSheet', () => {
   assert.equal(/MoreSheet|this\.showMore/.test(INDEX), false, '首页不应再有「更多」底部面板');
   assert.equal(/onMore:/.test(INDEX), false, '首页不应把菜单挂在 PageLayout 的 onMore 上');
-  assert.match(INDEX, /headerActionTwo: '⚙ 设置'/, '页头保留唯一动作「⚙ 设置」');
+  // 旧断言「页头保留唯一动作 ⚙ 设置 / 设置动作要能进设置页」→ 新断言：页头无设置动作、面板不自行跳转。
+  assert.equal(/headerActionTwo|onHeaderActionTwo|⚙ 设置|openSettings/.test(INDEX_CODE), false,
+    '日程面板页头不得有设置动作（唯一出口 = rail 齿轮 → Home.openSettings）');
+  assert.equal(/pushUrl\(\{ url: 'pages\/Settings' \}\)/.test(INDEX_CODE), false,
+    '日程面板不得自行 push 设置页（Settings push 只能有一处、在 Home）');
   // 用户反馈：页头 AI 汇总图标点了没反应但图标还在 → 整条入口删除（AI 汇总只在列表第一项）
   assert.equal(/headerActionOne|onHeaderActionOne/.test(INDEX), false, '页头不得再有第一个动作（✨ AI 汇总 入口）');
   assert.equal(/✨ AI 汇总/.test(INDEX), false, '页头「✨ AI 汇总」文案必须删除');
   assert.equal(/onHeaderSummaryAction/.test(INDEX), false, '页头汇总 handler 必须删除');
-  assert.match(INDEX, /router\.pushUrl\(\{ url: 'pages\/Settings' \}\)/, '设置动作要能进设置页');
   assert.doesNotMatch(INDEX, /HOME_INCLUDE_OTHER_KEY/, 'v2-only：首页不再有「含其他设备」v1 过滤开关');
 });
 
@@ -461,12 +483,16 @@ test('U-S1 外壳断点与 Index / PageLayout 同源：onAreaChange + resolveBre
 })
 
 test('U-S2 外壳页头标题是分段标签；日程 pane 的相对日期标题契约仍在（不删旧断言）', () => {
-  // 旧 PaneHeader 四行调用随 S3 拆成：三个占位各自带标签页头 + 日程面板的真 PageLayout 页头。
-  const labels = ['dots', '远程 DSH', '云端对话']
+  // 旧 PaneHeader 四行调用随 S3 拆成：占位各自带标签页头 + 日程面板的真 PageLayout 页头。
+  // mod-shell-instances-pane 后远程 DSH 改为真页头正向断言（不是删除）。
+  const labels = ['dots', '云端对话']
   labels.forEach((label, index) => {
     assert.match(PANE_CODES[index], new RegExp(`Text\\('${label}'\\)`), `缺少分段标签「${label}」`)
     assert.match(PANE_CODES[index], /REASON_[A-Z]+/, `「${label}」必须写出禁用原因`)
   })
+  assert.match(INSTANCES_CODE, /Text\('远程 DSH'\)/, '远程 DSH 仍带分段标签')
+  assert.match(INSTANCES_CODE, /Text\('添加实例'\)/, '远程 DSH 主操作可点，不是禁用占位')
+  assert.equal(/REASON_REMOTE|远程面板即将迁入/.test(INSTANCES_CODE), false, '远程占位原因绝迹')
   assert.match(INDEX, /title: this\.pageTitle\(\)/, '日程面板标题仍走相对日期语义')
   assert.match(SHELL_RAIL, /label: 'dots'/)
   assert.match(SHELL_RAIL, /label: '日程'/)
@@ -499,8 +525,12 @@ test('U-S4 外壳只有一个设置出口：rail 齿轮 + 父页 openSettings，
   const pushes = home.match(/pushUrl\(\{ url: 'pages\/Settings' \}\)/g) ?? []
   assert.equal(pushes.length, 1, '外壳里只能有一处进设置页')
   assert.match(home, /private openSettings\(\): void/, '跳转集中在 openSettings()')
+  // 旧断言只数 Home 一处；新断言正向钉「外壳 + 四面板恰好一处，且位于 Home.ets」。
+  assert.deepEqual(settingsPushFiles(), ['Home.ets'],
+    '正向断言：Settings push 恰好一处、位于 Home.ets（rail 齿轮 → Home.openSettings）')
   const disabled = PANE_CODES.flatMap((code) => code.match(/\.enabled\(false\)/g) ?? [])
-  assert.equal(disabled.length, 4, '三个占位动作槽 + dots 输入框禁用（随页头抽壳搬进各自文件）')
-  // 旧断言未删：Index 仍钉着「页头唯一动作 ⚙ 设置」（S3 后随日程 pane body 迁移）。
-  assert.match(INDEX, /headerActionTwo: '⚙ 设置'/)
+  assert.equal(disabled.length, 3, '两个占位动作槽 + dots 输入框禁用（远程 DSH 迁真后 4→3）')
+  assert.equal(/\.enabled\(false\)/.test(INSTANCES_CODE), false, '远程 DSH 主操作不再禁用')
+  // 旧断言「Index 页头唯一动作 ⚙ 设置」→ 新断言：日程面板页头无设置动作（去重）。
+  assert.equal(/headerActionTwo|onHeaderActionTwo/.test(INDEX_CODE), false, '日程面板页头不得有设置动作')
 })

@@ -25,10 +25,12 @@ const HARMONY_PAGES = JSON.parse(
   readFileSync(new URL('../../entry/src/harmony/resources/base/profile/main_pages.json', import.meta.url), 'utf8'));
 
 const PANE_NAMES = ['DotsPane', 'SchedulePane', 'InstancesPane', 'CloudChatPane'];
-/** 三个未迁入真 body 的占位（日程面板已是真 body）。 */
+/**
+ * 剩余占位：日程（S3）与远程 DSH（mod-shell-instances-pane）都已是真 body；
+ * 只有 dots / 云端对话仍是「即将迁入」占位。
+ */
 const SCAFFOLDS = [
   { name: 'DotsPane', action: '新建对话', reason: 'REASON_DOTS', empty: '还没有 dots 对话' },
-  { name: 'InstancesPane', action: '添加实例', reason: 'REASON_REMOTE', empty: '本页暂不展示任何记录。' },
   { name: 'CloudChatPane', action: '新建对话', reason: 'REASON_CLOUD', empty: '本页暂不展示任何记录。' }
 ];
 
@@ -297,7 +299,7 @@ describe('外壳行为：默认 / 返回 / 入口 / fallback 路由', () => {
 });
 
 describe('面板诚实性：占位无假行 + 无全局导航', () => {
-  test('P-15 三个占位无假记录行，且各有一句「暂不展示」说明', () => {
+  test('P-15 两个占位无假记录行，且各有一句「暂不展示」说明', () => {
     for (const scaffold of SCAFFOLDS) {
       const p = pane(scaffold.name);
       for (const fake of ['ForEach(', 'RecordRow(', 'Checkbox(', '示例', 'Lorem', '假数据']) {
@@ -308,7 +310,7 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     assert.equal(/ForEach\(/.test(HOME), false, '外壳页本体不渲染任何列表行');
   });
 
-  test('P-16 三个占位都有禁用主操作 + 逐字原因（无假入口）', () => {
+  test('P-16 两个占位都有禁用主操作 + 逐字原因（无假入口）', () => {
     for (const scaffold of SCAFFOLDS) {
       const p = pane(scaffold.name);
       assert.match(p.source, new RegExp(`const ${scaffold.reason}: string = '[^']+';`),
@@ -337,17 +339,66 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
       assert.equal(/SHELL_SECTION_[A-Z_]+|ShellSection/.test(p.body), false,
         `${name} 不得在渲染树里判定分段 id`);
     }
-    // 日程面板确有 router.pushUrl，但只能是详情 / 编辑 / 设置，不含任何分段路由。
+    // 日程面板确有 router.pushUrl，但只能是详情 / 编辑；设置出口唯一在 rail 齿轮 → Home。
+    // 旧断言允许 pages/Settings → 新断言明确禁止（收紧，不是放宽）。
     const schedule = pane('SchedulePane');
     const targets = [...schedule.source.matchAll(/pushUrl\(\{\s*url:\s*'([^']+)'/g)].map((m) => m[1]);
     for (const url of targets) {
-      assert.ok(['pages/Edit', 'pages/Detail', 'pages/Settings'].includes(url),
-        `日程面板的 pushUrl 目标必须是记录 / 设置页，实际 ${url}`);
+      assert.ok(['pages/Edit', 'pages/Detail'].includes(url),
+        `日程面板的 pushUrl 目标只能是记录页，实际 ${url}`);
     }
+    assert.equal(targets.includes('pages/Settings'), false,
+      '日程面板不得 push 设置页（唯一 Settings push 在 Home.openSettings）');
     // 全局分段切换的唯一入口在 shell：section 状态 + onSelect 回调装配。
     assert.match(HOME, /@State section: ShellSection/, 'shell 持有 section 状态');
     assert.match(HOME, /private selectSection\(section: ShellSection\)/, 'shell 拥有统一选段入口');
     assert.equal((HOME.match(/onSelect: \(next: ShellSection\)/g) ?? []).length, 2,
       '常驻轨与抽屉轨都通过 onSelect 回传给 shell');
+  });
+
+  test('P-19 远程 DSH 是真 body：自带 Scroll / 页头 / 实例行 / 三动作 / 空态 / 播种', () => {
+    const p = pane('InstancesPane');
+    assert.match(p.body, /^\s*Scroll\(\) \{/, '面板自带 Scroll（根即滚动容器）');
+    assert.equal(/PageLayout\(/.test(p.source), false, '不得再套固定页头 + 内容的双层壳');
+    assert.match(blockAfter(p.source, '\n  Header() '), /Text\('添加实例'\)/, '页头主操作可点');
+    const rows = blockAfter(p.source, '\n  InstanceRow(');
+    for (const token of ['打开', '编辑', '删除']) {
+      assert.match(rows, new RegExp(`label: '${token}'`), `实例行必须装配「${token}」动作`);
+    }
+    assert.match(rows, /view\.id !== LOCAL_INSTANCE_ID/, '本机行不得渲染删除');
+    assert.match(p.body, /ForEach\(\s*this\.views/, '列表来自真实实例视图');
+    assert.match(p.source, /instanceStore\.ensureSeeded\(/, '首次进入播种本机 + 旧配置迁移');
+    assert.match(p.source, /还没有可管理的 DSH 实例/, '空态逐字文案仍在');
+    assert.equal(/远程面板即将迁入|本页暂不展示任何记录。|REASON_REMOTE/.test(p.source), false,
+      '占位说明 / 禁用原因必须绝迹');
+  });
+
+  test('P-20 单一事实来源：pages/Instances 顶层页只装配 InstancesPane，不复制正文', () => {
+    const route = stripComments(readFileSync(new URL('pages/Instances.ets', ETS), 'utf8'));
+    assert.match(route, /import \{ InstancesPane \}/, '路由页必须导入面板组件');
+    assert.match(route, /InstancesPane\(\{/, '路由页必须装配面板');
+    assert.equal(/instanceStore\.|settingsStore\.|ForEach\(|EMPTY_TITLE/.test(route), false,
+      '路由页不得复制实例正文（双份播种 / 双份渲染）');
+  });
+
+  test('P-21 设置出口唯一（mod-settings-entry-dedupe）：外壳 + 四面板恰好一处 Settings push、位于 Home', () => {
+    const sources = [['Home.ets', HOME], ['ShellRail.ets', RAIL], ...PANE_NAMES.map((name) => [name, pane(name).source])];
+    const hits = sources
+      .filter(([, code]) => /pushUrl\(\{\s*url:\s*'pages\/Settings'\s*\}\)/.test(code))
+      .map(([name]) => name);
+    assert.deepEqual(hits, ['Home.ets'],
+      '正向断言：Settings push 恰好一处、位于 Home.ets（rail 齿轮 → Home.openSettings）');
+    for (const name of PANE_NAMES) {
+      assert.equal(/headerActionTwo|onHeaderActionTwo|⚙ 设置|private openSettings/.test(pane(name).source), false,
+        `${name} 不得含有设置动作（唯一出口 = rail 齿轮）`);
+    }
+    // 齿轮是唯一 UI 入口且 Home 两处装配都接住事件；面板主操作保持 pane 专属。
+    assert.match(RAIL, /this\.SettingsRow\(\)/, '齿轮行必须渲染');
+    assert.equal((HOME.match(/onOpenSettings: \(\): void => \{\s*\n\s*this\.openSettings\(\);/g) ?? []).length, 2,
+      '宽屏常驻轨与 compact 抽屉轨都把齿轮事件接到 openSettings');
+    assert.match(pane('SchedulePane').source, /Button\('新建'\)/, '日程：新建');
+    assert.match(pane('InstancesPane').source, /Text\('添加实例'\)/, '远程 DSH：添加实例');
+    assert.match(pane('DotsPane').source, /新建对话/, 'dots：新建对话');
+    assert.match(pane('CloudChatPane').source, /新建对话/, '云端对话：新建对话');
   });
 });

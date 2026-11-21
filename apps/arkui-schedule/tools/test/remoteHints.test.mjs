@@ -141,7 +141,8 @@ describe('mod-remote-hints：前置条件提示表按方式唯一（纯函数）
 describe('mod-remote-hints（retarget）：提示表仍是唯一事实来源，设置页不再渲染方式提示', () => {
   const PAGE = readSettingsPage();
   const MODEL = readFileSync(new URL('../../entry/src/main/ets/model/remoteAccess.ts', import.meta.url), 'utf8');
-  const INSTANCES = readSettingsFile('pages/Instances.ets');
+  // mod-shell-instances-pane（old→new）：实例正文锚点 pages/Instances.ets → pages/panes/InstancesPane.ets。
+  const INSTANCES = readSettingsFile('pages/panes/InstancesPane.ets');
 
   test('模型是单一事实来源：六条逐字文案都在 REMOTE_MODE_HINTS 表里', () => {
     const table = MODEL.slice(MODEL.indexOf('export const REMOTE_MODE_HINTS'), MODEL.indexOf('export function remoteModeHint'));

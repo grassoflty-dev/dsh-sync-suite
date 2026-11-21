@@ -304,16 +304,18 @@ describe('B3 C（retarget）：远程组删除后，地址归一仍在实例页�
     assert.equal((group.match(/this\.ChatEntryRow\(\)/g) ?? []).length, 1, '入口行恰好一行');
     assert.equal((group.match(/TextInput\(/g) ?? []).length, 0, '入口组里不该有输入框');
     assert.match(SETTINGS, /router\.pushUrl\(\{ url: 'pages\/Instances' \}\)/, '入口指向实例页');
-    // 归一规则本身仍在 model 层，由实例页 submitForm 复用（不是删掉校验）
+    // 归一规则本身仍在 model 层，由实例面板 submitForm 复用（不是删掉校验）。
+    // mod-shell-instances-pane（old→new）：锚点 pages/Instances.ets → pages/panes/InstancesPane.ets。
     assert.match(
-      readFileSync(new URL('pages/Instances.ets', ETS), 'utf8'),
+      readFileSync(new URL('pages/panes/InstancesPane.ets', ETS), 'utf8'),
       /normalizeRemoteUrl\(this\.formUrl\.trim\(\)\)/,
-      '实例页保存仍走同一条归一规则'
+      '实例面板保存仍走同一条归一规则'
     );
   });
 
-  test('B3-15（old→new）旧值不丢：实例页 bootstrap 把 remoteUrl / lastOk / mode / token 全量播种', () => {
-    const page = readFileSync(new URL('pages/Instances.ets', ETS), 'utf8');
+  test('B3-15（old→new）旧值不丢：实例面板 bootstrap 把 remoteUrl / lastOk / mode / token 全量播种', () => {
+    // mod-shell-instances-pane（old→new）：锚点 pages/Instances.ets → pages/panes/InstancesPane.ets。
+    const page = readFileSync(new URL('pages/panes/InstancesPane.ets', ETS), 'utf8');
     for (const field of ['remoteUrl', 'remoteLastOk', 'remoteMode', 'remoteToken']) {
       assert.match(page, new RegExp(`${field}: settings\\.${field}`), `播种必须带上旧 ${field}`);
     }
