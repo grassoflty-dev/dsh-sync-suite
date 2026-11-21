@@ -1955,3 +1955,97 @@ WARNING: [sign-hap] WARNING -AllowLegacyV1Key: using LEAKED v1 signing key (comp
 4. **竖屏下拉刷新**：竖屏日程列表下拉可刷新（与横屏同一路径）。
 
 > 注：**现在支持空仓库**（首次同步会自动初始化 `main`）。
+
+### 15.19 四模块合版落真：1000005 构建 / 签名 / 装机 / 启动烟测 + 七项用户复验待回填（2026-11-21, planner-b7；append-only, 不改写 §15.1–§15.18）
+
+> 本节紧接 §15.18 之后**追加**，不改写 §15.1–§15.18 任何一行。所有数字均由 Designer 实测；
+> 本次**只验证到「装上并启动」为止**，未做任何用户交互实测；七项用户复验结论一律留空，
+> 后续回填 PASS / FAILED / BLOCKED，不据本节宣称功能通过。
+
+**提交 / 被测树（1000005 = B + C）**
+
+- 被测源码 = HEAD **`cdd2fce`**（`mod-sync-silent-autoinit` + `mod-sync-status-persist`）
+  **加上** HEAD~1 **`b756001`**（`mod-instances-drop-local` + `mod-ai-summarize-label`），
+  即 **1000005 = B + C**，四个模块，全部此前已提交并评审；设计/标签事实：提交时 **91** 个模块 tag。
+- `versionCode` 由 **1000004** 自增到 **1000005**（`apps/arkui-schedule/AppScope/app.json5:5`，
+  工作树未提交，由 Lead 提交）。
+
+**干净构建 1000005**
+
+先删除 `apps/arkui-schedule/entry/build` 与 `apps/arkui-schedule/build` 再做干净构建，日志
+`apps/arkui-schedule/.build-logs/build-20261121-222123.log`：
+
+```
+42 tasks in total: 42 executed, 0 up-to-date
+Finished :entry:default@CompileArkTS... after 14 s 202 ms
+Finished :entry:default@PackageHap... after 2 s 342 ms
+BUILD SUCCESSFUL in 19 s 266 ms
+Build completed successfully
+```
+
+控制台尾 `.tmp/build-1000005.out` → `✓ 产物验收通过` ×1、`[overlay] applied=false` ×1
+（这两行**只在控制台出现，从不进入 `.build-logs`**）。
+未签名 HAP `entry-default-unsigned.hap` **4,970,380 B**。
+
+**签名**
+
+- v2 材料仍不齐，本次以**已泄露的 v1 密钥**签名（显式 `-AllowLegacyV1Key`）。警告原文如下
+  （脚本源行权威，控制台抓取时发生换行，按源行完整引用）：
+
+```
+WARNING: [sign-hap] WARNING -AllowLegacyV1Key: using LEAKED v1 signing key (compromised private key) - reproduce-only, never ship or publish with this key
+```
+
+- **仅本地复现，绝不用于分发/上架**；发布仍需 AGC v2 `.cer` + `.p7b`（P0 阻塞）。
+- 已签名 HAP `dist-harmony/arkui-schedule-1000005-signed.hap` **5,031,596 B**，
+  SHA-256 `ff0fbf085faf743bf049a9dcf4eb03747042c7fd410818ed86c53c3e09390ba6`，
+  签名时间 **2026-11-21 22:21:56.071**；`hap-sign-tool verify-app` → `verify: Verify success` /
+  `verify-app success`。内层 `ets/modules.abc` **2,853,784 B**，SHA-256
+  `2b7a1d7c139adac970661485be88681e687dbf6fd45b4b4e93f8724d53b87b99`
+  （与未签名构建的 entry 相同——签名不改代码）。
+
+**装机 + 证明（本镜像上内容哈希路线不可用）**
+
+`hdc -t 192.168.1.7:33023 install -r <signed hap>` → `msg:install bundle successfully.` /
+`AppMod finish`，exit 0。
+
+证明方法：本镜像上内容哈希路线**不可用**（见 `docs/RUNBOOK.md` §7.1），改用
+`bm dump -n com.itwill.schedule` 的装机前后对照。
+
+- 基线（装机**前**，`.tmp/baseline-pre-1000005.json`）：应用级 `versionCode` **1000004**，
+  `updateTime` **1795260583970** = **2026-11-21 19:29:43.970 +08:00**。
+- 装机**后**：`versionCode` **1000005**，`updateTime` **1795270924603**
+  = **2026-11-21 22:22:04.603 +08:00**。
+
+| 判据 | 结果 | 证据 |
+| --- | --- | --- |
+| a) versionCode | **PASS**（1000004→1000005） | 应用级字段，前后两份 dump |
+| b) updateTime 改变 | **PASS** | 1795260583970 → 1795270924603 |
+| c) updateTime 增长 | **PASS** | 同上，时间前进 |
+| d) hapPath 存在性 | **unknown** | `ls` / `file recv` → `Permission denied`（shell uid 2000）；`hdc smode` 被拒（undebuggable 镜像） |
+| e) HAP 产物同一性 | 见上（SHA-256） | 未签名 HAP / 已签名 HAP / `ets/modules.abc` 三值 |
+
+**OVERALL: PASS (exit 0)**。
+
+`installTime` **不是**见证：两侧均为 `1794720327159`，未变化；`bm dump` 里嵌套/模块的
+`versionCode` 字段为 0/空——只有应用级那一对可用（见 `docs/RUNBOOK.md` §7.1）。
+
+**启动烟测**
+
+`aa force-stop` → `aa start -a EntryAbility -b com.itwill.schedule` → `start ability successfully`；
+进程存活（PID **54387**，另有 `:render`）。hilog 命中行名为 `crashpad` / `Crash reporting enabled`
+—— 这些是 **crashpad 初始化日志，不是崩溃**；该 bundle 没有 `FATAL` / `jscrash` / 未捕获
+`Exception`。特此说明，避免误读日志。
+
+**用户复验清单（未实测，结论一律留空待回填）**
+
+1. **保存不撒谎**：设置 → 保存后，状态行**不得**出现「已同步」；保存本身不产生任何状态跃迁。**结论：待用户**
+2. **重启保留真实状态**：重启后显示上次真实 `已同步 · HH:MM`（原时间），**不是**「失败：未知错误」，也**不是**「刚刚」；如上次是失败，只显示「上次失败 · HH:MM」这种过去时。**结论：待用户**
+3. **无感初始化**：设置 → 同步仓库 → 更多 → 查看状态 / 测试连接，在仓库地址 + 令牌已配置、尚未克隆时**自动初始化**并报告真实远端状态；全程**不得**出现「尚未初始化 / 先执行「拉取」/ 首次克隆」字样（这些只允许在诊断区）。**结论：待用户**
+4. **空仓库首跑**：用一个全新空远端仓库（无 `main`、无任何引用）→ 新建一条记录、**不做任何手动操作** → 应自动建初始提交并推送，最终 `已同步`；「尚未初始化」字样不得出现在任何可见文案里。非空但无 `main` 的仓库仍须给出 typed 错误、绝不覆盖。**结论：待用户**
+5. **实例列表无本机**：远程实例列表**没有**「本机」行；空列表 + 「添加实例」是正常首跑态；若旧版本遗留过本机行，升级后应被过滤掉、不复活、不可再新增。**结论：待用户**
+6. **AI 汇总按钮常驻**：汇总完成后按钮仍是「AI 汇总」（幂等，再点即重生成），**没有**「重新生成」；首页列表与外壳日程页两处都一样。**结论：待用户**
+7. **竖屏下拉刷新**仍可用。**结论：待用户**
+
+> **本构建包含四个模块**：`mod-instances-drop-local`、`mod-ai-summarize-label`、`mod-sync-silent-autoinit`、
+> `mod-sync-status-persist`；安装证据只证明「装上了并启动」，第 1–7 项要等用户实测后回填 PASS / FAILED / BLOCKED。
