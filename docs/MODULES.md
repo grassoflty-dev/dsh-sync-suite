@@ -305,3 +305,5 @@ mod-v2-contract
 > 追加登记：mod-instance-grant P2 修复 = da1e8ea（撤销预校验、重复键确定性去重、补齐用例；instanceGrant 45/45，全量 2958/2957/0/1）。
 
 > 追加登记：`mod-home-entries` + `fix-landscape-list` = `e9d544f`（两模块共用 Index/Chats/文档，合并一笔；横屏真机复验在提交后并行进行）。
+
+> 追加登记：`mod-home-entries` + `fix-landscape-list` = `e9d544f`（两模块共用 Index/Chats/文档，合并一笔；横屏真机复验在提交后并行进行）。
