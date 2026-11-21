@@ -156,11 +156,12 @@ describe('normalizeGrant：字段校验与 typed 拒绝', () => {
     refused(rawGrant({ grantId: 42 }), 'E_GRANT_ID');
   });
 
-  test('N-04 坏 instanceId 形状给 E_GRANT_INSTANCE_ID（local 与 inst-<16hex> 合法）', () => {
-    for (const id of ['', 'bad', 'inst-xyz', 'LOCAL', 'local/..', 'inst-0123456789abcdef0', 7]) {
+  // mod-instances-drop-local（old→new，收紧）：旧断言把 local 当合法授权目标；
+  // 平板没有本机实例，local 不再是 grantable id，只有远程 inst-<16hex> 合法。
+  test('N-04 坏 instanceId 形状给 E_GRANT_INSTANCE_ID（仅远程 inst-<16hex> 合法）', () => {
+    for (const id of ['', 'bad', 'inst-xyz', 'LOCAL', 'local', 'local/..', 'inst-0123456789abcdef0', 7]) {
       refused(rawGrant({ instanceId: id }), 'E_GRANT_INSTANCE_ID');
     }
-    assert.equal(normalized(rawGrant({ instanceId: 'local' })).instanceId, 'local');
     assert.equal(normalized(rawGrant({ instanceId: ID_A })).instanceId, ID_A);
   });
 
@@ -497,6 +498,25 @@ describe('持久化信封 {v:1,items:[...]}', () => {
     assert.equal(canPrompt(decoded.items, ID_A, 300), false, '旧 prompt 权不得并进胜者');
     assert.deepEqual(grantedTools(decoded.items, ID_A, 300), [TOOL_SESSION_LIST]);
     assert.equal(JSON.parse(encodeGrants(decoded.items)).items.length, 1, '再编码仍是单条');
+  });
+
+  // mod-instances-drop-local 新增正向守卫：遗留 local 授权读取时丢弃（fail-closed），
+  // 不整表判坏、不授予任何权限，也不影响同信封里远程实例的授权。
+  test('E-07 遗留 local 授权读取时忽略，远程授权照常生效', () => {
+    const remote = normalized(rawGrant({
+      grantId: 'g-remote', tools: [TOOL_SESSION_PROMPT]
+    }));
+    const legacyLocal = rawGrant({
+      grantId: 'g-local', instanceId: 'local', tools: [TOOL_SESSION_PROMPT]
+    });
+    const json = JSON.stringify({ v: 1, items: [legacyLocal, remote] });
+    const decoded = decodeGrants(json);
+    assert.equal(decoded.ok, true, '遗留本机授权不得把整表判坏');
+    assert.equal(decoded.items.length, 1, '只保留远程授权');
+    assert.equal(decoded.items[0].instanceId, ID_A);
+    assert.equal(JSON.stringify(decoded.items).includes('local'), false, '不重新落盘本机授权');
+    assert.equal(canPrompt(decoded.items, 'local', 200), false, '遗留本机授权永不生效');
+    assert.equal(canPrompt(decoded.items, ID_A, 200), true, '远程授权照常生效');
   });
 
   test('E-06 重复键同 grantedAt：grantId 字典序更大者胜，与信封顺序无关', () => {

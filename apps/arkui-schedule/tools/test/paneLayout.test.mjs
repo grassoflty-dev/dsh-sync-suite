@@ -453,7 +453,10 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     assert.match(readonlyRegions(rows), /label: '打开'/, '两种模式都能打开实例');
     assert.match(configRegions(rows).join('\n'), /label: '编辑'/, '配置模式有编辑');
     assert.match(configRegions(rows).join('\n'), /label: '删除'/, '配置模式有删除');
-    assert.match(configRegions(rows).join('\n'), /view\.id !== LOCAL_INSTANCE_ID/, '本机行不得渲染删除');
+    // mod-instances-drop-local（old→new，收紧）：旧断言钉「删除按钮排除本机」；
+    // 现在没有本机行，任何分支都不许再按 local id 分叉，所有远程行一律可删。
+    assert.equal(/LOCAL_INSTANCE_ID|localInstance\(/.test(p.source), false, '面板不得有本机行分支');
+    assert.match(configRegions(rows).join('\n'), /label: '删除'/, '所有远程行都有删除动作（无本机豁免）');
     assert.equal(/label: '编辑'|label: '删除'/.test(readonlyRegions(rows)), false, '首页行内无配置动作');
     // 只读模式没有地址 / 令牌 / 方式输入，也没有内联表单调用。
     for (const forbidden of ['TextInput(', 'Select(', 'this.showAdd()', 'this.FormPanel()']) {
@@ -461,7 +464,7 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     }
     assert.match(config, /TextInput\(/, '设置模式保留地址输入');
     assert.match(p.body, /ForEach\(\s*this\.views/, '列表来自真实实例视图');
-    assert.match(p.source, /instanceStore\.ensureSeeded\(/, '首次进入播种本机 + 旧配置迁移');
+    assert.match(p.source, /instanceStore\.ensureSeeded\(/, '首次进入只迁远程旧地址（不播种本机）');
     assert.match(p.source, /还没有可管理的 DSH 实例/, '空态逐字文案仍在');
     const empty = blockAfter(raw, '\n  EmptyView() ');
     assert.match(readonlyRegions(empty), /actionLabel: EMPTY_ACTION_READONLY/, '只读空态主操作去设置');

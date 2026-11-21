@@ -17,12 +17,22 @@
  *    已吊销、已过期、时间非法均不授权；吊销后不自动续期、不换令牌重试。
  * 5. **typed 拒绝，不抛异常**：未知工具 / 空工具 / 未知 principal / 坏 instanceId / 非法 nowMs
  *    都返回 typed problem + 中文 reason；变更 API 拒绝时原表不动、绝不落盘会被 normalize 拒收的项；
- *    坏信封整表回落空表（与 `model/instances.ts` 同纪律）。
+ *    坏信封整表回落空表（与 `model/instances.ts` 同纪律）。旧 `local` 授权在读取时按字面量丢弃，
+ *    不整表判坏、不授予任何权限。
  * 6. **零凭据**：本模型与对应 store **没有任何令牌字段**，也没有日志调用；渲染视图 `RedactedGrant`
  *    结构上不带自由文本 `note`，只给派生的 `active` / `canPrompt`。
+ *
+ * 产品决定（`mod-instances-drop-local`）：平板不跑原生 DSH，没有本机实例，授权目标只能是远程实例。
  */
 
 import { INSTANCE_ID_PATTERN } from './instances';
+
+/**
+ * 旧信封里可能出现的本机占位 id，**只在解码时按字面量跳过**（`decodeGrants`）。
+ * 这是遗留数据兼容的字符串判断，不是可授权的本机实例模型；跳过后不授予任何权限，
+ * 同一信封里的其它远程授权保持不动。
+ */
+const LEGACY_LOCAL_ID: string = 'local';
 
 /** dots 的唯一 principal（与设备 principal 区分）。 */
 export const PRINCIPAL_DOTS: string = 'dots';
@@ -119,7 +129,7 @@ export type GrantProblem =
 export interface InstanceGrant {
   /** 授权 id（调用方生成，唯一标识一条授权）。 */
   grantId: string;
-  /** 目标实例 id：`local` 或 `inst-<16hex>`（与实例表同一形状）。 */
+  /** 目标实例 id：`inst-<16hex>`（所有实例都是远程，与实例表同一形状）。 */
   instanceId: string;
   /** 只能是 `dots`。 */
   principal: 'dots';
@@ -200,7 +210,7 @@ export function problemText(problem: GrantProblem): string {
     case 'E_GRANT_ID':
       return '授权 id 不能为空';
     case 'E_GRANT_INSTANCE_ID':
-      return '实例 id 只能是 local 或 inst- 加 16 位十六进制';
+      return '实例 id 只能是 inst- 加 16 位十六进制';
     case 'E_GRANT_PRINCIPAL':
       return '授权对象只能是 dots';
     case 'E_GRANT_TOOLS_SHAPE':
@@ -638,10 +648,23 @@ export function encodeGrants(list: InstanceGrant[]): string {
   return JSON.stringify(envelope);
 }
 
+/** 只识别旧信封里 keyed 到 `local` 的遗留授权：纯字面量比较，不是可授权的本机实例。 */
+function isLegacyLocalGrant(raw: LooseValue): boolean {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return false;
+  }
+  const item = raw as RawGrant;
+  return typeof item.instanceId === 'string' && item.instanceId.trim() === LEGACY_LOCAL_ID;
+}
+
 /**
  * 反序列化整表：空串 / 坏 JSON / 结构错 / 版本错 / 任一记录坏 → 空表 + typed reason，
  * 绝不抛异常（这条路径在 UI 启动时跑）。合法记录按 grantKey 去重（最新 grantedAt 胜，
  * 同刻 grantId 大者胜），再按 `sortGrants` 给确定性顺序。
+ *
+ * 遗留数据兼容（读取时过滤，不做迁移）：旧版本可能写过 keyed 到 `local` 的授权。本机实例已从
+ * 产品删除，这类授权不可能命中任何真实实例，读取时**只丢弃这一行**——fail-closed、不授予、
+ * 不复活、不重写别的远程授权；它也不会把整表判成损坏。
  */
 export function decodeGrants(raw: string | null | undefined): GrantDecodeResult {
   const text: string = typeof raw === 'string' ? raw.trim() : '';
@@ -672,6 +695,9 @@ export function decodeGrants(raw: string | null | undefined): GrantDecodeResult 
   // 坏记录仍然整表拒绝；合法记录按键去重，规则见 winsDuplicate（最新 grantedAt 胜，
   // 同刻 grantId 更大者胜），与信封里出现的先后无关。
   for (const rawItem of rawItems) {
+    if (isLegacyLocalGrant(rawItem)) {
+      continue;
+    }
     const result: GrantNormalizeResult = normalizeGrant(rawItem as RawGrant);
     if (!result.ok || result.grant === null) {
       return decodeFailed('E_GRANT_ENVELOPE_ITEM');

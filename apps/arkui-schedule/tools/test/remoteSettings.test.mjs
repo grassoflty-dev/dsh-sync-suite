@@ -130,8 +130,11 @@ describe('mod-settings-remote-dedupe：迁移幂等、令牌不丢（纯函数�
         remoteMode: 'manual',
         remoteToken: 'LEGACY_SECRET_9f3a2b'
       };
+      // mod-instances-drop-local：平板不跑原生 DSH，实例全是远程，播种不再补本机行。
+      // 旧断言「2 = 本机行 + 迁移实例」收紧为「1 条远程实例且零 local 行」。
       const first = seedInstances([], legacy);
-      assert.equal(first.length, 2, '本机行 + 一条迁移实例');
+      assert.equal(first.length, 1, '只有一条迁移实例，没有本机行');
+      assert.equal(first.filter((item) => item.id === 'local').length, 0, '绝不播种本机行');
       const remote = first.find((item) => item.id !== 'local');
       assert.ok(remote !== undefined, '旧地址必须落成远程实例');
       assert.equal(remote.url, 'http://192.168.1.6:3080/?a=1', 'normalizeRemoteUrl 补 http://');

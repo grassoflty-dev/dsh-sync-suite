@@ -25,6 +25,9 @@ import {
 
 // S3：日程契约锚点从 fallback 路由 pages/Index.ets 移到真 body 所在的日程面板；断言不动。
 const INDEX = readFileSync(new URL('../../entry/src/main/ets/pages/panes/SchedulePane.ets', import.meta.url), 'utf8')
+// mod-ai-summarize-label：本模块唯一可写的日程源码（fallback 路由），有汇总态标签新真值钉在它上面。
+// 上面的真 body 锚点与全部断言一字不动；下面只新增 Index.ets 的标签 / 禁用词覆盖。
+const INDEX_ETS = readFileSync(new URL('../../entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8')
 const PAGE_LAYOUT = readFileSync(new URL('../../entry/src/main/ets/components/PageLayout.ets', import.meta.url), 'utf8')
 // 因 A2 拆分移动：设置页界面拆到 `pages/Settings.ets` + `components/settings/*.ets`，
 // 「设置页」的静态断言锚点改成两者合并（页面 + 五个 section + bits）；断言本身不变。
@@ -49,6 +52,7 @@ function stripComments(source) {
 }
 
 const INDEX_CODE = stripComments(INDEX)
+const INDEX_ETS_CODE = stripComments(INDEX_ETS)
 const SETTINGS_CODE = stripComments(SETTINGS)
 
 /**
@@ -249,7 +253,25 @@ test('今日汇总块：是列表第一项，五态互斥，AI 汇总只从这�
   assert.match(INDEX_CODE, /LoadingState\(\{/, '生成中要走 LoadingState（带进度与 3 秒后可取消）');
   assert.match(INDEX_CODE, /loadingText\('AI 汇总'\)/, '生成中文案走 copy.loadingText');
   assert.match(INDEX_CODE, /更新于 \$\{this\.summaryUpdatedAt\}/);
-  assert.match(INDEX_CODE, /重新生成/);
+  // mod-ai-summarize-label（old→new，收紧）：旧断言正向要求「重新生成」出现；
+  // 现在反向要求它在真 body（SchedulePane.ets）与 fallback（Index.ets）两个日程源码里全文绝迹，
+  // 并各自正向钉住 SummaryCard 区里的有汇总态标签「AI 汇总」（缺一边即红）。
+  assert.doesNotMatch(INDEX, /重新生成/, 'SchedulePane.ets 全文（含注释与停止等待文案）不得出现「重新生成」');
+  assert.doesNotMatch(INDEX_CODE, /重新生成/, 'SchedulePane.ets 代码视图不得出现「重新生成」');
+  assert.doesNotMatch(INDEX_ETS, /重新生成/, 'Index.ets 全文（含注释与停止等待文案）不得出现「重新生成」');
+  assert.doesNotMatch(INDEX_ETS_CODE, /重新生成/, 'Index.ets 代码视图不得出现「重新生成」');
+  const cardAt = INDEX_CODE.indexOf('SummaryCard() {');
+  assert.ok(cardAt >= 0, 'SchedulePane.ets 必须保留 SummaryCard 汇总块');
+  const cardEnd = INDEX_CODE.indexOf('\n  }\n', cardAt);
+  assert.ok(cardEnd > cardAt, 'SchedulePane.ets 的 SummaryCard 必须能定位到定义末尾');
+  const cardCode = INDEX_CODE.slice(cardAt, cardEnd + 5);
+  assert.match(cardCode, /label: 'AI 汇总'/, '真 body 有汇总态动作标签必须是「AI 汇总」');
+  const idxCardAt = INDEX_ETS_CODE.indexOf('SummaryCard() {');
+  assert.ok(idxCardAt >= 0, 'Index.ets 必须保留 SummaryCard 汇总块');
+  const idxCardEnd = INDEX_ETS_CODE.indexOf('\n  }\n', idxCardAt);
+  assert.ok(idxCardEnd > idxCardAt, 'Index.ets 的 SummaryCard 必须能定位到定义末尾');
+  const idxCard = INDEX_ETS_CODE.slice(idxCardAt, idxCardEnd + 5);
+  assert.match(idxCard, /label: 'AI 汇总'/, 'fallback 有汇总态动作标签必须是「AI 汇总」');
   assert.match(INDEX_CODE, /查看全部/, '要点超过 3 条要有「查看全部」');
   assert.match(INDEX_CODE, /summaryStore\.read\(this\.selectedDate\)/, '汇总必须从持久化存储读取');
   assert.match(INDEX_CODE, /summaryStore\.generate\(/, '生成必须走 summaryStore（内部保证失败不覆盖）');

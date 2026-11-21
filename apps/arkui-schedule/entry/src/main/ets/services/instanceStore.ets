@@ -14,6 +14,9 @@
  *
  * 失败纪律：坏 JSON / 坏版本 / 坏记录 → `decodeInstances` 回落空表 + typed reason，
  * 由 `lastProblem()` 暴露给 UI；存储 API 异常也只落到 typed reason，绝不抛进 UI。
+ *
+ * 产品决定（`mod-instances-drop-local`）：没有本机实例，表里只放远程行；旧持久化 `local` 行在
+ * `decodeInstances` 读取时按字面量过滤，不复活、不落盘。
  */
 
 import {
@@ -100,7 +103,7 @@ export class InstanceStore {
     return sorted.slice();
   }
 
-  /** 当前实例表（返回副本；本机若有则由调用方用 `localInstance()` 决定如何呈现）。 */
+  /** 当前实例表（返回副本；只含远程行，旧 `local` 行已在 `decodeInstances` 读取时过滤）。 */
   list(): DsInstance[] {
     return this.load().slice();
   }
@@ -109,7 +112,7 @@ export class InstanceStore {
    * 首次进入实例页时播种 + 旧配置迁移（模块 `mod-instance-list`）。
    *
    * 由页面在读完 `settingsStore` 后调用一次；纯判定在 `model/instanceSeed.ts`。
-   * 内容没变就**不写盘**（第二次启动零 IO、零重复）；本机不可删、旧地址按 id 去重。
+   * 只迁远程地址、不补本机行；内容没变就**不写盘**（第二次启动零 IO、零重复），旧地址按 id 去重。
    */
   ensureSeeded(legacy: LegacyInstanceSettings): DsInstance[] {
     const before: DsInstance[] = this.load();
@@ -132,7 +135,7 @@ export class InstanceStore {
     return this.commit(upsertInstance(this.load(), inst));
   }
 
-  /** 按 id 删除；本机行由模型层保证不可删除。 */
+  /** 按 id 删除任意远程行（没有受保护的本机行）；删空后保持空表，不重新播种。 */
   remove(id: string): DsInstance[] {
     return this.commit(removeInstance(this.load(), id));
   }

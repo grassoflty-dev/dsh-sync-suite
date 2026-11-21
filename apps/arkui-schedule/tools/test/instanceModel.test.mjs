@@ -24,14 +24,13 @@ registerHooks({
 
 const M = await import('../.build/model/instances.js');
 
+// mod-instances-drop-local：本机实例已删除。原测试 id 全部保留，断言 retarget 为
+// 「无本机原语 / 遗留 local 行读取时过滤 / 排序无本机锚点」，旧断言一条未删。
 const {
-  LOCAL_INSTANCE_ID,
   INSTANCE_ID_PATTERN,
-  DEFAULT_LOCAL_NAME,
   DEFAULT_REMOTE_NAME,
   INSTANCE_ENVELOPE_VERSION,
   INSTANCE_KEY_PREFIX,
-  localInstance,
   normalizeInstance,
   instanceIdFromUrl,
   instanceKey,
@@ -113,11 +112,12 @@ describe('normalizeInstance：字段校验与 typed 拒绝', () => {
     refused({ id: ID_A, name: 'x', url: URL_A, mode: '' }, 'E_INSTANCE_MODE');
   });
 
-  test('N-04 坏 id：形状不对的四种都给 E_INSTANCE_ID', () => {
-    for (const id of ['', 'LOCAL', 'inst-xyz', 'pc-b', 'inst-0123456789abcdef0']) {
+  // 旧断言把 local 当合法 id；新事实更严格：只有远程 id 合法，旧 local 一律拒绝。
+  test('N-04 坏 id：形状不对的四种都给 E_INSTANCE_ID（旧 local 也拒绝）', () => {
+    for (const id of ['', 'LOCAL', 'local', 'inst-xyz', 'pc-b', 'inst-0123456789abcdef0']) {
       refused({ id, name: 'x', url: URL_A, mode: 'lan' }, 'E_INSTANCE_ID');
     }
-    assert.equal(INSTANCE_ID_PATTERN.test('local'), true);
+    assert.equal(INSTANCE_ID_PATTERN.test('local'), false, '本机 id 不再是实例 id');
     assert.equal(INSTANCE_ID_PATTERN.test(ID_A), true);
   });
 
@@ -125,10 +125,8 @@ describe('normalizeInstance：字段校验与 typed 拒绝', () => {
     refused({ id: ID_A, name: '   ', url: URL_A, mode: 'lan' }, 'E_INSTANCE_NAME');
     refused({ id: ID_A, name: 42, url: URL_A, mode: 'lan' }, 'E_INSTANCE_NAME');
     assert.equal(normalized({ id: ID_A, url: URL_A, mode: 'lan' }).name, DEFAULT_REMOTE_NAME);
-    const local = normalized({ id: LOCAL_INSTANCE_ID, mode: 'lan' });
-    assert.equal(local.name, DEFAULT_LOCAL_NAME);
-    assert.equal(local.url, '');
-    assert.equal(normalized({ id: LOCAL_INSTANCE_ID, name: ' 我的电脑 ', mode: 'lan' }).name, '我的电脑');
+    assert.equal(normalized({ id: ID_A, name: ' 我的电脑 ', url: URL_A, mode: 'lan' }).name, '我的电脑');
+    assert.equal(normalized({ id: ID_A, url: URL_A, mode: 'lan' }).url, URL_A, '远程行恒有 URL，无空 URL 的本机形态');
   });
 
   test('N-06 脏入参（null / 数组 / 数字）给 E_INSTANCE_SHAPE，不抛错', () => {
@@ -166,12 +164,16 @@ describe('normalizeInstance：字段校验与 typed 拒绝', () => {
     assert.equal(normalized({ ...remoteInstance(), lastSeen: -1 }).lastSeen, undefined);
   });
 
-  test('N-09 本机行忽略传入 url / token，URL 恒空串且无令牌', () => {
-    const inst = normalized({
-      id: LOCAL_INSTANCE_ID, mode: 'lan', url: `http://h/?token=${SECRET}`, token: SECRET
+  // 旧断言钉「本机行忽略 url / token」；新事实更严格：旧本机 id 直接拒绝，远程行照常带令牌。
+  test('N-09 旧本机 id 一律拒绝，不能靠忽略 url / token 造出本机行', () => {
+    refused({
+      id: 'local', mode: 'lan', url: `http://h/?token=${SECRET}`, token: SECRET
+    }, 'E_INSTANCE_ID');
+    const remote = normalized({
+      id: ID_A, name: 'x', mode: 'lan', url: `http://h/?token=${SECRET}`, token: SECRET
     });
-    assert.equal(inst.url, '');
-    assert.equal(inst.token, undefined);
+    assert.equal(remote.url, 'http://h/');
+    assert.equal(remote.token, SECRET, '远程行的令牌语义不变');
   });
 
   test('N-10 大写 ?TOKEN= 也抽到 token 字段，url 只留 base（P2 评审缺口）', () => {
@@ -220,7 +222,8 @@ describe('redactUrl / redactInstance：令牌绝不外泄', () => {
     assert.equal(JSON.stringify(view).includes(SECRET), false);
     const noToken = redactInstance(remoteInstance());
     assert.equal(noToken.tokenSet, false);
-    assert.deepEqual(redactInstance(null).capabilities, deriveCapabilities(LOCAL_INSTANCE_ID));
+    assert.deepEqual(redactInstance(null).capabilities, deriveCapabilities(ID_A));
+    assert.equal(redactInstance(null).capabilities.webUI, true, '空视图按远程能力集，无本机特例');
   });
 
   test('R-05 redactInstance 的能力集是副本，不会反过来改原实例', () => {
@@ -231,36 +234,37 @@ describe('redactUrl / redactInstance：令牌绝不外泄', () => {
   });
 });
 
-// ---------------------------------------------------------------- 本机 / 排序 / CRUD
+// ---------------------------------------------------------------- 排序 / CRUD（无本机行）
 
-describe('本机表示与列表操作', () => {
-  test('L-01 localInstance：显式首行、空 URL、webUI=false / RPC 回环', () => {
-    const local = localInstance();
-    assert.equal(local.id, LOCAL_INSTANCE_ID);
-    assert.equal(local.name, DEFAULT_LOCAL_NAME);
-    assert.equal(local.url, '');
-    assert.equal(local.mode, 'lan');
-    assert.equal(local.reachable, 'unknown');
-    assert.equal(local.capabilities.webUI, false);
-    assert.equal(local.capabilities.rpc, true);
-    assert.equal(local.token, undefined);
-    assert.equal(local.lastSeen, undefined);
+describe('远程实例列表操作', () => {
+  // 旧断言用 localInstance() 造一条显式首行；新事实更严格：这些原语已从模型删除，
+  // 任何调用点都无法再构造本机行，远程行的能力集统一为 webUI=true / rpc=false。
+  test('L-01 无本机原语：localInstance / LOCAL_INSTANCE_ID / DEFAULT_LOCAL_NAME 均不存在', () => {
+    assert.equal(typeof M.localInstance, 'undefined', '模型不得导出 localInstance');
+    assert.equal(typeof M.LOCAL_INSTANCE_ID, 'undefined', '模型不得导出本机 id 常量');
+    assert.equal(typeof M.DEFAULT_LOCAL_NAME, 'undefined', '模型不得导出本机名常量');
+    const remote = normalized({ id: ID_A, name: 'pc', url: URL_A, mode: 'lan' });
+    assert.equal(remote.url, URL_A);
+    assert.equal(remote.capabilities.webUI, true);
+    assert.equal(remote.capabilities.rpc, false);
   });
 
-  test('L-02 sortInstances：本机第一，其余按 name→id，输入不被改', () => {
-    const local = localInstance();
+  // 旧断言钉「本机第一」；新事实更严格：排序完全没有本机锚点，纯 name→id，空表仍为空。
+  test('L-02 sortInstances：无本机首行，按 name→id，输入不被改', () => {
     const z = remoteInstance({ id: ID_B, name: 'z-电脑' });
     const a = remoteInstance({ id: ID_A, name: 'a-电脑' });
     const same1 = remoteInstance({ id: ID_B, name: '同名' });
     const same2 = remoteInstance({ id: ID_A, name: '同名' });
-    const input = [z, local, a, same1, same2];
+    const input = [z, a, same1, same2];
     const sorted = sortInstances(input);
-    assert.deepEqual(sorted.map((x) => x.id), [LOCAL_INSTANCE_ID, ID_A, ID_B, ID_A, ID_B]);
+    assert.deepEqual(sorted.map((x) => x.id), [ID_A, ID_B, ID_A, ID_B]);
+    assert.equal(sorted[0].name, 'a-电脑', '没有本机锚点，第一行按名字排');
     assert.equal(input[0].id, ID_B, '排序不能就地修改入参');
     assert.deepEqual(sortInstances(sorted), sorted, '重复排序幂等');
+    assert.deepEqual(sortInstances([]), [], '空表排序仍为空');
   });
 
-  test('L-03 upsert：同 id 更新、新 id 追加，无重复且不改原数组', () => {
+  test('L-03 upsert：同 id 更新、新 id 追加，无重复且不改原数组；本机 id 无法插入', () => {
     const a = remoteInstance({ name: 'a' });
     const b = remoteInstance({ id: ID_B, name: 'b' });
     const original = [a, b];
@@ -268,9 +272,9 @@ describe('本机表示与列表操作', () => {
     assert.equal(next.length, 2);
     assert.equal(findInstance(next, ID_A).name, 'a-改名');
     assert.equal(original[0].name, 'a');
-    const added = upsertInstance(next, localInstance());
-    assert.equal(added.length, 3);
-    assert.equal(added[0].id, LOCAL_INSTANCE_ID);
+    const rejected = upsertInstance(next, { id: 'local', name: 'x', url: URL_A, mode: 'lan' });
+    assert.deepEqual(rejected, next, '旧本机 id 不能经 upsert 进入列表');
+    assert.equal(rejected.filter((x) => x.id === 'local').length, 0);
   });
 
   test('L-04 upsert 坏实例原样返回（fail-closed，不抛错）', () => {
@@ -280,11 +284,14 @@ describe('本机表示与列表操作', () => {
     assert.notEqual(next, list, '仍返回新数组');
   });
 
-  test('L-05 remove：删掉目标、本机不可删', () => {
-    const list = [localInstance(), remoteInstance({ id: ID_B, name: 'b' }), remoteInstance({ name: 'a' })];
+  // 旧断言钉「本机不可删」；新事实更严格：任何 id 都可删，遗留字面量 local 也不受保护，
+  // 删空后保持空表（不回补）。
+  test('L-05 remove：任意行可删（含遗留 local 字面量），删空保持空表', () => {
+    const list = [remoteInstance({ id: ID_B, name: 'b' }), remoteInstance({ name: 'a' })];
     const next = removeInstance(list, ID_B);
-    assert.deepEqual(next.map((x) => x.id), [LOCAL_INSTANCE_ID, ID_A]);
-    assert.deepEqual(removeInstance(list, LOCAL_INSTANCE_ID).map((x) => x.id), [LOCAL_INSTANCE_ID, ID_A, ID_B]);
+    assert.deepEqual(next.map((x) => x.id), [ID_A]);
+    assert.deepEqual(removeInstance(list, 'local').map((x) => x.id), [ID_A, ID_B], '本机字面量不再受保护');
+    assert.deepEqual(removeInstance(next, ID_A), [], '删空 = 空表，不回补');
     assert.equal(findInstance(next, ID_B), null);
     assert.equal(findInstance(list, ID_A).name, 'a');
   });
@@ -298,25 +305,34 @@ describe('持久化信封 {v:1,items:[...]}', () => {
       id: ID_A, name: 'pc-b', url: URL_B, mode: 'lan',
       token: SECRET, lastSeen: 1700000000000, reachable: 'ok'
     });
-    const json = encodeInstances([localInstance(), inst]);
+    const json = encodeInstances([inst]);
     const envelope = JSON.parse(json);
     assert.equal(envelope.v, INSTANCE_ENVELOPE_VERSION);
-    assert.equal(envelope.items.length, 2);
-    assert.deepEqual(Object.keys(envelope.items[1]).sort(),
+    assert.equal(envelope.items.length, 1, '信封里只有远程行，没有本机行');
+    assert.deepEqual(Object.keys(envelope.items[0]).sort(),
       ['id', 'lastSeen', 'mode', 'name', 'reachable', 'token', 'url']);
     const decoded = decodeInstances(json);
     assert.equal(decoded.ok, true);
     assert.equal(decoded.problem, 'ok');
-    assert.deepEqual(decoded.items, [localInstance(), inst]);
-    assert.equal(decoded.items[1].capabilities.webUI, true);
+    assert.deepEqual(decoded.items, [inst]);
+    assert.equal(decoded.items[0].capabilities.webUI, true);
   });
 
-  test('E-02 decode 对乱序输入重新排序，重复 decode 字节相等', () => {
+  // 旧断言钉「遗留本机行排第一」；新事实更严格：读取时直接丢弃该行，不复活、不重编码落盘，
+  // 同一信封里的远程行照常解码，整表也不因这一行判坏。
+  test('E-02 decode 过滤遗留 local 行，远程行照常排序，重复 decode 字节相等', () => {
     const inst = remoteInstance({ name: 'b' });
-    const unsorted = JSON.stringify({ v: 1, items: [inst, localInstance()] });
+    const legacyLocal = { id: 'local', name: '本机（默认）', url: '', mode: 'lan', reachable: 'unknown' };
+    const unsorted = JSON.stringify({ v: 1, items: [inst, legacyLocal] });
     const decoded = decodeInstances(unsorted);
-    assert.equal(decoded.items[0].id, LOCAL_INSTANCE_ID);
-    assert.equal(encodeInstances(decoded.items), encodeInstances(decodeInstances(unsorted).items));
+    assert.equal(decoded.ok, true, '遗留本机行不能把整表判成损坏');
+    assert.equal(decoded.items.length, 1, '本机行读取时过滤，不是排到第一行');
+    assert.equal(decoded.items[0].id, ID_A);
+    const reencoded = encodeInstances(decoded.items);
+    assert.equal(reencoded.includes('"local"'), false, '不重新落盘本机行');
+    assert.equal(reencoded, encodeInstances(decodeInstances(unsorted).items));
+    const onlyLegacy = JSON.stringify({ v: 1, items: [legacyLocal] });
+    assert.deepEqual(decodeInstances(onlyLegacy).items, [], '只有遗留本机行时读出空表');
   });
 
   test('E-03 损坏信封一律回落空表 + typed reason，不抛异常', () => {
@@ -371,9 +387,9 @@ describe('持久化信封 {v:1,items:[...]}', () => {
   });
 
   test('E-05 instanceKey：只由合法 id 生成，脏 id 空串', () => {
-    assert.equal(instanceKey(LOCAL_INSTANCE_ID), `${INSTANCE_KEY_PREFIX}${LOCAL_INSTANCE_ID}`);
+    assert.equal(instanceKey('local'), '', '旧本机 id 不再生成持久键');
     assert.equal(instanceKey(ID_A), `${INSTANCE_KEY_PREFIX}${ID_A}`);
-    for (const bad of ['', 'bad', 'inst-xyz', 'local/..']) {
+    for (const bad of ['local', '', 'bad', 'inst-xyz', 'local/..']) {
       assert.equal(instanceKey(bad), '');
     }
   });

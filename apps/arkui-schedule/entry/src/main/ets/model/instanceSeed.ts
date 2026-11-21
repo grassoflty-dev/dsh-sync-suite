@@ -4,8 +4,11 @@
  * 为什么单独一层：`services/instanceStore.ets` 用 `PersistentStorage`/`AppStorage`，
  * Node 单测加载不了；把可判定的部分放进纯模型，UI 与 store 只做接线。
  *
+ * 产品决定（`mod-instances-drop-local`）：平板不跑原生 DSH，**没有本机实例**；播种只把旧配置里的
+ * 远程地址落成远程行，空表 + 「添加实例」是正常首用状态，绝不补本机占位行。
+ *
  * 两条纪律：
- * 1. **幂等**：本机行缺了才补，旧地址 id 已存在就跳过（不覆盖用户后来改的 name / lastSeen），
+ * 1. **幂等**：旧地址 id 已存在就跳过（不覆盖用户后来改的 name / lastSeen），
  *    第二次启动不会多出第二条；
  * 2. **旧地址必须先归一**：`normalizeRemoteUrl(raw).url` 才交给 `instanceIdFromUrl()` /
  *    `normalizeInstance()`——后者拒绝 `hadScheme === false`，只有前者会给裸 host 补 `http://`。
@@ -14,10 +17,8 @@
 
 import { REMOTE_MODE_MANUAL, findRemoteMode } from './remoteAccess';
 import {
-  LOCAL_INSTANCE_ID,
   findInstance,
   instanceIdFromUrl,
-  localInstance,
   normalizeInstance,
   sortInstances,
   upsertInstance
@@ -82,26 +83,16 @@ function legacyMode(legacy: LegacyInstanceSettings | null | undefined): string {
 }
 
 /**
- * 首次加载时播种：保证 `local` 一行存在，并把旧 `remoteUrl` / `remoteLastOk` 落成第一条远程实例。
+ * 首次加载时播种：只把旧 `remoteUrl` / `remoteLastOk` 落成一条远程实例，**不补本机行**。
  *
  * 幂等判定按 id：`inst-<sha16(归一 url)>`；同 id 已存在就不再 upsert，所以第二次启动
- * 既不重复、也不会用旧快照覆盖用户改过的名字 / 可达状态。
+ * 既不重复、也不会用旧快照覆盖用户改过的名字 / 可达状态。旧配置为空时直接返回原表（通常为空）。
  */
 export function seedInstances(
   current: DsInstance[] | null | undefined,
   legacy: LegacyInstanceSettings | null | undefined
 ): DsInstance[] {
-  let list: DsInstance[] = Array.isArray(current) ? current.slice() : [];
-  let hasLocal: boolean = false;
-  for (const item of list) {
-    if (item.id === LOCAL_INSTANCE_ID) {
-      hasLocal = true;
-      break;
-    }
-  }
-  if (!hasLocal) {
-    list.push(localInstance());
-  }
+  const list: DsInstance[] = Array.isArray(current) ? current.slice() : [];
   const raw: string = legacyUrl(legacy);
   if (raw.length === 0) {
     return sortInstances(list);

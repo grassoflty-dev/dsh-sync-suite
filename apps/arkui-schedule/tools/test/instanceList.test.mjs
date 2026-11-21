@@ -27,8 +27,11 @@ registerHooks({
 const M = await import('../.build/model/instances.js');
 const S = await import('../.build/model/instanceSeed.js');
 
-const { LOCAL_INSTANCE_ID, normalizeInstance, encodeInstances, decodeInstances, redactInstance,
-  redactUrl, applyReachability, sortInstances, instanceIdFromUrl, deriveCapabilities } = M;
+// mod-instances-drop-local：本机实例已删除，模型不再导出 LOCAL_INSTANCE_ID / localInstance；
+// 所有断言改为「零本地行」的等或 stricter 表述（原测试 id 一个不删）。
+const { normalizeInstance, encodeInstances, decodeInstances, redactInstance,
+  redactUrl, applyReachability, sortInstances, instanceIdFromUrl, deriveCapabilities,
+  upsertInstance } = M;
 const { seedInstances, reachabilityLabel, relativeLastSeen } = S;
 
 const SECRET = 'LEGACY_SECRET_9f3a2b';
@@ -128,20 +131,21 @@ function legacy(overrides = {}) {
 // ---------------------------------------------------------------- B: 播种 / 迁移
 
 describe('播种与旧配置迁移', () => {
-  test('S-01 空表播种：恰好一条本机行，id=local、URL 空、无 token', () => {
+  // 旧断言钉「恰好一条本机行」；新事实更严格：旧配置为空时一行都不播种（首用 = 空表 + 添加实例）。
+  test('S-01 空表播种：零行，绝不补本机占位（首用空表 + 添加实例）', () => {
     const list = seedInstances([], { remoteUrl: '', remoteLastOk: '', remoteMode: '' });
-    assert.equal(list.length, 1);
-    assert.equal(list[0].id, LOCAL_INSTANCE_ID);
-    assert.equal(list[0].url, '');
-    assert.equal(list[0].token, undefined);
-    assert.equal(list[0].capabilities.webUI, false);
+    assert.equal(list.length, 0);
+    assert.equal(list.filter((item) => item.id === 'local').length, 0, '绝不播种本机行');
+    assert.deepEqual(seedInstances(null, null), [], '空输入也不凭空造行');
   });
 
-  test('S-02 旧 remoteUrl 迁移：裸 host 补 http://、token 抽进 token 字段、url 无明文', () => {
+  // 旧断言钉「本机第一行 + 第二行远程」；新断言钉「只有一条远程行，且无 local」——数量与形态都更严。
+  test('S-02 旧 remoteUrl 迁移：裸 host 补 http://、token 抽进 token 字段、url 无明文；无本机行', () => {
     const list = seedInstances([], legacy());
-    assert.equal(list.length, 2);
-    assert.equal(list[0].id, LOCAL_INSTANCE_ID, '本机必须第一行');
-    const remote = list[1];
+    assert.equal(list.length, 1);
+    assert.equal(list.filter((item) => item.id === 'local').length, 0);
+    const remote = list[0];
+    assert.match(remote.id, /^inst-[0-9a-f]{16}$/, '每一行都是远程实例 id');
     assert.match(remote.url, /^http:\/\//, 'schemeless 旧地址必须经 normalizeRemoteUrl 补协议');
     assert.equal(remote.url.includes(SECRET), false);
     assert.equal(remote.token, SECRET, 'token 只能进 token 字段');
@@ -160,23 +164,21 @@ describe('播种与旧配置迁移', () => {
 
   test('S-04 迁移不覆盖用户后续编辑（名称 / 可达 / lastSeen 保留）', () => {
     const seeded = seedInstances([], legacy());
-    const id = seeded[1].id;
-    const edited = [seeded[0], {
-      ...seeded[1], name: '我的电脑', reachable: 'ok', lastSeen: 1234, token: 'OWN'
-    }];
+    const edited = [{ ...seeded[0], name: '我的电脑', reachable: 'ok', lastSeen: 1234, token: 'OWN' }];
     const again = seedInstances(edited, legacy());
-    assert.equal(again.length, 2);
-    assert.equal(again[1].name, '我的电脑');
-    assert.equal(again[1].reachable, 'ok');
-    assert.equal(again[1].lastSeen, 1234);
-    assert.equal(again[1].token, 'OWN');
+    assert.equal(again.length, 1);
+    assert.equal(again.filter((item) => item.id === 'local').length, 0);
+    assert.equal(again[0].name, '我的电脑');
+    assert.equal(again[0].reachable, 'ok');
+    assert.equal(again[0].lastSeen, 1234);
+    assert.equal(again[0].token, 'OWN');
   });
 
   test('S-05 remoteUrl 为空时从 remoteLastOk 的 url/at 迁移', () => {
     const list = seedInstances([], legacy({ remoteUrl: '' }));
-    assert.equal(list.length, 2);
-    assert.equal(list[1].url, 'http://192.168.1.6:3080/?a=1');
-    assert.equal(list[1].lastSeen, 1700000000000);
+    assert.equal(list.length, 1);
+    assert.equal(list[0].url, 'http://192.168.1.6:3080/?a=1');
+    assert.equal(list[0].lastSeen, 1700000000000);
   });
 
   test('S-06 坏旧配置不添加远程行，也不抛错（ftp / 空串 / 坏 lastOk）', () => {
@@ -186,40 +188,56 @@ describe('播种与旧配置迁移', () => {
       legacy({ remoteUrl: 'http://has space/', remoteLastOk: '' })
     ]) {
       const list = seedInstances([], bad);
-      assert.equal(list.length, 1);
-      assert.equal(list[0].id, LOCAL_INSTANCE_ID);
+      assert.equal(list.length, 0, '坏配置既不加远程行，也不再补本机行');
+      assert.equal(list.filter((item) => item.id === 'local').length, 0);
     }
   });
 
   test('S-07 fragment 旧地址：落盘无 #token、id 与干净地址相等（P2-1 端到端）', () => {
     const frag = `http://h:3080/?k=${SECRET}#token=${SECRET}`;
     const list = seedInstances([], legacy({ remoteUrl: frag, remoteLastOk: '' }));
-    assert.equal(list[1].url.includes('#'), false);
-    assert.equal(list[1].url.includes(SECRET), false);
-    assert.equal(list[1].token, SECRET);
-    assert.equal(list[1].id, instanceIdFromUrl(`http://h:3080/?k=${SECRET}`));
+    assert.equal(list[0].url.includes('#'), false);
+    assert.equal(list[0].url.includes(SECRET), false);
+    assert.equal(list[0].token, SECRET);
+    assert.equal(list[0].id, instanceIdFromUrl(`http://h:3080/?k=${SECRET}`));
   });
 
   test('S-08（mod-settings-remote-dedupe）旧 remoteToken 与地址分开存放也一并迁移，且幂等不丢', () => {
     const separate = 'SEPARATE_LEGACY_TOKEN';
     const input = { remoteUrl: 'http://h:3080/?a=1', remoteLastOk: '', remoteMode: 'manual', remoteToken: separate };
     const once = seedInstances([], input);
-    assert.equal(once.length, 2, '本机行 + 一条迁移实例');
-    assert.equal(once[1].token, separate, '分开存的旧令牌必须进 token 字段（不能只迁地址）');
-    assert.equal(once[1].url.includes(separate), false, '令牌不得拼进可读 url');
+    assert.equal(once.length, 1, '只有一条迁移实例，没有本机行');
+    assert.equal(once.filter((item) => item.id === 'local').length, 0, '本机占位绝不再被播种');
+    assert.equal(once[0].token, separate, '分开存的旧令牌必须进 token 字段（不能只迁地址）');
+    assert.equal(once[0].url.includes(separate), false, '令牌不得拼进可读 url');
     const twice = seedInstances(once, input);
     assert.equal(encodeInstances(twice), encodeInstances(once), '再播一次信封逐字节相等（幂等）');
     // 地址里已有令牌时，显式传入的旧 remoteToken 优先（normalizeInstance 的 token 优先级）
     const both = seedInstances([], { ...input, remoteUrl: `http://h:3080/?token=${SECRET}`, remoteToken: separate });
-    assert.equal(both[1].token, separate, '显式旧令牌优先于 URL 里的旧令牌');
-    assert.equal(both[1].url.includes(SECRET), false, 'URL 令牌也不得进可读 url');
+    assert.equal(both[0].token, separate, '显式旧令牌优先于 URL 里的旧令牌');
+    assert.equal(both[0].url.includes(SECRET), false, 'URL 令牌也不得进可读 url');
   });
 
   test('S-08 旧 mode 非法 / 缺失回落 manual，不静默变成 lan', () => {
     const bad = seedInstances([], legacy({ remoteMode: 'wifi' }));
     const missing = seedInstances([], legacy({ remoteMode: undefined }));
-    assert.equal(bad[1].mode, 'manual');
-    assert.equal(missing[1].mode, 'manual');
+    assert.equal(bad[0].mode, 'manual');
+    assert.equal(missing[0].mode, 'manual');
+  });
+
+  // mod-instances-drop-local 新增正向守卫：无本机行时仍可新增远程实例，删空后不回补。
+  test('S-09 空表上添加远程实例可用；删空后保持空表（不重新播种本机）', () => {
+    const remote = normalizeInstance({
+      id: instanceIdFromUrl('http://pc.example:3080/'),
+      name: '我的电脑', url: 'http://pc.example:3080/', mode: 'manual'
+    }).instance;
+    const added = upsertInstance(seedInstances([], { remoteUrl: '', remoteLastOk: '' }), remote);
+    assert.equal(added.length, 1);
+    assert.equal(added[0].id, remote.id);
+    assert.equal(added.filter((item) => item.id === 'local').length, 0);
+    const emptied = added.filter((item) => item.id !== remote.id);
+    const reseeded = seedInstances(emptied, { remoteUrl: '', remoteLastOk: '' });
+    assert.equal(reseeded.length, 0, '删空后播种不复活本机行');
   });
 });
 
@@ -243,17 +261,19 @@ describe('列表展示纯逻辑', () => {
     }
   });
 
-  test('L-02 列表顺序：本机第一，其余按 name 再按 id（排序不改入参）', () => {
-    const local = seedInstances([], { remoteUrl: '', remoteLastOk: '', remoteMode: '' })[0];
+  // 旧断言钉「本机第一」；新事实更严格：没有任何本机锚点，纯按 name→id，且空表仍为空。
+  test('L-02 列表顺序：无本机锚点，纯按 name 再按 id（排序不改入参）', () => {
     const mk = (id, name) => normalizeInstance({
       id, name, url: `http://${id.slice(5, 11)}.example/`, mode: 'lan'
     }).instance;
     const a = mk('inst-0123456789abcdef', 'a-电脑');
     const z = mk('inst-fedcba9876543210', 'z-电脑');
-    const input = [z, local, a];
+    const input = [z, a];
     const ordered = sortInstances(input).map((x) => redactInstance(x).name);
-    assert.deepEqual(ordered, [local.name, 'a-电脑', 'z-电脑']);
-    assert.equal(input[0].id, z.id);
+    assert.deepEqual(ordered, ['a-电脑', 'z-电脑']);
+    assert.equal(input[0].id, z.id, '排序不改入参');
+    assert.equal(ordered.length, 2, '没有隐含的本机首行');
+    assert.deepEqual(sortInstances([]), [], '空表排序仍为空');
   });
 
   test('L-03 可达标记：ok 推进 lastSeen、fail 保留、坏 nowMs 不改时间', () => {
@@ -311,7 +331,11 @@ describe('静态断言：页面、入口与存储接线', () => {
   // 现在可配置模式沿用逐字四段，只读模式另有「去设置添加实例」，标题/指引/次操作仍逐字共用。
   test('U-02 空态文案逐字符合 §1，两种模式各有自己的主操作', () => {
     assert.match(PAGE, /还没有可管理的 DSH 实例/);
-    assert.match(PAGE, /在电脑 DSH → 远程访问 → 启动并点「显示二维码与链接」，把地址粘进来；本机（默认）实例会自动出现/);
+    // 旧指引承诺「本机（默认）实例会自动出现」；新指引只讲远程地址的添加流程。
+    assert.match(PAGE, /在电脑 DSH → 远程访问 → 启动并点「显示二维码与链接」，把地址粘进来；添加一个远程实例即可开始/);
+    const detail = PAGE.match(/const EMPTY_DETAIL: string =\s*'([^']*)'/);
+    assert.ok(detail, '必须有 EMPTY_DETAIL 常量');
+    assert.equal(detail[1].includes('本机'), false, '空态指引文案不得再提本机');
     assert.match(PAGE, /const EMPTY_ACTION: string = '添加实例'/);
     assert.match(PAGE, /const EMPTY_ACTION_READONLY: string = '去设置添加实例'/);
     assert.match(PAGE, /const EMPTY_SECONDARY: string = '用浏览器打开'/);
@@ -327,13 +351,16 @@ describe('静态断言：页面、入口与存储接线', () => {
   // mod-instances-pane-readonly（old→new，收紧）：旧断言在整文件里找「编辑 / 删除」，
   // 现在这些只属于 configurable=true 的配置模式；改在配置块内逐条断言，README 首页侧另在
   // U-18 做「绝迹」断言，两边合起来比旧的整文件 includes 更强。
-  test('U-04 配置模式守卫：本机无删除、编辑不显示 URL 输入框', () => {
+  // 旧断言钉「本机无删除 / 编辑不显示地址」；新事实更严格：没有本机分支，每行都有删除，
+  // 地址与方式表单对所有实例可见（再无「只改名字」的本机特例）。
+  test('U-04 配置模式守卫：无本机特例，每行可编辑可删除且地址 / 方式表单常在', () => {
     const config = configBlocks(PAGE).join('\n');
     assert.ok(config.length > 0, '必须存在配置专属块');
-    assert.match(config, /view\.id !== LOCAL_INSTANCE_ID/, '删除按钮必须排除本机');
-    assert.match(config, /this\.formId !== LOCAL_INSTANCE_ID/, 'URL / 方式输入框必须排除本机');
-    assert.match(config, /label: '删除'/, '配置模式的远程行必须有删除动作');
-    assert.match(config, /label: '编辑'/, '配置模式的每行必须有编辑动作');
+    assert.equal(/LOCAL_INSTANCE_ID|localInstance\(/.test(PAGE), false, '面板不得残留本机分支');
+    assert.match(config, /label: '删除'/, '所有远程行都有删除动作');
+    assert.match(config, /label: '编辑'/, '所有远程行都有编辑动作');
+    assert.match(config, /TextInput\(\{ text: this\.formUrl/, '地址输入框对所有实例可见');
+    assert.match(config, /Select\(this\.modeSelectOptions\(\)\)/, '方式下拉对所有实例可见');
   });
 
   test('U-05 打开复用内嵌 Web 并记可达：routeToRemote + mergeRemoteToken + markReachable(ok|fail, Date.now())', () => {
@@ -444,17 +471,18 @@ describe('静态断言：页面、入口与存储接线', () => {
   });
 
   // mod-instances-pane-readonly（old→new，收紧）：把「三动作都在」改成模式分叉断言。
-  test('U-14 面板渲染本机首行 + 远程行 + 打开；配置动作只在配置模式', () => {
+  // 旧断言钉「本机首行 + 远程行」；新断言钉「只有远程行」，并正向禁止本机标签 / 分支。
+  test('U-14 面板渲染远程行 + 打开；配置动作只在配置模式且没有本机首行', () => {
     assert.match(PAGE, /ForEach\(\s*this\.views,\s*\(view: RedactedInstance\)/, '渲染真实实例视图');
     assert.match(PAGE, /this\.InstanceRow\(view\)/, '每行装配 InstanceRow');
-    assert.match(PAGE, /ensureSeeded\(\{/, '面板仍负责首次播种（本机首行）');
+    assert.match(PAGE, /ensureSeeded\(\{/, '面板仍负责首次播种（只迁远程地址）');
+    assert.equal(/LOCAL_INSTANCE_ID|本机首行|本机（默认）/.test(PAGE), false, '面板不得渲染本机行 / 标签');
     const readonly = readonlySource(PAGE);
     const config = configBlocks(PAGE).join('\n');
     assert.match(readonly, /label: '打开'/, '使用动作在首页面板常驻');
-    assert.match(config, /view\.id !== LOCAL_INSTANCE_ID/, '删除只对远程行渲染');
     assert.match(config, /label: '编辑'/);
-    assert.match(config, /label: '删除'/);
-    // 本机排序第一由 L-02 的纯逻辑钉住；面板消费 store 的 sortInstances 后副本。
+    assert.match(config, /label: '删除'/, '每一行（全为远程）都有删除动作');
+    // 排序不再有本机锚点，由 L-02 的纯逻辑钉住；面板消费 store 的 sortInstances 后副本。
     assert.match(STORE, /redacted\(\): RedactedInstance\[\]/, '渲染视图来自 store 的排序副本');
   });
 
@@ -506,7 +534,7 @@ describe('静态断言：页面、入口与存储接线', () => {
     ]) {
       assert.equal(readonly.includes(needle), false, `只读面板不得出现配置入口「${needle}」`);
     }
-    // 展示面保留：本机首行 / 状态 / 打码 URL / 打开 / 播种。
+    // 展示面保留：远程行 / 状态 / 打码 URL / 打开 / 播种（无本机首行）。
     for (const keep of [
       'instanceStore.ensureSeeded(', 'instanceStore.redacted()', 'ForEach(this.views',
       'Text(redactUrl(view.url))', 'label: \'打开\'', 'reachabilityLabel(view.reachable)'
@@ -551,5 +579,17 @@ describe('静态断言：页面、入口与存储接线', () => {
     assert.equal(config.includes('label: \'打开\''), false, '打开不在配置专属块里：两种模式共用同一行');
     assert.match(PAGE, /this\.openInstance\(view\)/, '行内打开动作接线');
     assert.match(PAGE, /this\.InstanceRow\(view\)/, '两种模式都装配同一实例行');
+  });
+
+  // mod-instances-drop-local 正向守卫：空列表两种模式各有自己的主操作，且没有任何本机兜底。
+  test('U-22 空表首用：配置模式「添加实例」、只读模式「去设置添加实例」，无本机兜底', () => {
+    const readonly = readonlySource(PAGE);
+    const config = configBlocks(PAGE).join('\n');
+    assert.match(config, /actionLabel: EMPTY_ACTION\b/, '配置模式空态主操作 = 添加实例');
+    assert.match(readonly, /actionLabel: EMPTY_ACTION_READONLY/, '只读模式空态主操作 = 去设置添加实例');
+    assert.match(PAGE, /const EMPTY_ACTION: string = '添加实例'/);
+    assert.match(PAGE, /const EMPTY_ACTION_READONLY: string = '去设置添加实例'/);
+    assert.equal(/localInstance\(\)|LOCAL_INSTANCE_ID/.test(PAGE), false, '空态不得回退到本机行');
+    assert.equal(/EMPTY_DETAIL[^\n]*本机|本机（默认）实例会自动出现/.test(PAGE), false, '空态说明不提本机');
   });
 });

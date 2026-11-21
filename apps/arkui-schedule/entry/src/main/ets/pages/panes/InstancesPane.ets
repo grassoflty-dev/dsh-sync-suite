@@ -2,10 +2,11 @@
  * 远程 DSH 面板（mod-shell-instances-pane / mod-instances-pane-readonly）：
  * 同一个组件服务两种形态，由 `configurable` 一处开关分叉。
  *
- * - `configurable = false`（默认，首页「远程 DSH」分段）：**只用来用**——本机首行 /
- *   远程行（名称 + 方式徽章 + 可达三态 + 相对 lastSeen + 二次打码 URL）/「打开」/
+ * - `configurable = false`（默认，首页「远程 DSH」分段）：**只用来用**——远程行
+ *   （名称 + 方式徽章 + 可达三态 + 相对 lastSeen + 二次打码 URL）/「打开」/
  *   typed 问题行 / 空态 / 播种迁移。没有添加实例、编辑、删除，也没有内联地址 / 令牌 /
  *   方式表单；所有配置动作都回到「设置 → 远程实例」。
+ *   产品决定（`mod-instances-drop-local`）：平板不跑原生 DSH，没有本机实例行；空表是正常首用状态。
  * - `configurable = true`（设置 → 远程实例路由 `pages/Instances`）：**配置落点**——
  *   在上面「用」的能力之外，保留页头「添加实例」、行内「编辑 / 删除」、添加 / 编辑表单
  *   与空态「添加实例」。
@@ -31,7 +32,6 @@ import { ActionButton } from '../../components/ActionButton';
 import { EmptyState } from '../../components/state/EmptyState';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../../common/uiTokens';
 import {
-  LOCAL_INSTANCE_ID,
   instanceIdFromUrl,
   normalizeInstance,
   problemText,
@@ -51,7 +51,7 @@ const ACTION_VIEW_DATA: string = 'ohos.want.action.viewData';
 /** 空态文案：§1 逐字口径（标题 + 指引 + 主操作 + 次操作）。 */
 const EMPTY_TITLE: string = '还没有可管理的 DSH 实例';
 const EMPTY_DETAIL: string =
-  '在电脑 DSH → 远程访问 → 启动并点「显示二维码与链接」，把地址粘进来；本机（默认）实例会自动出现';
+  '在电脑 DSH → 远程访问 → 启动并点「显示二维码与链接」，把地址粘进来；添加一个远程实例即可开始';
 /** 可配置模式（设置 → 远程实例）的空态主操作：就地展开添加表单。 */
 const EMPTY_ACTION: string = '添加实例';
 /** 只读模式（首页远程 DSH 面板）的空态主操作：只导航，不在首页展开配置。 */
@@ -89,7 +89,7 @@ export struct InstancesPane {
   @State panelMode: string = '';
   /** 正在编辑的 id（添加时空串）。 */
   @State formId: string = '';
-  /** 表单：名称 / 地址（本机不显示地址框）/ 方式（仅 configurable=true 可见）。 */
+  /** 表单：名称 / 地址 / 方式（仅 configurable=true 可见；所有实例都是远程）。 */
   @State formName: string = '';
   @State formUrl: string = '';
   @State formMode: string = REMOTE_MODE_LAN;
@@ -117,7 +117,7 @@ export struct InstancesPane {
 
   // ------------------------------------------------------------------ 数据
 
-  /** 读一次旧设置做幂等播种；读失败也要保证本机首行出现（旧迁移留空、不算失败）。 */
+  /** 读一次旧设置做幂等播种（只迁远程地址）；读失败也照常播种空迁移、不算失败。 */
   private async bootstrap(): Promise<void> {
     try {
       const settings = await settingsStore.load(getContext(this) as common.UIAbilityContext);
@@ -131,7 +131,7 @@ export struct InstancesPane {
         });
       }
     } catch (error) {
-      // 设置读不到不影响实例表：只播种本机，不在 UI 回显错误细节
+      // 设置读不到不影响实例表：按空迁移播种（不加任何实例），不在 UI 回显错误细节
       if (!this.disposed) {
         instanceStore.ensureSeeded({ remoteUrl: '', remoteLastOk: '', remoteMode: '', remoteToken: '' });
       }
@@ -183,14 +183,14 @@ export struct InstancesPane {
   // ------------------------------------------------------------------ 动作
 
   /**
-   * 打开：复用 `RemoteControl` 的内嵌 Web。远程行把 base 与一次性 token 现拼，
-   * 本机行走参数缺省（`RemoteControl` 自己回退到 `settingsStore.remoteUrl`）。
+   * 打开：复用 `RemoteControl` 的内嵌 Web。所有实例都是远程，把 base 与一次性 token 现拼；
+   * 真身缺失时不塞空地址（不再有回退到旧设置的本机分支）。
    * 跳转成功记 ok、跳转抛错记 fail；Web 加载失败由 RemoteControl 自己的错误卡负责。
    */
   private openInstance(view: RedactedInstance): void {
     const full: DsInstance | null = this.fullOf(view.id);
     const params: Record<string, string> = {};
-    if (view.id !== LOCAL_INSTANCE_ID && full !== null) {
+    if (full !== null) {
       const token: string = full.token === undefined ? '' : full.token;
       const url: string = mergeRemoteToken(full.url, token);
       if (url.length > 0) {
@@ -230,7 +230,7 @@ export struct InstancesPane {
     this.formError = '';
   }
 
-  /** 打开编辑面板；本机行只带名称（URL 输入框按 §2「本机不可改 URL」隐藏）。 */
+  /** 打开编辑面板：远程行带名称 + 地址 + 方式（没有本机只改名的特例）。 */
   private showEdit(view: RedactedInstance): void {
     const full: DsInstance | null = this.fullOf(view.id);
     this.panelMode = PANEL_EDIT;
@@ -253,17 +253,6 @@ export struct InstancesPane {
     const name: string = this.formName.trim();
     if (name.length === 0) {
       this.formError = '实例名称不能为空';
-      return;
-    }
-    if (this.formId === LOCAL_INSTANCE_ID) {
-      const result = normalizeInstance({ id: LOCAL_INSTANCE_ID, name: name, mode: REMOTE_MODE_LAN });
-      if (!result.ok || result.instance === null) {
-        this.formError = result.reason;
-        return;
-      }
-      instanceStore.upsert(result.instance);
-      this.panelMode = '';
-      this.reload();
       return;
     }
     const check = normalizeRemoteUrl(this.formUrl.trim());
@@ -304,11 +293,8 @@ export struct InstancesPane {
     this.reload();
   }
 
-  /** 删除：本机行没有这个动作（模型层也会拒），删完立刻重读内存镜像。 */
+  /** 删除任意远程行（没有受保护的本机行）；删完立刻重读内存镜像，空表不回补实例。 */
   private deleteInstance(view: RedactedInstance): void {
-    if (view.id === LOCAL_INSTANCE_ID) {
-      return;
-    }
     instanceStore.remove(view.id);
     this.reload();
   }
@@ -535,20 +521,18 @@ export struct InstancesPane {
             },
             onBlockedTap: null
           })
-          if (view.id !== LOCAL_INSTANCE_ID) {
-            ActionButton({
-              label: '删除',
-              actionEnabled: true,
-              disabledReason: '',
-              busy: false,
-              variant: 'danger',
-              block: false,
-              onTap: (): void => {
-                this.deleteInstance(view);
-              },
-              onBlockedTap: null
-            })
-          }
+          ActionButton({
+            label: '删除',
+            actionEnabled: true,
+            disabledReason: '',
+            busy: false,
+            variant: 'danger',
+            block: false,
+            onTap: (): void => {
+              this.deleteInstance(view);
+            },
+            onBlockedTap: null
+          })
         }
       }
       .width('100%')
@@ -559,7 +543,7 @@ export struct InstancesPane {
     .borderRadius(RADIUS.none)
   }
 
-  /** 添加 / 编辑面板：本机只给名称；远程给名称 + 地址 + 方式（六选一）。仅 configurable=true 装配。 */
+  /** 添加 / 编辑面板：每个远程实例都给名称 + 地址 + 方式（六选一）。仅 configurable=true 装配。 */
   @Builder
   FormPanel() {
     if (this.panelMode.length > 0) {
@@ -578,23 +562,21 @@ export struct InstancesPane {
             this.formName = value;
             this.formError = '';
           })
-        if (this.formId !== LOCAL_INSTANCE_ID) {
-          TextInput({ text: this.formUrl, placeholder: 'http://192.168.1.6:3080/?token=…' })
-            .width('100%')
-            .height(TOUCH_MIN)
-            .fontSize(FONT.body)
-            .onChange((value: string) => {
-              this.formUrl = value;
-              this.formError = '';
-            })
-          Select(this.modeSelectOptions())
-            .selected(this.modeIndex())
-            .width('100%')
-            .height(TOUCH_MIN)
-            .onSelect((index: number) => {
-              this.pickMode(index);
-            })
-        }
+        TextInput({ text: this.formUrl, placeholder: 'http://192.168.1.6:3080/?token=…' })
+          .width('100%')
+          .height(TOUCH_MIN)
+          .fontSize(FONT.body)
+          .onChange((value: string) => {
+            this.formUrl = value;
+            this.formError = '';
+          })
+        Select(this.modeSelectOptions())
+          .selected(this.modeIndex())
+          .width('100%')
+          .height(TOUCH_MIN)
+          .onSelect((index: number) => {
+            this.pickMode(index);
+          })
         if (this.formError.length > 0) {
           Text(this.formError)
             .fontSize(FONT.caption)
@@ -654,7 +636,7 @@ export struct InstancesPane {
           this.FormPanel()
         }
         if (this.loading) {
-          Text('正在读取本机实例表…')
+          Text('正在读取实例表…')
             .fontSize(FONT.caption)
             .lineHeight(LINE_HEIGHT.caption)
             .fontColor($r('app.color.text_secondary'))

@@ -6,7 +6,7 @@
  * AI 汇总本来就是**列表第一项**（`SummaryCard`，数据源 `summaryStore.read` / `generate`），
  * 页头再放一个 AI 汇总图标属于同一动作两处入口，且点了没有可见反馈。现在页头只留
  * `今天`（左）+ `⚙ 设置`（右），中间不放任何空按钮；AI 汇总只能从汇总块进入
- * （空态「生成汇总」/ 失败态「重试」/「重新生成」/「查看全部」/ 点标题与要点）。
+ * （空态「生成汇总」/ 失败态「重试」/ 有汇总态「AI 汇总」/「查看全部」/ 点标题与要点）。
  * 守卫测试：`tools/test/indexHeader.test.mjs`。
  *
  * 契约：BRIEF §3.5、`docs/CONTRACT.md` §3.4：
@@ -780,12 +780,12 @@ struct Index {
    *
    * 三条刻意的选择：
    * 1. **不写「已取消」**：取消的是「等待」，请求本身可能已经发出去了，写「已取消」等于假成功；
-   * 2. **不宣称结果不会回来**：文案直说「模型回复可能仍会到达」，让用户知道稍后要「重新生成」覆盖；
+   * 2. **不宣称结果不会回来**：文案直说「模型回复可能仍会到达」，让用户知道稍后要再点「AI 汇总」覆盖；
    * 3. **只置空闲 + 写原因**：结果若真回来了，`generateSummary` 的成功分支会清掉这条提示。
    */
   private cancelAiWait(): void {
     this.aiBusy = false;
-    this.summaryError = '已停止等待：模型回复可能仍会到达，稍后点「重新生成」覆盖';
+    this.summaryError = '已停止等待：模型回复可能仍会到达，稍后再点「AI 汇总」覆盖';
     console.info('[ai] wait cancelled by user');
   }
 
@@ -1317,7 +1317,7 @@ struct Index {
    * ② 生成中     → `LoadingState`（3 秒后出现「取消」；取消只停止等待，结果真回来就用真结果）
    * ③ 失败       → `ErrorState`（发生了什么 / 为什么 / 下一步 + 诊断 + 重试 / 去设置）
    * ④ 无汇总     → `EmptyState`（一句说明 + 「生成汇总」；空态必须有下一步）
-   * ⑤ 有汇总     → 标题一行 + 要点 ≤3 条 +（>3 时「查看全部」）+ 「更新于 HH:MM · 重新生成」
+   * ⑤ 有汇总     → 标题一行 + 要点 ≤3 条 +（>3 时「查看全部」）+ 「更新于 HH:MM · AI 汇总」（幂等，再点即重生成）
    */
   @Builder
   SummaryCard() {
@@ -1435,7 +1435,7 @@ struct Index {
             .layoutWeight(1)
             .textAlign(TextAlign.End)
           ActionButton({
-            label: '重新生成',
+            label: 'AI 汇总',
             actionEnabled: !this.aiBusy,
             disabledReason: 'AI 汇总正在生成，请稍候',
             busy: this.aiBusy,

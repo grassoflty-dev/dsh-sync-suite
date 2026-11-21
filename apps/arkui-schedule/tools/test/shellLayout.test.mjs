@@ -342,7 +342,7 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
 
   // mod-instances-pane-readonly（old→new，收紧）：旧断言把三动作都算「面板真 body」；
   // 现在「打开」是两种模式的共用能力，「编辑 / 删除」只在设置配置模式，分别钉住。
-  test('L-19 远程 DSH 真 body：本机首行 + 打开 + 空态 + 播种；配置动作只在设置模式', () => {
+  test('L-19 远程 DSH 真 body：远程行 + 打开 + 空态 + 播种；配置动作只在设置模式', () => {
     const instances = PANE_RAW.get('InstancesPane');
     const readonly = readonlyRegions(instances);
     const config = configRegions(instances).join('\n');
@@ -356,9 +356,10 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       assert.ok(config.includes(token), `配置模式必须拥有 ${token}`);
       assert.equal(readonly.includes(token), false, `首页面板不得渲染配置动作 ${token}`);
     }
-    // `view.id !== LOCAL_INSTANCE_ID` 两处用途不同：删除按钮（配置专属）与打开时拼 token
-    // （两种模式共用），所以只在配置块里断言删除分支，不断言整份只读源码绝迹。
-    assert.ok(config.includes('view.id !== LOCAL_INSTANCE_ID'), '配置块的删除分支必须排除本机');
+    // mod-instances-drop-local（old→new，收紧）：旧断言钉「删除分支排除本机、打开时按本机
+    // 走参数缺省」；现在没有本机行——面板不得有 local 分支，所有远程行一律可删、可拼 token 打开。
+    assert.equal(/LOCAL_INSTANCE_ID|localInstance\(/.test(instances), false, '面板不得有本机行分支');
+    assert.ok(config.includes("label: '删除'"), '配置块的每行远程实例都有删除动作');
     for (const stale of ['远程面板即将迁入', '实例列表与连接操作即将迁入', '本页暂不展示任何记录。']) {
       assert.equal(instances.includes(stale), false, `远程面板不得残留占位串「${stale}」`);
     }

@@ -30,6 +30,12 @@ const etsDir = join(here, '..', '..', 'entry', 'src', 'main', 'ets');
 // S3：日程契约锚点已从 fallback 路由 pages/Index.ets 移到真 body 所在的日程面板。
 const pagePath = join(etsDir, 'pages', 'panes', 'SchedulePane.ets');
 const source = readFileSync(pagePath, 'utf8');
+// mod-ai-summarize-label：本模块唯一可写的日程源码是 fallback 路由 pages/Index.ets，
+// 有汇总态标签的新真值钉在它上面。上面的真 body 锚点与其全部断言一字未动；这里是**新增**覆盖。
+const INDEX_ETS = readFileSync(join(etsDir, 'pages', 'Index.ets'), 'utf8');
+const INDEX_ETS_CODE = INDEX_ETS
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^\s*\/\/.*$/gm, '');
 // S4：外壳真值来源（新首页 = Home + ShellRail）。
 const HOME = readFileSync(join(etsDir, 'pages', 'Home.ets'), 'utf8');
 const PANE_DIR = join(etsDir, 'pages', 'panes');
@@ -129,10 +135,26 @@ describe('日程面板契约（S3 已迁入 SchedulePane.ets）：AI 汇总图�
     // A 批（`docs/STATE-UI.md` §5）把「生成今日汇总」那一行改成空态：
     // 标题 + 说明 + 「生成汇总」动作（空态必须带下一步，不能再是一行可点文字）。
     assert.match(code, /actionLabel: '生成汇总'/, '块内「生成汇总」入口仍在（页头入口删除后这是唯一 AI 汇总入口）');
-    // 生成入口不止一个：生成行 / 重试 / 重新生成
+    // 生成入口不止一个：空态生成 / 失败态重试 / 有汇总态「AI 汇总」（幂等再生成），三处仍都调 generate。
     const card = memberBody('SummaryCard');
     const generateCalls = (card.match(/this\.generateSummary\(\)/g) ?? []).length;
-    assert.ok(generateCalls >= 3, `汇总块内应有生成/重试/重新生成三个入口，实际 ${generateCalls} 处`);
+    assert.ok(generateCalls >= 3, `汇总块内应有生成/重试/有汇总态三个入口，实际 ${generateCalls} 处`);
+    // mod-ai-summarize-label（old→new，收紧）：旧文案把有汇总态钉成「重新生成」，现在钉成「AI 汇总」。
+    // 真 body（SchedulePane.ets）与 fallback（Index.ets）两个日程源码都做全文禁用词绝迹 + 块内正向钉标签，
+    // 避免只改 fallback 而用户实际看到的面板仍显示旧标签。上面的三入口与 actionLabel 断言原样保留。
+    assert.match(card, /label: 'AI 汇总'/, '真 body 有汇总态动作标签必须是「AI 汇总」');
+    assert.equal(/重新生成/.test(source), false, 'SchedulePane.ets 全文（含注释与停止等待文案）不得出现「重新生成」');
+    assert.equal(/重新生成/.test(code), false, 'SchedulePane.ets 代码视图不得出现「重新生成」');
+    const idxCardAt = INDEX_ETS_CODE.indexOf('SummaryCard() {');
+    assert.ok(idxCardAt >= 0, 'Index.ets 必须保留 SummaryCard 汇总块');
+    const idxCardEnd = INDEX_ETS_CODE.indexOf('\n  }\n', idxCardAt);
+    assert.ok(idxCardEnd > idxCardAt, 'Index.ets 的 SummaryCard 必须能定位到定义末尾');
+    const idxCard = INDEX_ETS_CODE.slice(idxCardAt, idxCardEnd + 5);
+    assert.match(idxCard, /label: 'AI 汇总'/, '有汇总态动作标签必须是「AI 汇总」（幂等，不再显示「重新生成」）');
+    assert.equal(/重新生成/.test(idxCard), false, '有汇总态渲染出的 action label 不得出现「重新生成」');
+    assert.equal(/重新生成/.test(INDEX_ETS), false, 'Index.ets 全文（含注释与停止等待文案）不得出现「重新生成」');
+    const idxGenerateCalls = (idxCard.match(/this\.generateSummary\(\)/g) ?? []).length;
+    assert.ok(idxGenerateCalls >= 3, `Index.ets 汇总块内应有生成/重试/有汇总态三个入口，实际 ${idxGenerateCalls} 处`);
   });
 
   test('AiPanel 仍保留（列表项逐条 AI 操作），但只能由结果面板的「重选」触发', () => {
