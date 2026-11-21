@@ -1434,3 +1434,164 @@ GATE4_EXIT=0
 **本 pass 的改动**：未改任何源码/断言；只新增本文 §15.11 与 gitignore 内 `.tmp/device-shots/final-pass-20261120/` 证据（另 `.tmp/fp-scan.mjs` 为一次性解析辅助，非仓库文件）。`git status --porcelain` 相对 pass 开始只多出并行执行者的 `docs/RELEASE-PLAN-APPGALLERY.md`（untracked）——本 pass 未触碰。
 
 **unverified（本 pass 未覆盖）**：b–d 的真机呈现与交互（含模型下拉选择、数据组唯一入口、同步三按钮）；锁屏/皮套模式解除后的全部 UI 注入；签名材料 v1 回退的处置；真实仓库配置下的 Git push/pull；手写/OCR 端到端；横竖屏切换后的设置页布局。§15.8 / §15.10 的 STILL UNVERIFIED 列表继续有效。
+
+### 15.12 设备验证 pass-3（2026-11-21，`device-pass-3`；只追加，不改写 §15.1–§15.11）
+
+> 本 pass 在设备重新启用后跑当前工作树（含未提交的 `mod-home-entries`：首页双格条 + `Chats` 分段）。
+> 无线 `hdc tconn 192.168.1.7:33023` 成功，所有命令带 `-t 192.168.1.7:33023`；每次注入前
+> `aa force-stop com.oray.sunloginclient`（向日葵浮层抢点击）并 `power-shell wakeup`。本次平板**未**进入
+> §15.11 的皮套 / 防误触 / 锁屏循环，设置页三项环境阻断全部取到布局。证据均在
+> `.tmp/device-shots/pass-3-*`（gitignore 内）。结论均为本 pass 新采，历史结论不动。
+
+**构建 / 签名 / 装机（各一次）**
+
+- `build-harmony.ps1 -Cores 4 -Product default`：`BUILD SUCCESSFUL in 5 min 7 s 432 ms`，42 tasks =
+  23 executed / 19 up-to-date；`CompileArkTS` 实际执行 2 min 36 s 736 ms（非 UP-TO-DATE）；
+  `✓ 产物验收通过`；`overlay(finally): applied=false（已断言）`。未签 HAP `entry-default-unsigned.hap`
+  **4,648,187 B / SHA256=0B8CFE18D0D84A6B0DEFB1DFB72CF932336E779B01B74BB32EA25AAB060885DF**。
+- `sign-hap.ps1 -Deliver`：`Sign Hap success!` / `verify-app success`（仍有「v2 signing material incomplete
+  → fallback to v1 (LEAKED KEY)」告警，历史既有，未改签名材料）。交付 HAP
+  `dist-harmony/arkui-schedule-harmony-debug-signed.hap` **4,707,129 B /
+  SHA256=79AC28C66D6CB8FA5118362525D36D9094574A62435D8A258A2488370C8E3B7A**。
+- `hdc -t 192.168.1.7:33023 install -r` → `install bundle successfully`；`aa start -a EntryAbility -b
+  com.itwill.schedule` → `start ability successfully`；`ps -ef` 见 `com.itwill.schedule` 存活。
+- **`services/instanceGrantStore.ets` 编译结论：SKIPPED（未编入）**。证据：ArkTS 编译缓存
+  `entry/build/default/cache/default/default@CompileArkTS/esmodule/debug/filesInfo.txt`（108 行）与
+  `modules.cache`（109 行）中只有 `model/instanceSeed.ts`，**没有** `instanceGrantStore.ts` / `instanceGrant.ts`；
+  全部 522 个缓存文件与 `.msgpack` 产物对 `instanceGrantStore` / `instanceGrant` 命中 **0**；HAP 内
+  `ets/modules.abc` 对该串命中 0。源码中它只被 Node 源码守卫 `tools/test/instanceGrant.test.mjs:562` 以
+  `readFileSync` 读取，**没有任何 `.ets` import 它**。因此它仍是 `unverified`，不因本次构建升级为
+  compile-verified；待 `mod-dots-readonly` 接线后需重新跑一次构建才能翻转。
+- 对照：`mod-home-entries` 已确编入（`modules.abc` 中 `ChatEntries`×2、`filterByKind`×2、
+  `纯云端对话`×2、`与 dots 对话`×2、`还没有 dots 对话`×1；编译缓存有 `Index.ets` / `Chats.ets` /
+  `chatList.ts` 的 `.msgpack` + `.protoBin`）。
+
+**§15.11 三项环境阻断复验（全部 PASS）**
+
+| # | 项 | 结论 | 逐字布局证据 / 证据文件 |
+| --- | --- | --- | --- |
+| a | 设置 → 数据：仅一个导入/导出入口 | **PASS** | `pass-3-data-nodes.txt`：`Text [导出]`、`Button [导出完整包]`、`Text [导入]`、`Button [选择文件]`、`Button [确认导入]`、`Button [取消]`；`日程备份`=0 / `备份`=0（三份设置 dump 全文）。截图 `pass-3-data.png` |
+| b | 设置 → AI：无「高级」、模型可选 | **PASS** | 唯一的 `高级 ▸`/`高级 ▾` 在左栏同步组（bounds x=57），AI 组（x=1338–2503）无高级控件。点 `模型` 行 → `选择模型` sheet 有 `DeepSeek Chat`（✓）与 `DeepSeek Reasoner`；选后者后 `Text [模型]` 行更新为 `DeepSeek Reasoner`，fallback 行同步变为 `主源：DeepSeek 官方 · deepseek-reasoner`。截图 `pass-3-model-sheet.png`、`pass-3-model-picked.png` |
+| c | 设置 → 同步：无推送/立即同步，状态诚实 | **PASS** | 主布局 + `更多` 弹层（`Text [同步（Git）更多操作]` 仅 `查看状态` / `测试连接` / `关闭`）+ 展开 `高级 ▾`（仅 `用户名（HTTPS 认证）`）三处 `推送`=0 / `立即同步`=0。状态行逐字 `Text [还没有配置同步仓库]` + `Text [填好仓库地址和 token 后，这里会显示同步状态]`。截图 `pass-3-sync-more.png`、`pass-3-sync-advanced.png` |
+
+**首页 / 空仓库复验**
+
+| # | 项 | 结论 | 逐字证据 / 证据文件 |
+| --- | --- | --- | --- |
+| d | 首 tab / 无快捷记录 / 唯一创建入口 | **PASS** | `pass-3-home-layout.json`：`Button text=[当日全部日程]`、`Button [未完成]`；`快速记一条`/`快速记`/`保存` 均为 0；唯一创建主按钮 `Button [新建]`；唯一 TextInput 是明确保留的 `hint=[搜索标题/正文/作者]`。截图 `pass-3-home.png` |
+| e1 | 空仓库起点 | **PASS** | 备份 `pass-3-git-repo-backup`（14 files / 1,554,295 B；`pass-3-baseline-devices-md5.txt` 11 条）；只 `rm -rf git-repo/timeline` 后 `ls git-repo` 仅 `devices/`；relaunch → `Text [今天还没有日程]`，无 banner / 无 `E_NOT_MIGRATED`。截图 `pass-3-fresh-empty.png` |
+| e2 | 新建 → 落盘 + devices 不变 | **PASS** | `pass-3-fresh-ls.txt`：`timeline/schema.json`（`{"schemaVersion":2}`）+ `timeline/2026-11-21/records.json`；`pass-3-records.json` 首行含 `FRESH-UI-PASS3-20261121`、`"ts":"2026-11-21T08:28:03+08:00"`。恢复后重收 `devices/**` 11 个文件的 MD5 与备份基线**逐行相同**（`DEVICES_UNCHANGED=YES`）。 |
+| e3 | 重启保留 + 状态行 | **PASS（保留）** | `aa force-stop` + `aa start` 后页头 `Text [当日全部日程 1 条（v2 时间线，自动同步）]`，`timeline/2026-11-21/records.json` 仍在；切到「未完成」tab 后逐字可见 `Text [FRESH-UI-PASS3-20261121]`。同步状态行诚实：`Text [失败：未知错误]` + `Text [重试同步]`（无仓库配置，未伪造「已同步」）。截图 `pass-3-fresh-restart.png`、`pass3-pending-tab.json` |
+
+**mod-home-entries 真机复验**
+
+| # | 项 | 结论 | 逐字证据 / 证据文件 |
+| --- | --- | --- | --- |
+| f1 | 两格渲染 + 左格路由 | **PASS** | 首页 `Button [纯云端对话]` bounds=[57,1296][475,1391]、`Button [与 dots 对话]` bounds=[494,1296][912,1391]；点左格 → 页头 `云端对话` / `只读 · 从同步仓库读取`，分段 `纯云端对话` + `dots 对话`，空态 `还没有云端对话` + `本页只读：…插件「云端对话 → 导出全部」…从首页「纯云端对话」…` + 按钮 `下拉刷新试试`。截图 `pass-3-chats-cloud.png` |
+| f2 | 右格路由 / 分段切换 / dots 空态 | **PASS** | 首页右格进同页 `dots` 段；在页内点 `dots 对话` 分段后空态逐字切换为 `还没有 dots 对话` + `从首页「与 dots 对话」进入本页；dots 可查看实例并对会话发指令，所有操作需你确认，当前为只读预览` + `下拉刷新试试`。截图 `pass-3-chats-dots-segment.png` |
+| f3 | 有会话行时的分段过滤 | **BLOCKED（设备无 chats 数据）** | 设备 `git-repo/chats/` 不存在（`NO_CHATS`），无法造出 `kind` 不同的两行做逐行过滤；仅 f2 的按段空态派发已验证。`normalizeChatKind` / `filterByKind` 的纯函数行为由 `chatList.test.mjs` 覆盖。 |
+
+**FAILED（新发现，本 pass 未修）**
+
+- **横屏「当日全部日程」tab 有记录时列表零高度**（`pages/Index.ets:1823–1834` `WideBody()`）：在
+  2560×1600 横屏下，左栏 flex `Column`（含 `SummaryCard()` + `RecordList()`）实测
+  `bounds=[57,970][912,1268]`，恰好被 `SummaryCard()`（298 px）占满，`RecordList()` 无节点、无标题；
+  页头仍显示 `当日全部日程 1 条`，即**计数与可见行不一致**。切到「未完成」tab（源码
+  `Index.ets:1824` 不渲染 SummaryCard）后同一条记录立刻出现：`List [57,970][912,1268]` →
+  `ListItem` → `Text [FRESH-UI-PASS3-20261121]`（`pass-3-pending-tab.json`）。
+  诱因是 `mod-home-entries` 在左栏新增的 `ChatEntries()`（`Index.ets:1836`，约 111 px）与
+  `SidebarAction()` 争用固定高度，flex 子项被压到只剩 SummaryCard 的高度。修法涉及断点布局取舍
+  （压缩汇总块 / 让双格条进入滚动区 / 给列表保底高度），超出「小且明显的缺陷」范围，本 pass 不擅自改
+  布局，留待 Designer 决策。竖屏（1600×2494）未复现该现象（历史 §15.10 / §15.11 布局均有 Refresh 列表节点）。
+
+**门闸 tail（本 pass 复跑，四门全绿）**
+
+```
+GATE1_EXIT=0                       # tsc -p apps/arkui-schedule/tools/tsconfig.json
+ℹ tests 2975 / suites 353 / pass 2974 / fail 0 / skipped 1
+GATE2_EXIT=0                       # node --test 全量（packages + apps）
+✅ 全部通过：8/8 条规则（JSON5/JSON 70 个、相对 import 423 条、main 静态 import 542 条、页面 8 个、rawfile/git 2 个文件）
+GATE3_EXIT=0                       # validate-app
+[overlay] applied=false            GATE4_EXIT=0
+```
+
+**本 pass 的改动**：未改任何源码 / 断言；只有本文 §15.12 的新增与 gitignore 内 `.tmp/device-shots/pass-3-*`
+证据（另 `.tmp/build-pass3.log` / `.tmp/sign-pass3.log` / `.tmp/gate*-pass3.log` 为一次性日志）。
+`git status --porcelain` 与 pass 开始时完全一致（仍只有未提交的 `mod-home-entries` 工作树：
+`chatList.ts`、`Chats.ets`、`Index.ets`、两份 test、`docs/MODULES.md`、`docs/ROADMAP.md` + 新增
+`homeEntries.test.mjs`）。未触发「失败即改」分支，门闸为主动复跑而非修后重跑。
+
+**unverified**：`instanceGrantStore`（SKIPPED，见上）；f3 有行时的逐行分段过滤；真实 Git commit/push
+与 `已同步·HH:MM` 三态行；双设备并发；OCR / 手写端到端；远程 Web 与 dots 命令链；插件 live；
+签名材料 v1 回退的处置。§15.8 / §15.10 的 STILL UNVERIFIED 列表继续有效。
+
+### 15.13 横屏列表零高度修复复验（2026-11-21，`fix-landscape-list`；只追加，不改写 §15.1–§15.12）
+
+**修复（针对 §15.12 的 FAILED）**
+
+- `pages/Index.ets:125` 新增 `SUMMARY_BOX_MAX_HEIGHT=80`（vp）；`SummaryCard()` 根 `Column` 改为 `Scroll` 包裹，
+  宽屏（`masterDetail`）下 `.constraintSize({ maxHeight: SUMMARY_BOX_MAX_HEIGHT })`，竖屏不设上限（:1323 / :1458）。
+  汇总块从「吃满列表区的竞争者」变为有界固定高度兄弟；五态文案与入口一个没删，块内仍可滚动。
+- `CompactBody()`（:1798）与 `WideBody()`（:1848）在原有加权区内各加一层 `Column().layoutWeight(1)`，
+  只包 `RecordList()`（紧凑屏仍由 `Refresh` 包裹）；`ChatEntries()` 仍在加权区外作固定兄弟；
+  共享 `ListRows()` 的 `List` 保持 `layoutWeight(1)`。列表永远拿到余量，页头计数与可见行一致。
+- `tools/test/homeEntries.test.mjs:222–252` 新增 6 条静态断言：两断点各自的 `RecordList` 位于以
+  `.layoutWeight(1)` 收尾的加权区；`ChatEntries()` 不在该加权区；共享 `List` 仍带 `layoutWeight(1)`；
+  `WideBody` 同时渲染计数文案与列表，且 `if (this.tab === 'today')` 在列表之前闭合（不能一起跳过列表）。
+
+**门闸 tail（修后复跑，四门全绿）**
+
+```
+GATE1_EXIT=0                       # tsc -p apps/arkui-schedule/tools/tsconfig.json
+ℹ tests 2981 / suites 354 / pass 2980 / fail 0 / skipped 1   (homeEntries 18/18，比 §15.12 多 6 条)
+GATE2_EXIT=0                       # node --test 全量（packages + apps）
+✅ 全部通过：8/8 条规则（JSON5/JSON 70 个、相对 import 423 条、main 静态 import 542 条、页面 8 个、rawfile/git 2 个文件）
+GATE3_EXIT=0                       # validate-app
+[overlay] applied=false            # 构建/收尾两次确认
+```
+
+**构建 / 签名 / 装机**
+
+- 最终源码（auto_rotation）构建：`BUILD SUCCESSFUL in 9 min 15 s 542 ms`，42 tasks = 23 executed / 19 up-to-date，
+  `CompileArkTS` 4 min 46 s 546 ms；`✓ 产物验收通过`；unsigned HAP **4,650,349 B /
+  SHA256=20AFA9F6D0EC3EE899FADEBE590D694179B6A455C125CEB527DAAAF83A7B659B**。
+- 签名需显式 `-StorePass itwill123`（`signing/pass.txt` 是轮换后的 v2 口令，v1 p12 不认；
+  首次不传口令失败一次，非源码问题）；`Sign Hap success!` / `verify-app success`（v2 材料不全 → v1 回退告警仍在）。
+  交付 HAP `dist-harmony/arkui-schedule-harmony-debug-signed.hap` **4,713,925 B /
+  SHA256=CD1945B3864F6607CEA1CF1A138AC17A4778794718B7B845229D47BFAA45CE52**。
+- `hdc -t 192.168.1.7:33023 install -r` → `install bundle successfully`；`aa start -a EntryAbility -b
+  com.itwill.schedule` → `start ability successfully`；每次注入前 `aa force-stop com.oray.sunloginclient` +
+  `power-shell wakeup`。最终设备装的是这份 auto_rotation 交付 HAP。
+
+**横屏验证（2560×1600，1 条记录，今日 tab）**
+
+- 设备物理方向当前为竖屏；`auto_rotation` 应用无法用 `wm` / `settings` / `uitest rotate` 软件置横。
+  为取真实横屏证据：临时把 `module.json5` 的 orientation 改为 `landscape` 重建一版**仅用于验证**的 HAP；
+  验毕已回退 `auto_rotation`（`git diff -- module.json5` 为空）并重装上面的交付 HAP。
+  直接改 ZIP 重压缩 HAP 的版本会黑屏（资源失效），已弃用，不作为证据。
+- 修前（§15.12）左栏 flex Column `bounds=[57,970][912,1268]` 被 SummaryCard 占满、无 List 节点；
+  修后逐字布局（`fix-landscape-nodes.txt` / `fix-landscape-verified.json`）：
+  `Text [当日全部日程 1 条（v2 时间线，自动同步）] bounds=[19,208][2367,255]`、
+  `Text [✨ 今日汇总] bounds=[57,970][912,1018]`、
+  `Text [FRESH-UI-PASS3-20261121] bounds=[199,1193][788,1250]`（**今日 tab 内可见行，与计数 1 条一致**）、
+  `Button [纯云端对话] bounds=[57,1297][475,1392]`、`Button [新建] bounds=[57,1420][627,1534]`（双格条/主操作位置未变）。
+- 滚动：`swipe 400,1240→400,1120` 后同一行变为 `bounds=[199,1160][788,1176]`，证明列表区真实滚动；
+  再在汇总块内上滑，`生成汇总` 按钮由 1px 裁切变为完整可见（块内滚动，文案未丢）。
+  截图 `.tmp/device-shots/fix-landscape-today.png`（首屏）、`fix-landscape-scroll.png`（滚动后）；
+  布局 `fix-landscape-verified.json`、`fix-landscape-scroll.json`、`fix-landscape-nodes.txt`。
+
+**竖屏回归（1600×2560，交付 HAP）**
+
+- 根 `bounds=[0,105][1600,2560]`；`Text [当日全部日程 1 条（v2 时间线，自动同步）] bounds=[19,208][1407,255]`、
+  `Text [FRESH-UI-PASS3-20261121] bounds=[199,1317][1419,1374]`、`Button [新建] bounds=[57,2380][1543,2494]`；
+  未复现零高度。截图 `.tmp/device-shots/fix-landscape-portrait.png`，布局 `fix-landscape-portrait.json`。
+
+**本 pass 的改动**：`pages/Index.ets`、`tools/test/homeEntries.test.mjs`（均属未提交 `mod-home-entries` 工作树）、本文 §15.13，
+以及 gitignore 内 `.tmp/device-shots/fix-landscape-*`。`module.json5` 已回退（无 diff）。
+`git status --porcelain`：8 项既有 `mod-home-entries` 改动 + 新增 `homeEntries.test.mjs`（untracked），
+无本 pass 额外源码文件。
+
+**unverified**：§15.12 f3（有 chats 行时逐行分段过滤）；`instanceGrantStore`（SKIPPED）；
+真实 Git push/pull 与「已同步·HH:MM」；双设备并发；OCR / 手写端到端；远程 Web 与 dots 命令链；插件 live；
+签名材料 v1 回退处置。横屏截图取自临时 landscape-locked 验证构建（同一份修复源码），非交付 HAP 本身；
+交付 HAP 的横屏行为由该验证构建等价推断。

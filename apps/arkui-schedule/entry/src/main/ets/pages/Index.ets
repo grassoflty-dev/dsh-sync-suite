@@ -43,6 +43,7 @@ import { common } from '@kit.AbilityKit';
 import { loadingText, toastMsFor } from '../common/copy';
 import { localDateKey, nextTsSameDate, nowIso } from '../common/date';
 import { APP_VERSION } from '../common/version';
+import type { ChatKind } from '../model/chatList';
 import { applyAiResult, buildAiPayload } from '../model/aiPayload';
 import type { AiPayload, ScheduleRecord } from '../model/types';
 import { cloneRecord } from '../model/types';
@@ -114,6 +115,14 @@ const SIDEBAR_ACTION_WIDTH: number = 240;
 
 /** 宽屏列表最大宽度（vp）：超过后居中留白，避免单条记录横跨整个宽屏（720vp ≈ 14fp 下 45–50 字/行）。 */
 const LIST_MAX_WIDTH: number = 720;
+
+/**
+ * 宽屏/横屏左栏「今日汇总」块在列表区内的高度上限（vp）。
+ * 2560×1600 横屏下左栏列表区总高只有约 125vp，汇总块自然高 ~119vp：不限高会把
+ * 同区的日程列表挤成 0 高（docs/VERIFICATION.md §15.12 FAILED）。宽屏（masterDetail）
+ * 下封顶并允许块内滚动，保证列表区永远可见；竖屏内容宽 <840vp 时不设上限，保持原样。
+ */
+const SUMMARY_BOX_MAX_HEIGHT: number = 80;
 
 /** 两位补零（本地 HH:MM 展示用）。 */
 function two(value: number): string {
@@ -547,6 +556,18 @@ struct Index {
   private openSettings(): void {
     router.pushUrl({ url: 'pages/Settings' }).catch((error: Error) => {
       promptAction.showToast({ message: `打开设置页失败：${describeError(error)}` });
+    });
+  }
+
+  /**
+   * 首页「对话」双格条 → 共享会话列表页，按格子预选 `kind` 段（默认左侧 = cloud）。
+   * 只传一个字符串参数：列表本来就读同一份 `chats/index.jsonl`，不需要第二套页面或 store。
+   * 返回由 PageLayout 的返回按钮走 `router.back()`，自然回到首页。
+   */
+  private openChats(kind: ChatKind): void {
+    const params: Record<string, string> = { 'kind': kind };
+    router.pushUrl({ url: 'pages/Chats', params: params }).catch((error: Error) => {
+      promptAction.showToast({ message: `打开会话列表失败：${describeError(error)}` });
     });
   }
 
@@ -1241,6 +1262,51 @@ struct Index {
   }
 
   /**
+   * 「对话」双格条（`docs/CLOUD-CHAT-AND-DOTS.md` §2 的推荐落位）：
+   * 常驻在首页列表区底部、「新建」主操作**之上**（原快捷记录行的位置，该行已删除），
+   * 两个次要样式格子各占一半；不新增主操作、不动页头、不新增第三个 tab。
+   * 左格进纯云端对话段，右格进 dots 对话段；紧凑屏与宽屏左栏各渲染一次，横屏右栏不重复。
+   */
+  @Builder
+  ChatEntries() {
+    Row({ space: SPACING.sm }) {
+      Column() {
+        ActionButton({
+          label: '纯云端对话',
+          actionEnabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: 'secondary',
+          block: true,
+          onTap: (): void => {
+            this.openChats('cloud');
+          },
+          onBlockedTap: null
+        })
+      }
+      .layoutWeight(1)
+
+      Column() {
+        ActionButton({
+          label: '与 dots 对话',
+          actionEnabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: 'secondary',
+          block: true,
+          onTap: (): void => {
+            this.openChats('dots');
+          },
+          onBlockedTap: null
+        })
+      }
+      .layoutWeight(1)
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Center)
+  }
+
+  /**
    * 「今日汇总」块：今日日程列表的第一项。
    *
    * 五态（同一时刻只显示一态，互斥）：
@@ -1252,9 +1318,12 @@ struct Index {
    */
   @Builder
   SummaryCard() {
-    Column({ space: SPACING.sm }) {
-      Row({ space: SPACING.sm }) {
-        Text('✨ 今日汇总')
+    // 宽屏/横屏下封顶并允许块内滚动：汇总块不再吃掉整个列表区（列表必须拿到余量）。
+    // 竖屏（非 masterDetail）不设上限，行为与改前一致。
+    Scroll() {
+      Column({ space: SPACING.sm }) {
+        Row({ space: SPACING.sm }) {
+          Text('✨ 今日汇总')
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.brand'))
@@ -1378,12 +1447,17 @@ struct Index {
         .alignItems(VerticalAlign.Center)
       }
 
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
+        Divider()
+          .strokeWidth(DIVIDER)
+          .color($r('app.color.divider'))
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
-    .alignItems(HorizontalAlign.Start)
+    .constraintSize({ maxHeight: this.masterDetail ? SUMMARY_BOX_MAX_HEIGHT : undefined })
+    .scrollBar(BarState.Off)
+    .align(Alignment.TopStart)
   }
 
   // ------------------------------------------------------------------ 搜索 / 筛选 / 撤销（UI）
@@ -1706,7 +1780,7 @@ struct Index {
     })
   }
 
-  /** 紧凑屏：日期条 → 模式 → 搜索/筛选 → 今日汇总块（列表第一项）→ 列表 → 撤销条 → 新建。 */
+  /** 紧凑屏：日期条 → 模式 → 搜索/筛选 → 今日汇总块（列表第一项）→ 列表 → 撤销条 → 对话双格条 → 新建。 */
   @Builder
   CompactBody() {
     Column({ space: SPACING.md }) {
@@ -1721,16 +1795,21 @@ struct Index {
         if (this.tab === 'today') {
           this.SummaryCard()
         }
-        // 下拉刷新：只包列表，不改主从/单列结构
-        Refresh({ refreshing: $$this.refreshing }) {
-          this.RecordList()
+        // 列表区：唯一吃余量的加权兄弟；Refresh 只包列表，不改主从/单列结构。
+        // 汇总块已封顶（宽屏）或自然高（竖屏），无论哪种都不会把这里挤成 0 高。
+        Column() {
+          Refresh({ refreshing: $$this.refreshing }) {
+            this.RecordList()
+          }
+          .onRefreshing(() => {
+            this.refreshing = true;
+            this.onPullRefresh().then(() => {
+              this.refreshing = false;
+            });
+          })
         }
-        .onRefreshing(() => {
-          this.refreshing = true;
-          this.onPullRefresh().then(() => {
-            this.refreshing = false;
-          });
-        })
+        .width('100%')
+        .layoutWeight(1)
         if (this.undoId.length > 0) {
           this.UndoBar()
         }
@@ -1738,6 +1817,8 @@ struct Index {
       .width('100%')
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
+      // 原快捷记录行已删除：对话双格条落在同一位置（列表区底部、唯一主操作之上）
+      this.ChatEntries()
       this.PrimaryAction()
     }
     .width('100%')
@@ -1746,7 +1827,7 @@ struct Index {
 
   /**
    * 宽屏/横屏：左右主从。
-   * 左栏（`masterPaneWidth` 360–420vp）= 日期条 + 模式 + 搜索/筛选 + 汇总块 + 列表 + 撤销条 + 新建；
+   * 左栏（`masterPaneWidth` 360–420vp）= 日期条 + 模式 + 搜索/筛选 + 汇总块 + 列表 + 撤销条 + 对话双格条 + 新建；
    * 右栏 = 详情 / 编辑 / 空态（点行切右栏内容，点「新建」右栏直接变表单）。
    */
   @Builder
@@ -1764,7 +1845,12 @@ struct Index {
           if (this.tab === 'today') {
             this.SummaryCard()
           }
-          this.RecordList()
+          // 列表区：唯一吃余量的加权兄弟；汇总块是封顶的固定高度兄弟，不再与列表争高度。
+          Column() {
+            this.RecordList()
+          }
+          .width('100%')
+          .layoutWeight(1)
           if (this.undoId.length > 0) {
             this.UndoBar()
           }
@@ -1772,6 +1858,8 @@ struct Index {
         .width('100%')
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
+        // 横屏右栏不重复：双格条只在左栏渲染一次（在加权列表区之外，不争余量）
+        this.ChatEntries()
         this.SidebarAction()
       }
       .width(masterPaneWidth(this.contentWidth))

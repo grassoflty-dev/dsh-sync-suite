@@ -2,8 +2,12 @@
  * 云端对话 · 会话列表（P1 只读）。
  *
  * 数据源：同步仓库工作副本里的 `chats/index.jsonl`（见 `services/chatStore.ets` 与
- * `docs/CHAT-SYNC.md` §2.4）。页面只做三件事：搜索（`filterChats`）、按更新时间排序
- * （`sortChats`）、点行跳只读详情。
+ * `docs/CHAT-SYNC.md` §2.4）。页面只做四件事：按 `kind` 分段（`filterByKind`）、
+ * 搜索（`filterChats`）、按更新时间排序（`sortChats`）、点行跳只读详情。
+ *
+ * 顶部「纯云端对话 | dots 对话」两段共用同一份列表、搜索、三态与下拉刷新：切换只重算
+ * `visibleChats`，不重读磁盘也不丢数据（`docs/CLOUD-CHAT-AND-DOTS.md` §2）。首页两个入口
+ * 经 `kind` 路由参数预选分段；本片仍未接 dots 对话页，dots 行暂时沿用只读详情。
  *
  * 页面骨架走 `PageLayout`（`docs/UI-DESIGN.md` §4）：标题栏返回按钮、白底无卡片、
  * 颜色只用 `$r('app.color.*')`、字号只用 `FONT`、触控目标 ≥ `TOUCH_MIN`。
@@ -23,8 +27,8 @@ import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { loadingText } from '../common/copy';
 import { APP_VERSION } from '../common/version';
-import { chatSummaryLine, filterChats, sortChats } from '../model/chatList';
-import type { ChatIndexEntry } from '../model/chatList';
+import { chatSummaryLine, filterByKind, filterChats, sortChats } from '../model/chatList';
+import type { ChatIndexEntry, ChatKind } from '../model/chatList';
 import { formatDiagnostics } from '../model/stateView';
 import type { DiagnosticsInput } from '../model/stateView';
 import { chatStore } from '../services/chatStore';
@@ -45,10 +49,14 @@ const CONTENT_MAX_WIDTH: number = 720;
 /** 诊断行里的错误码（列表读取失败）：固定值，便于用户反馈时检索。 */
 const CHAT_LIST_ERROR_CODE: string = 'CHAT_LIST';
 
-/** 空态文案：一句说明 + 「怎么弄过来」的下一步（保留原来的三句关键信息）。 */
-const EMPTY_TITLE: string = '还没有云端会话';
-const EMPTY_DETAIL: string =
-  '在电脑的 DSH 上运行一次会话后，点插件「云端对话 → 导出全部」；导出并推送后回到本页下拉刷新';
+/** 云端段空态：一句说明 + 「怎么弄过来」的下一步（保留原来的三句关键信息）。 */
+const EMPTY_CLOUD_TITLE: string = '还没有云端对话';
+const EMPTY_CLOUD_DETAIL: string =
+  '本页只读：在电脑的 DSH 上运行一次会话后点插件「云端对话 → 导出全部」，导出并推送后下拉刷新；从首页「纯云端对话」可随时回来查看';
+/** dots 段空态：说清 dots 能做什么、一切操作都要用户确认（没有假的输入框）。 */
+const EMPTY_DOTS_TITLE: string = '还没有 dots 对话';
+const EMPTY_DOTS_DETAIL: string =
+  '从首页「与 dots 对话」进入本页；dots 可查看实例并对会话发指令，所有操作需你确认，当前为只读预览';
 const EMPTY_ACTION: string = '下拉刷新试试';
 
 /** 错误态文案：为什么失败由 `errorText` 运行时给。 */
@@ -58,7 +66,9 @@ const ERROR_NEXT: string = '先确认本机拉取过同步仓库（设置 → �
 @Entry
 @Component
 struct Chats {
-  /** 全部会话（已按更新时间倒序）。 */
+  /** 顶部分段：cloud = 纯云端对话（默认左），dots = 与 dots 对话。 */
+  @State kind: ChatKind = 'cloud';
+  /** 全部会话（已按更新时间倒序，含两段；分段只在渲染前过滤）。 */
   @State chats: ChatIndexEntry[] = [];
   /** 当前渲染的列表（= `chats` 过一遍搜索词）。 */
   @State visibleChats: ChatIndexEntry[] = [];
@@ -76,6 +86,8 @@ struct Chats {
 
   aboutToAppear(): void {
     chatStore.prepare(getContext(this) as common.UIAbilityContext);
+    // 首页双格条经路由参数预选分段；没有参数 / 坏参数都留在默认 cloud 段。
+    this.kind = this.readKindParam();
     this.reload();
   }
 
@@ -92,7 +104,20 @@ struct Chats {
 
   // ------------------------------------------------------------------ 数据
 
-  /** 读 `chats/index.jsonl` → 排序 → 过滤。失败只落 `errorText`，不抛。 */
+  /** 读路由参数 `kind`；只认 `dots`，其它一律回落默认 `cloud`（与 ChatDetail 的读法一致）。 */
+  private readKindParam(): ChatKind {
+    try {
+      const params = router.getParams() as Record<string, string>;
+      if (params === undefined || params === null) {
+        return 'cloud';
+      }
+      return params['kind'] === 'dots' ? 'dots' : 'cloud';
+    } catch (error) {
+      return 'cloud';
+    }
+  }
+
+  /** 读 `chats/index.jsonl` → 排序 → 分段 → 搜索过滤。失败只落 `errorText`，不抛。 */
   private async reload(): Promise<void> {
     this.errorText = '';
     try {
@@ -120,9 +145,9 @@ struct Chats {
     this.loading = false;
   }
 
-  /** 重新按搜索词过滤（只算内存，不重读磁盘）。 */
+  /** 重新按分段 + 搜索词过滤（只算内存，不重读磁盘；切段不丢数据）。 */
   private applyQuery(): void {
-    this.visibleChats = filterChats(this.chats, this.queryText);
+    this.visibleChats = filterChats(filterByKind(this.chats, this.kind), this.queryText);
   }
 
   /**
@@ -185,16 +210,64 @@ struct Chats {
     if (this.loading && this.chats.length === 0) {
       return '正在读取…';
     }
-    if (this.chats.length === 0) {
+    // 计数按当前分段：切到 dots 段时不该显示云端段的会话总数。
+    const segmentCount: number = filterByKind(this.chats, this.kind).length;
+    if (segmentCount === 0) {
       return '只读 · 从同步仓库读取';
     }
     if (this.queryText.trim().length > 0) {
-      return `只读 · 共 ${this.chats.length} 个会话 · 筛选出 ${this.visibleChats.length} 个`;
+      return `只读 · 共 ${segmentCount} 个会话 · 筛选出 ${this.visibleChats.length} 个`;
     }
-    return `只读 · 共 ${this.chats.length} 个会话`;
+    return `只读 · 共 ${segmentCount} 个会话`;
   }
 
   // ------------------------------------------------------------------ UI
+
+  /**
+   * 顶部分段：默认左侧「纯云端对话」，右侧「dots 对话」。
+   * 选中段用 `secondary` 控件灰底、未选中用 `ghost`；切换只重算 `visibleChats`，
+   * 搜索词 / 三态 / 下拉刷新全部复用（不重读磁盘，不丢数据）。
+   */
+  @Builder
+  KindSegment() {
+    Row({ space: SPACING.sm }) {
+      Column() {
+        ActionButton({
+          label: '纯云端对话',
+          actionEnabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: this.kind === 'cloud' ? 'secondary' : 'ghost',
+          block: true,
+          onTap: (): void => {
+            this.kind = 'cloud';
+            this.applyQuery();
+          },
+          onBlockedTap: null
+        })
+      }
+      .layoutWeight(1)
+
+      Column() {
+        ActionButton({
+          label: 'dots 对话',
+          actionEnabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: this.kind === 'dots' ? 'secondary' : 'ghost',
+          block: true,
+          onTap: (): void => {
+            this.kind = 'dots';
+            this.applyQuery();
+          },
+          onBlockedTap: null
+        })
+      }
+      .layoutWeight(1)
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Center)
+  }
 
   /** 搜索框 + 「清空」（清空只在有输入时出现，避免常驻噪音）。 */
   @Builder
@@ -233,13 +306,15 @@ struct Chats {
   }
 
   /**
-   * 一行会话：标题 + 「只读」徽章 + 摘要行（`2026-11-18 14:03 · 42 条消息`）。
+   * 一行会话：标题 + `chat`/`dots` 徽章 + 摘要行（`2026-11-18 14:03 · 42 条消息`）。
    *
-   * 参数只收**基础类型**（id / 标题 / 摘要）：`@Builder` 传对象属于按值快照，
+   * 徽章替代原来固定的「只读」（`docs/CLOUD-CHAT-AND-DOTS.md` §2）：两段共用一行渲染，
+   * 只读性由本页没有输入框 + 详情页的「在电脑上继续」保证，不再用「只读」占位。
+   * 参数只收**基础类型**（id / 标题 / 摘要 / 徽章）：`@Builder` 传对象属于按值快照，
    * 列表刷新时容易被旧快照粘住；传字符串既便宜又不会踩这个坑。
    */
   @Builder
-  ChatRow(id: string, title: string, summary: string) {
+  ChatRow(id: string, title: string, summary: string, badge: string) {
     Column({ space: SPACING.xs }) {
       Row({ space: SPACING.sm }) {
         Text(title)
@@ -251,8 +326,8 @@ struct Chats {
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .layoutWeight(1)
           .textAlign(TextAlign.Start)
-        // 「只读」徽章：非交互元素，不占独立触控区（整行都可点）
-        Text('只读')
+        // 种类徽章：非交互元素，不占独立触控区（整行都可点）
+        Text(badge)
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.text_secondary'))
@@ -292,7 +367,8 @@ struct Chats {
         (item: ChatIndexEntry) => {
           ListItem() {
             Column() {
-              this.ChatRow(item.id, item.title, chatSummaryLine(item))
+              this.ChatRow(item.id, item.title, chatSummaryLine(item),
+                item.kind === 'dots' ? 'dots' : 'chat')
               Divider()
                 .strokeWidth(DIVIDER)
                 .color($r('app.color.divider'))
@@ -312,19 +388,43 @@ struct Chats {
   /**
    * 空态：**必须带操作指引**（用户第一次进来几乎必然是这个状态）。
    *
-   * 文案与 `docs/CHAT-APP.md` §3 一致：说清「去哪儿导出」「怎么同步过来」，
-   * 而不是只写「暂无数据」让人无从下手；`EmptyState` 保证永远渲染一个真按钮。
+   * 两段各自的空文案不同：云端说清「去哪儿导出 / 怎么同步过来」（`docs/CHAT-APP.md` §3），
+   * dots 说清「它能做什么 / 操作要你确认」。两态都给真按钮（`EmptyState` 兜底），
+   * 不渲染假行、不写「暂无数据」。
    */
   @Builder
-  EmptyChats() {
+  EmptyCloudChats() {
     EmptyState({
-      title: EMPTY_TITLE,
-      detail: EMPTY_DETAIL,
+      title: EMPTY_CLOUD_TITLE,
+      detail: EMPTY_CLOUD_DETAIL,
       actionLabel: EMPTY_ACTION,
       onAction: (): void => {
         this.pullAndReload();
       }
     })
+  }
+
+  /** dots 段空态：只读预览 + 需确认的说明，下一步仍是刷新（没有假的输入框）。 */
+  @Builder
+  EmptyDotsChats() {
+    EmptyState({
+      title: EMPTY_DOTS_TITLE,
+      detail: EMPTY_DOTS_DETAIL,
+      actionLabel: EMPTY_ACTION,
+      onAction: (): void => {
+        this.pullAndReload();
+      }
+    })
+  }
+
+  /** 按当前分段落空态；两段共用同一个刷新出口。 */
+  @Builder
+  EmptyChats() {
+    if (this.kind === 'dots') {
+      this.EmptyDotsChats()
+    } else {
+      this.EmptyCloudChats()
+    }
   }
 
   /** 有会话但搜索没命中：与空态区分（否则用户会以为会话被删了）。 */
@@ -405,10 +505,12 @@ struct Chats {
     .alignItems(HorizontalAlign.Start)
   }
 
-  /** 列表区：错误 → 搜索框 + 下拉刷新（空态/列表/无匹配三选一）。 */
+  /** 列表区：分段（常驻）→ 错误 → 搜索框 + 下拉刷新（空态/列表/无匹配三选一）。 */
   @Builder
   Body() {
     Column({ space: SPACING.md }) {
+      // 分段常驻：错误态下也能切段看另一段（错误来自本地读文件，与 kind 无关）
+      this.KindSegment()
       if (this.errorText.length > 0) {
         this.ErrorBlock()
       } else {

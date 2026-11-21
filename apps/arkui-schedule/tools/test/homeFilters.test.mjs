@@ -247,7 +247,10 @@ describe('mod-home-filters-2 · 计数、空态与不变量', () => {
     assert.equal(INDEX.includes('这一天还没有日程'), false);
   });
 
-  test('今日汇总块 / 撤销条 / 两个断点的渲染位置未被本模块改动', () => {
+  // mod-home-entries retarget：本条原先只钉「汇总 / 列表 / 撤销 / 主操作」的渲染位置，
+  // 首页双格条新增后，补钉它在两个断点里都位于主操作之上（原快捷记录行的位置）。
+  // 这是**收紧**而非放宽：旧断言全部保留，再加一条精确位置断言，防止双格条掉到主操作之下或漏渲染。
+  test('今日汇总块 / 撤销条 / 两个断点的渲染位置未被本模块改动（含对话双格条位于主操作之上）', () => {
     for (const builderName of ['CompactBody', 'WideBody']) {
       const body = bodyFrom(INDEX, `\n  ${builderName}() {`);
       for (const piece of ['this.ModeTabs()', 'this.SearchFilterBar()', 'this.RecordList()', 'this.UndoBar()']) {
@@ -255,6 +258,11 @@ describe('mod-home-filters-2 · 计数、空态与不变量', () => {
       }
       assert.ok(body.includes('this.SummaryCard()'), `${builderName} 仍须渲染今日汇总块`);
       assert.ok(body.includes("if (this.tab === 'today') {"), `${builderName} 的汇总块必须按新 tab 名门控`);
+      const entriesAt = body.indexOf('this.ChatEntries()');
+      const action = builderName === 'CompactBody' ? 'this.PrimaryAction()' : 'this.SidebarAction()';
+      const actionAt = body.indexOf(action);
+      assert.ok(entriesAt >= 0, `${builderName} 必须渲染对话双格条`);
+      assert.ok(actionAt > entriesAt, `${builderName} 的双格条必须位于唯一主操作 ${action} 之上`);
     }
     assert.ok(INDEX.includes('this.UndoBar()'));
   });

@@ -12,6 +12,7 @@ import { describe, test } from 'node:test';
 
 import {
   chatSummaryLine,
+  filterByKind,
   filterChats,
   formatChatTime,
   parseChatIndex,
@@ -133,6 +134,34 @@ describe('parseChatIndex', () => {
     assert.doesNotThrow(() => parseChatIndex(null));
     assert.equal(parseChatIndex(undefined).entries.length, 0);
     assert.equal(parseChatIndex('   \n  \n').entries.length, 0);
+  });
+
+  // mod-home-entries：additive `kind` 字段的读侧兼容（`docs/CLOUD-CHAT-AND-DOTS.md` §3）。
+  test('kind 读侧默认：历史行（缺 kind）与存储侧 kind:"chat" 都归一为 cloud（不重写文件）', () => {
+    const lines = [
+      JSON.stringify({ id: 'legacy', title: 'A', updatedAt: '', messageCount: 0, sha256: '' }),
+      JSON.stringify({ id: 'named-chat', title: 'B', updatedAt: '', messageCount: 0, sha256: '', kind: 'chat' }),
+      JSON.stringify({ id: 'empty-kind', title: 'C', updatedAt: '', messageCount: 0, sha256: '', kind: '' }),
+      JSON.stringify({ id: 'unknown-kind', title: 'D', updatedAt: '', messageCount: 0, sha256: '', kind: 'weird' })
+    ].join('\n');
+    const entries = parseChatIndex(lines).entries;
+    assert.equal(entries.length, 4);
+    for (const entry of entries) {
+      assert.equal(entry.kind, 'cloud', `${entry.id} 应读侧回落 cloud`);
+    }
+  });
+
+  test('kind=dots 被读出；大小写 / 首尾空白容错；只取同 id 最后一行的 kind', () => {
+    const lines = [
+      JSON.stringify({ id: 'd1', title: 'Dots', updatedAt: '', messageCount: 0, sha256: '', kind: 'dots' }),
+      JSON.stringify({ id: 'd2', title: 'Dots2', updatedAt: '', messageCount: 0, sha256: '', kind: ' DoTs ' }),
+      JSON.stringify({ id: 's1', title: '旧', updatedAt: '', messageCount: 0, sha256: '', kind: 'dots' }),
+      JSON.stringify({ id: 's1', title: '新', updatedAt: '', messageCount: 0, sha256: '', kind: 'chat' })
+    ].join('\n');
+    const byId = new Map(parseChatIndex(lines).entries.map((entry) => [entry.id, entry.kind]));
+    assert.equal(byId.get('d1'), 'dots');
+    assert.equal(byId.get('d2'), 'dots', '首尾空白 + 大小写都应识别为 dots');
+    assert.equal(byId.get('s1'), 'cloud', '同 id 取最后一行，其 kind=chat 归 cloud');
   });
 });
 
@@ -387,6 +416,36 @@ describe('filterChats', () => {
     assert.doesNotThrow(() => filterChats(undefined, 'x'));
     assert.equal(filterChats(undefined, 'x').length, 0);
     assert.equal(filterChats(SORT_INPUT, undefined).length, 3);
+  });
+});
+
+// ---------------------------------------------------------------- filterByKind（mod-home-entries 分段过滤）
+
+describe('filterByKind', () => {
+  const MIXED = [
+    { id: 'c1', title: '云一', updatedAt: '', messageCount: 0, sha256: '', kind: 'cloud' },
+    { id: 'd1', title: '点一', updatedAt: '', messageCount: 0, sha256: '', kind: 'dots' },
+    { id: 'c2', title: '云二', updatedAt: '', messageCount: 0, sha256: '', kind: 'cloud' }
+  ];
+
+  test('cloud 段只留 cloud 行，dots 段只留 dots 行（顺序不变）', () => {
+    assert.deepEqual(filterByKind(MIXED, 'cloud').map((e) => e.id), ['c1', 'c2']);
+    assert.deepEqual(filterByKind(MIXED, 'dots').map((e) => e.id), ['d1']);
+  });
+
+  test('返回副本：改结果不影响入参；两段计数相加 = 全部会话', () => {
+    const copy = filterByKind(MIXED, 'cloud');
+    copy.pop();
+    assert.equal(MIXED.length, 3);
+    assert.equal(filterByKind(MIXED, 'cloud').length + filterByKind(MIXED, 'dots').length, MIXED.length);
+  });
+
+  test('无命中返回空数组；坏输入不抛', () => {
+    assert.deepEqual(filterByKind(MIXED, 'cloud').filter((e) => e.kind === 'dots'), []);
+    assert.doesNotThrow(() => filterByKind(undefined, 'cloud'));
+    assert.doesNotThrow(() => filterByKind(null, 'dots'));
+    assert.equal(filterByKind(undefined, 'cloud').length, 0);
+    assert.equal(filterByKind(null, 'dots').length, 0);
   });
 });
 

@@ -3,8 +3,10 @@
  *
  * 数据形态见 `docs/CHAT-SYNC.md` §2：
  * - `chats/index.jsonl`：**只追加**的列表投影，一行
- *   `{"id","title","updatedAt","messageCount","sha256"}`；同一个 id 可能出现多行，
+ *   `{"id","title","updatedAt","messageCount","sha256","kind?"}`；同一个 id 可能出现多行，
  *   读侧**取最后一行**（§2.4：唯一允许「取最新」的地方，因为它是展示投影，不是事件流）。
+ *   `kind` 是 `docs/CLOUD-CHAT-AND-DOTS.md` §3 的 additive 字段：缺字段的历史行**只在读侧**
+ *   回落 `'cloud'`，不重写任何已有文件（存储侧 `kind:"chat"` 同样归一成 `'cloud'`）。
  * - `chats/<id>/session.jsonl`：**明文事件流**，行序即事件序；本模块只把它压成可读消息，
  *   绝不重排、不折叠（§1.2 明确拒绝在会话事件上做「按 ts 折叠」）。
  *
@@ -25,6 +27,15 @@
 
 // ---------------------------------------------------------------- 列表投影
 
+/**
+ * 会话种类（`docs/CLOUD-CHAT-AND-DOTS.md` §2/§3）：
+ * - `cloud` = 纯云端对话（存储侧写 `kind:"chat"` 或缺 `kind` 的历史行都归到这里）；
+ * - `dots` = 与 dots 对话。
+ *
+ * 页面顶部分段按此字段过滤；旧行不写盘、只在读侧补默认值。
+ */
+export type ChatKind = 'cloud' | 'dots';
+
 /** `chats/index.jsonl` 的一行（读侧已归一：缺字段用安全默认值补上）。 */
 export interface ChatIndexEntry {
   /** 会话 id（= 目录名 = DSH header 的 `id`），空串绝不会出现在返回值里。 */
@@ -37,6 +48,8 @@ export interface ChatIndexEntry {
   messageCount: number;
   /** 明文 `session.jsonl` 整文件的 sha256（P1 只展示不校验，校验属 `services/` 的活）。 */
   sha256: string;
+  /** 会话种类；缺字段 / 未知值一律回落 `'cloud'`（只读默认，不改文件）。 */
+  kind: ChatKind;
 }
 
 /** `parseChatIndex` 的结果：坏行只计数，不抛。 */
@@ -89,6 +102,8 @@ interface RawIndexLine {
   updatedAt?: string;
   messageCount?: number;
   sha256?: string;
+  /** additive 字段：存储侧可能写 `chat`（§3），读侧归一为 `cloud`。 */
+  kind?: string;
 }
 
 /** 消息内容数组里的一段（只有 `text` 段会被读，图片等其它段直接跳过）。 */
@@ -169,6 +184,21 @@ function normalizeTitle(value: string | undefined): string {
     }
   }
   return UNTITLED;
+}
+
+/**
+ * 种类归一（**纯读侧**，绝不写回文件）：
+ * - `dots`（忽略大小写与首尾空白）→ `'dots'`；
+ * - 缺字段 / 空串 / `chat` / 任何未知值 → `'cloud'`。
+ *
+ * 历史索引行没有 `kind`，设计稿存储侧用 `chat` 表示纯云端对话；两种都归到 `'cloud'`，
+ * 这样分段切换不会因为一条脏数据把会话藏起来（fail-open 到默认段，而不是丢行）。
+ */
+function normalizeChatKind(value: string | undefined): ChatKind {
+  if (typeof value === 'string' && value.trim().toLowerCase() === 'dots') {
+    return 'dots';
+  }
+  return 'cloud';
 }
 
 /** 按行切分 JSONL（空串 → 空数组；不做 trim，交给调用方逐行处理）。 */
@@ -298,7 +328,8 @@ export function parseChatIndex(jsonlText: string): ChatIndexParse {
       title: normalizeTitle(raw.title),
       updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt.trim() : '',
       messageCount: countOf(raw.messageCount),
-      sha256: typeof raw.sha256 === 'string' ? raw.sha256.trim() : ''
+      sha256: typeof raw.sha256 === 'string' ? raw.sha256.trim() : '',
+      kind: normalizeChatKind(raw.kind)
     };
     // 后写覆盖：只追加文件里「最后一行」才是该 id 的最新投影
     byId.set(id, entry);
@@ -380,6 +411,24 @@ export function filterChats(entries: ChatIndexEntry[], query: string): ChatIndex
       continue;
     }
     if (lowerOf(entry.title).indexOf(needle) >= 0) {
+      matched.push(entry);
+    }
+  }
+  return matched;
+}
+
+/**
+ * 分段过滤：只保留 `kind` 等于给定值的会话（返回副本，不改入参）。
+ *
+ * 与 `filterChats` 正交：页面先按 `kind` 切段，再按搜索词过滤，两段共用同一份 `chats`
+ * （切换不丢数据）。脏输入返回空数组，不抛。
+ */
+export function filterByKind(entries: ChatIndexEntry[], kind: ChatKind): ChatIndexEntry[] {
+  const list: ChatIndexEntry[] = Array.isArray(entries) ? entries : [];
+  const matched: ChatIndexEntry[] = [];
+  for (let index = 0; index < list.length; index++) {
+    const entry: ChatIndexEntry | null = list[index];
+    if (entry !== null && entry.kind === kind) {
       matched.push(entry);
     }
   }
