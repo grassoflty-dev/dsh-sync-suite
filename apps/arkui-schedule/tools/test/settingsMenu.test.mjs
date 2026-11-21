@@ -2,7 +2,7 @@
 // 前置：node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readExportPage, readSettingsFile, readSettingsPage, readSyncPage, readSyncSection } from './settingsSources.mjs';
+import { readApiPage, readExportPage, readSettingsFile, readSettingsPage, readSyncPage, readSyncSection } from './settingsSources.mjs';
 
 const {
   LAST_EXPORT_AT_KEY,
@@ -143,8 +143,8 @@ test('M-08 数据子页渲染真实正文：三个 chip + 两个日期字段 + �
 
 // mod-settings-export-page：risk guard —— 从本页剥离出去的数据状态不能靠「保存整表」波及。
 // settingsStore.save 是 patch（未提供键保留磁盘当前值），而导出/导入时刻只写 AppStorage 的
-// 两个独立键，SettingsPatch / ScheduleSettings 都不含它们，所以 API 子页复用宿主保存时
-// 不可能清空导出相关设置。
+// 两个独立键，SettingsPatch / ScheduleSettings 都不含它们，所以任何设置子页保存时
+// 都不可能清空导出相关设置（API 子页现已是 pages/SettingsApi 真页面）。
 test('M-09 patch 安全：剩余页面保存不触碰导出/导入状态（store patch + 双键只在导出页写）', () => {
   const store = readSettingsFile('services/settingsStore.ets');
   const host = readSettingsPage();
@@ -166,4 +166,79 @@ test('M-09 patch 安全：剩余页面保存不触碰导出/导入状态（store
   assert.equal(/settingsStore\.save\(/.test(page), false, '导出页不写配置对象，只写 AppStorage 时刻');
   assert.match(page, /AppStorage\.setOrCreate<string>\(LAST_EXPORT_AT_KEY, nowIso\(\)\)/, '导出成功才记导出时刻');
   assert.match(page, /AppStorage\.setOrCreate<string>\(LAST_IMPORT_AT_KEY, nowIso\(\)\)/, '导入成功才记导入时刻');
+});
+
+// mod-settings-api-page：AI 配置落到真页面后，剩余页面的保存必须仍是 patch —— 不能把已存的
+// AI 源 / 模型 / Key / 接口地址清空。store 层（缺省键沿用 current）+ 页面层（两页 patch 无 AI 键）
+// 双向钉住，唯一写 AI 键的地方是 pages/SettingsApi。
+test('M-10 patch 安全：剩余页面保存不触碰 AI 字段（store 缺省保留 + 两页 patch 无 AI 键）', () => {
+  const store = readSettingsFile('services/settingsStore.ets');
+  const host = readSettingsPage();
+  const sync = readSyncPage();
+  const api = readApiPage();
+  const patchBody = store.slice(store.indexOf('async save(patch: SettingsPatch'), store.indexOf('async saveSyncState('));
+  assert.ok(patchBody.length > 0, '必须能定位到 store 的 save() 实现');
+
+  // store 层：未提供 AI 键时沿用磁盘当前值（provider / model 经派生变量，缺省分支必须指向 current）。
+  for (const pattern of [
+    /aiKey:\s*patch\.aiKey === undefined \? current\.aiKey/,
+    /patch\.aiProviderId === undefined \? current\.aiProviderId/,
+    /patch\.aiModel === undefined \? '' : patch\.aiModel/,
+    /patch\.aiBaseURL === undefined \? current\.aiBaseURL/
+  ]) {
+    assert.match(patchBody, pattern, `save() 必须保留缺省的 AI 键：${pattern}`);
+  }
+  assert.match(
+    patchBody,
+    /nextProviderId === current\.aiProviderId\s*\n\s*\? resolveAiModel\(nextProviderId, current\.aiModel\)/,
+    '同源且未提供 aiModel 时必须保留已存模型名'
+  );
+
+  // 页面层：同步真页面与历史宿主的 patch 里都不能出现 AI 键；API 真页面才是唯一 AI 写入者。
+  const patchOf = (src) => src.slice(src.indexOf('const patch: SettingsPatch = {'), src.indexOf('settingsStore.save(patch'));
+  for (const [name, src] of [['SettingsHost', host], ['SettingsSync', sync]]) {
+    const patch = patchOf(src);
+    assert.ok(patch.length > 0, `${name} 必须能定位到 SettingsPatch 对象`);
+    for (const key of ['aiKey', 'aiProviderId', 'aiModel', 'aiBaseURL']) {
+      assert.equal(new RegExp(`\\b${key}\\s*:`).test(patch), false, `${name} 的保存 patch 不得写 ${key}`);
+    }
+  }
+  const apiPatch = patchOf(api);
+  assert.ok(apiPatch.length > 0, 'API 真页面必须能定位到 SettingsPatch 对象');
+  for (const key of ['aiKey', 'aiProviderId', 'aiModel', 'aiBaseURL']) {
+    assert.match(apiPatch, new RegExp(`\\b${key}\\s*:`), `API 真页面必须写 ${key}（唯一 AI 写入者）`);
+  }
+});
+
+// mod-settings-api-page：API 路由也必须落到真页面（provider / model 下拉 + 唯一「保存」），
+// 同时钉住 presentational body（AiSection）不搬走、旧「高级」与手输模型名不复活。
+test('M-11 API 子页渲染真实正文：服务 / 模型 + 保存，无高级 / 手输模型名 / 薄壳', () => {
+  const page = readApiPage();
+  const section = readSettingsFile('components/settings/AiSection.ets');
+
+  assert.match(page, /title: 'API 配置'/, '页头标题');
+  assert.match(page, /Button\('保存'\)/, '唯一主操作「保存」');
+  assert.match(page, /Scroll\(this\.pageScroller\)/, '自带唯一 Scroll');
+  assert.match(page, /PageLayout\(\{/, '自带 PageLayout，不是薄壳');
+  assert.match(page, /AiSection\(\{/, '页面必须装配 AI 正文');
+  assert.match(page, /router\.back\(\)/, '返回走 router.back() 回设置根页');
+  assert.match(page, /checkSettingsFields\(/, '保存复用同一整表校验');
+  assert.equal(/SettingsHost\(\{/.test(page), false, 'API 子页不得再是复用宿主的薄壳');
+  assert.equal(/section: 'api'/.test(page), false, 'API 子页不得残留 section 分支标识');
+
+  // 正文（presentational body 保持在 AiSection，锚点不搬走）。
+  assert.match(section, /Text\('服务'\)/, '服务下拉行仍在 AiSection');
+  assert.match(section, /Text\('模型'\)/, '模型下拉行仍在 AiSection');
+  assert.match(section, /TextInput\(\{ text: this\.aiKey, placeholder:/, 'Key 输入框仍在');
+  assert.match(section, /\.type\(InputType\.Password\)/, 'Key 字段必须掩码');
+  assert.match(section, /if \(this\.customProvider\) \{/, '接口地址只在自定义源显示');
+  assert.match(section, /this\.FieldLabel\('接口地址 baseURL'\)/, '接口地址字段名仍在');
+
+  // 只扫可执行源码：注释里的「没有高级 / 没有手输」说明不算控件。
+  const code = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  for (const src of [code(page), code(section)]) {
+    assert.equal(/高级/.test(src), false, 'API 子页 / 正文不得出现「高级」控件');
+    assert.equal(/模型名（可手输|模型名（必填）|TextInput\(\{ text: this\.aiModel/.test(src), false,
+      'API 子页 / 正文不得有手输模型名入口');
+  }
 });

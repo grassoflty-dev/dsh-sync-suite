@@ -41,6 +41,9 @@ const PAGE_SYNC = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'pages', 'Settin
 // mod-settings-export-page（old→new）：数据正文的真装配点在 pages/SettingsExportImport.ets，
 // 不再由 SettingsHost 装配 DataSection。断言跟着代码换锚点，双向对齐强度不变。
 const PAGE_EXPORT = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'pages', 'SettingsExportImport.ets');
+// mod-settings-api-page（old→new）：AI 正文的真装配点从 SettingsHost 换到 pages/SettingsApi.ets，
+// 断言跟着代码换锚点，双向对齐强度不变。
+const PAGE_API = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'pages', 'SettingsApi.ets');
 // S4 外壳真值：装配（Home ↔ ShellRail）+ 两份页面清单登记。
 const PAGE_HOME = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'pages', 'Home.ets');
 const SHELL_RAIL = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'components', 'shell', 'ShellRail.ets');
@@ -51,15 +54,16 @@ const HOME_CODE = stripComments(readFileSync(PAGE_HOME, 'utf8'));
 const RAIL_CODE = stripComments(readFileSync(SHELL_RAIL, 'utf8'));
 const MAIN_PAGES = JSON.parse(readFileSync(join(APP_ROOT, 'entry', 'src', 'main', 'resources', 'base', 'profile', 'main_pages.json'), 'utf8'));
 const HARMONY_PAGES = JSON.parse(readFileSync(join(APP_ROOT, 'entry', 'src', 'harmony', 'resources', 'base', 'profile', 'main_pages.json'), 'utf8'));
-// mod-settings-sync-page / mod-settings-export-page：SyncSection 与 DataSection 从宿主装配
-// 集合移出，分别改由同步真页面 / 数据真页面单独装配；Ai/About 仍由 SettingsHost 装配。
+// mod-settings-sync-page / mod-settings-export-page / mod-settings-api-page：SyncSection /
+// DataSection / AiSection 从宿主装配集合移出，分别改由三个真页面单独装配；
+// 本宿主只剩 AboutSection 一个装配点。
 const SECTION_FILES = [
-  'components/settings/AiSection.ets',
   // RemoteSection.ets 随 mod-settings-remote-dedupe 删除（配置统一在 pages/Instances）
   'components/settings/AboutSection.ets'
 ].map((relative) => join(APP_ROOT, 'entry', 'src', 'main', 'ets', ...relative.split('/')));
 const SYNC_SECTION_FILE = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'components', 'settings', 'SyncSection.ets');
 const DATA_SECTION_FILE = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'components', 'settings', 'DataSection.ets');
+const AI_SECTION_FILE = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'components', 'settings', 'AiSection.ets');
 
 /**
  * 「只被写、从未被读」的 `@State` 白名单——**逐条写理由**。
@@ -128,13 +132,17 @@ describe('结构断言：@State 至少被读一次 / issue 必须有渲染落点
     // mod-settings-root（old→new）：锚点从 pages/Settings.ets 换到实现宿主，字段集合与下限不变。
     // mod-settings-sync-page / mod-settings-export-page（old→new，不是放宽）：repoUrlError /
     // tokenError / identityWarning / attachmentWarning / lastSyncError 随同步正文迁到
-    // pages/SettingsSync，SettingsHost 只留 aiBaseUrlError；数据页没有任何校验类字段。
+    // pages/SettingsSync，aiBaseUrlError 随 mod-settings-api-page 迁到 pages/SettingsApi；
+    // 数据页没有任何校验类字段，宿主亦不再持有字段错误态。
     // 断言范围改为「宿主 + 同步页 + 数据页」并集，原来 6 个字段一个不少，下限不降。
     const settingsFields = collectIssueFields(files).filter((item) =>
       item.file.startsWith('main/ets/components/settings/SettingsHost.ets') ||
       item.file.startsWith('main/ets/pages/SettingsSync.ets') ||
-      item.file.startsWith('main/ets/pages/SettingsExportImport.ets'));
-    // 6 = 3 内联错误 + 2 警告 + lastSyncError（现分布在宿主与同步页两处）
+      item.file.startsWith('main/ets/pages/SettingsExportImport.ets') ||
+      item.file.startsWith('main/ets/pages/SettingsApi.ets'));
+    // 6 = 3 内联错误（repoUrlError / tokenError / aiBaseUrlError）+ 2 警告 + lastSyncError
+    // mod-settings-api-page（old→new，不是放宽）：aiBaseUrlError 随 AI 正文从宿主迁到
+    // pages/SettingsApi，断言范围改为「宿主 + 同步页 + 数据页 + API 页」并集，6 个字段一个不少。
     assert.ok(settingsFields.length >= 6, `Settings 的校验类字段只剩 ${settingsFields.length} 个，检查范围疑似缩了`);
   });
 
@@ -145,8 +153,9 @@ describe('结构断言：@State 至少被读一次 / issue 必须有渲染落点
     const hostViolations = propWiringViolations(PAGE_SETTINGS, SECTION_FILES);
     const syncViolations = propWiringViolations(PAGE_SYNC, [SYNC_SECTION_FILE]);
     const dataViolations = propWiringViolations(PAGE_EXPORT, [DATA_SECTION_FILE]);
-    const violations = hostViolations.concat(syncViolations, dataViolations);
-    t.diagnostic(`宿主装配点 ${SECTION_FILES.length} 个 + 同步页 1 个 + 数据页 1 个`);
+    const apiViolations = propWiringViolations(PAGE_API, [AI_SECTION_FILE]);
+    const violations = hostViolations.concat(syncViolations, dataViolations, apiViolations);
+    t.diagnostic(`宿主装配点 ${SECTION_FILES.length} 个 + 同步页 1 个 + 数据页 1 个 + API 页 1 个`);
     assert.deepEqual(
       violations.map((item) => `${item.file} —— ${item.reason}`),
       [],
@@ -268,6 +277,7 @@ describe('结构断言：@State 至少被读一次 / issue 必须有渲染落点
     assert.ok(files.has('main/ets/components/shell/ShellRail.ets'), '必须扫到 ShellRail.ets');
     // mod-settings-export-page：真页面也必须进死状态扫描，否则它的 @State 等于没检查。
     assert.ok(files.has('main/ets/pages/SettingsExportImport.ets'), '必须扫到数据真页面 SettingsExportImport.ets');
+    assert.ok(files.has('main/ets/pages/SettingsApi.ets'), '必须扫到 API 真页面 SettingsApi.ets（AI @State 的死状态检查不能漏）');
     assert.ok(fields.length > 100, `@State 总数 ${fields.length} 明显偏少`);
     // S3：四个面板下沉到 pages/panes/，必须全部进扫描文件集（三个占位只有 @Prop，
     // 不产生 @State 字段，所以要直接查 componentFiles() 而不是查 fields）。

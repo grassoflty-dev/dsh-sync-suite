@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
-import { readSettingsPage } from './settingsSources.mjs';
+import { readSettingsPage, readSettingsRoot } from './settingsSources.mjs';
 
 // 纯逻辑：homeRefresh.ts 零 SDK import，编译产物可直接 import（无运行时相对依赖）。
 const { SAVED_MARKER_KEY, encodeSavedMarker, decodeSavedMarker, containsRecordVersion } =
@@ -299,11 +299,14 @@ describe('B3 C（retarget）：远程组删除后，地址归一仍在实例页�
     assert.equal(/RemoteSection\(\{/.test(SETTINGS), false, '不该再装配 RemoteSection');
   });
 
-  test('B3-14（old→new）入口唯一：RemoteGroup 只渲染 ChatEntryRow，指向 pages/Instances', () => {
-    const group = bodyFrom(SETTINGS, 'RemoteGroup() {');
-    assert.equal((group.match(/this\.ChatEntryRow\(\)/g) ?? []).length, 1, '入口行恰好一行');
-    assert.equal((group.match(/TextInput\(/g) ?? []).length, 0, '入口组里不该有输入框');
-    assert.match(SETTINGS, /router\.pushUrl\(\{ url: 'pages\/Instances' \}\)/, '入口指向实例页');
+  test('B3-14（old→new，收紧）入口唯一：根页「远程实例」行指向 pages/Instances，旧 ChatEntryRow 已删', () => {
+    // mod-settings-instances-entry-dedupe：旧断言钉「RemoteGroup 里恰好一行 ChatEntryRow」，
+    // 现改为正向钉住唯一的新入口（四行菜单根页）+ 旧 builder/handler 绝迹，不是放宽。
+    const root = readSettingsRoot();
+    assert.equal((root.match(/'pages\/Instances'/g) ?? []).length, 1, '设置树唯一 Instances 路由在根页');
+    assert.match(root, /const ROUTE_INSTANCES: string = 'pages\/Instances'/, '根页路由常量');
+    assert.match(root, /this\.MenuRow\('远程实例', this\.instanceSummary, ROUTE_INSTANCES\)/, '四行菜单的「远程实例」行');
+    assert.equal(/ChatEntryRow\(|openInstances\(|RemoteGroup\(/.test(SETTINGS), false, '旧入口 builder / handler / 组已删');
     // 归一规则本身仍在 model 层，由实例面板 submitForm 复用（不是删掉校验）。
     // mod-shell-instances-pane（old→new）：锚点 pages/Instances.ets → pages/panes/InstancesPane.ets。
     assert.match(

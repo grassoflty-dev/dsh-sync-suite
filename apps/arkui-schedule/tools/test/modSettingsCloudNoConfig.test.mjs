@@ -6,7 +6,7 @@
 // ③ 列表 / 点行进只读详情 / 下拉刷新路径逐条仍在（删的是说明，不是功能）。
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { readSettingsFile, readSettingsPage, readSettingsSources } from './settingsSources.mjs';
+import { readSettingsFile, readSettingsPage, readSettingsRoot, readSettingsSources } from './settingsSources.mjs';
 
 // mod-settings-root（old→new）：入口行随实现从 pages/Settings.ets 搬到组件宿主；
 // 本用例只查「导航入口里没有配置控件」，断言不变，只换锚点。
@@ -31,11 +31,12 @@ describe('mod-settings-cloud-no-config：设置页没有云端会话配置', () 
     ]) {
       assert.equal(gone.test(PAGE), false, `设置页残留云端配置字段：${gone}`);
     }
-    // 「远程实例与云端对话 ›」只是导航入口，不是配置行：没有输入框、没有 URL / token。
-    const entry = PAGE.slice(PAGE.indexOf('ChatEntryRow() {'), PAGE.indexOf('private openInstances()'));
-    assert.equal(/TextInput\(/.test(entry), false, '入口行不该有输入框');
-    assert.match(entry, /router\.pushUrl|this\.openInstances\(\)/, '入口只做跳转');
-    assert.match(SOURCES, /远程实例与云端对话/, '入口文案仍在（导航，不是配置）');
+    // mod-settings-instances-entry-dedupe（old→new，收紧）：旧「远程实例与云端对话 ›」
+    // 导航行已删除，唯一入口是四行菜单根页的「远程实例」行；它同样只是导航，不是配置行。
+    const root = readSettingsRoot();
+    assert.equal(/TextInput\(/.test(root), false, '根页入口行不该有输入框');
+    assert.match(root, /this\.MenuRow\('远程实例', this\.instanceSummary, ROUTE_INSTANCES\)/, '入口只做路由跳转');
+    assert.equal(SOURCES.includes('远程实例与云端对话'), false, '旧入口文案绝迹，不再假设它仍在');
   });
 
   test('settingsStore 没有任何 chats 相关配置键（deepseek-chat 模型名不算）', () => {

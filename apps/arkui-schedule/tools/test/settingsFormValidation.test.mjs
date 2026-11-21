@@ -210,7 +210,9 @@ describe('设置页保存校验：与页面源码的接线（防止退回「只�
 function readSettingsPage() {
   // 因 A2 拆分移动：设置页界面拆到 `pages/Settings.ets` + `components/settings/*.ets`。
   // 本文件里「存在性」断言（某段文案 / 某个 ErrorText 调用必须在）仍然成立，因为语义没变，
-  // 只是文件位置变了 —— 锚点从「单文件」改成「页面 + 五个 section + bits」的合并源码。
+  // 只是文件位置变了 —— 锚点从「单文件」改成「页面 + 三个真子页 + section + bits」的合并源码。
+  // mod-settings-api-page（old→new）：readSettingsSources() 已并入 pages/SettingsApi.ets，
+  // AI 错误态的存在性断言跟着代码换锚点，断言本身不变、不放宽。
   // 需要按 builder 切片、比较相对顺序的断言，另用 readSettingsFile() 指向**搬过去之后**的文件。
   return readSettingsSources();
 }
@@ -332,6 +334,21 @@ describe('幽灵报错守卫：每个 issue 都必须有可见落点', () => {
       assert.ok(page.indexOf(`this.${state} = '';`) < page.indexOf(`this.${state} = issue.message`), `${state} 必须先清后赋`)
     });
   }
+
+  test('API 真页面：aiBaseUrlError 先在页面清空/赋值，再把值传给 AiSection 渲染', () => {
+    // mod-settings-api-page（old→new，不替代上面的副作用断言）：AI 错误态从 SettingsHost
+    // 迁到 pages/SettingsApi，这里按页锚定「清空 → 赋值 → 作为 prop 传给正文」三点，
+    // 避免合并源码里文本还在、但页面侧装配断掉时漏检。
+    const api = readSettingsFile('pages/SettingsApi.ets');
+    assert.match(api, /@State aiBaseUrlError: string = ''/, '错误态归 API 真页面所有');
+    assert.match(api, /this\.aiBaseUrlError = '';/, '每次保存前先清空');
+    assert.match(api, /this\.aiBaseUrlError = issue\.message/, 'issue 必须写进内联错误态');
+    assert.match(api, /aiBaseUrlError: this\.aiBaseUrlError,/, '页面必须把值传给 AiSection 才能渲染');
+    assert.match(api, /checkSettingsFields\(/, '仍复用同一整表校验入口');
+    const clearAt = api.indexOf('this.aiBaseUrlError = \'\';');
+    const assignAt = api.indexOf('this.aiBaseUrlError = issue.message');
+    assert.ok(clearAt > 0 && assignAt > clearAt, '必须先清后赋，避免上次红字残留');
+  });
 
   test('横幅只统计「真正落到可见字段」的问题（不从原始 issues 直接算）', () => {
     const page = readSettingsPage();
@@ -535,6 +552,25 @@ describe('F1（review P1）：SSH 警告行的显式出口（切换不落盘）'
       'SyncGroup 必须把回调接到页面 handler'
     );
     assert.match(syncSection, /onSwitchToHttpsToken: \(\) => void = \(\) => \{\};/, '组件必须声明回调 prop');
+  });
+});
+
+// ---------------------------------------------------------------- OpenCode Go live-test 400 的表单入口
+// 会话头修复不改变设置页可见字段：预设源的地址/模型由预设表提供，自定义源才校验地址。
+describe('AI 源/模型字段：预设 opencode-go 不被整表校验误拦', () => {
+  test('opencode-go + deepseek-v4.1-flash 走预设（无需手填地址），校验通过', async () => {
+    const { findProvider, resolveModel } = await import('../.build/model/aiProvider.js');
+    const preset = findProvider('opencode-go');
+    assert.equal(preset.baseURL, 'https://opencode.ai/inference/go/v1');
+    assert.equal(resolveModel('opencode-go', 'deepseek-v4.1-flash'), 'deepseek-v4.1-flash');
+
+    const issues = check({ customProvider: false, aiModel: 'deepseek-v4.1-flash', aiBaseURL: '' });
+    assert.deepEqual(issues, [], '预设源不该因为「没填接口地址/模型」被拦（模型只能下拉选）');
+  });
+
+  test('自定义源仍必须填地址（会话头不能掩盖配置错误）', () => {
+    const issues = check({ customProvider: true, aiModel: 'custom-model', aiBaseURL: '' });
+    assert.deepEqual(fieldsOf(issues), [FIELD_AI_BASE_URL]);
   });
 });
 

@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
-import { readSettingsFile, readSettingsPage } from './settingsSources.mjs';
+import { readSettingsFile, readSettingsPage, readSettingsRoot } from './settingsSources.mjs';
 
 const STORE = readSettingsFile('services/settingsStore.ets');
 const PAGE = readSettingsPage();
@@ -160,11 +160,13 @@ describe('B/C. 设置页远程配置删除 + 唯一入口 + 旧值迁移（retar
     }
   });
 
-  test('B3（old→new）RemoteGroup 只剩一行入口，指向 pages/Instances', () => {
-    const group = PAGE.slice(PAGE.indexOf('RemoteGroup() {'), PAGE.indexOf('DataGroup() {'));
-    assert.equal((group.match(/this\.ChatEntryRow\(\)/g) ?? []).length, 1, '唯一入口行');
-    assert.equal((group.match(/TextInput\(/g) ?? []).length, 0, '无输入框');
-    assert.match(PAGE, /router\.pushUrl\(\{ url: 'pages\/Instances' \}\)/, '入口指向实例页');
+  test('B3（old→new，收紧）唯一入口是根页「远程实例」行，旧 RemoteGroup 已删', () => {
+    // mod-settings-instances-entry-dedupe：旧断言钉「RemoteGroup 里一行 ChatEntryRow」；
+    // 现在正向钉住四行菜单根页那一行 + 旧组/builder/handler 消失，强度不降。
+    const root = readSettingsRoot();
+    assert.equal((root.match(/'pages\/Instances'/g) ?? []).length, 1, '唯一 Instances 路由在根页');
+    assert.match(root, /this\.MenuRow\('远程实例', this\.instanceSummary, ROUTE_INSTANCES\)/, '四行菜单的「远程实例」行');
+    assert.equal(/RemoteGroup\(|ChatEntryRow\(|openInstances\(/.test(PAGE), false, '旧入口组/builder/handler 已删');
   });
 
   test('C1（old→new）RemoteSection.ets 文件删除，设置页不再导入或装配', () => {

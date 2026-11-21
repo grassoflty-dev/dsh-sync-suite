@@ -12,7 +12,7 @@ import { existsSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, test } from 'node:test';
-import { readSettingsFile, readSettingsPage, readSettingsSources } from './settingsSources.mjs';
+import { readSettingsFile, readSettingsPage, readSettingsRoot, readSettingsSources } from './settingsSources.mjs';
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -67,30 +67,32 @@ describe('mod-settings-remote-dedupe：设置页不再重复配置，只留唯�
     }
   });
 
-  test('唯一入口：RemoteGroup 只渲染一行「远程实例与云端对话 ›」打开 pages/Instances', () => {
-    // mod-settings-export-page（old→new，不是放宽）：DataGroup 已从 SettingsHost 迁到
-    // pages/SettingsExportImport，这里只换「下一段 builder」的切片结束标记，断言逐字不变。
-    const group = bodyOf(PAGE, 'RemoteGroup() {', '@Builder\n  AboutGroup()');
-    assert.equal((group.match(/this\.ChatEntryRow\(\)/g) ?? []).length, 1, '入口行恰好一行');
-    assert.equal((group.match(/TextInput\(/g) ?? []).length, 0, '入口组里不该有任何输入框');
-    assert.equal((PAGE.match(/this\.RemoteGroup\(\)/g) ?? []).length, 2, '紧凑屏 / 宽屏各装配一次');
-    assert.equal((PAGE.match(/this\.ChatEntryRow\(\)/g) ?? []).length, 1, '整页只有这一处入口行调用');
-    const entry = bodyOf(PAGE, 'ChatEntryRow() {', 'private openInstances()');
-    assert.match(entry, /Text\('远程实例与云端对话'\)/, '入口文案仍在');
-    assert.match(entry, /Text\('›'\)/, '入口仍是可点的 › 行');
-    assert.match(PAGE, /router\.pushUrl\(\{ url: 'pages\/Instances' \}\)/, '入口指向实例页');
+  test('唯一入口（old→new，收紧）：根页「远程实例」行指向 pages/Instances，旧入口行已删除', () => {
+    // mod-settings-instances-entry-dedupe：旧入口是本宿主里的 ChatEntryRow → openInstances
+    // → push('pages/Instances')，与四行菜单根页的「远程实例」行重复。旧断言钉「旧行存在」，
+    // 现在正向钉「唯一的新行 + 旧行绝迹」——不是删断言、也不是只查 absence。
+    const root = readSettingsRoot();
+    assert.match(root, /const ROUTE_INSTANCES: string = 'pages\/Instances'/, '唯一入口的路由常量');
+    assert.match(root, /this\.MenuRow\('远程实例', this\.instanceSummary, ROUTE_INSTANCES\)/, '四行菜单的「远程实例」行');
+    assert.equal((root.match(/'pages\/Instances'/g) ?? []).length, 1, '根页只有一处 Instances 路由');
+    for (const gone of [/ChatEntryRow\(/, /openInstances\(/, /RemoteGroup\(/, /远程实例与云端对话/]) {
+      assert.equal(gone.test(PAGE), false, `实现宿主残留旧入口：${gone}`);
+    }
+    assert.equal(SOURCES.includes('远程实例与云端对话'), false, '设置树里旧入口文案绝迹');
   });
 
-  test('组顺序未回归：远程入口组仍排在「关于」之前（紧凑屏与宽屏）', () => {
+  test('旧入口装配绝迹：历史骨架不再渲染远程组与「远程」锚点（old→new）', () => {
+    // 旧断言「远程入口组仍排在关于之前」随入口删除而失效；改为钉住旧装配确实从两套历史骨架
+    // 里清掉，避免只删 builder、留下指向已删 builder 的死调用或永远 toast 的死锚点。
     for (const [name, body] of [
       ['compact', bodyOf(PAGE, 'CompactBody() {', 'WideBody() {')],
       ['wide', bodyOf(PAGE, 'WideBody() {', '// ------------------------------------------------------------------ 弹层')]
     ]) {
-      const remote = body.indexOf('this.RemoteGroup()');
-      const about = body.indexOf('this.AboutGroup()');
-      assert.ok(remote >= 0, `${name} 缺远程入口组`);
-      assert.ok(about > remote, `${name} 里远程入口必须排在关于之前`);
+      assert.equal(/this\.RemoteGroup\(\)/.test(body), false, `${name} 仍装配已删的远程入口组`);
+      assert.equal(/measureGroup\(2,/.test(body), false, `${name} 仍测量已删的远程组锚点`);
     }
+    const anchors = bodyOf(PAGE, 'GroupAnchorBar() {', '// ------------------------------------------------------------------ 装配');
+    assert.equal(/GroupAnchorChip\('远程'/.test(anchors), false, '「远程」锚点 chip 已随入口一起删除');
   });
 
   test('旧值仍可读：settingsStore 的 remoteUrl / remoteToken / remoteLastOk 三键未删', () => {

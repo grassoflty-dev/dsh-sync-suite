@@ -544,7 +544,7 @@ fallback 路由 `pages/Index.ets` 在自己的页头保留齿轮，直到 fallba
 诚实状态行三态逐字为 `已同步·HH:MM` / `同步中…` / `失败：原因`，失败态点一下即重放上次动作；
 失败出口「查看状态 / 测试连接 / 重试」在页面，没有「高级」也没有「推送 / 立即同步」手动按钮。
 `SettingsHost` 不再为 `section='sync'` 渲染正文 / 装配 props（删 `SyncGroup` 与 `SyncSection` import），
-其余 API / 关于子页仍复用同一宿主（数据子页已按 `mod-settings-export-page` 落真）；
+API 子页已按 `mod-settings-api-page`、数据子页已按 `mod-settings-export-page` 落真；关于子页的历史骨架留在宿主，且不再由路由渲染；
 `settingsStore.save()` 是 patch，故那些子页保存不会覆盖仓库地址 / 令牌（`syncSaveScope.test.mjs` 钉住此契约）。
 真机 ArkTS 编译与保存落盘观感 `unverified`。
 
@@ -579,5 +579,17 @@ fallback 路由 `pages/Index.ets` 在自己的页头保留齿轮，直到 fallba
 两个日期字段，动作只有 导出完整包 / 选择文件 / 确认导入，没有「填今天」重复提示，也没有「日程备份」节，
 媒体能力留在主流程。`SettingsHost` 不再为 `section='data'` 渲染正文 / 装配 props（删 `DataGroup` /
 `PrimaryExportButton` 与 `DataSection` import）；导出 / 导入状态只写 AppStorage 两个时刻键，不写
-`settingsStore`，故 API 子页复用宿主保存不会清空它（`settingsMenu` M-09 钉住）。真机 ArkTS 编译 /
+`settingsStore`，故任何子页保存都不会清空它（`settingsMenu` M-09 钉住）。真机 ArkTS 编译 /
 文件选择器观感 `unverified`（设备 lane 在跑，本批不做构建 / 装机）。
+
+**API 配置是真页面（`mod-settings-api-page`，2026-11-21）**：四行设置菜单的「API 配置」行 push 的
+`pages/SettingsApi.ets` 不再是复用 `SettingsHost` 的薄壳——它自带 `PageLayout(title:'API 配置')`、
+一层 flex（自己的 `Scroll` + 底部唯一主操作「保存」）、全部 AI / 多源 fallback 状态与方法
+（读盘、服务与模型下拉、测试连接、保存、四路 fallback handler），返回键走 `router.back()`。
+正文继续装配同一份 `components/settings/AiSection.ets` presentational body：服务 + 模型两个预设下拉、
+API Key 密码框、自定义源才显示接口地址，没有「高级」控制、没有手输模型名（§11 删除口径不变）。
+`SettingsHost` 删 `SECTION_API` / `AiGroup` / `PickerSheet` / AI 状态与 handler；`settingsStore.save()`
+为 patch，未提供的 AI 键保留磁盘原值，M-10 钉住「剩余页面保存不触碰 AI 字段」。真机 ArkTS 编译 /
+保存落盘与弹层观感 `unverified`（设备 lane 在跑，本批不做构建 / 装机）。
+
+**远程实例入口去重（`mod-settings-instances-entry-dedupe`，2026-11-21）**：设置树里指向可配置实例页 `pages/Instances` 的导航只剩一条——四行菜单的「远程实例」行（`pages/Settings.ets`，`ROUTE_INSTANCES`）。旧 `SettingsHost` 长滚动里的「远程实例与云端对话 ›」行（`ChatEntryRow` → `openInstances`）、包装它的 `RemoteGroup()`、两套历史骨架的两处装配与「远程」锚点 chip 一并删除（不留「永远 toast 未测量」的死锚点）；实例页内部（列表 / 表单 / 播种 / 打开）一字未改。`instancesEntryDedupe.test.mjs` 正向钉住「Settings 树里 `pages/Instances` 字面量恰好 1 处、文件列表 === `['pages/Settings.ets']`」，旧文案全树绝迹，两份 `main_pages.json` 与顶层页装配仍保证路由可达；四份旧守卫按 old→new retarget（旧断言一条未删）。真机编译 / 观感 `unverified`（本批不做构建 / 装机）。

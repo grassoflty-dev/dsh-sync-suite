@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ETS_ROOT, readExportPage, readSettingsFile, readSettingsPage, readSettingsRoot, readSettingsSources } from './settingsSources.mjs';
+import { ETS_ROOT, readApiPage, readExportPage, readSettingsFile, readSettingsPage, readSettingsRoot, readSettingsSources } from './settingsSources.mjs';
 
 const FILES = [
   'pages/Settings.ets',
@@ -205,6 +205,20 @@ test('C4 AI 配置无「高级」按钮与手输模型名文案，预设服务/�
   assert.match(ai, /Text\('服务'\)/, '服务下拉行仍在');
   assert.match(ai, /Text\('模型'\)/, '模型下拉行仍在');
   assert.match(ai, /this\.FieldLabel\('接口地址 baseURL'\)/, '自定义源接口地址仍在');
+
+  // mod-settings-api-page（old→new，不替代上面的 AiSection 断言）：用户可见文案的根锚点
+  // 从薄壳 SettingsApi 换到真页面，逐字复用的正文断言仍指向 AiSection。
+  const api = readApiPage();
+  assert.match(api, /title: 'API 配置'/, 'API 真页面页头标题');
+  assert.match(api, /AiSection\(\{/, 'API 真页面装配 AI 正文');
+  assert.match(api, /Button\('保存'\)/, '唯一主操作「保存」');
+  assert.equal(/SettingsHost\(\{/.test(api), false, 'API 子页不得再是复用宿主的薄壳');
+  const apiCode = withoutComments(api);
+  assert.equal(/高级/.test(apiCode), false, 'API 真页面不得出现「高级」控件');
+  assert.equal(/模型名（可手输|模型名（必填）/.test(apiCode), false, 'API 真页面不得有手输模型名文案');
+  const aiCode = withoutComments(ai);
+  assert.equal(/TextInput\(\{ text: this\.aiModel/.test(aiCode), false, '正文不得有手输模型名输入框');
+  assert.match(aiCode, /\.type\(InputType\.Password\)/, 'API Key 仍以密码框掩码显示');
 });
 
 // ---------------------------------------------------------------- mod-settings-root

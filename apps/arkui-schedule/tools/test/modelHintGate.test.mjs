@@ -10,11 +10,12 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, test } from 'node:test';
-import { readSettingsFile, readSettingsPage, readSettingsSources } from './settingsSources.mjs';
+import { readApiPage, readSettingsFile, readSettingsSources } from './settingsSources.mjs';
 
 const AI_SECTION = readSettingsFile('components/settings/AiSection.ets');
-// mod-settings-root（old→new）：锚点随实现搬到组件宿主；断言逐字保留。
-const PAGE = readSettingsPage();
+// mod-settings-root → mod-settings-api-page（old→new，不是放宽）：AI 实现先随根页拆到
+// SettingsHost，再随 API 真页面迁到 pages/SettingsApi。断言逐字保留，只换锚点文件。
+const PAGE = readApiPage();
 const SOURCES = readSettingsSources();
 
 const BUILT = fileURLToPath(new URL('../.build/model/aiProvider.js', import.meta.url));
@@ -27,7 +28,7 @@ describe('mod-ai-drop-advanced：高级折叠区与手输模型名已删除', ()
     assert.equal(/if \(this\.advancedOpen\)/.test(AI_SECTION), false, '高级折叠分支必须删除');
   });
 
-  test('Settings 页不再持有 AI 组的 advancedOpen / aiModelError 状态', () => {
+  test('API 真页面不再持有 AI 组的 advancedOpen / aiModelError 状态', () => {
     assert.equal(/@State advancedOpen: boolean/.test(PAGE), false, '页面不该再有 AI 组 advancedOpen @State');
     assert.equal(/@State aiModelError: string/.test(PAGE), false, 'aiModelError 内联错误状态必须删除');
     assert.equal(/onToggleAdvanced|onChangeAiModel|aiModelError:/.test(PAGE), false, 'AiSection 接线里的高级/手输回调与 prop 必须删除');

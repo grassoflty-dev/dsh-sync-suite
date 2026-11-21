@@ -547,9 +547,9 @@ test('U-S5 设置四行根页与三个子页都不新增设置入口（U-S4 仍�
   }
   assert.deepEqual(settingsPushFiles(), ['Home.ets'],
     'U-S4 不削弱：外壳 + 四面板里 Settings push 仍恰好一处、位于 Home.ets')
-  // mod-settings-sync-page / mod-settings-export-page（old→new，收紧）：同步与数据两个子页
-  // 都不再是薄壳，而是自带 Scroll + 一层 flex + 唯一主操作的真页面；它们各自装配
-  // presentational body（SyncSection / DataSection）但不 push 设置根页。API 子页仍是薄壳。
+  // mod-settings-sync-page / mod-settings-export-page / mod-settings-api-page（old→new，收紧）：
+  // 三个子页都不再是薄壳，而是自带 Scroll + 一层 flex + 唯一主操作的真页面；它们各自装配
+  // presentational body（SyncSection / DataSection / AiSection）但不 push 设置根页。
   const sync = roots.find(([file]) => file === 'SettingsSync.ets')[1]
   assert.equal(/SettingsHost\(\{/.test(sync), false, 'SettingsSync 不得再复用实现宿主的薄壳')
   assert.match(sync, /PageLayout\(\{[\s\S]{0,80}title: '同步仓库'/, 'SettingsSync 页头标题必须是「同步仓库」')
@@ -562,11 +562,16 @@ test('U-S5 设置四行根页与三个子页都不新增设置入口（U-S4 仍�
   assert.match(data, /DataSection\(\{/, '数据子页必须装配 DataSection 正文')
   assert.match(data, /Scroll\(this\.pageScroller\)/, '数据子页自带唯一 Scroll')
   assert.match(data, /Button\('导出'\)/, '数据子页的唯一主操作是「导出」')
-  for (const [name, section, title] of [
-    ['SettingsApi.ets', 'api', 'API 配置']
-  ]) {
-    const code = roots.find(([file]) => file === name)[1]
-    assert.match(code, new RegExp(`SettingsHost\\(\\{ section: '${section}', pageTitle: '${title}' \\}\\)`),
-      `${name} 必须是复用同一宿主的薄壳`)
-  }
+  // mod-settings-api-page（old→new，收紧，不是放宽）：API 子页也从薄壳变真页面。
+  // 旧断言「SettingsHost({ section:'api', pageTitle:'API 配置' })」随实现删除，改成钉
+  // 同一组真页面结构（标题 / 正文装配 / 自带 Scroll / 唯一「保存」/ 只 back 不 push）。
+  const api = roots.find(([file]) => file === 'SettingsApi.ets')[1]
+  assert.equal(/SettingsHost\(\{/.test(api), false, 'SettingsApi 不得再复用实现宿主的薄壳')
+  assert.match(api, /PageLayout\(\{[\s\S]{0,80}title: 'API 配置'/, 'API 子页页头标题必须是「API 配置」')
+  assert.match(api, /AiSection\(\{/, 'API 子页必须装配 AI 正文')
+  assert.match(api, /Scroll\(this\.pageScroller\)/, 'API 子页自带唯一 Scroll')
+  assert.match(api, /Button\('保存'\)/, 'API 子页的唯一主操作是「保存」')
+  assert.match(api, /router\.back\(\)/, 'API 子页只 back，不新增设置入口')
+  assert.equal(/高级/.test(api.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')), false,
+    'API 真页面不得出现「高级」控件')
 })
