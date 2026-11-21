@@ -267,7 +267,11 @@ describe('B2 设置根页 Settings.ets（四行菜单）：行级路由跳转的
     const row = bodyFrom(PAGE, 'MenuRow(title: string, summary: string, route: string) {');
     assert.match(row, /Row\(\{ space: SPACING\.sm \}\)/, '行必须是 Row');
     assert.match(row, /\.onClick\(\(\) => \{\s*this\.push\(route\);/, '点击必须调 push(route)');
-    assert.match(row, /\.minHeight\(TOUCH_MIN \+ SPACING\.md\)/, '命中区必须 ≥ TOUCH_MIN');
+    // ArkTS RowAttribute has no .minHeight(); the ≥ TOUCH_MIN hit area is set via constraintSize.
+    assert.match(row, /\.constraintSize\(\{\s*minHeight:\s*TOUCH_MIN \+ SPACING\.md\s*\}\)/,
+      '命中区必须 ≥ TOUCH_MIN（用 constraintSize({ minHeight })）');
+    assert.equal(/\.minHeight\(/.test(row), false,
+      'Row 不得回退到 ArkTS 不存在的 .minHeight(（须用 constraintSize({ minHeight })）');
     assert.equal(row.includes('.enabled(false)'), false, '行不得静默禁用');
     assert.match(ROOT_BUILD, /Scroll\(\)/, '四行必须放在自己的 Scroll 里');
   });

@@ -139,7 +139,7 @@ struct Settings {
         .textAlign(TextAlign.Center)
     }
     .width('100%')
-    .minHeight(TOUCH_MIN + SPACING.md)
+    .constraintSize({ minHeight: TOUCH_MIN + SPACING.md })
     .alignItems(VerticalAlign.Center)
     .onClick(() => {
       this.push(route);
