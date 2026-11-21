@@ -1,14 +1,26 @@
 /**
- * 远程 DSH 面板（mod-shell-instances-pane）：从 pages/Instances.ets 迁入的真实实例列表。
+ * 远程 DSH 面板（mod-shell-instances-pane / mod-instances-pane-readonly）：
+ * 同一个组件服务两种形态，由 `configurable` 一处开关分叉。
  *
- * 逐字承接原页的实例正文：本机首行 / 远程行（名称 + 方式徽章 + 可达三态 + 相对 lastSeen +
- * 打码 URL）/ 三动作（打开 / 编辑 / 删除；本机无删除、编辑不显示地址框）/ typed 问题行 /
- * 空态 / 首次播种与旧配置迁移。令牌纪律不变：只渲染 store.redacted() 的视图，URL 再过 redactUrl()。
+ * - `configurable = false`（默认，首页「远程 DSH」分段）：**只用来用**——本机首行 /
+ *   远程行（名称 + 方式徽章 + 可达三态 + 相对 lastSeen + 二次打码 URL）/「打开」/
+ *   typed 问题行 / 空态 / 播种迁移。没有添加实例、编辑、删除，也没有内联地址 / 令牌 /
+ *   方式表单；所有配置动作都回到「设置 → 远程实例」。
+ * - `configurable = true`（设置 → 远程实例路由 `pages/Instances`）：**配置落点**——
+ *   在上面「用」的能力之外，保留页头「添加实例」、行内「编辑 / 删除」、添加 / 编辑表单
+ *   与空态「添加实例」。
+ *
+ * `Home.ets` 的分段装配不传 `configurable`，走默认 false，因此首页面板天然只读、不必改 Home；
+ * `pages/Instances.ets` 显式传 `true`，设置入口看到的仍是原来的完整配置页。
  *
  * 对外契约（Home 的四面板装配）：
  *   - `deepLinkId: string`：深链携带的实例 id，预留给「按 id 打开指定实例」，当前不消费；
  *   - `active: boolean`：由 Home 按当前分段传入，根 Scroll 据此在 Visible / Hidden 间切换；
- *     Hidden 留在树上，@State / 滚动位置 / 表单面板状态不丢。
+ *     Hidden 留在树上，@State / 滚动位置不丢；
+ *   - `configurable: boolean`：默认 false（只读用），设置路由传 true（可配置）。
+ *
+ * 令牌纪律不变：只渲染 store.redacted() 的视图，URL 再过 redactUrl()；配置表单的令牌
+ * 只在保存时经 typed upsert 进 store，从不进 Text / 日志。
  *
  * 布局纪律：根 Scroll + 自带分段页头，没有固定高度 Column 包裹层；行内名称 / 页头标题的
  * layoutWeight(1) 只是省略号，不是整页的第二层 flex 切分（整页唯一的切分在 Home.build()）。
@@ -40,10 +52,16 @@ const ACTION_VIEW_DATA: string = 'ohos.want.action.viewData';
 const EMPTY_TITLE: string = '还没有可管理的 DSH 实例';
 const EMPTY_DETAIL: string =
   '在电脑 DSH → 远程访问 → 启动并点「显示二维码与链接」，把地址粘进来；本机（默认）实例会自动出现';
+/** 可配置模式（设置 → 远程实例）的空态主操作：就地展开添加表单。 */
 const EMPTY_ACTION: string = '添加实例';
+/** 只读模式（首页远程 DSH 面板）的空态主操作：只导航，不在首页展开配置。 */
+const EMPTY_ACTION_READONLY: string = '去设置添加实例';
 const EMPTY_SECONDARY: string = '用浏览器打开';
 
-/** 面板模式：空 = 收起；`add` = 添加实例；`edit` = 编辑当前行。 */
+/** 只读面板跳到配置唯一落点：设置根页的「远程实例」行指向同一个路由。 */
+const ROUTE_INSTANCES: string = 'pages/Instances';
+
+/** 面板模式：空 = 收起；`add` = 添加实例；`edit` = 编辑当前行（仅 configurable=true 可进入）。 */
 const PANEL_ADD: string = 'add';
 const PANEL_EDIT: string = 'edit';
 
@@ -53,8 +71,13 @@ export struct InstancesPane {
   @Prop deepLinkId: string = '';
   /** 保活可见性：Home 当前分段为 instances 时传 true。 */
   @Prop active: boolean = true;
+  /**
+   * 配置模式：默认 false = 首页「远程 DSH」面板（只用不配置）；
+   * 设置路由 pages/Instances 传 true = 保留添加 / 编辑 / 删除 / 地址·令牌·方式表单。
+   */
+  @Prop configurable: boolean = false;
 
-  /** 实例真身（只供打开 / 编辑取 token / 原值，不直接进 Text）。 */
+  /** 实例真身（只供打开 / 配置取 token / 原值，不直接进 Text）。 */
   @State rows: DsInstance[] = [];
   /** 渲染视图：结构上没有 token，URL 已由 store 的 `redacted()` 打码。 */
   @State views: RedactedInstance[] = [];
@@ -62,11 +85,11 @@ export struct InstancesPane {
   @State problem: InstanceProblem = 'ok';
   /** 首次加载中（避免闪一帧空态）。 */
   @State loading: boolean = true;
-  /** 添加 / 编辑面板模式。 */
+  /** 添加 / 编辑面板模式（只读模式恒为空串）。 */
   @State panelMode: string = '';
   /** 正在编辑的 id（添加时空串）。 */
   @State formId: string = '';
-  /** 表单：名称 / 地址（本机不显示地址框）/ 方式。 */
+  /** 表单：名称 / 地址（本机不显示地址框）/ 方式（仅 configurable=true 可见）。 */
   @State formName: string = '';
   @State formUrl: string = '';
   @State formMode: string = REMOTE_MODE_LAN;
@@ -186,7 +209,18 @@ export struct InstancesPane {
       });
   }
 
-  /** 打开添加面板（空态主操作与错误行的「重新添加」共用）。 */
+  /**
+   * 只读面板的统一配置出口：不在这里展开表单，回到设置根页的「远程实例」行。
+   * 空态主操作与问题行「去设置添加实例」共用这一条；设置路由本身是 configurable=true，
+   * 不会走到这里，避免自跳。
+   */
+  private openInstanceConfig(): void {
+    router.pushUrl({ url: ROUTE_INSTANCES }).catch((error: Error) => {
+      promptAction.showToast({ message: `打开实例设置失败：${describeError(error)}`, duration: 3000 });
+    });
+  }
+
+  /** 打开添加面板（仅 configurable=true 的空态 / 错误行调用）。 */
   private showAdd(): void {
     this.panelMode = PANEL_ADD;
     this.formId = '';
@@ -313,7 +347,7 @@ export struct InstancesPane {
 
   // ------------------------------------------------------------------ 渲染
 
-  /** 分段页头：左侧标题（省略号），右侧主操作「添加实例」+ 原页保留的「云端对话」桥接出口。 */
+  /** 分段页头：左标题（省略号）+「云端对话」桥接；「添加实例」只在可配置模式出现。 */
   @Builder
   Header() {
     Row() {
@@ -325,15 +359,17 @@ export struct InstancesPane {
         .layoutWeight(1)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-      Text('添加实例')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.brand'))
-        .height(TOUCH_MIN)
-        .padding({ left: SPACING.sm, right: SPACING.sm })
-        .onClick(() => {
-          this.showAdd();
-        })
+      if (this.configurable) {
+        Text('添加实例')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.brand'))
+          .height(TOUCH_MIN)
+          .padding({ left: SPACING.sm, right: SPACING.sm })
+          .onClick(() => {
+            this.showAdd();
+          })
+      }
       Text('云端对话')
         .fontSize(FONT.caption)
         .lineHeight(LINE_HEIGHT.caption)
@@ -349,19 +385,34 @@ export struct InstancesPane {
     .border({ width: { bottom: DIVIDER }, color: $r('app.color.divider') })
   }
 
-  /** 空态：§1 的逐字文案 + 主操作「添加实例」，次操作「用浏览器打开」另起一行。 */
+  /**
+   * 空态：§1 的逐字标题 + 指引 + 次操作「用浏览器打开」两种模式共用；
+   * 主操作分叉——可配置就地「添加实例」，只读「去设置添加实例」跳设置路由。
+   */
   @Builder
   EmptyView() {
     Column({ space: SPACING.sm }) {
-      EmptyState({
-        title: EMPTY_TITLE,
-        detail: EMPTY_DETAIL,
-        actionLabel: EMPTY_ACTION,
-        compact: false,
-        onAction: (): void => {
-          this.showAdd();
-        }
-      })
+      if (this.configurable) {
+        EmptyState({
+          title: EMPTY_TITLE,
+          detail: EMPTY_DETAIL,
+          actionLabel: EMPTY_ACTION,
+          compact: false,
+          onAction: (): void => {
+            this.showAdd();
+          }
+        })
+      } else {
+        EmptyState({
+          title: EMPTY_TITLE,
+          detail: EMPTY_DETAIL,
+          actionLabel: EMPTY_ACTION_READONLY,
+          compact: false,
+          onAction: (): void => {
+            this.openInstanceConfig();
+          }
+        })
+      }
       ActionButton({
         label: EMPTY_SECONDARY,
         actionEnabled: true,
@@ -378,7 +429,7 @@ export struct InstancesPane {
     .width('100%')
   }
 
-  /** 存储问题行：typed 原因逐字上屏 +「重新添加」（不静默吞掉坏信封 / 存储不可用）。 */
+  /** 存储问题行：typed 原因逐字上屏；恢复动作两种模式共用同一个出口选择。 */
   @Builder
   ProblemRow() {
     if (this.problem !== 'ok') {
@@ -389,18 +440,33 @@ export struct InstancesPane {
           .fontColor($r('app.color.danger'))
           .width('100%')
           .textAlign(TextAlign.Start)
-        ActionButton({
-          label: '重新添加',
-          actionEnabled: true,
-          disabledReason: '',
-          busy: false,
-          variant: 'secondary',
-          block: false,
-          onTap: (): void => {
-            this.showAdd();
-          },
-          onBlockedTap: null
-        })
+        if (this.configurable) {
+          ActionButton({
+            label: '重新添加',
+            actionEnabled: true,
+            disabledReason: '',
+            busy: false,
+            variant: 'secondary',
+            block: false,
+            onTap: (): void => {
+              this.showAdd();
+            },
+            onBlockedTap: null
+          })
+        } else {
+          ActionButton({
+            label: '去设置添加实例',
+            actionEnabled: true,
+            disabledReason: '',
+            busy: false,
+            variant: 'secondary',
+            block: false,
+            onTap: (): void => {
+              this.openInstanceConfig();
+            },
+            onBlockedTap: null
+          })
+        }
       }
       .width('100%')
       .alignItems(HorizontalAlign.Start)
@@ -410,7 +476,7 @@ export struct InstancesPane {
     }
   }
 
-  /** 单行：名称 / 方式 / 三态 + 相对时间 / 打码 URL / 三个动作（本机缺删除）。 */
+  /** 单行：名称 / 方式 / 三态 + 相对时间 / 打码 URL /「打开」；编辑·删除只在可配置模式。 */
   @Builder
   InstanceRow(view: RedactedInstance) {
     Column({ space: SPACING.xs }) {
@@ -469,31 +535,33 @@ export struct InstancesPane {
           },
           onBlockedTap: null
         })
-        ActionButton({
-          label: '编辑',
-          actionEnabled: true,
-          disabledReason: '',
-          busy: false,
-          variant: 'ghost',
-          block: false,
-          onTap: (): void => {
-            this.showEdit(view);
-          },
-          onBlockedTap: null
-        })
-        if (view.id !== LOCAL_INSTANCE_ID) {
+        if (this.configurable) {
           ActionButton({
-            label: '删除',
+            label: '编辑',
             actionEnabled: true,
             disabledReason: '',
             busy: false,
-            variant: 'danger',
+            variant: 'ghost',
             block: false,
             onTap: (): void => {
-              this.deleteInstance(view);
+              this.showEdit(view);
             },
             onBlockedTap: null
           })
+          if (view.id !== LOCAL_INSTANCE_ID) {
+            ActionButton({
+              label: '删除',
+              actionEnabled: true,
+              disabledReason: '',
+              busy: false,
+              variant: 'danger',
+              block: false,
+              onTap: (): void => {
+                this.deleteInstance(view);
+              },
+              onBlockedTap: null
+            })
+          }
         }
       }
       .width('100%')
@@ -504,7 +572,7 @@ export struct InstancesPane {
     .borderRadius(RADIUS.none)
   }
 
-  /** 添加 / 编辑面板：本机只给名称；远程给名称 + 地址 + 方式（六选一）。 */
+  /** 添加 / 编辑面板：本机只给名称；远程给名称 + 地址 + 方式（六选一）。仅 configurable=true 装配。 */
   @Builder
   FormPanel() {
     if (this.panelMode.length > 0) {
@@ -595,7 +663,9 @@ export struct InstancesPane {
           .width('100%')
           .textAlign(TextAlign.Start)
         this.ProblemRow()
-        this.FormPanel()
+        if (this.configurable) {
+          this.FormPanel()
+        }
         if (this.loading) {
           Text('正在读取本机实例表…')
             .fontSize(FONT.caption)

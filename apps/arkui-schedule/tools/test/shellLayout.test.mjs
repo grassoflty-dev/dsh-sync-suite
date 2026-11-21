@@ -66,10 +66,53 @@ const SCAFFOLDS = [
 const PANE_SOURCE = new Map(
   PANES.map((pane) => [pane.name, stripComments(readFileSync(new URL(pane.file, PANE_DIR), 'utf8'))])
 );
+/**
+ * 原始源码（不剥注释）：模式分叉守卫必须用它——`stripComments()` 会把 URL 字面量里的
+ * `http://` 当成行注释起点，截掉同一行的 `}`，破坏花括号配对（InstancesPane 的表单里有
+ * `placeholder: 'http://192...`）。注释本身不含守卫用的代码形状字符串，留着无害。
+ */
+const PANE_RAW = new Map(
+  PANES.map((pane) => [pane.name, readFileSync(new URL(pane.file, PANE_DIR), 'utf8')])
+);
 
 /** 外部组件的 build() 区间（替代旧 Home 里的同名 @Builder 区间）。 */
 function paneBody(name) {
   return blockAfter(PANE_SOURCE.get(name), '\n  build() ');
+}
+
+// mod-instances-pane-readonly：Instan 面板同一个组件两种模式，守卫按模式切源码。
+const CONFIG_GATE = 'if (this.configurable) {';
+const CONFIG_BUILDER = '\n  FormPanel() {';
+
+/** 配置专属区域（门控块 + 只由配置模式调用的 FormPanel builder）。 */
+function configRegions(source) {
+  const out = [];
+  let at = source.indexOf(CONFIG_GATE);
+  while (at >= 0) {
+    const [start, end] = matchBrace(source, source.indexOf('{', at));
+    out.push(source.slice(start + 1, end - 1));
+    at = source.indexOf(CONFIG_GATE, end);
+  }
+  const builderAt = source.indexOf(CONFIG_BUILDER);
+  if (builderAt >= 0) {
+    const [start, end] = matchBrace(source, source.indexOf('{', builderAt));
+    out.push(source.slice(start + 1, end - 1));
+  }
+  return out;
+}
+
+/** 首页只读模式可见源码（挖掉配置专属区域）。 */
+function readonlyRegions(source) {
+  let result = source;
+  for (const marker of [CONFIG_GATE, CONFIG_BUILDER]) {
+    let at = result.indexOf(marker);
+    while (at >= 0) {
+      const [start, end] = matchBrace(result, result.indexOf('{', at));
+      result = result.slice(0, start) + ' '.repeat(end - start) + result.slice(end);
+      at = result.indexOf(marker, end);
+    }
+  }
+  return result;
 }
 
 const BUILD = blockAfter(HOME, '\n  build() ');
@@ -236,9 +279,14 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       '日程面板页头不得有设置动作（唯一出口 = rail 齿轮 → Home.openSettings）');
     assert.match(schedule, /Button\('新建'\)/, '日程面板的主操作是「新建」');
     assert.equal(/即将迁入/.test(schedule), false, '日程面板不得残留占位文案');
-    // 远程 DSH 不再是占位：真页头带可点「添加实例」，禁用原因常量 / 逐字说明都已移除。
+    // mod-instances-pane-readonly（old→new，收紧）：远程 DSH 不再是占位；首页只读页头
+    // 不再有「添加实例」（它只在配置模式出现），但「云端对话」桥接仍可点；禁用原因已绝迹。
     const instances = PANE_SOURCE.get('InstancesPane');
-    assert.match(blockAfter(instances, '\n  Header() '), /Text\('添加实例'\)/, '主操作可点，不是禁用占位');
+    const instancesRaw = PANE_RAW.get('InstancesPane');
+    const readonlyHeader = readonlyRegions(blockAfter(instancesRaw, '\n  Header() '));
+    assert.match(readonlyHeader, /Text\('云端对话'\)/, '只读页头保留可点桥接出口');
+    assert.equal(/Text\('添加实例'\)/.test(readonlyHeader), false, '首页面板不得展示添加实例');
+    assert.match(configRegions(instancesRaw).join('\n'), /Text\('添加实例'\)/, '配置模式保留添加实例');
     assert.equal(/REASON_REMOTE|远程面板即将迁入|本页暂不展示任何记录/.test(instances), false,
       '远程面板不得残留占位原因 / 说明');
   });
@@ -272,21 +320,32 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.match(instances, /this\.InstanceRow\(view\)/, '远程面板必须装配 InstanceRow');
   });
 
-  test('L-19 远程 DSH 真 body：本机首行 + 三动作 + 空态 + 播种，占位文案绝迹', () => {
-    const instances = PANE_SOURCE.get('InstancesPane');
+  // mod-instances-pane-readonly（old→new，收紧）：旧断言把三动作都算「面板真 body」；
+  // 现在「打开」是两种模式的共用能力，「编辑 / 删除」只在设置配置模式，分别钉住。
+  test('L-19 远程 DSH 真 body：本机首行 + 打开 + 空态 + 播种；配置动作只在设置模式', () => {
+    const instances = PANE_RAW.get('InstancesPane');
+    const readonly = readonlyRegions(instances);
+    const config = configRegions(instances).join('\n');
     for (const token of [
       'instanceStore.ensureSeeded(', 'instanceStore.redacted()', 'instanceStore.lastProblem()',
-      'ForEach(this.views', "label: '打开'", "label: '编辑'", "label: '删除'",
-      '还没有可管理的 DSH 实例', 'view.id !== LOCAL_INSTANCE_ID'
+      'ForEach(this.views', "label: '打开'", '还没有可管理的 DSH 实例'
     ]) {
-      assert.ok(instances.includes(token), `远程面板必须拥有 ${token}`);
+      assert.ok(readonly.includes(token), `首页面板必须拥有 ${token}`);
     }
+    for (const token of ["label: '编辑'", "label: '删除'"]) {
+      assert.ok(config.includes(token), `配置模式必须拥有 ${token}`);
+      assert.equal(readonly.includes(token), false, `首页面板不得渲染配置动作 ${token}`);
+    }
+    // `view.id !== LOCAL_INSTANCE_ID` 两处用途不同：删除按钮（配置专属）与打开时拼 token
+    // （两种模式共用），所以只在配置块里断言删除分支，不断言整份只读源码绝迹。
+    assert.ok(config.includes('view.id !== LOCAL_INSTANCE_ID'), '配置块的删除分支必须排除本机');
     for (const stale of ['远程面板即将迁入', '实例列表与连接操作即将迁入', '本页暂不展示任何记录。']) {
       assert.equal(instances.includes(stale), false, `远程面板不得残留占位串「${stale}」`);
     }
-    // 单一事实来源：路由页只装配面板，不复制正文。
+    // 单一事实来源：路由页只装配面板，不复制正文；它是配置落点，必须显式打开模式。
     const route = stripComments(readFileSync(new URL('pages/Instances.ets', ETS_ROOT_URL), 'utf8'));
     assert.match(route, /InstancesPane\(\{/, 'pages/Instances 路由必须装配 InstancesPane');
+    assert.match(route, /configurable: true/, '设置路由必须打开配置模式');
   });
 
   test('L-14 齿轮是出口不是第五个 section：四节顺序 + 分隔线 + SettingsRow', () => {
@@ -365,7 +424,12 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       '常驻轨与抽屉轨都把齿轮事件接到 openSettings');
     // 面板主操作必须 pane 专属，不能有设置动作。
     assert.match(PANE_SOURCE.get('SchedulePane'), /Button\('新建'\)/, '日程：新建');
-    assert.match(PANE_SOURCE.get('InstancesPane'), /Text\('添加实例'\)/, '远程 DSH：添加实例');
+    // mod-instances-pane-readonly（old→new，不比原来弱）：面板主操作仍 pane 专属，
+    // 但「添加实例」只在配置模式；首页分段用「云端对话」桥接 + 空态跳设置，不展示配置。
+    assert.match(readonlyRegions(PANE_RAW.get('InstancesPane')), /Text\('云端对话'\)/,
+      '远程 DSH（只读）：云端对话桥接');
+    assert.match(configRegions(PANE_RAW.get('InstancesPane')).join('\n'), /Text\('添加实例'\)/,
+      '远程 DSH（设置模式）：添加实例');
     assert.match(PANE_SOURCE.get('DotsPane'), /新建对话/, 'dots：新建对话');
     assert.match(PANE_SOURCE.get('CloudChatPane'), /新建对话/, '云端对话：新建对话');
   });

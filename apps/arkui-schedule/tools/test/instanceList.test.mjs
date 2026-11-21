@@ -9,6 +9,7 @@ import { registerHooks } from 'node:module';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { matchBrace, stripComments } from './helpers/etsSource.mjs';
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -40,6 +41,7 @@ const LAST_OK = JSON.stringify({ url: 'http://192.168.1.6:3080/?a=1', at: 170000
 const PAGE = readFileSync(
   new URL('../../entry/src/main/ets/pages/panes/InstancesPane.ets', import.meta.url), 'utf8');
 const ROUTE = readFileSync(new URL('../../entry/src/main/ets/pages/Instances.ets', import.meta.url), 'utf8');
+const HOME = readFileSync(new URL('../../entry/src/main/ets/pages/Home.ets', import.meta.url), 'utf8');
 const SETTINGS = readFileSync(new URL('../../entry/src/main/ets/pages/Settings.ets', import.meta.url), 'utf8');
 const STORE = readFileSync(new URL('../../entry/src/main/ets/services/instanceStore.ets', import.meta.url), 'utf8');
 const MAIN_PAGES = JSON.parse(
@@ -61,6 +63,54 @@ function appSources(dir = ETS_ROOT, out = []) {
     }
   }
   return out;
+}
+
+/**
+ * mod-instances-pane-readonly：同一个组件两种模式，静态守卫必须按「模式可见性」切源码，
+ * 不能只做整文件 `includes` —— 配置代码仍留在组件里供设置路由使用。
+ * `if (this.configurable) { … }` 块 = 只有配置模式可见；挖掉它们 = 首页只读模式可见。
+ */
+const CONFIG_GATE = 'if (this.configurable) {';
+
+/** `FormPanel` builder 只在 `if (this.configurable) { this.FormPanel() }` 处被调用。 */
+const CONFIG_BUILDER = '\n  FormPanel() {';
+
+function blankBlock(source, markerAt) {
+  const [start, end] = matchBrace(source, source.indexOf('{', markerAt));
+  return source.slice(0, start) + ' '.repeat(end - start) + source.slice(end);
+}
+
+/** 所有配置专属区域：模式门控块 + 只在配置模式下被调用的 FormPanel builder。 */
+function configBlocks(source) {
+  const out = [];
+  let at = source.indexOf(CONFIG_GATE);
+  while (at >= 0) {
+    const [start, end] = matchBrace(source, source.indexOf('{', at));
+    out.push(source.slice(start + 1, end - 1));
+    at = source.indexOf(CONFIG_GATE, end);
+  }
+  const builderAt = source.indexOf(CONFIG_BUILDER);
+  if (builderAt >= 0) {
+    const [start, end] = matchBrace(source, source.indexOf('{', builderAt));
+    out.push(source.slice(start + 1, end - 1));
+  }
+  return out;
+}
+
+/** 首页只读模式可见源码：把配置专属区域替换成等长空白（保留偏移与行号）。 */
+function readonlySource(source) {
+  let result = source;
+  let at = result.indexOf(CONFIG_GATE);
+  while (at >= 0) {
+    const [start, end] = matchBrace(result, result.indexOf('{', at));
+    result = result.slice(0, start) + ' '.repeat(end - start) + result.slice(end);
+    at = result.indexOf(CONFIG_GATE, end);
+  }
+  const builderAt = result.indexOf(CONFIG_BUILDER);
+  if (builderAt >= 0) {
+    result = blankBlock(result, builderAt);
+  }
+  return result;
 }
 
 function legacy(overrides = {}) {
@@ -249,10 +299,13 @@ describe('静态断言：页面、入口与存储接线', () => {
     assert.ok(HARMONY_PAGES.src.includes('pages/Instances'));
   });
 
-  test('U-02 空态四段文案逐字符合 §1', () => {
+  // mod-instances-pane-readonly（old→new，不比原来弱）：原来只有一套空态「添加实例」；
+  // 现在可配置模式沿用逐字四段，只读模式另有「去设置添加实例」，标题/指引/次操作仍逐字共用。
+  test('U-02 空态文案逐字符合 §1，两种模式各有自己的主操作', () => {
     assert.match(PAGE, /还没有可管理的 DSH 实例/);
     assert.match(PAGE, /在电脑 DSH → 远程访问 → 启动并点「显示二维码与链接」，把地址粘进来；本机（默认）实例会自动出现/);
     assert.match(PAGE, /const EMPTY_ACTION: string = '添加实例'/);
+    assert.match(PAGE, /const EMPTY_ACTION_READONLY: string = '去设置添加实例'/);
     assert.match(PAGE, /const EMPTY_SECONDARY: string = '用浏览器打开'/);
   });
 
@@ -263,11 +316,16 @@ describe('静态断言：页面、入口与存储接线', () => {
     assert.equal(PAGE.includes(SECRET), false);
   });
 
-  test('U-04 本机守卫：无删除按钮、编辑不显示 URL 输入框', () => {
-    assert.match(PAGE, /view\.id !== LOCAL_INSTANCE_ID/, '删除按钮必须排除本机');
-    assert.match(PAGE, /this\.formId !== LOCAL_INSTANCE_ID/, 'URL / 方式输入框必须排除本机');
-    assert.match(PAGE, /label: '删除'/, '远程行必须有删除动作');
-    assert.match(PAGE, /label: '编辑'/, '每行必须有编辑动作');
+  // mod-instances-pane-readonly（old→new，收紧）：旧断言在整文件里找「编辑 / 删除」，
+  // 现在这些只属于 configurable=true 的配置模式；改在配置块内逐条断言，README 首页侧另在
+  // U-18 做「绝迹」断言，两边合起来比旧的整文件 includes 更强。
+  test('U-04 配置模式守卫：本机无删除、编辑不显示 URL 输入框', () => {
+    const config = configBlocks(PAGE).join('\n');
+    assert.ok(config.length > 0, '必须存在配置专属块');
+    assert.match(config, /view\.id !== LOCAL_INSTANCE_ID/, '删除按钮必须排除本机');
+    assert.match(config, /this\.formId !== LOCAL_INSTANCE_ID/, 'URL / 方式输入框必须排除本机');
+    assert.match(config, /label: '删除'/, '配置模式的远程行必须有删除动作');
+    assert.match(config, /label: '编辑'/, '配置模式的每行必须有编辑动作');
   });
 
   test('U-05 打开复用内嵌 Web 并记可达：routeToRemote + mergeRemoteToken + markReachable(ok|fail, Date.now())', () => {
@@ -277,10 +335,16 @@ describe('静态断言：页面、入口与存储接线', () => {
     assert.match(PAGE, /markReachable\(view\.id, 'fail', Date\.now\(\)\)/);
   });
 
-  test('U-06 问题行：problemText() + 「重新添加」', () => {
+  // mod-instances-pane-readonly（old→new，收紧）：typed 原因两种模式都渲染；
+  // 「重新添加」只在配置模式，只读模式换成导航到设置的「去设置添加实例」。
+  test('U-06 问题行：problemText() 常在，恢复动作按模式分叉', () => {
     assert.match(PAGE, /this\.problem !== 'ok'/);
     assert.match(PAGE, /problemText\(this\.problem\)/);
-    assert.match(PAGE, /label: '重新添加'/);
+    const config = configBlocks(PAGE).join('\n');
+    const readonly = readonlySource(PAGE);
+    assert.match(config, /label: '重新添加'/, '配置模式就地重开添加表单');
+    assert.match(readonly, /label: '去设置添加实例'/, '只读模式只给导航出口');
+    assert.match(readonly, /this\.openInstanceConfig\(\)/, '只读恢复动作走统一配置出口');
   });
 
   // mod-settings-root（old→new，不比原来弱）：旧入口是长滚动里的一行「远程实例与云端对话 ›」；
@@ -307,10 +371,15 @@ describe('静态断言：页面、入口与存储接线', () => {
     assert.doesNotMatch(SEED, /url: raw/);
   });
 
-  test('U-10 菜单动作齐全且本机不可删：打开 / 编辑 / 删除三个 label', () => {
-    for (const label of ['打开', '编辑', '删除']) {
-      assert.match(PAGE, new RegExp(`label: '${label}'`));
-    }
+  // mod-instances-pane-readonly（old→new，收紧）：旧断言要求三动作都在；现在「打开」
+  // 是两种模式共用的使用动作，「编辑 / 删除」只属于配置模式，分别钉住。
+  test('U-10 打开常在两种模式；编辑 / 删除只在配置模式', () => {
+    const readonly = readonlySource(PAGE);
+    const config = configBlocks(PAGE).join('\n');
+    assert.match(readonly, /label: '打开'/, '首页面板必须有打开动作');
+    assert.match(config, /label: '编辑'/);
+    assert.match(config, /label: '删除'/);
+    assert.equal(/label: '编辑'|label: '删除'/.test(readonly), false, '首页面板不得有编辑 / 删除');
     assert.match(PAGE, /EMPTY_TITLE: string = '还没有可管理的 DSH 实例'/);
   });
 
@@ -344,9 +413,11 @@ describe('静态断言：页面、入口与存储接线', () => {
     assert.equal(U.stripRemoteToken('http://h:3080/?a=1'), 'http://h:3080/?a=1');
   });
 
-  test('U-13 单一事实来源：顶层页只装配 InstancesPane，不复制正文', () => {
+  // mod-instances-pane-readonly（old→new，收紧）：路由壳是设置里的配置落点，必须显式
+  // 传 configurable: true；旧断言只钉装配，不区分模式。
+  test('U-13 单一事实来源：顶层页只装配 InstancesPane 并打开配置模式', () => {
     assert.match(ROUTE, /import \{ InstancesPane \} from '\.\/panes\/InstancesPane'/);
-    assert.match(ROUTE, /InstancesPane\(\{\s*deepLinkId: '', active: true \}\)/);
+    assert.match(ROUTE, /InstancesPane\(\{\s*deepLinkId: '', active: true, configurable: true \}\)/);
     // 路由壳不得自己持有实例正文状态 / 动作（否则双份播种、双份渲染）。
     for (const body of ['instanceStore.', 'settingsStore.', 'EMPTY_TITLE', 'InstanceRow(', 'ForEach(']) {
       assert.equal(ROUTE.includes(body), false, `路由壳不得复制正文：${body}`);
@@ -354,21 +425,28 @@ describe('静态断言：页面、入口与存储接线', () => {
     assert.ok(PAGE.includes('export struct InstancesPane'), '真 body 必须在面板里');
   });
 
-  test('U-14 面板渲染本机首行 + 远程行 + 三动作（打开/编辑/删除；本机无删除）', () => {
+  // mod-instances-pane-readonly（old→new，收紧）：把「三动作都在」改成模式分叉断言。
+  test('U-14 面板渲染本机首行 + 远程行 + 打开；配置动作只在配置模式', () => {
     assert.match(PAGE, /ForEach\(\s*this\.views,\s*\(view: RedactedInstance\)/, '渲染真实实例视图');
     assert.match(PAGE, /this\.InstanceRow\(view\)/, '每行装配 InstanceRow');
     assert.match(PAGE, /ensureSeeded\(\{/, '面板仍负责首次播种（本机首行）');
-    assert.match(PAGE, /view\.id !== LOCAL_INSTANCE_ID/, '删除只对远程行渲染');
-    for (const label of ['打开', '编辑', '删除']) {
-      assert.match(PAGE, new RegExp(`label: '${label}'`), `必须有「${label}」动作`);
-    }
+    const readonly = readonlySource(PAGE);
+    const config = configBlocks(PAGE).join('\n');
+    assert.match(readonly, /label: '打开'/, '使用动作在首页面板常驻');
+    assert.match(config, /view\.id !== LOCAL_INSTANCE_ID/, '删除只对远程行渲染');
+    assert.match(config, /label: '编辑'/);
+    assert.match(config, /label: '删除'/);
     // 本机排序第一由 L-02 的纯逻辑钉住；面板消费 store 的 sortInstances 后副本。
     assert.match(STORE, /redacted\(\): RedactedInstance\[\]/, '渲染视图来自 store 的排序副本');
   });
 
-  test('U-15 面板页头 + 自带 Scroll + 保活接线，无 PageLayout 双层壳', () => {
+  // mod-instances-pane-readonly（old→new，收紧）：页头主操作按模式分叉，保活 / Scroll 不变。
+  test('U-15 面板页头 + 自带 Scroll + 保活接线；添加实例只在配置模式', () => {
     assert.match(PAGE, /Text\('远程 DSH'\)/, '分段标题');
-    assert.match(PAGE, /Text\('添加实例'\)/, '主操作');
+    assert.match(configBlocks(PAGE).join('\n'), /Text\('添加实例'\)/, '配置模式主操作');
+    assert.match(readonlySource(PAGE), /Text\('云端对话'\)/, '只读页头保留桥接出口');
+    assert.equal(/Text\('添加实例'\)/.test(readonlySource(PAGE)), false,
+      '首页面板不得展示添加实例');
     assert.match(PAGE, /^\s*Scroll\(\) \{/m, '面板自带 Scroll');
     assert.match(PAGE, /\.visibility\(this\.active \? Visibility\.Visible : Visibility\.Hidden\)/);
     assert.equal(/PageLayout\(/.test(PAGE), false, '面板不得再套固定页头 + 内容双层壳');
@@ -383,5 +461,72 @@ describe('静态断言：页面、入口与存储接线', () => {
         assert.equal(text.includes(needle), false, `${path} 残留占位串「${needle}」`);
       }
     }
+  });
+
+  // ------------------------------------------------ mod-instances-pane-readonly（正向守卫）
+
+  test('U-17 单一 prop 两种调用点：默认 false 的 Home 分段 + 显式 true 的设置路由', () => {
+    assert.match(PAGE, /@Prop configurable: boolean = false;/, 'prop 必须存在且默认 false');
+    const homeCall = HOME.slice(HOME.indexOf('InstancesPane({'), HOME.indexOf('CloudChatPane({'));
+    assert.ok(homeCall.length > 0, 'Home 装配点必须存在');
+    assert.equal(/configurable/.test(homeCall), false, 'Home 分段不得打开配置模式（默认只读）');
+    assert.match(ROUTE, /configurable: true/, '设置路由必须显式打开配置模式');
+    assert.equal(configBlocks(PAGE).length >= 4, true, '页头 / 空态 / 问题行 / 行内 / 表单都按模式分叉');
+  });
+
+  test('U-18 首页面板（只读模式可见源码）没有配置入口，也没有地址 / 令牌 / 方式输入', () => {
+    const readonly = readonlySource(PAGE);
+    for (const needle of [
+      'label: \'添加实例\'', 'label: \'编辑\'', 'label: \'删除\'', 'label: \'保存\'', 'label: \'取消\'',
+      'Text(\'添加实例\')', 'label: \'重新添加\'', 'TextInput(', 'Select(', 'this.showAdd()',
+      'this.showEdit(', 'this.submitForm()', 'this.FormPanel()', 'this.deleteInstance('
+    ]) {
+      assert.equal(readonly.includes(needle), false, `只读面板不得出现配置入口「${needle}」`);
+    }
+    // 展示面保留：本机首行 / 状态 / 打码 URL / 打开 / 播种。
+    for (const keep of [
+      'instanceStore.ensureSeeded(', 'instanceStore.redacted()', 'ForEach(this.views',
+      'Text(redactUrl(view.url))', 'label: \'打开\'', 'reachabilityLabel(view.reachable)'
+    ]) {
+      assert.ok(readonly.includes(keep), `只读面板必须保留「${keep}」`);
+    }
+  });
+
+  test('U-19 设置路由模式保留全部配置能力（添加 / 编辑 / 删除 / 地址·令牌·方式表单）', () => {
+    const config = configBlocks(PAGE).join('\n');
+    for (const needle of [
+      'Text(\'添加实例\')', 'label: \'编辑\'', 'label: \'删除\'', 'label: \'重新添加\'',
+      'TextInput({ text: this.formUrl', 'Select(this.modeSelectOptions())',
+      'this.showAdd()', 'this.showEdit(view)', 'this.submitForm()', 'this.FormPanel()',
+      'this.deleteInstance(view)'
+    ]) {
+      assert.ok(config.includes(needle), `配置模式必须保留「${needle}」`);
+    }
+    assert.match(config, /EMPTY_ACTION/, '配置模式空态主操作仍是「添加实例」');
+  });
+
+  test('U-20 空态分叉：只读跳设置 → 远程实例路由；配置模式就地添加', () => {
+    assert.match(PAGE, /const ROUTE_INSTANCES: string = 'pages\/Instances'/,
+      '配置唯一落点常量必须与设置根页的路由一致');
+    const method = PAGE.slice(PAGE.indexOf('private openInstanceConfig()'), PAGE.indexOf('private showAdd()'));
+    assert.ok(method.length > 0, '统一配置出口方法必须存在');
+    assert.match(method, /router\.pushUrl\(\{ url: ROUTE_INSTANCES \}\)/, '只读模式的配置动作必须跳设置实例路由');
+    assert.equal(/pushUrl\(\{ url: 'pages\/Settings'/.test(PAGE), false,
+      '不新增第二处 Settings push（唯一出口仍是 Home 齿轮）');
+    const readonly = readonlySource(PAGE);
+    const config = configBlocks(PAGE).join('\n');
+    assert.match(readonly, /actionLabel: EMPTY_ACTION_READONLY/, '只读空态主操作是「去设置添加实例」');
+    assert.match(readonly, /this\.openInstanceConfig\(\)/, '只读空态主操作走统一出口');
+    assert.match(config, /actionLabel: EMPTY_ACTION\b/, '配置模式空态主操作仍是「添加实例」');
+    assert.match(config, /this\.showAdd\(\)/, '配置模式空态就地打开表单');
+  });
+
+  test('U-21 「打开」在两种模式都存在，且仍复用内嵌 Web + 记可达', () => {
+    const readonly = readonlySource(PAGE);
+    const config = configBlocks(PAGE).join('\n');
+    assert.equal(readonly.includes('label: \'打开\''), true, '只读模式必须能打开实例');
+    assert.equal(config.includes('label: \'打开\''), false, '打开不在配置专属块里：两种模式共用同一行');
+    assert.match(PAGE, /this\.openInstance\(view\)/, '行内打开动作接线');
+    assert.match(PAGE, /this\.InstanceRow\(view\)/, '两种模式都装配同一实例行');
   });
 });

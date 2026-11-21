@@ -25,6 +25,10 @@ const HARMONY_PAGES = JSON.parse(
   readFileSync(new URL('../../entry/src/harmony/resources/base/profile/main_pages.json', import.meta.url), 'utf8'));
 
 const PANE_NAMES = ['DotsPane', 'SchedulePane', 'InstancesPane', 'CloudChatPane'];
+/** 原始源码：模式分叉守卫用；`stripComments()` 会把 URL 字面量 `http://` 后面的 `}` 截掉。 */
+const PANE_RAW = new Map(
+  PANE_NAMES.map((name) => [name, readFileSync(new URL(`${name}.ets`, PANE_DIR), 'utf8')])
+);
 /**
  * 剩余占位：日程（S3）与远程 DSH（mod-shell-instances-pane）都已是真 body；
  * 只有 dots / 云端对话仍是「即将迁入」占位。
@@ -42,6 +46,39 @@ function blockAfter(source, marker) {
   assert.notEqual(brace, -1, `${marker} 后面没有花括号`);
   const [start, end] = matchBrace(source, brace);
   return source.slice(start + 1, end - 1);
+}
+
+// mod-instances-pane-readonly：同一个 InstancesPane 两种模式，按门控块切只读 / 配置可见源码。
+const CONFIG_GATE = 'if (this.configurable) {';
+const CONFIG_BUILDER = '\n  FormPanel() {';
+
+function configRegions(source) {
+  const out = [];
+  let at = source.indexOf(CONFIG_GATE);
+  while (at >= 0) {
+    const [start, end] = matchBrace(source, source.indexOf('{', at));
+    out.push(source.slice(start + 1, end - 1));
+    at = source.indexOf(CONFIG_GATE, end);
+  }
+  const builderAt = source.indexOf(CONFIG_BUILDER);
+  if (builderAt >= 0) {
+    const [start, end] = matchBrace(source, source.indexOf('{', builderAt));
+    out.push(source.slice(start + 1, end - 1));
+  }
+  return out;
+}
+
+function readonlyRegions(source) {
+  let result = source;
+  for (const marker of [CONFIG_GATE, CONFIG_BUILDER]) {
+    let at = result.indexOf(marker);
+    while (at >= 0) {
+      const [start, end] = matchBrace(result, result.indexOf('{', at));
+      result = result.slice(0, start) + ' '.repeat(end - start) + result.slice(end);
+      at = result.indexOf(marker, end);
+    }
+  }
+  return result;
 }
 
 /** 取 `X({...}) { ... }` 这类「配置对象 + builder 体」构造器的 builder 体（跳过第一对花括号）。 */
@@ -329,16 +366,27 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     assert.match(dots.body, /Text\(REASON_DOTS\)/, '禁用原因必须可见');
   });
 
-  test('P-18 面板不拥有全局导航：无分段 pushUrl、无 section 常量；rail 完全 router-free', () => {
+  // mod-instances-pane-readonly（old→new，不比原来弱）：旧断言只说「渲染树里无 pushUrl」；
+  // 现在首页实例面板的空态/问题行确实要跳「设置 → 远程实例」，故把它挪进统一出口方法，
+  // 渲染树仍无 pushUrl；并正向钉住唯一新增目标 = pages/Instances，绝不 push 设置根页 / 外壳。
+  test('P-18 面板不拥有全局导航：渲染树无 pushUrl；实例面板只跳设置实例路由', () => {
     assert.equal(/router|pushUrl/.test(RAIL), false, 'ShellRail 不得引用 router 或 pushUrl');
     for (const name of PANE_NAMES) {
       const p = pane(name);
       assert.equal(/pushUrl/.test(p.body), false, `${name} 的渲染树不得自行跳转（换段由 shell 负责）`);
       assert.equal(/pushUrl\(\{\s*url:\s*'pages\/Home'/.test(p.source), false,
         `${name} 不得 pushUrl 到外壳页切段`);
+      assert.equal(/pushUrl\(\{\s*url:\s*'pages\/Settings'/.test(p.source), false,
+        `${name} 不得新增第二处 Settings push`);
       assert.equal(/SHELL_SECTION_[A-Z_]+|ShellSection/.test(p.body), false,
         `${name} 不得在渲染树里判定分段 id`);
     }
+    const instancesRaw = PANE_RAW.get('InstancesPane');
+    assert.match(instancesRaw, /const ROUTE_INSTANCES: string = 'pages\/Instances'/);
+    assert.match(instancesRaw, /pushUrl\(\{ url: ROUTE_INSTANCES \}\)/,
+      '只读配置出口必须跳设置根页的「远程实例」路由');
+    assert.match(readonlyRegions(instancesRaw), /this\.openInstanceConfig\(\)/,
+      '只读空态 / 问题行走统一出口');
     // 日程面板确有 router.pushUrl，但只能是详情 / 编辑；设置出口唯一在 rail 齿轮 → Home。
     // 旧断言允许 pages/Settings → 新断言明确禁止（收紧，不是放宽）。
     const schedule = pane('SchedulePane');
@@ -356,19 +404,36 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
       '常驻轨与抽屉轨都通过 onSelect 回传给 shell');
   });
 
-  test('P-19 远程 DSH 是真 body：自带 Scroll / 页头 / 实例行 / 三动作 / 空态 / 播种', () => {
+  // mod-instances-pane-readonly（old→new，收紧）：「三动作」改成使用动作常在 / 配置动作分叉；
+  // 新增空态路由与「只读模式无配置输入」的正向断言，而不是只删旧断言。
+  test('P-19 远程 DSH 是真 body：自带 Scroll / 页头 / 实例行 / 打开 / 空态 / 播种；配置分模式', () => {
     const p = pane('InstancesPane');
+    const raw = PANE_RAW.get('InstancesPane');
+    const readonly = readonlyRegions(raw);
+    const config = configRegions(raw).join('\n');
     assert.match(p.body, /^\s*Scroll\(\) \{/, '面板自带 Scroll（根即滚动容器）');
     assert.equal(/PageLayout\(/.test(p.source), false, '不得再套固定页头 + 内容的双层壳');
-    assert.match(blockAfter(p.source, '\n  Header() '), /Text\('添加实例'\)/, '页头主操作可点');
-    const rows = blockAfter(p.source, '\n  InstanceRow(');
-    for (const token of ['打开', '编辑', '删除']) {
-      assert.match(rows, new RegExp(`label: '${token}'`), `实例行必须装配「${token}」动作`);
+    const header = blockAfter(raw, '\n  Header() ');
+    assert.match(readonlyRegions(header), /Text\('云端对话'\)/, '只读页头保留桥接出口');
+    assert.equal(/Text\('添加实例'\)/.test(readonlyRegions(header)), false, '只读页头不得有添加实例');
+    assert.match(configRegions(header).join('\n'), /Text\('添加实例'\)/, '配置模式页头有添加实例');
+    const rows = blockAfter(raw, '\n  InstanceRow(');
+    assert.match(readonlyRegions(rows), /label: '打开'/, '两种模式都能打开实例');
+    assert.match(configRegions(rows).join('\n'), /label: '编辑'/, '配置模式有编辑');
+    assert.match(configRegions(rows).join('\n'), /label: '删除'/, '配置模式有删除');
+    assert.match(configRegions(rows).join('\n'), /view\.id !== LOCAL_INSTANCE_ID/, '本机行不得渲染删除');
+    assert.equal(/label: '编辑'|label: '删除'/.test(readonlyRegions(rows)), false, '首页行内无配置动作');
+    // 只读模式没有地址 / 令牌 / 方式输入，也没有内联表单调用。
+    for (const forbidden of ['TextInput(', 'Select(', 'this.showAdd()', 'this.FormPanel()']) {
+      assert.equal(readonly.includes(forbidden), false, `只读面板不得出现 ${forbidden}`);
     }
-    assert.match(rows, /view\.id !== LOCAL_INSTANCE_ID/, '本机行不得渲染删除');
+    assert.match(config, /TextInput\(/, '设置模式保留地址输入');
     assert.match(p.body, /ForEach\(\s*this\.views/, '列表来自真实实例视图');
     assert.match(p.source, /instanceStore\.ensureSeeded\(/, '首次进入播种本机 + 旧配置迁移');
     assert.match(p.source, /还没有可管理的 DSH 实例/, '空态逐字文案仍在');
+    const empty = blockAfter(raw, '\n  EmptyView() ');
+    assert.match(readonlyRegions(empty), /actionLabel: EMPTY_ACTION_READONLY/, '只读空态主操作去设置');
+    assert.match(configRegions(empty).join('\n'), /actionLabel: EMPTY_ACTION\b/, '配置空态主操作仍是添加实例');
     assert.equal(/远程面板即将迁入|本页暂不展示任何记录。|REASON_REMOTE/.test(p.source), false,
       '占位说明 / 禁用原因必须绝迹');
   });
@@ -397,7 +462,11 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     assert.equal((HOME.match(/onOpenSettings: \(\): void => \{\s*\n\s*this\.openSettings\(\);/g) ?? []).length, 2,
       '宽屏常驻轨与 compact 抽屉轨都把齿轮事件接到 openSettings');
     assert.match(pane('SchedulePane').source, /Button\('新建'\)/, '日程：新建');
-    assert.match(pane('InstancesPane').source, /Text\('添加实例'\)/, '远程 DSH：添加实例');
+    // mod-instances-pane-readonly（old→new，不比原来弱）：面板主操作仍 pane 专属；
+    // 「添加实例」只在配置模式，首页只读面板用「云端对话」桥接 + 空态跳设置实例路由。
+    const instancesRaw = PANE_RAW.get('InstancesPane');
+    assert.match(readonlyRegions(instancesRaw), /Text\('云端对话'\)/, '远程 DSH（只读）：桥接');
+    assert.match(configRegions(instancesRaw).join('\n'), /Text\('添加实例'\)/, '远程 DSH（设置）：添加实例');
     assert.match(pane('DotsPane').source, /新建对话/, 'dots：新建对话');
     assert.match(pane('CloudChatPane').source, /新建对话/, '云端对话：新建对话');
   });

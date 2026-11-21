@@ -13,6 +13,9 @@
  * 颜色只用 `$r('app.color.*')`、字号只用 `FONT`、触控目标 ≥ `TOUCH_MIN`。
  * **首页页头不动**（仍只有「今天 / ⚙ 设置」）：本页入口在「设置 → 云端对话」。
  *
+ * **no config surface**（mod-cloud-chat-no-config-note）：云端会话直接复用「设置 → 同步仓库」的 Git
+ * 配置；本页没有独立设置面，不渲染配置行或机制说明段落，空态唯一下一步是「先在设置里配置仓库」。
+ *
  * 三种非常规状态（`docs/CHAT-APP.md` 逐字记录，`docs/STATE-UI.md` §4 组件化）：
  * - **加载中**：`LoadingState`（行内紧凑档），3 秒后可取消——取消只停止「等待」，后台读文件可能仍会完成；
  * - **空态**（`chats/index.jsonl` 不存在，`ok:true`）：`EmptyState` 给出「怎么把会话弄过来」的操作指引
@@ -49,23 +52,15 @@ const CONTENT_MAX_WIDTH: number = 720;
 /** 诊断行里的错误码（列表读取失败）：固定值，便于用户反馈时检索。 */
 const CHAT_LIST_ERROR_CODE: string = 'CHAT_LIST';
 
-/** 云端段空态：一句说明 + 「怎么弄过来」的下一步（保留原来的三句关键信息）。 */
+/** 云端段空态：唯一下一步 = 配置同步仓库；其余只是导出/同步的操作指引，不是配置或机制说明。 */
 const EMPTY_CLOUD_TITLE: string = '还没有云端对话';
 const EMPTY_CLOUD_DETAIL: string =
-  '本页只读：在电脑的 DSH 上运行一次会话后点插件「云端对话 → 导出全部」，导出并推送后下拉刷新；从首页「纯云端对话」可随时回来查看';
+  '先在设置里配置仓库；之后在电脑点插件「云端对话 → 导出全部」并同步，下拉刷新即可看到；从首页「纯云端对话」可随时回来查看';
 /** dots 段空态：说清 dots 能做什么、一切操作都要用户确认（没有假的输入框）。 */
 const EMPTY_DOTS_TITLE: string = '还没有 dots 对话';
 const EMPTY_DOTS_DETAIL: string =
   '从首页「与 dots 对话」进入本页；dots 可查看实例并对会话发指令，所有操作需你确认，当前为只读预览';
 const EMPTY_ACTION: string = '下拉刷新试试';
-
-/**
- * 只读来源说明（mod-settings-cloud-no-config）：会话不在此页配置，也不需要任何云端服务地址 / 令牌。
- * 它们就保存在同步仓库的 `chats/` 目录里，靠 Git 多端同步；续接在电脑上完成（单写者）。
- * 这是常驻的只读说明行，**不是设置行**，页面上没有任何可编辑的云端配置入口。
- */
-const CHAT_GIT_EXPLANATION: string =
-  '会话保存在同步仓库的 chats/ 目录，通过 Git 在多端同步；本页只读，对话续接请在电脑上继续。';
 
 /** 错误态文案：为什么失败由 `errorText` 运行时给。 */
 const ERROR_WHAT: string = '读取会话列表失败';
@@ -221,7 +216,7 @@ struct Chats {
     // 计数按当前分段：切到 dots 段时不该显示云端段的会话总数。
     const segmentCount: number = filterByKind(this.chats, this.kind).length;
     if (segmentCount === 0) {
-      return '只读 · 从同步仓库读取';
+      return '只读';
     }
     if (this.queryText.trim().length > 0) {
       return `只读 · 共 ${segmentCount} 个会话 · 筛选出 ${this.visibleChats.length} 个`;
@@ -519,15 +514,6 @@ struct Chats {
     Column({ space: SPACING.md }) {
       // 分段常驻：错误态下也能切段看另一段（错误来自本地读文件，与 kind 无关）
       this.KindSegment()
-      // 只读来源说明：会话来自同步仓库的 chats/，没有云端配置行（mod-settings-cloud-no-config）
-      Text(CHAT_GIT_EXPLANATION)
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.text_secondary'))
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .width('100%')
-        .textAlign(TextAlign.Start)
       if (this.errorText.length > 0) {
         this.ErrorBlock()
       } else {
