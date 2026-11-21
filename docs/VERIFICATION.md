@@ -1629,3 +1629,48 @@ GATE3_EXIT=0                       # validate-app
 **本 pass 的改动**：仅本文 §15.14 与 gitignore 内 `.tmp/device-shots/s5-*`（另 `.tmp/s5-walk.mjs` / `.tmp/s5-abc-scan.mjs` / `.tmp/s5-hap-scan.mjs` 为一次性解析辅助脚本，非仓库文件）。**未改任何源码**（无 compile error 需修），未触发「失败即本批修」分支，故未重跑四门；门闸 tail 沿用 §15.13 基线（GATE1/2/3=0、overlay applied=false）。
 
 **unverified**：本次横屏 2560×1600 真机布局（设备物理竖屏）；shell 四节交互（Home 尚未成为入口）；`instanceGrantStore`（SKIPPED）；§15.13 所列其余项。
+
+### 15.15 首次 shell 编译门槛 + 四节真机 smoke（2026-11-21，`shell-smoke`；只追加，不改写 §15.1–§15.14）
+
+**编译门槛结论（三份 `.ets` 首次真实 ArkTS 编译）**
+
+- 尝试 1 **FAILED**：`BUILD FAILED in 2 min 17 s 803 ms`，`COMPILE RESULT:FAIL {ERROR:5 WARN:415}`；4 条独立错误同根因——`Property 'id' in type '<Pane>' is not assignable to the same property in base type 'CustomComponent'. Type 'string' is not assignable to type '(value: string) => CommonAttribute'`，分别位于 `DotsPane.ets:26` / `SchedulePane.ets:154` / `InstancesPane.ets:26` / `CloudChatPane.ets:34`（`@Prop id: string` 与 ArkUI 内建 `CustomComponent.id(value)` 属性方法同名冲突）。覆盖层已还原并断言 `applied=false`；产物作废、未装机。日志 `.build-logs/build-20261121-131811.log`。
+- 尝试 2（交付）**SUCCESSFUL**：`BUILD SUCCESSFUL in 10 s`，42 tasks = 23 executed / 19 up-to-date，`CompileArkTS 6 s 968 ms`，`✓ 产物验收通过`；`overlay(finally): applied=false（已断言）`。日志 `.build-logs/build-20261121-132324.log`。
+- **显式编译判定**：最终 `modules.abc`（2,785,560 B，compiler `loader_out` 与 HAP 内 `ets/modules.abc` 字节一致）含 `SchedulePane`×7 @348841、`DotsPane`×6 @348783、`InstancesPane`×6 @348903、`CloudChatPane`×6 @348966、`Home`×9 @344265、`ShellRail`×6 @148708、`pages/Home`×5、`deepLinkId`×4。三份门槛文件（`pages/panes/*.ets`、`Home.ets`、`EntryAbility.ets` 的 `loadContent('pages/Home')`）**全部编译通过并进入交付 HAP**；无残留 ArkTS 错误。
+- 产物：unsigned HAP **4,846,331 B / SHA256=80BF22122DD90819F6813A64C616AF05FD0FD31701E2AF53F568C91EC6E3C63A**。
+- 签名（`-ExecutionPolicy Bypass`，`$env:JAVA_HOME='D:\jdk17\jdk-17'`，`$env:SIGN_PASS='itwill123'`）：v2 材料不全 → v1 回退告警仍在；`Sign Hap success!` / `verify-app success`；交付 HAP `dist-harmony/arkui-schedule-harmony-debug-signed.hap` **4,919,606 B / SHA256=3F2923798844F5B00F8ABF203D2D3269CD9A7FB61FB9065712775FCE5E472F87**。
+- 装机：`hdc -t 192.168.1.7:33023 install -r` → `install bundle successfully`；每次注入前 `aa force-stop com.oray.sunloginclient` + `power-shell wakeup` + 解锁上滑；`aa start -a EntryAbility -b com.itwill.schedule` → `start ability successfully`。启动页确为 `pages/Home`（见 2a）。
+
+**shell smoke（`uitest dumpLayout` + `screenCap`，证据均在 `.tmp/device-shots/smoke-*`）**
+
+| 项 | 判定 | 逐字证据 / 截图 |
+| --- | --- | --- |
+| 2a rail 顺序 + 默认节 | **PASS** | `Text [dots]` / `[日程]` / `[远程 DSH]` / `[云端对话]`（bounds 依次 `[0,105][570,218]`、`[0,218][570,332]`、`[0,332][570,446]`、`[0,446][570,560]`）+ 页脚 `⚙ 设置`；启动即 dots 面板（`dots` / `新建对话（dots 尚未接线）`）。`smoke-01-rail-launch.png/.json` |
+| 2b 日程列表 | **PASS** | `Text [当日全部日程 1 条（v2 时间线，自动同步）]` + `Text [FRESH-UI-PASS3-20261121]`。记录已存在，未新建。`smoke-02-schedule` |
+| 2b 切 tab 保状态 | **PASS** | 点「未完成」→ `未完成 1 条（v2 时间线，自动同步）` + 同一行；点回「当日全部日程」→ 计数与 `FRESH-UI-PASS3-20261121` 仍在，无空白/重置。`smoke-03-undone` / `smoke-04-schedule-return` |
+| 2b 云端对话说明 | **PASS** | `会话保存在同步仓库的 chats/ 目录，通过 Git 在多端同步；本页只读，对话续接请在电脑上继续。` `smoke-05-cloud-chat` |
+| 2b 远程 DSH 实例列表 | **FAILED** | 面板仍为占位：`添加实例（远程面板即将迁入）`、`实例列表与连接操作即将迁入，本页暂不展示任何记录。`、`远程面板即将迁入`；**无 `本机` 行、无任何实例行**。`smoke-06-remote-dsh.png/.json` |
+| 2c 齿轮 → 设置 | **PASS** | 齿轮行打开 `设置`（副标题 `同步 / AI / 远程 / 数据 / 关于`）；同步组 `同步仓库` 只有 `仓库地址` + `访问令牌（仅存本机）`，全 dump 无 `高级`；远程组恰好一行 `远程实例与云端对话 ›`（Row id=505），点开为 `远程实例与云端对话` 页；无云端地址/令牌配置行。`smoke-07-settings` / `smoke-08-instances` |
+| 2d dots 面板 | **PASS** | `TextInput click=false hint=[输入给 dots 的指令…]`（禁用输入）+ 逐字 `dots 尚未接线` + `新建对话（dots 尚未接线）`；无假行。`smoke-12-dots.png/.json` |
+| 2e 远程迁移 | **PASS** | `共 2 个实例`；远程行逐字 `远程实例` / `手动填地址` / `未知 · 暂无记录` / `http://192.168.1.6:3080/` —— URL **不含 token**；设置唯一入口行确实打开该列表。`smoke-08-instances.png/.json` |
+| 2f 横竖屏 | **BLOCKED（设备物理竖屏）** | `dumpLayout` 根边界始终 `[0,0][1600,2560]`；受限 shell `wm` / `settings` 均 `inaccessible or not found`；控制中心 `旋转锁定` 磁贴点击切换后仍 `[0,0][1600,2560]`，无软件旋转手段，未改源码。`smoke-14-control-center` / `smoke-15-rotation-toggled` |
+
+**本次改动（ArkTS 严格修复，未提交，作为后续模块交 Lead）**
+
+- `pages/panes/DotsPane.ets:26`、`pages/panes/SchedulePane.ets:154`、`pages/panes/InstancesPane.ets:26`、`pages/panes/CloudChatPane.ets:34`：`@Prop id: string` → `@Prop deepLinkId: string`（避开 `CustomComponent.id()` 内建属性方法）。
+- `pages/Home.ets:191/195/199/203`：四处装配 `id: this.deepLinkId` → `deepLinkId: this.deepLinkId`。
+- `tools/test/structureGuards.test.mjs:307/313`：SG-S4 守卫同步为 `@Prop deepLinkId: string` / `['active','deepLinkId']`。
+- 纯机械改名，无行为/深链语义变化；五处源码 + 一处守卫之外未动任何文件。
+
+**门闸 tail（修后复跑，四门全绿）**
+
+```
+GATE_TSC_EXIT=0                      # 无输出（tsc 只覆盖 tools/tsconfig.json 的纯 TS）
+GATE_TESTS_EXIT=0                    # ℹ tests 3015 / suites 359 / pass 3014 / fail 0 / skipped 1
+GATE_VALIDATE_EXIT=0                 # ✅ 全部通过：8/8（relative 459 / main 静态 585 / 页面 9 / rawfile-git 2）
+[overlay] applied=false              # 构建前/后两次确认
+```
+
+**git status --porcelain**：仅上述 6 个源码/守卫文件为 ` M`（ArkTS 修复，待 Lead 以新模块提交）；`.tmp/` 被 gitignore；本小节写入 `docs/VERIFICATION.md`。未触发「失败即本批修」的其它分支——2b 远程 DSH 面板缺失是占位设计（UI-DESIGN §12 / REVIEW-shell-schedule-pane §5），非小缺陷，建议后续模块 `mod-shell-instances-pane` 把真实实例列表迁入 `InstancesPane`。
+
+**unverified**：横屏 2560×1600 真机布局（设备物理竖屏、无旋转命令）；远程 DSH 面板内实例列表（FAILED，待后续模块）；真实 Git push/pull 与「已同步·HH:MM」；chat takeover；OCR/手写端到端；插件 live；签名材料 v1 回退（泄漏密钥）处置；§15.13/§15.14 其余项。

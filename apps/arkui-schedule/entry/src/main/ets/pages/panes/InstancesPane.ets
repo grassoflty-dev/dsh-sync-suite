@@ -23,7 +23,7 @@ const REASON_REMOTE: string = '远程面板即将迁入';
 @Component
 export struct InstancesPane {
   /** 深链 id：预留给后续按 id 打开指定实例。 */
-  @Prop id: string = '';
+  @Prop deepLinkId: string = '';
   /** 保活可见性：Home 当前分段为 instances 时传 true。 */
   @Prop active: boolean = true;
 

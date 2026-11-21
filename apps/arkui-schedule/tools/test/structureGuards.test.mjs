@@ -304,13 +304,13 @@ describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
       const code = stripComments(readFileSync(file, 'utf8'));
       const name = structNameOf(file);
       assert.ok(name.length > 0, `${file} 必须导出一个 struct`);
-      assert.match(code, /@Prop id: string/, `${name} 缺少深链 id prop`);
+      assert.match(code, /@Prop deepLinkId: string/, `${name} 缺少深链 id prop`);
       assert.match(code, /@Prop active: boolean/, `${name} 缺少保活 active prop`);
       const at = HOME_CODE.indexOf(`${name}({`);
       assert.ok(at >= 0, `Home 没有装配 ${name}`);
       const keys = passedKeys(HOME_CODE.slice(at), name);
       assert.ok(keys !== null, `${name} 装配点必须有属性区`);
-      assert.deepEqual([...keys].sort(), ['active', 'id'], '少传 = 保活/深链断线；多传 = 名字拼错被静默忽略');
+      assert.deepEqual([...keys].sort(), ['active', 'deepLinkId'], '少传 = 保活/深链断线；多传 = 名字拼错被静默忽略');
     }
   });
 

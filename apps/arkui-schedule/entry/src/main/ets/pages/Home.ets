@@ -188,19 +188,19 @@ struct Home {
         // 只有 active 的那个可见，滚动由各面板自己的 Scroll 承担。
         Stack({ alignContent: Alignment.TopStart }) {
           DotsPane({
-            id: this.deepLinkId,
+            deepLinkId: this.deepLinkId,
             active: this.section === SHELL_SECTION_DOTS
           })
           SchedulePane({
-            id: this.deepLinkId,
+            deepLinkId: this.deepLinkId,
             active: this.section === SHELL_SECTION_SCHEDULE
           })
           InstancesPane({
-            id: this.deepLinkId,
+            deepLinkId: this.deepLinkId,
             active: this.section === SHELL_SECTION_INSTANCES
           })
           CloudChatPane({
-            id: this.deepLinkId,
+            deepLinkId: this.deepLinkId,
             active: this.section === SHELL_SECTION_CLOUD_CHAT
           })
         }

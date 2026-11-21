@@ -23,7 +23,7 @@ const REASON_DOTS: string = 'dots 尚未接线';
 @Component
 export struct DotsPane {
   /** 深链 id：预留给后续按 id 打开指定 dots 会话。 */
-  @Prop id: string = '';
+  @Prop deepLinkId: string = '';
   /** 保活可见性：Home 当前分段为 dots 时传 true。 */
   @Prop active: boolean = true;
 

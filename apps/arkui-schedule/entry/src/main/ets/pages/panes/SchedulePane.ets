@@ -151,7 +151,7 @@ export struct SchedulePane {
   /**
    * 深链 id（Home 的 router 参数）：预留给「按 id 打开指定日程」，当前仅保留对外契约、不消费。
    */
-  @Prop id: string = '';
+  @Prop deepLinkId: string = '';
   /**
    * 保活可见性：由 Home 按当前分段传入；根 Stack 据此在 Visible / Hidden 间切换（Hidden 不卸载，
    * 本组件的 @State、滚动位置与选中态在分段切换后仍然保留）。

@@ -31,7 +31,7 @@ const CHAT_GIT_EXPLANATION: string =
 @Component
 export struct CloudChatPane {
   /** 深链 id：预留给后续按 id 打开指定云端会话。 */
-  @Prop id: string = '';
+  @Prop deepLinkId: string = '';
   /** 保活可见性：Home 当前分段为 cloudChat 时传 true。 */
   @Prop active: boolean = true;
 
