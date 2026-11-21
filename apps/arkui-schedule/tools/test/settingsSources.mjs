@@ -3,8 +3,8 @@
 //
 // 这一批静态守卫测试原本的锚点是**单文件** `pages/Settings.ets`（`readFileSync` 后按
 // builder 名切片、按正则找调用点）。拆分后：
-// - 只关心「这段文案/调用是否存在」的断言 → 用 `readSettingsSources()`（页面 + bits + 五个
-//   section，按界面顺序拼接）当锚点，断言本身一个字都不改；
+// - 只关心「这段文案/调用是否存在」的断言 → 用 `readSettingsSources()`（根页 + 两个真子页 +
+//   bits + 五个 section，按界面顺序拼接）当锚点，断言本身一个字都不改；
 // - 需要「按 builder 切片 / 比较相对顺序」的断言 → 用 `readSettingsFile()` 指向**搬过去之后
 //   的那个文件**（锚点跟着代码走），断言内容同样不改。
 //
@@ -36,6 +36,25 @@ export function readSettingsRoot() {
   return readSettingsFile('pages/Settings.ets');
 }
 
+/**
+ * mod-settings-sync-page：同步子页现在自带真 body（状态 / 保存 / 诚实状态行 / 失败出口），
+ * 不再经 SettingsHost 的 section='sync' 分支。同步相关断言锚点须跟到这里；
+ * SyncSection 仍是 presentational body，它的断言保持原文件锚点、不搬走。
+ */
+export function readSyncPage() {
+  return readSettingsFile('pages/SettingsSync.ets');
+}
+
+/**
+ * mod-settings-export-page：数据 / 导入导出子页现在也自带真 body（区间 / 两个字段 /
+ * 导出完整包 / 选文件 / 试算 / 确认导入），不再经 SettingsHost 的 section='data' 分支。
+ * 数据与导出相关断言的锚点须跟到这里；DataSection / ExportImportPanel 仍是
+ * presentational body，它们的断言保持原文件锚点、不搬走。
+ */
+export function readExportPage() {
+  return readSettingsFile('pages/SettingsExportImport.ets');
+}
+
 /** 同步组 section（含组头「更多」、主表单、`高级` 折叠区）。 */
 export function readSyncSection() {
   return readSettingsFile('components/settings/SyncSection.ets');
@@ -65,6 +84,8 @@ export function readSettingsBits() {
 export function readSettingsSources() {
   const files = [
     'pages/Settings.ets',
+    'pages/SettingsSync.ets',
+    'pages/SettingsExportImport.ets',
     'components/settings/SettingsHost.ets',
     'components/settings/SettingsBits.ets',
     'components/settings/SyncSection.ets',

@@ -344,22 +344,17 @@ describe('幽灵报错守卫：每个 issue 都必须有可见落点', () => {
   });
 
   test('横幅在可滚动区域内部顶部（scrollEdge(Edge.Top) 才有效）', () => {
-    const page = readSettingsPage();
-    // 两套骨架（紧凑/宽屏）都要：Scroll(pageScroller) → IssuesBanner → SyncGroup
-    // 因 A2 拆分移动：SaveButton 现在排在两个 Body **之前**（装配段落顺序变了），
-    // 宽屏切片的右边界改用「弹层」分节标记；断言（Scroll → 横幅 → 同步组）不变。
-    const compact = page.slice(page.indexOf('CompactBody() {'), page.indexOf('WideBody() {'));
-    const wide = page.slice(
-      page.indexOf('WideBody() {'),
-      page.indexOf('// ------------------------------------------------------------------ 弹层')
-    );
-    for (const body of [compact, wide]) {
-      assert.match(body, /Scroll\(this\.pageScroller\)/, '滚动容器必须绑定 pageScroller');
-      const scrollAt = body.indexOf('Scroll(this.pageScroller)');
-      const bannerAt = body.indexOf('this.IssuesBanner()');
-      const groupAt = body.indexOf('this.SyncGroup()');
-      assert.ok(bannerAt > scrollAt && bannerAt < groupAt, '横幅必须在 Scroll 内、且在第一个分组之前');
-    }
+    // mod-settings-sync-page（old→new，不是放宽）：旧断言钉住宿主的 CompactBody / WideBody 两套骨架
+    // 都是 Scroll → IssuesBanner → SyncGroup；同步正文与保存已迁到 pages/SettingsSync，那里是
+    // 唯一真装配点。断言改为钉住同步页本身：Scroll(pageScroller) → IssuesBanner → SyncSection，
+    // 同一条「横幅在 Scroll 内、在正文之前」契约，覆盖的骨架从历史锚点换成真页面。
+    const page = readFileSyncSafe('../../entry/src/main/ets/pages/SettingsSync.ets');
+    assert.match(page, /Scroll\(this\.pageScroller\)/, '滚动容器必须绑定 pageScroller');
+    const scrollAt = page.indexOf('Scroll(this.pageScroller)');
+    const bannerAt = page.indexOf('this.IssuesBanner()');
+    const groupAt = page.indexOf('SyncSection({');
+    assert.ok(scrollAt > 0 && bannerAt > scrollAt && bannerAt < groupAt,
+      '横幅必须在 Scroll 内、且在同步正文之前');
   });
 
   test('token 第二次进入：输入框留空 + 有已存 token → 合法（回归用户场景）', () => {

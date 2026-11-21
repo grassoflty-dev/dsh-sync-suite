@@ -496,6 +496,11 @@ S3 迁入时只换文件锚点），并新增外壳页头/断点/令牌/装配�
 的纯 TS（`components/` 与 `pages/` 被排除），所以 **`Home.ets` / `ShellRail.ets` 的 ArkTS 编译与真机观感
 `unverified`**，首次真实编译留给下一次设备 pass。
 
+> **mod-cloud-chat-no-config-note（2026-11-21）**：云端对话**没有设置面**——`pages/panes/CloudChatPane.ets`
+> 与 `pages/Chats.ets` 都不渲染配置行或「chats/ + Git + 电脑上续接」这类机制说明段落，它直接复用
+> 「设置 → 同步仓库」那份 Git 配置；空态只给一句「先在设置里配置仓库」，会话列表 / 只读详情导航 /
+> 下拉刷新路径不变。
+
 **S3 落地更新（`mod-shell-schedule-pane`，2026-11-21）**：本节「四个面板当前是占位」与「S3 迁入时换锚点」
 两条已经落地——
 - **日程现在是真 body**：`pages/panes/SchedulePane.ets` 逐字承接 `pages/Index.ets` 的日程正文
@@ -530,3 +535,49 @@ S3 迁入时只换文件锚点），并新增外壳页头/断点/令牌/装配�
 fallback 路由 `pages/Index.ets` 在自己的页头保留齿轮，直到 fallback 退役；`Chats` / `RemoteControl` 的
 「去设置」是错误恢复按钮、不是导航入口，保持不动。五份守卫正向钉住「外壳 + 四面板中恰好一处 Settings push、
 位于 `Home.openSettings()`，且面板页头无设置动作」。
+
+**同步仓库是真页面（`mod-settings-sync-page`，2026-11-21）**：四行设置菜单的「同步仓库」行 push 的
+`pages/SettingsSync.ets` 不再是复用 `SettingsHost` 的薄壳——它自带 `PageLayout(title:'同步仓库')`、
+一层 flex（自己的 `Scroll` + 底部唯一主操作「保存」）、全部同步状态与业务方法（读写 store、配置内核、
+`checkSettingsFields` 校验、状态 / 拉取、测试连接、诚实状态行、失败出口），并装配同一份
+`components/settings/SyncSection.ets` 作为 presentational body（两个字段：仓库地址 / 访问令牌）。
+诚实状态行三态逐字为 `已同步·HH:MM` / `同步中…` / `失败：原因`，失败态点一下即重放上次动作；
+失败出口「查看状态 / 测试连接 / 重试」在页面，没有「高级」也没有「推送 / 立即同步」手动按钮。
+`SettingsHost` 不再为 `section='sync'` 渲染正文 / 装配 props（删 `SyncGroup` 与 `SyncSection` import），
+其余 API / 关于子页仍复用同一宿主（数据子页已按 `mod-settings-export-page` 落真）；
+`settingsStore.save()` 是 patch，故那些子页保存不会覆盖仓库地址 / 令牌（`syncSaveScope.test.mjs` 钉住此契约）。
+真机 ArkTS 编译与保存落盘观感 `unverified`。
+
+**使用 / 配置分家（`mod-instances-pane-readonly`，2026-11-21）**：本节上一段「其余三面的动作槽…
+添加实例」对远程 DSH 面板已失效——用户：「设置里已经有远程配置…所以首页的远程 DSH 里就不需要展示配置了」。
+定版口径：**首页远程 DSH 面板 = 用，设置 → 远程实例 = 配**。
+
+| 能力 | 首页「远程 DSH」分段（只读） | 设置 → 远程实例（`pages/Instances`） |
+| --- | --- | --- |
+| 本机首行 / 远程行 / 方式徽章 / 可达三态 / 相对 `lastSeen` / 二次打码 URL | ✅ | ✅ |
+| 「打开」（内嵌 Web + 可达回写） | ✅ | ✅ |
+| typed 问题行 + 空态标题 / 指引 / 「用浏览器打开」 | ✅ | ✅ |
+| 页头「添加实例」、行内「编辑 / 删除」、地址·令牌·方式表单、空态「添加实例」 | ❌ | ✅ |
+| 空态 / 问题行恢复动作 | 「去设置添加实例」→ `router.pushUrl('pages/Instances')` | 就地「添加实例」/「重新添加」→ 展开表单 |
+
+同一份 `pages/panes/InstancesPane.ets` 用**一个 prop** 分叉：`configurable: boolean = false`——
+`pages/Home.ets` 的面板装配不传该 prop（默认 false = 只读，Home 本批未改）；设置路由
+`pages/Instances.ets` 显式传 `configurable: true`。所有配置 UI（页头主操作、行内两动作、`FormPanel`
+及 `TextInput` / `Select`、空态「添加实例」、问题行「重新添加」）都包在 `if (this.configurable)` 里；
+只读模式保留**打开**、展示与播种迁移，配置动作统一走 `openInstanceConfig()` → `pages/Instances`。
+只读空态不是假入口：按钮文案改「去设置添加实例」，路由可达；配置页空态仍是逐字「添加实例」。
+守卫按「模式可见性」切源码做**正向**断言（`instanceList` U-17–U-21 / `shellLayout` L-11·L-19·L-20 /
+`paneLayout` P-18·P-19·P-21）：只读侧无配置入口与地址 / 令牌 / 方式输入且保留打开与打码 URL，
+配置侧保留三动作与表单，旧「三动作齐全」断言 retarget 为「打开常在 + 编辑·删除只在配置模式」（收紧非放宽）。
+真机 ArkTS 编译 / 两模式观感 `unverified`（设备 lane 在跑，本批不做构建 / 装机）。
+
+**数据导入导出是真页面（`mod-settings-export-page`，2026-11-21）**：四行设置菜单的「数据导入导出」行 push 的
+`pages/SettingsExportImport.ets` 不再是复用 `SettingsHost` 的薄壳——它自带 `PageLayout(title:'数据导入导出')`、
+一层 flex（自己的 `Scroll` + 底部唯一主操作「导出」，按今天日期走真实完整包落盘链）、全部数据状态与方法
+（选文件试算、显式确认导入、写前复核、取消与复制路径）。正文继续装配 `components/settings/DataSection.ets`
+→ `components/ExportImportPanel.ets` 两个 presentational body：区间入口只有 今天 / 本周 / 近 7 天 chip +
+两个日期字段，动作只有 导出完整包 / 选择文件 / 确认导入，没有「填今天」重复提示，也没有「日程备份」节，
+媒体能力留在主流程。`SettingsHost` 不再为 `section='data'` 渲染正文 / 装配 props（删 `DataGroup` /
+`PrimaryExportButton` 与 `DataSection` import）；导出 / 导入状态只写 AppStorage 两个时刻键，不写
+`settingsStore`，故 API 子页复用宿主保存不会清空它（`settingsMenu` M-09 钉住）。真机 ArkTS 编译 /
+文件选择器观感 `unverified`（设备 lane 在跑，本批不做构建 / 装机）。

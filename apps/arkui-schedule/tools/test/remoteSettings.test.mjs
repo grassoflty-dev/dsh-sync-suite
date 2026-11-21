@@ -68,7 +68,9 @@ describe('mod-settings-remote-dedupe：设置页不再重复配置，只留唯�
   });
 
   test('唯一入口：RemoteGroup 只渲染一行「远程实例与云端对话 ›」打开 pages/Instances', () => {
-    const group = bodyOf(PAGE, 'RemoteGroup() {', '@Builder\n  DataGroup()');
+    // mod-settings-export-page（old→new，不是放宽）：DataGroup 已从 SettingsHost 迁到
+    // pages/SettingsExportImport，这里只换「下一段 builder」的切片结束标记，断言逐字不变。
+    const group = bodyOf(PAGE, 'RemoteGroup() {', '@Builder\n  AboutGroup()');
     assert.equal((group.match(/this\.ChatEntryRow\(\)/g) ?? []).length, 1, '入口行恰好一行');
     assert.equal((group.match(/TextInput\(/g) ?? []).length, 0, '入口组里不该有任何输入框');
     assert.equal((PAGE.match(/this\.RemoteGroup\(\)/g) ?? []).length, 2, '紧凑屏 / 宽屏各装配一次');

@@ -1,16 +1,11 @@
 /**
- * 设置页：五组（同步 / AI 汇总 / 远程控制 / 数据 / 关于），长说明收进 `?` 弹层。
+ * 设置子页共用的实现宿主（API 子页复用）：全部 `@State` 与保存 / 同步业务方法，长说明收进 `?` 弹层。
  * （同步组因为「分支 / 推送 / 状态」三项新需求变长，次要项继续收在组头「更多」里。）
  *
  * 「仅手写笔输入」的入口在**手写板 → 笔迹面板**（`pages/harmony/Handwriting.ets`），
  * 本页不再重复提供该开关；`settingsStore.penOnlyInput` 键仍保留（笔迹面板读写它），
  * 本页保存时**不传**该字段（不传＝不改，见 `settingsStore.save` 的 patch 语义）。
  *
- * 「数据」组（导出 / 导入，`docs/EXPORT-IMPORT.md` §4）：只放 `ExportImportPanel` 一个组件，
- * 是设置页唯一的导入 / 导出入口；页面负责调 `services/exportService.ets` 并把结果写回
- * `exportImport`。主「导出完整包」产出 repo-shaped bundle（记录 + 媒体 + 账本）；导入**必须两步**
- * （选文件 → dry-run 统计 → 用户点确认才落盘，且用同一份计划），同一流程自动识别
- * 完整包 manifest 与兼容 JSON——独立的「日程备份」节已删除，能力保留、入口只有一个。
  *
  * AI 组内的「多源 fallback」（`docs/AI-FALLBACK.md` §8）排在「高级」折叠区之前：开关 +
  * 最多 3 个备用源 + 尝试次数 + 本次会话的诊断；三个持久化键由 `applySettings` / `saveSettings`
@@ -44,30 +39,26 @@
  *
  * token / AI key 只存本机 preferences，不进同步载荷与日志；本页不打印它们。
  *
- * **A2 拆分（纯重构，行为不变）**：四个功能组的界面从本页搬到了
- * `components/settings/{SyncSection,AiSection,DataSection,AboutSection}.ets`：
- * - 本页仍然是**唯一的状态持有者**（全部 `@State` 与业务方法：保存 / 同步 / 导出 / 远程控制 /
- *   主题切换 / 弹层），并负责装配（`SyncGroup()` 等 5 个 builder，紧凑屏与宽屏共用）；
- * - 子组件只收**单向 props + 回调**（`@Prop` 值 + `onXxx`），不持有共享状态 —— 因此刷新语义
- *   与拆分前一致：父页面值变了才重绘，回调闭包始终读页面最新状态；
- * - 共用字段构件（`FieldLabel` / `ErrorText` / `HintLine` / `FieldNote`）在
- *   `components/settings/SettingsBits.ets`，页面只用得着两个（弹层里也画标题与说明行）。
+ * **A2 拆分 / mod-settings-sync-page / mod-settings-export-page（纯重构，行为不变）**：
+ * 功能组的界面从本页搬到 `components/settings/{AiSection,AboutSection}.ets`；同步正文迁到
+ * `pages/SettingsSync`，数据正文迁到 `pages/SettingsExportImport`（两者都是自带真页面 +
+ * presentational body）。本页仍是 API 子页共用的状态持有者（保存链所需的 `@State` 与方法），
+ * 并负责装配 `AiGroup()` / `RemoteGroup()` / `AboutGroup()`；组件只收单向 props + 回调。
+ * 共用字段构件仍在 `components/settings/SettingsBits.ets`。
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { webview } from '@kit.ArkWeb';
 import { common } from '@kit.AbilityKit';
-import { pasteboard } from '@kit.BasicServicesKit';
 import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { nowIso } from '../../common/date';
-import { toastMsFor } from '../../common/copy';
 import { getFeatures } from '../../common/features';
 import { isHarmonyOS } from '../../common/platform';
 import { normalizeDeviceId, settingsStore } from '../../services/settingsStore';
 import type { ScheduleSettings, SettingsPatch, SyncStatePatch } from '../../services/settingsStore';
 import { describeError, scheduleStore } from '../../services/scheduleStore';
 import { GitSyncService } from '../../services/GitSyncService';
-import type { GitSyncConfig, GitSyncResult, ZipWriteBundleInput } from '../../services/GitSyncService';
+import type { GitSyncConfig, GitSyncResult } from '../../services/GitSyncService';
 import { describeRepoProbe, repoProbeUrl, validateRepoUrl } from '../../model/repoUrl';
 import type { RepoUrlCheck } from '../../model/repoUrl';
 import type {
@@ -100,7 +91,6 @@ import {
   DEFAULT_BRANCH
 } from '../../model/syncError';
 import type { SyncErrorInfo, SyncStatusView } from '../../model/syncError';
-import { describeIdentityConflict } from '../../model/deviceIdentity';
 import { testAiConnection } from '../../services/deepseek';
 import type { AiTestResult } from '../../services/deepseek';
 import {
@@ -129,10 +119,9 @@ import type { PlatformResolution } from '../../model/gitAuth';
 import { gitExtrasStore } from '../../services/syncController';
 import type { GitSyncExtras } from '../../services/syncController';
 import { PageLayout } from '../PageLayout';
-// A2 拆分：四个 section 组件（页面只做装配；共享字段构件在 SettingsBits）
-import { SyncSection } from './SyncSection';
+// A2 拆分：其余 section 组件（页面只做装配；共享字段构件在 SettingsBits）。
+// 同步 / 数据正文已各自迁到 pages/SettingsSync / pages/SettingsExportImport，本宿主不再装配。
 import { AiSection } from './AiSection';
-import { DataSection } from './DataSection';
 import { AboutSection } from './AboutSection';
 import { FieldLabel as FieldLabelBit, HintLine as HintLineBit } from './SettingsBits';
 import {
@@ -144,43 +133,7 @@ import {
   sourceLabel
 } from '../../model/aiFallback';
 import type { FallbackDiagnostic, FallbackSource, FallbackSourcePatch } from '../../model/aiFallback';
-import {
-  applyPlan,
-  clearDryRun,
-  defaultExportImportState,
-  todayText,
-  v2PlanSummary,
-  v2RefusalNext,
-  withExportPath,
-  withImportFileName,
-  withPanelMessage
-} from '../../model/exportImport';
-import { LAST_EXPORT_AT_KEY, LAST_IMPORT_AT_KEY } from '../../model/settingsMenu';
-import type { ExportImportState, ExportRequest, ImportPlan, V2ImportPlan } from '../../model/exportImport';
-import {
-  appendImportPlan,
-  applyV2Import,
-  exportV2Timeline,
-  exportsDirPath,
-  pickImportFile,
-  planImportFromText,
-  planV2ImportFromPicked
-} from '../../services/exportService';
-import type {
-  ExportRequestInput,
-  ImportApplyResult,
-  ImportFilePickResult,
-  ImportPlanResult,
-  V2ApplyResult,
-  V2ExportResult,
-  V2ImportPlanResult,
-  V2ZipBridge,
-  V2ZipEntry,
-  V2ZipWriteResult
-} from '../../services/exportService';
-import { timelineStore } from '../../services/timelineStore';
-import { timelineWriteStore } from '../../services/timelineWriteStore';
-import { DIVIDER, FONT, HOME_INCLUDE_OTHER_KEY, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../../common/uiTokens';
+import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../../common/uiTokens';
 import { applyThemeMode, isSystemDark } from '../../common/themeApply';
 import { normalizeThemeMode, resolveTheme, themeModeHint, themeModeLabel } from '../../model/theme';
 
@@ -206,8 +159,6 @@ const MAX_SESSION_DIAGNOSTICS: number = 10;
  * 旧 `CompactBody` / `WideBody` 及其组锚点 builder 原样保留（历史静态守卫的锚点），
  * 但子页只渲染自己那一段 section —— 根页不渲染任何 section body。
  */
-const SECTION_SYNC: string = 'sync';
-const SECTION_DATA: string = 'data';
 const SECTION_API: string = 'api';
 const SECTION_ABOUT: string = 'about';
 
@@ -218,37 +169,17 @@ const PANEL_PROVIDER: string = 'provider';
 const PANEL_MODEL: string = 'model';
 const PANEL_PRIVACY: string = 'privacy';
 const PANEL_REPO: string = 'repo';
-/**
- * exportService 与 GitSyncService 之间的显式适配器（ArkTS 禁止结构化类型，不能直接把
- * GitSyncService 当 V2ZipBridge 用）。只做参数形状转换，不含任何 IO 决策。
- */
-class SettingsZipBridge implements V2ZipBridge {
-  private service: GitSyncService;
-
-  constructor(service: GitSyncService) {
-    this.service = service;
-  }
-
-  zipWriteBundle(archivePath: string, entries: V2ZipEntry[]): Promise<V2ZipWriteResult> {
-    const inputs: ZipWriteBundleInput[] = [];
-    for (const entry of entries) {
-      const input: ZipWriteBundleInput = { name: entry.name, bytes: entry.bytes };
-      inputs.push(input);
-    }
-    return this.service.zipWriteBundle(archivePath, inputs);
-  }
-
-  zipRead(archivePath: string, entryName: string): Promise<Uint8Array | null> {
-    return this.service.zipRead(archivePath, entryName);
-  }
-}
 
 @Component
 export struct SettingsHost {
-  /** 子页标识（`SECTION_*`）：决定本页面渲染哪一段 section，子页之间共用同一套状态与方法。 */
-  @Prop section: string = SECTION_SYNC;
+  /**
+   * 子页标识（`SECTION_*`）：决定本页面渲染哪一段 section，子页之间共用同一套状态与方法。
+   * mod-settings-sync-page：同步子页已有自己的真页面，不再向本宿主传 section；
+   * 默认值留空串（不渲染任何 section），三个调用方都显式传 section。
+   */
+  @Prop section: string = '';
   /** 页面标题（由薄壳传入，与各自 `main_pages.json` 路由一一对应）。 */
-  @Prop pageTitle: string = '同步仓库';
+  @Prop pageTitle: string = '';
 
   @State deviceId: string = 'phone-a';
   @State author: string = '';
@@ -279,9 +210,8 @@ export struct SettingsHost {
    * 旧值从 settingsStore 读出后原样保留（不迁移、不清空），只是不再上屏。
    */
   @State gitUsername: string = '';
-  // 表单校验提示（逐字段红字）：只剩仓库地址 / 令牌 / AI 接口地址三处（mod-settings-sync-min）
-  @State repoUrlError: string = '';
-  @State tokenError: string = '';
+  // 表单校验提示：mod-settings-sync-page 后仓库地址 / 令牌的红字归 pages/SettingsSync，
+  // 本宿主只剩 AI 接口地址一处（其余子页不编辑那两个字段）。
   @State connectionText: string = '';
   @State connectionBusy: boolean = false;
   @State aiTestText: string = '';
@@ -296,17 +226,7 @@ export struct SettingsHost {
   @State lastSyncAction: string = '';
   @State syncMessage: string = '同步内核尚未就绪：请保持本页打开，等待隐藏 Web 环境加载完成';
   @State syncBusy: boolean = false;
-  /** 最近一次「查看状态」的结果（分支 / ahead / behind / 冲突 / 本地改动）。 */
-  @State statusLine: string = '';
-  /**
-   * 设备标识重复的**常驻**警告（空串 = 正常）。
-   *
-   * 两台设备填了同一个设备标识时，附件 zip 会互相覆盖、历史会混在一起；
-   * 这不是一次性的同步错误，所以必须是页面状态（不是 toast），只有改成唯一值后才会消失。
-   */
-  @State identityWarning: string = '';
-  /** 本次推送被暂停的附件说明（空串 = 没有暂停；同样是 warning 档的常驻提示）。 */
-  @State attachmentWarning: string = '';
+  // mod-settings-sync-page：identityWarning / attachmentWarning 随同步正文迁到 pages/SettingsSync。
   @State webReady: boolean = false;
   @State platformText: string = '';
   @State handwritingText: string = '';
@@ -318,16 +238,7 @@ export struct SettingsHost {
   @State panel: string = PANEL_NONE;
   /** 本机设备编号是否由仓库自动分配（true = 仓库分配；存量非自动值仍可读、不改）。 */
   @State deviceIdAuto: boolean = false;
-  /** 首页是否展示其他设备的只读记录（写 AppStorage，首页读取）。 */
-  @State includeOtherDevices: boolean = false;
-
-  /**
-   * 导出 / 导入面板的展示状态（`components/ExportImportPanel.ets` 的 `@Prop state`）。
-   *
-   * 组件只读它渲染，交互（区间 / 格式 / 两个开关）在组件本地承接并通过 `ExportRequest`
-   * 回传；本页只负责把**结果**（导出路径 / dry-run 计数 / 提示文案 / busy）写回来。
-   */
-  @State exportImport: ExportImportState = defaultExportImportState();
+  // mod-settings-sync-page：首页「含其他设备」开关随同步正文迁到 pages/SettingsSync。
 
   /** 是否启用「多源 fallback」（默认关闭：关闭时内容只发给主源，见 `docs/AI-FALLBACK.md` §6）。 */
   @State aiFallbackEnabled: boolean = false;
@@ -368,30 +279,12 @@ export struct SettingsHost {
    * 若写成 @State 反而会给人「已经会刷新」的错觉。
    */
   private groupOffsets: number[] = [-1, -1, -1, -1, -1];
-  /**
-   * 待用户确认的导入计划（**就是 dry-run 那一份**）。
-   *
-   * 确认导入时直接把它交给 `appendImportPlan`，**绝不重新解析文件**：两次读取之间本机记录
-   * 可能已被别的页面改动，重新规划会得到与用户看到的统计不一致的结果（`docs/EXPORT-IMPORT.md` §4.1）。
-   * `null` = 没有待确认的计划（没选文件 / 已取消 / 已确认落盘）。
-   */
-  private pendingImport: ImportPlan | null = null;
-
-  /**
-   * 待确认的完整包导入计划（**就是 dry-run 那一份**，确认时原样交给 applyV2Import，绝不重新解析）。
-   * `null` = 走兼容 JSON 导入；非 null = 走完整包导入（含媒体）。
-   */
-  private pendingV2Plan: V2ImportPlan | null = null;
-  /** 待确认完整包所在的目录（媒体从 media.zip 预取后搬运，绝不写 devices/**）。 */
-  private pendingV2BundleDir: string = '';
 
   aboutToAppear(): void {
     this.platformText = isHarmonyOS() ? 'HarmonyOS' : 'Android';
     const features = getFeatures();
     this.handwritingText = features.handwriting ? '手写可用' : '手写不可用';
     this.ocrText = features.ocr ? 'OCR 可用' : 'OCR 不可用';
-    const storedFilter: boolean | undefined = AppStorage.get<boolean>(HOME_INCLUDE_OTHER_KEY);
-    this.includeOtherDevices = storedFilter === true;
     this.readAutoAction();
     this.bootstrap();
   }
@@ -435,9 +328,7 @@ export struct SettingsHost {
       // 让 Git 桥使用与应用一致的沙箱根目录（G 的服务支持静态预置，缺省时才回落 getContext()）
       GitSyncService.setFilesDir(context.filesDir);
       await scheduleStore.ensureReady(context);
-      // 日程目录的读门槛与原子写口都在这里初始化；面板与导入落盘都依赖它们。
-      await timelineStore.ensureReady(context);
-      await timelineWriteStore.ensureReady(context);
+      // 日程目录的读门槛在这里初始化（保存链需要设备根路径）。
       if (this.disposed) {
         return;
       }
@@ -448,8 +339,6 @@ export struct SettingsHost {
       this.configure();
       // 分支/平台可能已经改过：等桥就绪后补一次本地状态（不联网，只是 git.status/log）
       this.refreshStatus(true);
-      // 设备身份：只读比对工作副本里的 `.device-fingerprint`（不联网），冲突时显示常驻警告
-      this.refreshIdentityWarning();
       // Web 先于设置就绪时，自动动作排在这里补触发
       if (this.webReady && this.autoAction.length > 0) {
         const pending = this.autoAction;
@@ -582,18 +471,15 @@ export struct SettingsHost {
    * 2. 顶部横幅只统计**真正写进了内联状态的**问题（`applied`），绝不出现「说有 N 项但看不到」。
    */
   private applyIssues(issues: SettingsFieldIssue[]): void {
-    this.repoUrlError = '';
-    this.tokenError = '';
     this.aiBaseUrlError = '';
     const applied: SettingsFieldIssue[] = [];
     for (const issue of issues) {
-      if (issue.field === FIELD_REPO_URL) {
-        this.repoUrlError = issue.message;
-      } else if (issue.field === FIELD_TOKEN) {
-        this.tokenError = issue.message;
-      } else if (issue.field === FIELD_AI_BASE_URL) {
+      if (issue.field === FIELD_AI_BASE_URL) {
         // 接口地址行在自定义源下常驻显示，红字直接落在它下方
         this.aiBaseUrlError = issue.message;
+      } else if (issue.field === FIELD_REPO_URL || issue.field === FIELD_TOKEN) {
+        // mod-settings-sync-page：仓库地址 / 令牌的红字归 pages/SettingsSync，本宿主不渲染它们。
+        continue;
       } else {
         // 设备标识 / 作者名 / 用户名已无输入控件（mod-settings-sync-min）：
         // 页面在校验入口传的就是「已归一 / 已兜底」的静默值，这三类 issue 不可达；
@@ -780,7 +666,6 @@ export struct SettingsHost {
       return;
     }
     const repoCheck: RepoUrlCheck = validateRepoUrl(this.repoUrl);
-    this.repoUrlError = repoCheck.ok ? '' : repoCheck.error;
     if (!repoCheck.ok) {
       this.connectionText = `❌ 无法测试：${repoCheck.error}`;
       return;
@@ -857,305 +742,6 @@ export struct SettingsHost {
       if (!this.disposed) {
         this.aiTestBusy = false;
       }
-    }
-  }
-
-  // ------------------------------------------------------------------ 导出 / 导入（A 线）
-
-  /**
-   * 导出：主按钮导出**完整包**（repo-shaped bundle：记录 + 媒体 + 账本，只读派生，不改源文件）。
-   *
-   * 原来的 v1 JSON 导出与独立的「日程备份」节已合并到这一个入口：媒体由 `exportV2Timeline`
-   * 经 zip 桥统一写进 media.zip。`ExportRequest` 的字段是 `fromText` / `toText`，服务层的
-   * `ExportRequestInput` 是 `from` / `to`，这里显式映射（只改调用侧，不动服务层与组件）。
-   */
-  private async handleExport(request: ExportRequest): Promise<void> {
-    if (this.disposed) {
-      return;
-    }
-    this.exportImport = withPanelMessage(this.exportImport, '', true);
-    const input: ExportRequestInput = {
-      from: request.fromText,
-      to: request.toText
-    };
-    try {
-      const zip: V2ZipBridge = new SettingsZipBridge(this.sync);
-      const result: V2ExportResult = await exportV2Timeline(input, zip);
-      if (this.disposed) {
-        return;
-      }
-      if (!result.ok) {
-        this.exportImport = withPanelMessage(this.exportImport, this.v2RefusalLine(result.code, result.reason, '导出'), false);
-        return;
-      }
-      this.exportImport = withExportPath(
-        withPanelMessage(
-          this.exportImport,
-          `已导出完整包：${result.days} 天 / ${result.records} 条记录 / ${result.media} 个媒体文件（${result.dirPath}）`,
-          false
-        ),
-        result.dirPath
-      );
-      // mod-settings-root：根页「数据导入导出」行的摘要读这个时刻（只记真实成功落盘）。
-      AppStorage.setOrCreate<string>(LAST_EXPORT_AT_KEY, nowIso());
-      promptAction.showToast({ message: '已导出完整包', duration: toastMsFor(false) });
-    } catch (error) {
-      if (this.disposed) {
-        return;
-      }
-      this.exportImport = withPanelMessage(this.exportImport, `导出失败：${describeError(error)}`, false);
-    }
-  }
-
-  /**
-   * 导入导出子页的底部主操作「导出」：按今天日期导出一个真实完整包。
-   *
-   * 面板内的 `导出完整包` 仍可用来自选区间；这里给的是一步到位的默认路径，
-   * 不是假按钮——走的仍是同一个 `handleExport` → `exportV2Timeline` 落盘链。
-   */
-  private quickExportToday(): void {
-    const today: string = todayText();
-    this.handleExport({ fromText: today, toText: today });
-  }
-
-  /**
-   * 导入第一步：选文件 → dry-run 统计（**一个字节都不写**）。
-   *
-   * 把计划存进 `pendingImport`，等用户点「确认导入」才落盘；选文件失败 / 文件不可解析都只改
-   * `exportImport.message`（中文），绝不留半份计划。
-   */
-  private async handlePickImportFile(): Promise<void> {
-    if (this.disposed) {
-      return;
-    }
-    // 空仓库照常 dry-run（落点由 writer 首用建骨架），无门槛。
-    this.exportImport = withPanelMessage(this.exportImport, '', true);
-    try {
-      const context = getContext(this) as common.UIAbilityContext;
-      const picked: ImportFilePickResult = await pickImportFile(context);
-      if (this.disposed) {
-        return;
-      }
-      if (!picked.ok) {
-        this.pendingImport = null;
-        this.exportImport = withPanelMessage(this.exportImport, `选择文件失败：${picked.reason}`, false);
-        return;
-      }
-      // 一个入口识别两种文件：先按完整包 manifest 试算（带媒体），不是完整包再回落兼容 JSON。
-      // 两个 dry-run 都只算不写；确认时按 pendingV2Plan 是否为 null 走对应落盘路径。
-      const bundled: V2ImportPlanResult = planV2ImportFromPicked(picked.text, picked.uri);
-      if (this.disposed) {
-        return;
-      }
-      if (bundled.ok && bundled.plan !== null) {
-        this.pendingV2Plan = bundled.plan;
-        this.pendingV2BundleDir = bundled.bundleDir;
-        this.pendingImport = null;
-        this.exportImport = this.withBundleDryRun(
-          withImportFileName(this.exportImport, picked.fileName),
-          bundled.plan,
-          `已选完整包（先试算，未写入）：${bundled.summary}`
-        );
-        return;
-      }
-      this.pendingV2Plan = null;
-      this.pendingV2BundleDir = '';
-      const planned: ImportPlanResult = planImportFromText(picked.text, picked.fileName);
-      if (this.disposed) {
-        return;
-      }
-      if (planned.plan === null) {
-        this.pendingImport = null;
-        this.exportImport = withPanelMessage(this.exportImport, `无法读取导入文件：${planned.reason}`, false);
-        return;
-      }
-      this.pendingImport = planned.plan;
-      const tip: string =
-        planned.plan.conflict > 0 ? '有冲突记录（同 id 且更新）：本机版本不会被覆盖，需人工决定' : '';
-      this.exportImport = applyPlan(
-        withImportFileName(withPanelMessage(this.exportImport, tip, false), picked.fileName),
-        planned.plan
-      );
-    } catch (error) {
-      if (this.disposed) {
-        return;
-      }
-      this.pendingImport = null;
-      this.exportImport = withPanelMessage(this.exportImport, `选择文件失败：${describeError(error)}`, false);
-    }
-  }
-
-  /**
-   * 完整包的 dry-run 计数写回面板：复用同一个 `ExportImportState`，让「确认导入」按钮的
-   * 可用性判定（`canConfirmImport`）与兼容 JSON 完全共用一套规则（有新增、无非法、不忙）。
-   * 媒体的天数 / 字节数由 `bundled.summary` 单独展示，不伪造进记录计数字段。
-   */
-  private withBundleDryRun(
-    state: ExportImportState, plan: V2ImportPlan, message: string
-  ): ExportImportState {
-    const next: ExportImportState = {
-      fromText: state.fromText,
-      toText: state.toText,
-      importFileName: state.importFileName,
-      dryRunReady: plan.ok && plan.totals.records > 0,
-      dryRunAdded: plan.totals.records,
-      dryRunSkipped: 0,
-      dryRunConflict: 0,
-      dryRunInvalid: 0,
-      exportPath: state.exportPath,
-      message: message,
-      busy: false
-    };
-    return next;
-  }
-
-  /**
-   * 导入第二步：用户点「确认导入」，把**同一份 dry-run 计划**追加落盘。
-   *
-   * 有完整包计划时先走完整包确认（弹显式对话框、经 applyV2Import 搬运媒体），否则走兼容 JSON。
-   * 落盘后清掉 dry-run（避免同一份文件被连点两次追加两遍），提示里保留追加 / 跳过 / 冲突计数。
-   */
-  private handleConfirmImport(): void {
-    if (this.pendingV2Plan !== null) {
-      this.confirmBundleImport();
-      return;
-    }
-    const plan: ImportPlan | null = this.pendingImport;
-    if (plan === null) {
-      if (this.disposed) {
-        return;
-      }
-      this.exportImport = withPanelMessage(this.exportImport, '没有待确认的导入计划：请先选择文件', false);
-      return;
-    }
-    try {
-      const applied: ImportApplyResult = appendImportPlan(plan);
-      this.pendingImport = null;
-      if (this.disposed) {
-        return;
-      }
-      if (!applied.ok) {
-        this.exportImport = withPanelMessage(this.exportImport, `导入失败：${applied.reason}`, false);
-        return;
-      }
-      const done: string =
-        `已追加 ${applied.appended} 条、跳过 ${applied.skipped} 条、冲突 ${applied.conflict} 条` +
-        `（非法 ${applied.invalid} 条未写入）`;
-      this.exportImport = withPanelMessage(clearDryRun(this.exportImport), done, false);
-      AppStorage.setOrCreate<string>(LAST_IMPORT_AT_KEY, nowIso());
-      promptAction.showToast({ message: `已导入 ${applied.appended} 条`, duration: toastMsFor(false) });
-    } catch (error) {
-      if (this.disposed) {
-        return;
-      }
-      this.exportImport = withPanelMessage(this.exportImport, `导入失败：${describeError(error)}`, false);
-    }
-  }
-
-  /** 取消导入：丢掉待确认计划（两种格式都清）+ 清空 dry-run 统计（本机记录没有任何改动）。 */
-  private handleCancelImport(): void {
-    this.pendingImport = null;
-    this.pendingV2Plan = null;
-    this.pendingV2BundleDir = '';
-    if (this.disposed) {
-      return;
-    }
-    this.exportImport = withPanelMessage(clearDryRun(this.exportImport), '已取消导入（本机记录没有任何改动）', false);
-  }
-
-  /**
-   * 复制导出路径到系统剪贴板（面板里也有「长按路径可复制」这一条退路）。
-   *
-   * 复制目标优先「最近一次导出的文件路径」，还没导出过就复制导出目录（`exportsDirPath()`），
-   * 用户至少知道文件在哪。剪贴板写入失败不弹崩溃，只把原因写进面板提示。
-   */
-  private async handleCopyPath(): Promise<void> {
-    const target: string = this.exportImport.exportPath.length > 0 ? this.exportImport.exportPath : exportsDirPath();
-    try {
-      const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, target);
-      await pasteboard.getSystemPasteboard().setData(data);
-      if (this.disposed) {
-        return;
-      }
-      promptAction.showToast({ message: '路径已复制', duration: toastMsFor(false) });
-    } catch (error) {
-      if (this.disposed) {
-        return;
-      }
-      this.exportImport = withPanelMessage(
-        this.exportImport,
-        `复制路径失败：${describeError(error)}（可在面板里长按路径手动复制）`,
-        false
-      );
-    }
-  }
-
-  // ------------------------------------------------------------------ 完整包导入（与兼容 JSON 共用同一入口）
-  //
-  // 独立「日程备份」节已删除：媒体能力通过主导入流程的完整包分支到达。
-  // 类型化拒绝统一由 v2RefusalNext 给出下一步，绝不静默吞点击。
-
-  /** 类型化错误行：`动作失败：E_xxx 原因（下一步：…）`；无类型码时只给动作与原因。 */
-  private v2RefusalLine(code: string, reason: string, action: string): string {
-    const head: string = code.length > 0 ? `${action}失败：${code}` : `${action}失败`;
-    return `${head} ${reason}（下一步：${v2RefusalNext(code)}）`;
-  }
-
-  /**
-   * 完整包的确认导入：**先弹显式确认框**，用户确认后才调 applyV2Import（dry-run 默认不写）。
-   * 成功 → 结果行（天 / 记录 / 媒体）+ 清计划；拒绝 → 类型化错误行，计划保留以便改好后重试。
-   */
-  private async confirmBundleImport(): Promise<void> {
-    const plan: V2ImportPlan | null = this.pendingV2Plan;
-    if (this.disposed || plan === null || !plan.ok) {
-      if (!this.disposed) {
-        this.exportImport = withPanelMessage(this.exportImport, '没有待确认的导入计划，请先选择文件并试算', false);
-      }
-      return;
-    }
-    this.exportImport = withPanelMessage(this.exportImport, '', true);
-    try {
-      const response = await promptAction.showDialog({
-        title: '确认导入完整包',
-        message:
-          `将按试算计划写入日程：${v2PlanSummary(plan)}。` +
-          '只追加记录与媒体，不覆盖更晚版本、不删除任何历史；点「取消」本机零改动。',
-        buttons: [
-          { text: '取消', color: $r('app.color.text_secondary') },
-          { text: '确认导入', color: $r('app.color.brand') }
-        ]
-      });
-      if (this.disposed) {
-        return;
-      }
-      if (response.index !== 1) {
-        this.exportImport = withPanelMessage(this.exportImport, '已取消导入（本机记录没有任何改动）', false);
-        return;
-      }
-      const zip: V2ZipBridge = new SettingsZipBridge(this.sync);
-      const result: V2ApplyResult = await applyV2Import(plan, this.pendingV2BundleDir, zip);
-      if (this.disposed) {
-        return;
-      }
-      if (!result.ok) {
-        this.exportImport =
-          withPanelMessage(this.exportImport, this.v2RefusalLine(result.code, result.reason, '导入'), false);
-        return;
-      }
-      this.pendingV2Plan = null;
-      this.pendingV2BundleDir = '';
-      const done: string =
-        `已导入完整包：${result.days} 天 / ${result.records} 条记录 / ` +
-        `${result.media} 个媒体文件（跳过 ${result.skipped} 条）`;
-      this.exportImport = withPanelMessage(clearDryRun(this.exportImport), done, false);
-      AppStorage.setOrCreate<string>(LAST_IMPORT_AT_KEY, nowIso());
-      promptAction.showToast({ message: '已导入完整包', duration: toastMsFor(false) });
-    } catch (error) {
-      if (this.disposed) {
-        return;
-      }
-      this.exportImport =
-        withPanelMessage(this.exportImport, this.v2RefusalLine('', describeError(error), '导入'), false);
     }
   }
 
@@ -1424,62 +1010,22 @@ export struct SettingsHost {
         return;
       }
       this.lastStatusResult = result;
-      this.statusLine = result.message;
     } catch (error) {
       // 状态刷新失败不影响主流程（同步结果已经展示在 syncMessage 里）
     }
   }
 
-  /**
-   * 复查设备身份（不联网：只读工作副本里的 `devices/<id>/.device-fingerprint`）。
-   *
-   * 空串 = 正常；非空 = 两台设备用了同一个设备标识（常驻 warning 文案）。
-   */
-  private async refreshIdentityWarning(): Promise<void> {
-    if (this.disposed || !this.ready) {
-      return;
-    }
-    try {
-      const text: string = await this.sync.identityWarning();
-      if (this.disposed) {
-        return;
-      }
-      this.identityWarning = text;
-    } catch (error) {
-      // 读不到就保留上一次的结论：不因为一次读盘失败把「设备标识重复」的警告误清掉
-    }
-  }
+  // mod-settings-sync-page：设备身份 / 附件暂停的常驻 warning 与「查看状态」结果行
+  // 随同步正文与诚实状态行迁到 pages/SettingsSync；本宿主只保留设备编号回填（保存链需要）。
 
-  /**
-   * 把同步结果里的「设备身份 / 附件暂停」标记铺到常驻状态上（成功与失败都要过一遍）。
-   *
-   * 冲突由仓库登记结果决定，不再有「改设备标识」的入口；冲突与编号分配失败的原文都会随
-   * 同步结果进入诚实状态行 / 错误态（含重试），所以「高级」自动展开线可以整条删除。
-   */
+  /** 把同步结果里的设备编号回填到保存链（同步服务登记成功后带回）。 */
   private applySyncFlags(result: GitSyncResult): void {
-    // 设备编号（数据边界）：同步服务登记成功会把编号带回来 → 立刻回填并推给服务（后续 push 用它）。
     const claimedId: string = result.deviceId === undefined ? '' : result.deviceId.trim();
     if (claimedId.length > 0) {
       this.deviceId = claimedId;
       this.deviceIdAuto = result.deviceIdAuto === true;
       this.configure();
       this.storageHint = `日程目录：${scheduleStore.deviceRoot()}/schedules/`;
-    }
-    if (result.identityConflict === true) {
-      const warning: string =
-        result.identityWarning === undefined ? '' : result.identityWarning.trim();
-      this.identityWarning = warning.length > 0 ? warning : describeIdentityConflict(normalizeDeviceId(this.deviceId));
-    } else {
-      this.refreshIdentityWarning();
-    }
-    if (result.attachmentsBlocked !== undefined && result.attachmentsBlocked > 0) {
-      const count: string = result.attachmentsBlocked.toString();
-      const reason: string = result.attachmentWarning === undefined ? '' : result.attachmentWarning.trim();
-      this.attachmentWarning = reason.length > 0
-        ? `已暂停推送 ${count} 个附件：${reason}`
-        : `已暂停推送 ${count} 个附件（远端可能已被别的设备改过）`;
-    } else {
-      this.attachmentWarning = '';
     }
   }
 
@@ -1504,9 +1050,8 @@ export struct SettingsHost {
   /**
    * 「能不能推」的一行说明（`describePushReadiness` 的纯逻辑结果）。
    *
-   * A2 拆分后由页面派生、以 `@Prop` 传给 `SyncSection`：拆分前这段计算写在同步组的
-   * builder 里，读的是同一个 `statusView()`；放到页面方法里，重绘时机与文案都不变
-   * （`statusLine` 一变，同步组就拿到新的 `statusReadiness`）。
+   * A2 拆分后由页面派生；mod-settings-sync-page 后这段派生与 `statusView()` 一并位于
+   * `pages/SettingsSync`，本宿主保留同名方法只为其它设置子页的保存链共用状态视图口径。
    */
   private statusReadiness(): string {
     return describePushReadiness(this.statusView());
@@ -1555,7 +1100,6 @@ export struct SettingsHost {
       return;
     }
     const repoCheck: RepoUrlCheck = validateRepoUrl(this.repoUrl);
-    this.repoUrlError = repoCheck.ok ? '' : repoCheck.error;
     if (!repoCheck.ok) {
       this.syncMessage = `请先修正仓库地址：${repoCheck.error}`;
       return;
@@ -1834,66 +1378,8 @@ export struct SettingsHost {
    *
    * 紧凑屏与宽屏两套骨架都调用下面这五个 builder（组顺序与拆分前逐字一致）。
    */
-  @Builder
-  SyncGroup() {
-    SyncSection({
-      gitPlatform: this.gitPlatform,
-      authMode: this.authMode,
-      repoUrl: this.repoUrl,
-      repoUrlError: this.repoUrlError,
-      token: this.token,
-      tokenError: this.tokenError,
-      // 设备标识只进可复制诊断文本；无「高级」折叠区、无用户名/编号/作者名输入控件
-      deviceId: this.deviceId,
-      identityWarning: this.identityWarning,
-      attachmentWarning: this.attachmentWarning,
-      syncMessage: this.syncMessage,
-      syncBusy: this.syncBusy,
-      webReady: this.webReady,
-      statusLine: this.statusLine,
-      statusReadiness: this.statusReadiness(),
-      lastSyncError: this.lastSyncError,
-      lastSyncAction: this.lastSyncAction,
-      saveHint: this.saveHint,
-      issuesSummary: this.issuesSummary,
-      includeOtherDevices: this.includeOtherDevices,
-      authBlocker: (): string => this.authBlocker(),
-      onChangeRepoUrl: (value: string): void => {
-        this.repoUrl = value;
-        this.repoUrlError = '';
-      },
-      onChangeToken: (value: string): void => {
-        this.token = value;
-        this.tokenError = '';
-      },
-      onToggleIncludeOtherDevices: (isOn: boolean): void => {
-        this.includeOtherDevices = isOn;
-        AppStorage.setOrCreate<boolean>(HOME_INCLUDE_OTHER_KEY, isOn);
-      },
-      runAction: (action: string): void => {
-        this.runAction(action);
-      },
-      onOpenSyncMore: (): void => {
-        this.panel = PANEL_SYNC_MORE;
-      },
-      onOpenRepoHelp: (): void => {
-        this.panel = PANEL_REPO;
-      },
-      onSwitchToHttpsToken: (): void => {
-        this.switchToHttpsToken();
-      },
-      // 隐藏 Web 的控制器与页面 GitSyncService 是同一个实例（`@Prop` 会深拷贝，故用普通成员）
-      gitController: this.gitController,
-      onWebReady: (): void => {
-        this.onWebReady();
-      },
-      onWebError: (): void => {
-        if (!this.disposed) {
-          this.syncMessage = '❌ 同步内核加载失败：rawfile/git/index.html 无法加载';
-        }
-      }
-    })
-  }
+  // mod-settings-sync-page：SyncGroup 与 SyncSection 装配已迁出本宿主，
+  // 正文、状态与保存都在 pages/SettingsSync；CompactBody / WideBody 仅作历史守卫锚点保留。
 
   @Builder
   AiGroup() {
@@ -1961,33 +1447,6 @@ export struct SettingsHost {
   }
 
   @Builder
-  DataGroup() {
-    DataSection({
-      exportImport: this.exportImport,
-      onExport: (request: ExportRequest): void => {
-        this.handleExport(request);
-      },
-      onPickFile: (): void => {
-        this.handlePickImportFile();
-      },
-      onConfirmImport: (): void => {
-        this.handleConfirmImport();
-      },
-      onCancel: (): void => {
-        this.handleCancelImport();
-      },
-      // A 批：loading 里的「取消」只停止等待（≠ 取消导入）。文件可能已经写出一部分，
-      // 所以文案是「已停止等待」而不是「已取消」——不假装回滚。
-      onCancelWait: (): void => {
-        this.exportImport = withPanelMessage(this.exportImport, '已停止等待：文件可能已写出一部分', false);
-      },
-      onCopyPath: (): void => {
-        this.handleCopyPath();
-      }
-    })
-  }
-
-  @Builder
   AboutGroup() {
     AboutSection({
       lastSyncAt: this.lastSyncAt,
@@ -2014,10 +1473,6 @@ export struct SettingsHost {
         Column({ space: SPACING.xl }) {
           this.GroupAnchorBar()
           this.IssuesBanner()
-          Column() { this.SyncGroup() }
-            .width('100%')
-            .alignItems(HorizontalAlign.Start)
-            .onAreaChange((_oldValue: Area, newValue: Area) => { this.measureGroup(0, newValue); })
           Divider()
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
@@ -2032,13 +1487,6 @@ export struct SettingsHost {
             .width('100%')
             .alignItems(HorizontalAlign.Start)
             .onAreaChange((_oldValue: Area, newValue: Area) => { this.measureGroup(2, newValue); })
-          Divider()
-            .strokeWidth(DIVIDER)
-            .color($r('app.color.divider'))
-          Column() { this.DataGroup() }
-            .width('100%')
-            .alignItems(HorizontalAlign.Start)
-            .onAreaChange((_oldValue: Area, newValue: Area) => { this.measureGroup(3, newValue); })
           Divider()
             .strokeWidth(DIVIDER)
             .color($r('app.color.divider'))
@@ -2062,7 +1510,7 @@ export struct SettingsHost {
     .height('100%')
   }
 
-  /** 宽屏/横屏：左（同步 + 远程控制 + 数据 + 关于）/ 右（AI），底部统一保存。 */
+  /** 宽屏/横屏：左（远程控制 + 数据 + 关于）/ 右（AI），底部统一保存（仅作历史守卫锚点）。 */
   @Builder
   WideBody() {
     Column({ space: SPACING.md }) {
@@ -2071,15 +1519,7 @@ export struct SettingsHost {
           this.IssuesBanner()
           Row({ space: SPACING.xl }) {
             Column({ space: SPACING.xl }) {
-              this.SyncGroup()
-              Divider()
-                .strokeWidth(DIVIDER)
-                .color($r('app.color.divider'))
               this.RemoteGroup()
-              Divider()
-                .strokeWidth(DIVIDER)
-                .color($r('app.color.divider'))
-              this.DataGroup()
               Divider()
                 .strokeWidth(DIVIDER)
                 .color($r('app.color.divider'))
@@ -2328,39 +1768,21 @@ export struct SettingsHost {
     .borderRadius({ topLeft: RADIUS.md, topRight: RADIUS.md })
   }
 
-  /** 导入导出子页唯一的主操作：按今天日期导出完整包（面板内可另选区间）。 */
-  @Builder
-  PrimaryExportButton() {
-    Button('导出')
-      .width('100%')
-      .height(48)
-      .fontSize(FONT.body)
-      .backgroundColor($r('app.color.brand'))
-      .fontColor($r('app.color.text_inverse'))
-      .borderRadius(RADIUS.sm)
-      .enabled(this.ready)
-      .onClick(() => {
-        this.quickExportToday();
-      })
-  }
-
   /**
-   * mod-settings-root：每个子页只渲染自己那一段 section —— 一层 Scroll + 一个主操作。
-   * 四个 section 组件本体原样复用；旧的 CompactBody / WideBody 仅作为历史守卫锚点保留，
-   * 不再由任何路由渲染（根页是四行菜单，子页是本 builder）。
+   * mod-settings-root / mod-settings-export-page：本宿主只渲染仍复用它的子页（API）那一段
+   * section —— 一层 Scroll + 一个主操作。同步正文在 pages/SettingsSync，数据正文在
+   * pages/SettingsExportImport；旧的 CompactBody / WideBody 仅作为历史守卫锚点保留，
+   * 不再由任何路由渲染（根页是四行菜单）。
    */
   @Builder
   SectionBody() {
     Column({ space: SPACING.md }) {
       Scroll(this.pageScroller) {
         Column({ space: SPACING.xl }) {
-          if (this.section === SECTION_SYNC) {
-            this.IssuesBanner()
-            this.SyncGroup()
-          } else if (this.section === SECTION_API) {
+          // mod-settings-sync-page：同步子页已拥有自己的真页面（pages/SettingsSync），
+          // 本宿主不再为 section='sync' 渲染任何正文或 prop 装配。
+          if (this.section === SECTION_API) {
             this.AiGroup()
-          } else if (this.section === SECTION_DATA) {
-            this.DataGroup()
           } else if (this.section === SECTION_ABOUT) {
             this.AboutGroup()
           }
@@ -2374,11 +1796,7 @@ export struct SettingsHost {
       .scrollBar(BarState.Off)
       .align(Alignment.TopStart)
 
-      if (this.section === SECTION_DATA) {
-        this.PrimaryExportButton()
-      } else {
-        this.SaveButton()
-      }
+      this.SaveButton()
     }
     .width('100%')
     .height('100%')

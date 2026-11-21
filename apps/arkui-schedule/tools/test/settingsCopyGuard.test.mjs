@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ETS_ROOT, readSettingsFile, readSettingsPage, readSettingsRoot, readSettingsSources } from './settingsSources.mjs';
+import { ETS_ROOT, readExportPage, readSettingsFile, readSettingsPage, readSettingsRoot, readSettingsSources } from './settingsSources.mjs';
 
 const FILES = [
   'pages/Settings.ets',
@@ -116,6 +116,10 @@ test('C1 用户可见文案不含 v2 / 时间线（允许表为空）', () => {
 
 test('C2 中性区块标题 + 数据组只有一个导入/导出入口', () => {
   const sync = readSettingsFile('components/settings/SyncSection.ets');
+  // mod-settings-sync-page：同步正文的宿主从 SettingsHost 换到 pages/SettingsSync。
+  // SyncSection 仍是 presentational body，上面所有逐字段断言一字不改；下面补钉真页面。
+  const syncPage = readSettingsFile('pages/SettingsSync.ets');
+  const exportPage = readExportPage();
   const data = readSettingsFile('components/settings/DataSection.ets');
   const panel = readSettingsFile('components/ExportImportPanel.ets');
   assert.match(sync, /Text\('同步仓库'\)/, '同步组标题必须是自然的中文「同步仓库」');
@@ -132,6 +136,32 @@ test('C2 中性区块标题 + 数据组只有一个导入/导出入口', () => {
   assert.match(sync, /Text\(this\.syncMessage\)/, '诚实同步状态行必须保留');
   assert.match(sync, /ErrorState\(\{/, '同步失败三段式（原因 + 重试）必须保留');
   assert.match(sync, /this\.syncMessage\.startsWith\('❌'\)/, '状态行只按成功/失败着色，不按模式着色');
+
+  // 真页面（old→new，新增不替代）：标题 / 唯一主操作 / 两个字段 / 三态状态行 / 三个失败出口。
+  assert.match(syncPage, /title: '同步仓库'/, '真页面标题必须是「同步仓库」');
+  assert.match(syncPage, /Button\('保存'\)/, '唯一主操作是「保存」（wire 到同一校验入口）');
+  assert.match(syncPage, /SyncSection\(\{/, '真页面装配 SyncSection 正文');
+  assert.match(syncPage, /checkSettingsFields\(/, '保存复用拆分前同一整表校验');
+  assert.match(syncPage, /syncRowSummary\(/, '诚实状态行来自同一份已持久化状态');
+  assert.match(syncPage, /'同步中…'/, '忙碌态文案');
+  for (const action of ['查看状态', '测试连接', '重试']) {
+    assert.match(syncPage, new RegExp(`Text\\('${action}'\\)`), `失败出口「${action}」必须在真页面上`);
+  }
+  // 只扫可执行源码：注释里的「没有高级 / 没有推送」说明不算入口；「已暂停推送 N 个附件」
+  // 是常驻 warning 文案（附件被远端改动），不是手动按钮，故只匹配按钮 / 文字入口的写法。
+  const pageCode = withoutComments(syncPage);
+  assert.equal(/高级/.test(pageCode), false, '真页面不得出现「高级」控件');
+  assert.equal(/label: '推送'|label: '立即同步'|Text\('推送'\)|Text\('立即同步'\)/.test(pageCode), false,
+    '真页面不得有手动推送 / 立即同步按钮');
+
+  // mod-settings-export-page（old→new，不替代上面的正文断言）：数据子页也是真页面，
+  // 自己有页头 / 唯一「导出」/ 一层 Scroll / DataSection 装配；两者都锚定，避免只真了页头。
+  assert.match(exportPage, /title: '数据导入导出'/, '真页面标题必须是「数据导入导出」');
+  assert.match(exportPage, /Button\('导出'\)/, '唯一主操作是「导出」');
+  assert.match(exportPage, /Scroll\(this\.pageScroller\)/, '自带唯一 Scroll');
+  assert.match(exportPage, /DataSection\(\{/, '真页面装配 DataSection 正文');
+  assert.equal(/SettingsHost\(\{/.test(exportPage), false, '不得再是复用宿主的薄壳');
+  assert.equal(/填今天/.test(withoutComments(exportPage)), false, '不得有与 chip 重复的「填今天」提示');
 });
 
 /** 注释里允许写「已删除备份节」这类说明，只检查可执行源码里的残留。 */
@@ -142,9 +172,10 @@ function withoutComments(source) {
 test('C3 备份节已删、媒体能力并入主流程（没有孤儿 props/handlers）', () => {
   const panel = withoutComments(readSettingsFile('components/ExportImportPanel.ets'));
   const data = withoutComments(readSettingsFile('components/settings/DataSection.ets'));
-  // mod-settings-root（old→new）：实现从 pages/Settings.ets 搬到组件宿主，正文文本不变；
-  // 断言跟着代码换锚点，仍钉住同一条「主流程完整包导出 / 试算 / 落盘」契约。
-  const page = withoutComments(readSettingsPage());
+  // mod-settings-root → mod-settings-export-page（old→new，不是放宽）：实现从
+  // pages/Settings.ets 搬到组件宿主，再随真页面迁到 pages/SettingsExportImport.ets；
+  // 正文文本不变，断言跟着代码换锚点，仍钉住同一条「主流程完整包导出 / 试算 / 落盘」契约。
+  const page = withoutComments(readExportPage());
   for (const [name, source] of [['panel', panel], ['data', data], ['page', page]]) {
     for (const token of [
       'V2Section', '日程备份', '导出备份', '选择备份并试算', '确认导入备份',

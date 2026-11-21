@@ -762,10 +762,11 @@ const DATA_SOURCE = readFileSync(
   join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'components', 'settings', 'DataSection.ets'),
   'utf8'
 ).replace(/\r\n/g, '\n');
-// mod-settings-root（old→new）：导出/导入实现从 pages/Settings.ets 搬到组件宿主，
-// 断言不变，只把锚点跟着代码换过去（根页现在是四行菜单）。
+// mod-settings-root → mod-settings-export-page（old→new，不是放宽）：导出/导入实现从
+// pages/Settings.ets 搬到组件宿主，再随真页面迁到 pages/SettingsExportImport.ets；
+// 断言不变，只把锚点跟着代码换过去（根页是四行菜单，宿主不再装配数据段）。
 const PAGE_SOURCE = readFileSync(
-  join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'components', 'settings', 'SettingsHost.ets'),
+  join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'pages', 'SettingsExportImport.ets'),
   'utf8'
 ).replace(/\r\n/g, '\n');
 

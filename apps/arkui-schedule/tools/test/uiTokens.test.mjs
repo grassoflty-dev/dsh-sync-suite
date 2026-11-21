@@ -547,9 +547,22 @@ test('U-S5 设置四行根页与三个子页都不新增设置入口（U-S4 仍�
   }
   assert.deepEqual(settingsPushFiles(), ['Home.ets'],
     'U-S4 不削弱：外壳 + 四面板里 Settings push 仍恰好一处、位于 Home.ets')
+  // mod-settings-sync-page / mod-settings-export-page（old→new，收紧）：同步与数据两个子页
+  // 都不再是薄壳，而是自带 Scroll + 一层 flex + 唯一主操作的真页面；它们各自装配
+  // presentational body（SyncSection / DataSection）但不 push 设置根页。API 子页仍是薄壳。
+  const sync = roots.find(([file]) => file === 'SettingsSync.ets')[1]
+  assert.equal(/SettingsHost\(\{/.test(sync), false, 'SettingsSync 不得再复用实现宿主的薄壳')
+  assert.match(sync, /PageLayout\(\{[\s\S]{0,80}title: '同步仓库'/, 'SettingsSync 页头标题必须是「同步仓库」')
+  assert.match(sync, /SyncSection\(\{/, 'SettingsSync 必须装配真实同步正文')
+  assert.match(sync, /Scroll\(this\.pageScroller\)/, 'SettingsSync 自带唯一 Scroll')
+  assert.match(sync, /Button\('保存'\)/, 'SettingsSync 的唯一主操作是「保存」')
+  const data = roots.find(([file]) => file === 'SettingsExportImport.ets')[1]
+  assert.equal(/SettingsHost\(\{/.test(data), false, 'SettingsExportImport 不得再复用实现宿主的薄壳')
+  assert.match(data, /PageLayout\(\{[\s\S]{0,80}title: '数据导入导出'/, '数据子页页头标题必须是「数据导入导出」')
+  assert.match(data, /DataSection\(\{/, '数据子页必须装配 DataSection 正文')
+  assert.match(data, /Scroll\(this\.pageScroller\)/, '数据子页自带唯一 Scroll')
+  assert.match(data, /Button\('导出'\)/, '数据子页的唯一主操作是「导出」')
   for (const [name, section, title] of [
-    ['SettingsSync.ets', 'sync', '同步仓库'],
-    ['SettingsExportImport.ets', 'data', '数据导入导出'],
     ['SettingsApi.ets', 'api', 'API 配置']
   ]) {
     const code = roots.find(([file]) => file === name)[1]
