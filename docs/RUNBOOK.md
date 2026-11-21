@@ -152,3 +152,13 @@ node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json 
   - **行为证明**：只在新构建里出现的界面特征（例如设置四行菜单、关于页版本文案、某个按钮已消失）。
   - 操作记录仍保留 `install bundle successfully` + `aa start` 输出。
   - `versionCode` 仍需按发布递增（AppGallery 要求），但**不作为安装证明**引用。
+
+### 7.1 安装证明：内容哈希路线在 undebuggable 镜像上不可用（1000004 起）
+
+> 2026-11-21 随 1000004 落真追加。**取代 §7 末段「可证安装 = install 输出 + 内容哈希比对、不要依赖 `bm dump` 的 `versionCode`」的笼统口径**：那条来自旧镜像（MLR-AL00 / API 26，`versionCode` 恒为 0）的观察，不适用于当前的 undebuggable 镜像。
+
+**症状**：本镜像上 `hdc shell ls` / `hdc file recv` 读取 `/data/app/el1/bundle/public/<bundle>/entry.hap` 一律 `Permission denied`（shell uid 2000），`hdc smode` 也被拒。因此原计划的「从设备取回已安装的 `ets/modules.abc` 并与已签名 HAP 内同名条目比对 SHA-256」**在此无法产出**；不要把「取不到哈希」误记为比对失败。
+
+**已采用的替代证明（1000004 实测）**：`bm dump -n <bundle>` 取**应用级** `versionCode`——以最浅的 `"vendor": "itwill"` 行作锚，`versionCode` 在紧随其后、缩进相同的一行——再取 `updateTime`；**装机前先抓一份基线**，`install -r` 后再抓一份对照。PASS = `versionCode` 等于预期值**且** `updateTime` 发生变化/增长。不要用 `installTime`（陈旧，`install -r` 不推进；实测两侧同为 `1794720327159`），也不要用嵌套/模块的 `versionCode` 块（0/空）。逐行哈希与完整判据见 `docs/VERIFICATION.md` §15.18。
+
+**操作要点**：每次需要可证明的装机，先自增 `AppScope/app.json5` 的 `versionCode` 再构建；`dist-harmony/` 必须在 `sign-hap.ps1` 运行前就存在，否则报 `11017002 Write zip file failed`；若 `signing/pass.txt` 已打不开 keystore，用 `signing/README.md` 记载的值经 `-StorePass`/`-KeyPass` 传入，**不要打印口令**。

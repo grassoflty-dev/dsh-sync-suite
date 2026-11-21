@@ -1841,3 +1841,117 @@ never ship or publish with this key
 > **仅本地复现，绝不用于分发**；发布路径需要 AppGallery Connect 的 v2 `.cer` + `.p7b`（P0 阻塞项）。
 >
 > 规则：**每次需要“可证明的装机”，先自增 `versionCode`**（`AppScope/app.json5`），否则 `install -r` 的替换无法证明。
+
+### 15.18 空仓库首跑引导落真：1000004 构建 / 签名 / 装机 / versionCode+updateTime 证明（2026-11-21, planner-b7；append-only, 不改写 §15.1–§15.17b）
+
+> 本节紧接 §15.17b 之后**追加**，不改写 §15.1–§15.17b 任何一行。所有数字均由 Designer 实测；
+> 未测项一律标 `unverified`，不据本节宣称端到端通过。
+
+**提交 / 被测树**
+
+- 模块 `mod-sync-empty-repo-bootstrap` 已提交为 **`edace79`**（`feat(sync): mod-sync-empty-repo-bootstrap——空仓库首次同步自动建初始提交并推送`），
+  tag `module/mod-sync-empty-repo-bootstrap`，模块 tag 共 **82** 个。三份评审记录
+  `docs/REVIEW-sync-empty-repo-bootstrap.md`、`docs/REVIEW-sync-empty-repo-bootstrap-r2.md`、
+  `docs/REVIEW-sync-empty-repo-bootstrap-r3.md` 均在该提交内。
+- r3 判定：**CONDITIONAL PASS，0 Major**，M3b-prod + M2b **CLOSED**，**2 Minor**
+  （漂移的行号锚点——已在文档中修好；`requireReady()` 前置条件——已记录，无测试覆盖）。
+- 提交后只有 `apps/arkui-schedule/AppScope/app.json5` 处于 dirty：本次发版把 `1000003` 自增到
+  `1000004`（`app.json5:5`），**尚未提交**（由 Lead 提交）。如实记录：提交树 `edace79` 里该文件仍是
+  `1000002`，而这次 bump 是在工作树上把 `1000003` 改为 `1000004`；模块源码与工作树一致，
+  `1000004` 的 bump 属于下一个提交。
+
+**门槛（pre-bump 树，versionCode 那行尚未改动时跑）**
+
+```
+node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json   → exit 0
+node --test "packages/dsh-dots/test/*.test.mjs" "apps/arkui-schedule/tools/test/*.test.mjs"
+  → tests 3164 / suites 373 / pass 3163 / fail 0 / skipped 1
+node apps/arkui-schedule/tools/validate-app.mjs
+  → 8/8（JSON5/JSON 70、相对 import 501、main 静态 import 659、页面 12、rawfile/git 2）
+node apps/arkui-schedule/tools/overlay.mjs status   → applied=false
+targeted syncEmptyBootstrap = 25/25
+```
+
+**构建 1000004**
+
+先删除 `apps/arkui-schedule/entry/build` 与 `apps/arkui-schedule/build` 再干净构建，日志
+`apps/arkui-schedule/.build-logs/build-20261121-192753.log`：
+
+```
+42 tasks in total: 42 executed, 0 up-to-date
+Finished :entry:default@CompileArkTS... after 26 s 563 ms
+Finished :entry:default@PackageHap... after 7 s 338 ms
+BUILD SUCCESSFUL in 40 s 619 ms
+Build completed successfully
+```
+
+控制台尾 `.tmp/build-1000004.out` → `✓ 产物验收通过`、`[overlay] applied=false`；overlay 还原并断言
+（`overlay(finally): applied=false（已断言）`）。
+未签名 HAP：`apps/arkui-schedule/entry/build/default/outputs/default/entry-default-unsigned.hap`，
+**4,927,347 B**，SHA-256 `41967e2691e08efe51c65c65419b78f222cd7b185c5a5492368dbeaa92b64a6f`。
+
+**签名**
+
+- v2 材料仍不齐（`signing/itwill-debug-v2.p12` 存在，但没有 v2 `.cer` / `.p7b`）→ 用 **legacy v1** 密钥签名，
+  必须显式加 `-AllowLegacyV1Key`。警告原文：
+
+```
+WARNING: [sign-hap] WARNING -AllowLegacyV1Key: using LEAKED v1 signing key (compromised private key) - reproduce-only, never ship or publish with this key
+```
+
+- **仅本地复现，绝不用于分发/上架**（发布仍需 AGC v2 `.cer` + `.p7b`）。
+- 口令排障（记下症状与修复，避免下一条 lane 重复耗时）：`signing/pass.txt` 存在（24 B）但**已打不开**
+  `signing/itwill-debug.p12`（`[sign-hap] 密码无法打开 keystore`）；随后脚本又因输出目录缺失而失败
+  （`dist-harmony/` 当时不存在 → `11017002 Write zip file failed`）。解法：先建该目录，再用
+  `signing/README.md` 记载的值经 `-StorePass`/`-KeyPass` 传入（运行时读取，**从不打印/写盘**）。
+  此处**不记录凭据本身**。
+- 已签名 HAP：`dist-harmony/arkui-schedule-1000004-signed.hap`（被 `.gitignore` 的 `dist-*/` 忽略），
+  **4,992,676 B**，SHA-256 `c83ef3676323247dcbf3df48e1f1ec6d5e2e666026d5b1d19e08790464d026fc`，
+  签名时间 **2026-11-21 19:29:41.661**；`hap-sign-tool verify-app` → `verify: Verify success` /
+  `verify-app success`；内层 `ets/modules.abc` **2,831,264 B**，SHA-256
+  `5b26166197c4263587204c02f2d516f91ab49d92458bcb1034b7932a1e3c46b6`
+  （与未签名构建的 entry 相同——签名不改代码）。
+
+**装机 + 证明**
+
+`hdc -t 192.168.1.7:33023 install -r <signed hap>` → `[Info]App install path:… msg:install bundle successfully.`
+/ `AppMod finish`，exit 0。
+
+证明方法：本镜像上内容哈希路线**不可用**（见 `docs/RUNBOOK.md` §7.1），改用
+`bm dump -n com.itwill.schedule` 的装机前后对照。
+
+- 基线（装机**前**，`.tmp/baseline-pre-1000004.json`）：应用级 `versionCode` **1000003**
+  （dump L485，锚在最浅的 `"vendor": "itwill"` L484），`updateTime` **1795253176187**
+  = **2026-11-21 17:26:16.187 +08:00**（L454）。
+- 装机**后**：`versionCode` **1000004**（L485），`updateTime` **1795260583970**
+  = **2026-11-21 19:29:43.970 +08:00**（L454）。
+
+| 判据 | 结果 | 证据 |
+| --- | --- | --- |
+| a) versionCode | **PASS**（1000003→1000004） | 应用级 L485，前后两份 dump |
+| b) updateTime 改变 | **PASS** | 1795253176187 → 1795260583970（L454） |
+| c) updateTime 增长 | **PASS** | 同上，时间前进 |
+| d) hapPath 存在性 | **unknown** | `ls` / `file recv` → `Permission denied`（shell uid 2000）；`hdc smode` 被拒（undebuggable 版本） |
+| e) HAP 产物同一性 | 见上（SHA-256） | 未签名 HAP / 已签名 HAP / `ets/modules.abc` 三值 |
+
+**OVERALL: PASS (exit 0)**。
+
+`installTime` **不是**见证：两侧均为 `1794720327159` = 2026-11-15 13:25:27.159，`install -r` 不会推进它；
+`bm dump` 里嵌套/模块的 `versionCode` 字段为 0/空——只有应用级那一对（L484–486）可用。
+这一条**取代**此前「`bm dump` 版本字段一律不可用」的笼统说法。
+
+**unverified**
+
+- 真实两端对真正空 HTTPS 远端的首次同步；
+- `getRemoteInfo` 对真实端点的 advertisement / auth；
+- WebView ↔ bridge 往返；
+- `timeline/schema.json` 的全新安装竞态（`requireReady()` 前置条件，r3 Minor 2）。
+
+**用户复验清单**
+
+1. **面板页头**：远程 DSH 面板页头**没有**「云端对话」按钮（换段只走左侧导航轨）；只读模式下页头只有标题，配置模式只有「添加实例」。
+2. **AI**：设置 → API 配置保存后发一次请求，应返回 **200**（或给出指名 provider+model 的 typed 错误），不再是 400。
+3. **同步**：新建一条记录后**不点任何重试**，状态自动走到「已同步」；**并验证空仓库首跑**：用一个全新的空远端仓库（无 `main`、无任何分支）→ 首次同步应自动创建初始提交并推送 `main`，然后显示「已同步」，而不是报错。非空但没有 `main` 的仓库仍应给出 typed 错误、绝不覆盖。
+4. **竖屏下拉刷新**：竖屏日程列表下拉可刷新（与横屏同一路径）。
+
+> 注：**现在支持空仓库**（首次同步会自动初始化 `main`）。
