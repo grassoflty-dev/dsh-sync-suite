@@ -46,12 +46,15 @@ export const COLOR_BUDGET = [
   {
     // 共享 UI 层：只该有资源令牌 $r('app.color.*')。
     // 实测 2026-11-18（40 个 .ets）：hex 0 / rgb 0 / ctor 0 / concat 0；named 1 = Index.ets 的 Color.Transparent。
+    // 2026-11-21 S3：日程正文迁入 pages/panes/SchedulePane.ets 且 Index 保留为 fallback 路由，
+    // 同一处 AiPanel「取消」按钮底色被逐字复制，故 named 2 = Index + SchedulePane 各 1（显式决策，
+    // theme.test.mjs 再加逐文件断言防止扩散到第三个文件）。
     key: 'main-ui',
     dir: 'entry/src/main/ets',
     suffixes: ['.ets'],
     label: 'entry/src/main/ets（共享 UI，.ets）',
-    limits: { hex: 0, func: 0, ctor: 0, concat: 0, named: 1 },
-    namedLimits: { 'Color.Transparent': 1 }
+    limits: { hex: 0, func: 0, ctor: 0, concat: 0, named: 2 },
+    namedLimits: { 'Color.Transparent': 2 }
   },
   {
     // 共享纯逻辑层：画布绘制色 / 墨色 / 兜底色。这些**本来就不跟主题**，

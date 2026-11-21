@@ -330,13 +330,21 @@ function normalizePageEntry(entry) {
   return text.replace(/^\/+/, '');
 }
 
-/** 列出某棵源码树 pages 目录下的页面（不含扩展名，正斜杠）。 */
+/**
+ * 列出某棵源码树 pages 目录下的**页面**（不含扩展名，正斜杠）。
+ *
+ * 只认 pages/ 顶层：S3 起 pages/panes/*.ets 是被 Home 装配的面板组件，不是路由页，
+ * 不应登记进 main_pages.json（登记会让它们成为可直达路由，破坏「唯一入口 Home」）。
+ * 子目录若将来再放组件，同样按组件处理。
+ */
 function listPages(treeRoot) {
   const pagesDir = join(treeRoot, 'pages');
-  const result = [];
-  walkFiles(pagesDir, (file) => file.endsWith('.ets'), result);
-  return result
-    .map((file) => toPosix(relative(treeRoot, file)).replace(/\.ets$/, ''))
+  if (!existsSync(pagesDir)) {
+    return [];
+  }
+  return readdirSync(pagesDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.ets'))
+    .map((entry) => toPosix(relative(treeRoot, join(pagesDir, entry.name))).replace(/\.ets$/, ''))
     .sort();
 }
 

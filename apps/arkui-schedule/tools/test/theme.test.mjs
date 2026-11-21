@@ -160,8 +160,8 @@ describe('色值收编：目录级预算 + 语义形态（硬门闸）', () => {
     const named = hits.filter((hit) => hit.kind === 'named');
     assert.deepEqual(
       named.map((hit) => hit.literal),
-      ['Color.Transparent'],
-      `main 树只允许「透明」这一种命名色（${named.map((hit) => `${hit.file}:${hit.line}`).join(', ')}）`
+      ['Color.Transparent', 'Color.Transparent'],
+      `main 树只允许「透明」这一种命名色，且恰好 2 处（Index fallback + SchedulePane 迁入副本；${named.map((hit) => `${hit.file}:${hit.line}`).join(', ')}）`
     );
   });
 
@@ -252,12 +252,18 @@ describe('色值收编：目录级预算 + 语义形态（硬门闸）', () => {
     assert.deepEqual(shapeViolations(hits).map((item) => formatHit(item.hit)), [], 'harmony 树的 hex 必须都在三元假分支或常量声明里');
   });
 
-  test('命名色只剩预算内：完成按钮的 Color.White ×1 + 透明 ×4', () => {
+  test('命名色只剩预算内：完成按钮的 Color.White ×1 + 透明 ×5（S3 逐字复制，逐文件钉死）', () => {
     const named = collectColorHits().filter((hit) => hit.kind === 'named');
     const white = named.filter((hit) => hit.literal === 'Color.White');
     const transparent = named.filter((hit) => hit.literal === 'Color.Transparent');
     assert.equal(white.length, 1, `Color.White 只允许 1 处（完成按钮反白字）：\n${white.map((hit) => `${hit.file}:${hit.line}`).join('\n')}`);
-    assert.equal(transparent.length, 4, `Color.Transparent 只允许 4 处（main 1 + harmony 3，语义恒定：让底色透出来）：\n${transparent.map((hit) => `${hit.file}:${hit.line}`).join('\n')}`);
+    assert.equal(transparent.length, 5, `Color.Transparent 只允许 5 处（main 2 + harmony 3，语义恒定：让底色透出来）：\n${transparent.map((hit) => `${hit.file}:${hit.line}`).join('\n')}`);
+    // S3 显式放宽预算后收紧到逐文件：fallback 的 Index 与迁入的 SchedulePane 各恰好 1 处，
+    // 其余两个占位面板一个都不许有，防止「预算变 2 就能随手塞」。
+    for (const file of ['main/ets/pages/Index.ets', 'main/ets/pages/panes/SchedulePane.ets']) {
+      const hits = transparent.filter((hit) => hit.file === file);
+      assert.equal(hits.length, 1, `${file} 只允许 1 处 Color.Transparent（AiPanel 取消按钮底色）`);
+    }
     assert.equal(named.length, white.length + transparent.length, '除 White / Transparent 之外不允许任何命名色');
   });
 
