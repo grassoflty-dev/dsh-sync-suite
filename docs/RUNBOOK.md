@@ -77,6 +77,7 @@ node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json 
 ```
 
 五项同时成立才算回滚干净；**回滚之后必须再跑一次全绿全量**（§4 第 5 步），没有这次绿灯不算回滚完成。
+> **构建后覆盖层还原卡住（2026-11-21 `mod-build-restore-timeout`）**：`build-harmony.ps1` 打印 `[overlay-restore] TIMEOUT ...` / `FAILED ...` 或以 exit 3 结束时，先 `node apps/arkui-schedule/tools/overlay.mjs status` 确认是否仍 `applied=true`；确认没有他人 hvigor / devecocli 构建在跑后，在 `apps/arkui-schedule` 目录手动 `node tools/overlay.mjs restore`，再查 `node tools/overlay.mjs status` 必须 `applied=false` 且 `git status --short` 的 `entry/src/main` 无改动才算恢复；不要在别人的构建进行中还原。
 
 ## 4. 异常处置（原「激活失败 / 异常处置」；**历史口径，未迁移项已被 mod-drop-v1 superseded**）
 
@@ -138,3 +139,7 @@ node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json 
   `timeline.v1Retained`）已随激活流程删除；「迁移完成 → 杀进程 → 重启仍生效」在真机未验证（评审 §9 第 3 项）。
 
 不要据此宣称已验证；对外表述只能是「纯逻辑/编译可证，端侧待验」。
+
+## 7. 构建 / 签名（`tools/sign-hap.ps1`）
+
+- 口令解析顺序固定为 `-StorePass/-KeyPass` 显式参数 → 环境变量 `SIGN_PASS`（可选 `SIGN_KEY_PASS`）→ `signing/pass.txt`（去 UTF-8 BOM、只去掉行尾 CRLF，空格/制表符当作口令字符保留）；签名前用 `keytool -list` 预检 keystore，打不开即报 `[sign-hap] 密码无法打开 keystore：检查 -StorePass / signing/pass.txt（不要打印密码）` 而不打印口令；v2 材料（`itwill-debug-v2.p12/.cer/.p7b`）不齐时**默认拒绝**使用已泄露的 v1 调试密钥，确有 Reproduction 需要须显式加 `-AllowLegacyV1Key`，届时会打印含 `LEAKED v1 signing key` 的高亮警告。
