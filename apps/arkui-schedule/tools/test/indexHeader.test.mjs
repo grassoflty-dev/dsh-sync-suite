@@ -154,14 +154,18 @@ describe('日程面板契约（S3 已迁入 SchedulePane.ets）：AI 汇总图�
 //   · 「✨ AI 汇总 / headerActionOne / onHeaderSummaryAction 绝迹」→ H-3：同样这些标识在外壳里绝迹；
 //   · 「首页无 tab / 汇总 / 列表重逻辑」→ H-4：Home 不复制 今日/未完成、summaryStore、RecordList —— 它们留在日程面板契约里。
 describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作', () => {
-  test('H-1 外壳页头标题 = 分段标签，两个占位各有带标签页头、日程 / 远程用真页头', () => {
-    // 旧 PaneHeader builder 随 S3 抽壳落到占位文件里；mod-shell-instances-pane 后
-    // 只剩 dots / 云端对话两个占位，远程 DSH 改为「真页头」正向断言（不是删除）。
-    const labels = ['dots', '云端对话'];
+  test('H-1 外壳页头标题 = 分段标签，唯一占位有带标签页头、日程 / 远程 / 云端用真页头', () => {
+    // 旧 PaneHeader builder 随 S3 抽壳落到占位文件里；mod-shell-instances-pane 与
+    // mod-shell-cloud-chat-pane 后只剩 dots 一个占位，其余三面改为「真页头」正向断言（不是删除）。
+    const labels = ['dots'];
     labels.forEach((label, index) => {
       assert.match(PANE_CODES[index], new RegExp(`Text\\('${label}'\\)`), `缺少「${label}」分段标签`);
       assert.match(PANE_CODES[index], /REASON_[A-Z]+/, `${label} 页头必须写出禁用原因`);
     });
+    // mod-shell-cloud-chat-pane（old→new，收紧）：云端标题仍在，禁用原因 / 占位文案绝迹。
+    assert.match(PANE_CODES[1], /Text\('云端对话'\)/, '云端面板页头仍有分段标题');
+    assert.equal(/REASON_[A-Z]+|新建对话|即将迁入/.test(PANE_CODES[1]), false,
+      '云端面板禁用原因 / 占位文案绝迹');
     assert.match(INSTANCES_CODE, /Text\('远程 DSH'\)/, '远程 DSH 仍有分段标题');
     assert.match(INSTANCES_CODE, /Text\('添加实例'\)/, '远程 DSH 主操作是真动作，不是禁用占位');
     assert.equal(/REASON_REMOTE|远程面板即将迁入/.test(INSTANCES_SOURCE), false, '远程占位原因绝迹');
@@ -176,7 +180,7 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
     assert.match(RAIL, /label: '云端对话'/);
   });
 
-  test('H-2 设置出口唯一：齿轮行在 rail，面板动作槽禁用且不重复 pushUrl', () => {
+  test('H-2 设置出口唯一 + 四面板 pushUrl 正向清单：dots 0 / 日程 2 / 远程 2 / 云端 1（只到只读详情），且无跨节页', () => {
     // 旧 headerActionTwo: '⚙ 设置' 的唯一出口属性 → 现在由 rail 齿轮 + 父页 openSettings 承担。
     assert.match(RAIL, /const SETTINGS_GLYPH: string = '⚙';/);
     assert.match(RAIL, /SettingsRow\(\) \{/, '齿轮行 builder 必须在 rail 里');
@@ -196,14 +200,44 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
       assert.equal(/headerActionTwo|onHeaderActionTwo|⚙ 设置|private openSettings/.test(text), false,
         `${file} 不得含有设置动作（唯一出口 = rail 齿轮）`);
     }
-    // 面板动作槽随 S3 抽壳搬进占位文件；远程 DSH 迁真后禁用数 4 → 3
-    // （两个占位动作槽 + dots 禁用输入框），远程的动作改为可点且另有正向断言。
+    // 面板动作槽随 S3 抽壳搬进占位文件；远程 DSH 迁真后 4 → 3，mod-shell-cloud-chat-pane
+    // 再落真后 3 → 2（只剩 dots 动作槽 + dots 禁用输入框）。
     const disabled = PANE_CODES.flatMap((code) => code.match(/\.enabled\(false\)/g) ?? []);
-    assert.equal(disabled.length, 3, '两个占位动作槽 + dots 输入框各一处禁用');
+    assert.equal(disabled.length, 2, '只剩 dots 动作槽 + 输入框各一处禁用；云端无禁用假入口');
     for (const [index, code] of PANE_CODES.entries()) {
-      assert.match(code, /\.enabled\(false\)/, `占位 ${index} 的主动作必须禁用（无假入口）`);
-      assert.equal(/pushUrl\(/.test(code), false, `占位 ${index} 不得自行跳页（设置出口唯一）`);
+      if (index === 0) {
+        assert.match(code, /\.enabled\(false\)/, 'dots 的主动作必须禁用（无假入口）');
+      } else {
+        assert.equal(/\.enabled\(false\)/.test(code), false, '云端面板已落真，不得有禁用假入口');
+      }
+      // 旧断言禁掉一切 pushUrl；云端点行进只读详情是真路径，故禁令继续精确锁定跨节页 / 设置根页。
+      assert.equal(/pushUrl\(\{\s*url:\s*'pages\/(Chats|Home|Settings)'/.test(code), false,
+        `面板 ${index} 不得自行跳跨节页 / 设置根页`);
     }
+    // mod-shell-cloud-chat-pane（评审 M2 修复，old→new 收紧）：旧 H-2 是「四面板零 pushUrl」的
+    // blanket ban，云端落真后必须放行 pages/ChatDetail。这里不用「只禁三个目标」的宽松版收尾，
+    // 而是补一张**逐面板正向清单**：次数 + 字面目标 + 非字面目标三项同时逐字钉住当前真值，
+    // 任何面板多出第二处 pushUrl 或改了目标都会红；上面的跨节页 / 设置根页禁令原样保留。
+    // 真值来自当前源码：dots 0；日程 2（pages/Edit、pages/Detail）；
+    // 远程 2（动态 routeToRemote() 与 ROUTE_INSTANCES）；云端 1（pages/ChatDetail）。
+    const pushInventory = [
+      { name: 'DotsPane.ets', source: PANE_CODES[0], count: 0, literal: [], dynamic: [] },
+      { name: 'SchedulePane.ets', source: code, count: 2, literal: ['pages/Edit', 'pages/Detail'], dynamic: [] },
+      { name: 'InstancesPane.ets', source: INSTANCES_CODE, count: 2, literal: [],
+        dynamic: ['routeToRemote()', 'ROUTE_INSTANCES'] },
+      { name: 'CloudChatPane.ets', source: PANE_CODES[1], count: 1, literal: ['pages/ChatDetail'], dynamic: [] }
+    ];
+    for (const entry of pushInventory) {
+      const calls = entry.source.match(/pushUrl\s*\(/g) ?? [];
+      assert.equal(calls.length, entry.count,
+        `${entry.name}: pushUrl 次数必须是 ${entry.count}（多一处即红，云端必须是恰好一处）`);
+      const literal = [...entry.source.matchAll(/pushUrl\(\{\s*url:\s*'([^']+)'/g)].map((m) => m[1]);
+      assert.deepEqual(literal, entry.literal, `${entry.name}: pushUrl 字面目标清单必须逐字一致`);
+      const dynamic = [...entry.source.matchAll(/pushUrl\(\{\s*url:\s*([A-Za-z_]\w*(?:\(\))?)/g)].map((m) => m[1]);
+      assert.deepEqual(dynamic, entry.dynamic, `${entry.name}: pushUrl 非字面目标清单必须逐字一致`);
+    }
+    assert.match(INSTANCES_CODE, /const ROUTE_INSTANCES: string = 'pages\/Instances';/,
+      'InstancesPane 的 ROUTE_INSTANCES 必须仍是设置实例路由（不是跨节页）');
     assert.equal(/\.enabled\(false\)/.test(INSTANCES_CODE), false, '远程 DSH 主操作不再禁用');
     assert.equal(/pushUrl\(\{\s*url: 'pages\/Home'/.test(INSTANCES_CODE), false,
       '远程面板不得 pushUrl 到外壳页切段');

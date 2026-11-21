@@ -485,11 +485,15 @@ test('U-S1 外壳断点与 Index / PageLayout 同源：onAreaChange + resolveBre
 test('U-S2 外壳页头标题是分段标签；日程 pane 的相对日期标题契约仍在（不删旧断言）', () => {
   // 旧 PaneHeader 四行调用随 S3 拆成：占位各自带标签页头 + 日程面板的真 PageLayout 页头。
   // mod-shell-instances-pane 后远程 DSH 改为真页头正向断言（不是删除）。
-  const labels = ['dots', '云端对话']
+  const labels = ['dots']
   labels.forEach((label, index) => {
     assert.match(PANE_CODES[index], new RegExp(`Text\\('${label}'\\)`), `缺少分段标签「${label}」`)
     assert.match(PANE_CODES[index], /REASON_[A-Z]+/, `「${label}」必须写出禁用原因`)
   })
+  // mod-shell-cloud-chat-pane（old→new，收紧）：云端标题仍在，禁用原因 / 占位文案绝迹。
+  assert.match(PANE_CODES[1], /Text\('云端对话'\)/, '云端面板页头仍有分段标题')
+  assert.equal(/REASON_[A-Z]+|新建对话|即将迁入/.test(PANE_CODES[1]), false,
+    '云端面板禁用原因 / 占位文案绝迹')
   assert.match(INSTANCES_CODE, /Text\('远程 DSH'\)/, '远程 DSH 仍带分段标签')
   assert.match(INSTANCES_CODE, /Text\('添加实例'\)/, '远程 DSH 主操作可点，不是禁用占位')
   assert.equal(/REASON_REMOTE|远程面板即将迁入/.test(INSTANCES_CODE), false, '远程占位原因绝迹')
@@ -529,8 +533,9 @@ test('U-S4 外壳只有一个设置出口：rail 齿轮 + 父页 openSettings，
   assert.deepEqual(settingsPushFiles(), ['Home.ets'],
     '正向断言：Settings push 恰好一处、位于 Home.ets（rail 齿轮 → Home.openSettings）')
   const disabled = PANE_CODES.flatMap((code) => code.match(/\.enabled\(false\)/g) ?? [])
-  assert.equal(disabled.length, 3, '两个占位动作槽 + dots 输入框禁用（远程 DSH 迁真后 4→3）')
+  assert.equal(disabled.length, 2, '只剩 dots 动作槽 + 输入框禁用（云端落真后 3→2）')
   assert.equal(/\.enabled\(false\)/.test(INSTANCES_CODE), false, '远程 DSH 主操作不再禁用')
+  assert.equal(/\.enabled\(false\)/.test(PANE_CODES[1]), false, '云端面板落真后无禁用假入口')
   // 旧断言「Index 页头唯一动作 ⚙ 设置」→ 新断言：日程面板页头无设置动作（去重）。
   assert.equal(/headerActionTwo|onHeaderActionTwo/.test(INDEX_CODE), false, '日程面板页头不得有设置动作')
 })

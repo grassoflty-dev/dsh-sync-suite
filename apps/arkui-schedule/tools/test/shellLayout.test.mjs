@@ -56,13 +56,13 @@ const PANES = [
   { name: 'CloudChatPane', file: 'CloudChatPane.ets', constant: 'SHELL_SECTION_CLOUD_CHAT' }
 ];
 /**
- * 剩余的「即将迁入」占位。mod-shell-instances-pane 已把 InstancesPane 换成真 body，
- * 日程更早就是真 body，因此占位只剩 dots / 云端对话两个（日程与远程不再列入）。
+ * 剩余的「即将迁入」占位。mod-shell-instances-pane 与 mod-shell-cloud-chat-pane 已把
+ * InstancesPane / CloudChatPane 换成真 body，日程更早就是真 body，因此占位只剩 dots 一个。
  */
 const SCAFFOLDS = [
-  { name: 'DotsPane', file: 'DotsPane.ets', label: 'dots', action: '新建对话', reason: 'REASON_DOTS', empty: '还没有 dots 对话' },
-  { name: 'CloudChatPane', file: 'CloudChatPane.ets', label: '云端对话', action: '新建对话', reason: 'REASON_CLOUD', empty: '云端对话' }
+  { name: 'DotsPane', file: 'DotsPane.ets', label: 'dots', action: '新建对话', reason: 'REASON_DOTS', empty: '还没有 dots 对话' }
 ];
+const CLOUD_FILE = 'CloudChatPane.ets';
 const PANE_SOURCE = new Map(
   PANES.map((pane) => [pane.name, stripComments(readFileSync(new URL(pane.file, PANE_DIR), 'utf8'))])
 );
@@ -139,7 +139,7 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     }
   });
 
-  test('L-02 唯一的 flex 切分在内容 Stack；两个占位页头各一处标题省略号', () => {
+  test('L-02 唯一的 flex 切分在内容 Stack；占位页头与云端真页头各一处标题省略号', () => {
     const buildSplits = BUILD.match(/layoutWeight\(1\)/g) ?? [];
     assert.equal(buildSplits.length, 1, `build() 里只允许一处 layoutWeight(1) flex 切分，实际 ${buildSplits.length} 处`);
     // 唯一的那一处紧跟在四面板 Stack 的闭合之后（width/height 100% → layoutWeight）。
@@ -155,6 +155,9 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       const inHeader = (paneBody(scaffold.name).match(/layoutWeight\(1\)/g) ?? []).length;
       assert.equal(inHeader, 1, `${scaffold.name} 的标题省略号只能占一处，不是新的 flex 切分`);
     }
+    // mod-shell-cloud-chat-pane：云端面板落真后仍只有页头一处省略号（列表行不加权，滚动交给根 Scroll）。
+    assert.equal((paneBody('CloudChatPane').match(/layoutWeight\(1\)/g) ?? []).length, 1,
+      'CloudChatPane 的标题省略号只能占一处，列表不得新增 flex 切分');
     // 远程 DSH 现在是真 body：页头标题与行内名称各一处省略号，build() 根层不新增切分。
     const instances = PANE_SOURCE.get('InstancesPane');
     assert.equal((paneBody('InstancesPane').match(/layoutWeight\(1\)/g) ?? []).length, 0,
@@ -181,8 +184,8 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     const content = contentStackBody();
     assert.equal(/Scroll\(/.test(content), false, '内容 Stack 不得再包一层 Scroll');
     assert.equal(/Column\(/.test(content), false, '内容 Stack 只能是面板叠放层，不得有布局 Column');
-    // 日程面板根是 Stack（内部汇总块自带 Scroll），其余三个面板根即 Scroll。
-    for (const name of [...SCAFFOLDS.map((s) => s.name), 'InstancesPane']) {
+    // 日程面板根是 Stack（内部汇总块自带 Scroll），其余三个面板根即 Scroll（云端落真后不变）。
+    for (const name of [...SCAFFOLDS.map((s) => s.name), 'InstancesPane', 'CloudChatPane']) {
       assert.match(paneBody(name), /^\s*Scroll\(\) \{/, `${name} 必须以自己的 Scroll 开头`);
     }
     // 日程真 body 的滚动纪律：汇总块自带 Scroll、列表区是唯一的加权兄弟（横屏修复不回退）。
@@ -265,7 +268,7 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.match(RAIL, /const RAIL_COMPACT_WIDTH: number = 72;/, '抽屉窄轨 72vp');
   });
 
-  test('L-11 两个占位各有带分段标签的页头，动作槽禁用并写出原因；日程 / 远程用真页头', () => {
+  test('L-11 唯一占位有带标签的禁用页头；日程 / 远程 / 云端用真页头', () => {
     for (const { name, label, action, reason } of SCAFFOLDS) {
       const body = paneBody(name);
       assert.match(body, new RegExp(`Text\\('${label}'\\)`), `${name} 必须有「${label}」分段标签`);
@@ -273,6 +276,14 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       assert.ok(body.includes(actionSlot), `${name} 的动作槽必须显示「${action}（原因）」`);
       assert.match(body, /\.enabled\(false\)/, `${name} 的占位动作必须禁用（无假入口）`);
     }
+    // mod-shell-cloud-chat-pane（old→new，收紧）：云端页头只留标题，禁用动作 /「即将迁入」绝迹。
+    const cloud = PANE_SOURCE.get('CloudChatPane');
+    const cloudBody = paneBody('CloudChatPane');
+    assert.match(cloudBody, /Text\('云端对话'\)/, '云端面板页头保留分段标题');
+    assert.equal(/新建对话|REASON_CLOUD|\.enabled\(false\)|即将迁入|本页暂不展示任何记录。/.test(cloud), false,
+      '云端面板不得残留占位说明 / 禁用假入口');
+    assert.match(cloud, /const CLOUD_REPO_SETUP: string = '先在设置里配置仓库';/, '空态短下一步仍在');
+    assert.match(cloud, /Text\(CLOUD_REPO_SETUP\)/, '短下一步仍渲染在面板里');
     // 日程不再是占位：真页头只留标题/副标题 + pane 专属「新建」；设置出口唯一在 rail 齿轮。
     const schedule = PANE_SOURCE.get('SchedulePane');
     assert.equal(/headerActionTwo|onHeaderActionTwo|⚙ 设置|private openSettings/.test(schedule), false,
@@ -305,16 +316,21 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.match(body, /还没有 dots 对话/, 'dots 空聊天气态文案');
   });
 
-  test('L-13 两个占位都不渲染假记录行；日程 / 远程面板必须渲染真行', () => {
+  test('L-13 唯一占位不渲染假记录行；日程 / 远程 / 云端面板必须渲染真行', () => {
     for (const { name } of SCAFFOLDS) {
       const body = paneBody(name);
       for (const fake of ['ForEach(', 'RecordRow(', 'Checkbox(', '示例', 'Lorem', '假数据']) {
         assert.equal(body.includes(fake), false, `${name} 不得出现假行标记「${fake}」`);
       }
     }
-    const explanatory = [...SCAFFOLDS].flatMap(({ name }) =>
-      PANE_SOURCE.get(name).match(/本页暂不展示任何记录。/g) ?? []).length;
-    assert.equal(explanatory, 1, '日程 + 远程都已换成真 body：只剩云端一句「本页暂不展示任何记录。」');
+    // mod-shell-cloud-chat-pane（old→new，收紧）：旧「只剩云端一句说明」改为「四面板全绝迹 + 真行在」。
+    const explanatory = [...PANE_SOURCE.values()].flatMap((source) =>
+      source.match(/本页暂不展示任何记录。/g) ?? []).length;
+    assert.equal(explanatory, 0, '四个面板的旧占位说明全部绝迹（云端本批落真）');
+    assert.equal(/本页暂不展示任何记录。/.test(PANE_SOURCE.get('CloudChatPane')), false,
+      '云端占位说明必须绝迹');
+    assert.match(PANE_SOURCE.get('CloudChatPane'), /ForEach\(\s*this\.chats/,
+      '云端面板必须渲染真实会话行');
     assert.equal(/ForEach\(/.test(HOME), false, '外壳页整体不渲染任何列表行');
     const schedule = PANE_SOURCE.get('SchedulePane');
     assert.match(schedule, /ForEach\(\s*this\.visibleRecords/, '日程面板必须渲染真实记录行');
@@ -436,7 +452,9 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.match(configRegions(instancesRaw).join('\n'), /Text\('添加实例'\)/,
       '远程 DSH（设置模式）：添加实例');
     assert.match(PANE_SOURCE.get('DotsPane'), /新建对话/, 'dots：新建对话');
-    assert.match(PANE_SOURCE.get('CloudChatPane'), /新建对话/, '云端对话：新建对话');
+    // mod-shell-cloud-chat-pane（old→new，收紧）：云端面板已落真列表，禁用「新建对话」绝迹。
+    assert.equal(/新建对话/.test(PANE_SOURCE.get('CloudChatPane')), false,
+      '云端对话：禁用主操作绝迹');
   });
 
   // mod-pane-header-nav-dedupe（新增正向守卫）：跨节导航只在 rail；面板页头只放 pane 专属动作。
@@ -460,5 +478,26 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.equal((HOME.match(/onSelect: \(next: ShellSection\)/g) ?? []).length, 2,
       '常驻轨与抽屉轨都把选段回传给外壳');
     assert.match(RAIL, /onSelect: \(section: ShellSection\) => void/, 'rail 只发 onSelect');
+  });
+
+  // mod-shell-cloud-chat-pane（新增正向守卫）：云端面板的四态 / 数据链 / 只读路由 / 保活。
+  test('L-22 云端对话面板落真：复用 chatStore/chatList、四态、只读详情、零 RPC / 零配置', () => {
+    const cloud = PANE_SOURCE.get('CloudChatPane');
+    const raw = PANE_RAW.get('CloudChatPane');
+    const body = paneBody('CloudChatPane');
+    for (const token of [
+      'chatStore.prepare(', 'chatStore.listChats()', 'ChatListResult', 'filterByKind(', 'sortChats(',
+      'chatSummaryLine(item)', 'ForEach(', 'LoadingState(', 'ErrorState(', 'Text(CLOUD_REPO_SETUP)'
+    ]) {
+      assert.ok(raw.includes(token), `云端面板必须拥有 ${token}`);
+    }
+    assert.equal(/JSON\.parse|readTextSync|syncController|pullNow|TextInput\(|pages\/Settings/.test(cloud), false,
+      '云端面板不得自建解析 / RPC / 配置入口');
+    assert.match(cloud, /@Prop deepLinkId: string = '';/, '深链 prop 不变');
+    assert.match(cloud, /@Prop active: boolean = true;/, 'active prop 不变');
+    assert.match(cloud, /\.visibility\(this\.active \? Visibility\.Visible : Visibility\.Hidden\)/,
+      'Visible/Hidden 保活不变');
+    assert.match(raw, /router\.pushUrl\(\{ url: 'pages\/ChatDetail', params: params \}\)/, '只 push 只读详情');
+    assert.equal(/pushUrl/.test(body), false, '渲染树无跨节跳转');
   });
 });

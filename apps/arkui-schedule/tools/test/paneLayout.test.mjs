@@ -30,13 +30,14 @@ const PANE_RAW = new Map(
   PANE_NAMES.map((name) => [name, readFileSync(new URL(`${name}.ets`, PANE_DIR), 'utf8')])
 );
 /**
- * 剩余占位：日程（S3）与远程 DSH（mod-shell-instances-pane）都已是真 body；
- * 只有 dots / 云端对话仍是「即将迁入」占位。
+ * 剩余占位：日程（S3）、远程 DSH（mod-shell-instances-pane）与云端对话
+ * （mod-shell-cloud-chat-pane）都已是真 body；只有 dots 仍是「即将迁入」占位。
  */
 const SCAFFOLDS = [
-  { name: 'DotsPane', action: '新建对话', reason: 'REASON_DOTS', empty: '还没有 dots 对话' },
-  { name: 'CloudChatPane', action: '新建对话', reason: 'REASON_CLOUD', empty: '本页暂不展示任何记录。' }
+  { name: 'DotsPane', action: '新建对话', reason: 'REASON_DOTS', empty: '还没有 dots 对话' }
 ];
+/** mod-shell-cloud-chat-pane：云端对话 scaffold 已换成真实只读会话列表。 */
+const CLOUD_CHAT = { name: 'CloudChatPane', title: '云端对话', nextStep: '先在设置里配置仓库' };
 
 /** 取 marker 之后那对花括号的内部文本。 */
 function blockAfter(source, marker) {
@@ -346,18 +347,29 @@ describe('外壳行为：默认 / 返回 / 入口 / fallback 路由', () => {
 });
 
 describe('面板诚实性：占位无假行 + 无全局导航', () => {
-  test('P-15 两个占位无假记录行，且各有一句「暂不展示」说明', () => {
+  // mod-shell-cloud-chat-pane（old→new，收紧）：旧断言要求两个占位都无假行、各有一句「暂不展示」；
+  // 现在云端对话是真列表——必须渲染真实会话行，且旧占位说明在源码里绝迹（注释剥离后判定）。
+  test('P-15 唯一占位无假记录行；云端对话渲染真实会话行而非假行', () => {
     for (const scaffold of SCAFFOLDS) {
       const p = pane(scaffold.name);
       for (const fake of ['ForEach(', 'RecordRow(', 'Checkbox(', '示例', 'Lorem', '假数据']) {
         assert.equal(p.body.includes(fake), false, `${scaffold.name} 不得出现假行标记「${fake}」`);
       }
       assert.ok(p.source.includes(scaffold.empty), `${scaffold.name} 必须有空态说明「${scaffold.empty}」`);
+      // 旧「本页暂不展示任何记录。」由云端占位持有，现在云端落真 → 四面板中都绝迹。
+      assert.equal(/本页暂不展示任何记录。/.test(p.source), false,
+        `${scaffold.name} 不得残留被真列表取代的占位说明`);
     }
+    const cloud = pane(CLOUD_CHAT.name);
+    const list = blockAfter(cloud.source, '\n  ChatList() ');
+    assert.match(list, /ForEach\(\s*this\.chats/, '云端面板必须渲染真实会话行');
+    assert.match(cloud.source, /chatSummaryLine\(item\)/, '每行摘要走纯模型，不是手写假文案');
+    assert.equal(/本页暂不展示任何记录。|即将迁入/.test(cloud.source), false, '云端占位说明必须绝迹');
     assert.equal(/ForEach\(/.test(HOME), false, '外壳页本体不渲染任何列表行');
   });
 
-  test('P-16 两个占位都有禁用主操作 + 逐字原因（无假入口）', () => {
+  // mod-shell-cloud-chat-pane（old→new，收紧）：禁用假入口只属于唯一占位；云端面板必须有标题、无禁用动作。
+  test('P-16 唯一占位有禁用主操作 + 逐字原因；云端面板无禁用假入口', () => {
     for (const scaffold of SCAFFOLDS) {
       const p = pane(scaffold.name);
       assert.match(p.source, new RegExp(`const ${scaffold.reason}: string = '[^']+';`),
@@ -366,6 +378,10 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
       assert.ok(p.body.includes(actionSlot), `${scaffold.name} 动作槽必须显示「${scaffold.action}（原因）」`);
       assert.match(p.body, /\.enabled\(false\)/, `${scaffold.name} 占位动作必须禁用`);
     }
+    const cloud = pane(CLOUD_CHAT.name);
+    assert.match(cloud.body, /Text\('云端对话'\)/, '云端面板页头保留分段标题');
+    assert.equal(/新建对话|REASON_CLOUD|\.enabled\(false\)|TextInput\(/.test(cloud.source), false,
+      '云端面板已落真列表，不得有禁用主操作 / 输入框 / 占位原因');
   });
 
   test('P-17 dots 占位保留禁用输入框 + 字面原因「dots 尚未接线」', () => {
@@ -485,7 +501,9 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
       '实例面板不得有跨节导航到云端对话');
     assert.match(configRegions(instancesRaw).join('\n'), /Text\('添加实例'\)/, '远程 DSH（设置）：添加实例');
     assert.match(pane('DotsPane').source, /新建对话/, 'dots：新建对话');
-    assert.match(pane('CloudChatPane').source, /新建对话/, '云端对话：新建对话');
+    // mod-shell-cloud-chat-pane（old→new，收紧）：云端面板已落真列表，禁用「新建对话」假入口绝迹。
+    assert.equal(/新建对话/.test(pane(CLOUD_CHAT.name).source), false,
+      '云端对话：列表已落真，禁用主操作绝迹');
   });
 
   // mod-pane-header-nav-dedupe（新增正向守卫）：面板页头只放 pane 专属动作，跨节导航一律不在页头。
@@ -508,5 +526,49 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     assert.equal((HOME.match(/onSelect: \(next: ShellSection\)/g) ?? []).length, 2,
       '宽屏常驻轨与抽屉轨都把选段回传给外壳');
     assert.match(RAIL, /onSelect: \(section: ShellSection\) => void/, 'rail 只发 onSelect，不自己切页');
+  });
+
+  // mod-shell-cloud-chat-pane（新增正向守卫）：真列表必须复用既有只读数据链，不自建第二条路径。
+  test('P-23 云端对话是真只读列表：chatStore + model/chatList，零 ad-hoc JSON / RPC / 配置面', () => {
+    const p = pane(CLOUD_CHAT.name);
+    const raw = PANE_RAW.get(CLOUD_CHAT.name);
+    for (const token of [
+      'chatStore.prepare(', 'chatStore.listChats()', 'ChatListResult',
+      'filterByKind(', "PANE_KIND: ChatKind = 'cloud'", 'sortChats(', "'updated'",
+      'chatSummaryLine(item)', 'ForEach(\n        this.chats'
+    ]) {
+      assert.ok(raw.includes(token), `云端面板必须复用 ${token}`);
+    }
+    assert.equal(/JSON\.parse|readTextSync|fileIo|git-repo/.test(p.source), false,
+      '面板不得自行解析 JSON / 读文件（数据源唯一在 chatStore）');
+    assert.equal(/syncController|pullNow|TextInput\(|pages\/Settings|机制/.test(p.source), false,
+      '面板不得有 RPC / 输入框 / 第二处设置出口 / 机制说明');
+    assert.match(p.source, /@Prop deepLinkId: string = '';/, '深链 prop 原样保留');
+    assert.match(p.source, /@Prop active: boolean = true;/, 'active prop 原样保留');
+    assert.match(p.body, /\.visibility\(this\.active \? Visibility\.Visible : Visibility\.Hidden\)/,
+      'Hidden 保活接线保留');
+    assert.equal((p.source.match(/aboutToAppear\(/g) ?? []).length, 1, '只读一次：只有一个 aboutToAppear');
+    assert.equal(/onPageShow\(/.test(p.source), false, '不得每次显示都重读（无 onPageShow）');
+    // 空态唯一下一步（与 mod-cloud-chat-no-config-note 同款锚点）。
+    assert.match(p.source, /const CLOUD_REPO_SETUP: string = '先在设置里配置仓库';/);
+    assert.match(p.source, /Text\(CLOUD_REPO_SETUP\)/, '空态仍渲染短下一步');
+    // 四态：加载 / 空 / 错误 / 列表；无搜索框，故无 no-match 态。
+    for (const token of ['this.LoadingHint()', 'this.EmptyChats()', 'this.ErrorBlock()', 'this.ChatList()']) {
+      assert.ok(p.body.includes(token), `必须渲染 ${token}`);
+    }
+    assert.equal(/NoMatch|搜索/.test(p.source), false, '紧凑面板不加搜索框 / 无匹配态');
+  });
+
+  test('P-24 云端对话点行进只读详情：路由 / 参数与 pages/Chats 一致，无跨节导航', () => {
+    const p = pane(CLOUD_CHAT.name);
+    const raw = PANE_RAW.get(CLOUD_CHAT.name);
+    assert.match(p.source, /private openDetail\(id: string\): void/, '统一出口只收 id');
+    assert.match(raw, /const params: Record<string, string> = \{ 'id': id \};/, '参数只传 id，不传会话正文');
+    assert.match(raw, /router\.pushUrl\(\{ url: 'pages\/ChatDetail', params: params \}\)/, '只 push 只读详情');
+    assert.equal(/pushUrl\(\{\s*url:\s*'pages\/(Chats|Home|Settings)'/.test(raw), false,
+      '不得 push 跨节页 / 设置根页');
+    assert.match(raw, /this\.openDetail\(id\)/, '行点击走统一出口');
+    assert.equal(/发送|新建对话/.test(p.source), false, '只读面板无发送 / 新建');
+    assert.equal(/pushUrl/.test(p.body), false, '渲染树内不得直接 push');
   });
 });
