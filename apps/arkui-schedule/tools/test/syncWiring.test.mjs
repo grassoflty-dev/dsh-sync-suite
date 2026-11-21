@@ -526,11 +526,21 @@ test('38 static v2-only: deleted activation modules are gone from the import gra
   assert.doesNotMatch(index, /timelineModeSwitch|v2ActivationService|useV2\(|readMode\(/);
 });
 
-test('39 static: setRunner(bridgeGitRunner) wired in Index bootstrap', () => {
+test('39 static（old→new）: GitRunner 在 app 启动时确定性绑定，页面 bootstrap 幂等兜底', () => {
+  // old（保留全部旧断言，防回退漂移）：fallback 路由 Index 的 bootstrap 仍绑定。
   const index = src('pages/Index.ets');
   assert.match(index, /import \{ bridgeGitRunner \} from '\.\.\/services\/gitRunner'/);
   assert.match(index, /syncProtocolStore\.setRunner\(bridgeGitRunner\)/);
   assert.match(index, /import \{ syncProtocolStore \}/);
+  // new：真启动链 = EntryAbility.onCreate → bindAtStartup(runner, filesDir)，
+  // 父生命周期先于任何页面 aboutToAppear / 记录写入，首轮周期不可能撞上「runner 未绑定」。
+  const ability = src('entryability/EntryAbility.ets');
+  assert.match(ability, /import \{ bridgeGitRunner \} from '\.\.\/services\/gitRunner'/);
+  assert.match(ability, /import \{ syncProtocolStore \} from '\.\.\/services\/syncProtocolStore'/);
+  const onCreate = /onCreate\(want: Want, launchParam: AbilityConstant\.LaunchParam\): void \{([\s\S]*?)\n  \}/.exec(ability);
+  assert.ok(onCreate, 'EntryAbility.onCreate body not found');
+  assert.match(onCreate[1], /syncProtocolStore\.bindAtStartup\(bridgeGitRunner, this\.context\)/);
+  assert.match(src('pages/panes/SchedulePane.ets'), /syncProtocolStore\.setRunner\(bridgeGitRunner\)/);
 });
 
 // mod-auto-sync 重定位：原用例钉住旧的四态文案（已同步 / N 条待同步 / 错误）；
@@ -792,19 +802,60 @@ test('61 offline / transport E_IO → typed failure + intent parked for retry (n
   assert.equal(fake.resetCount, MAX_ATTEMPTS, '拒推只能 reset --hard origin/main，绝不 force-push');
 });
 
-test('62 static: home pull-to-refresh runs the configured cycle (pull+push) then re-renders', () => {
-  const index = src('pages/Index.ets');
-  const body = /private async onPullRefresh\(\): Promise<void> \{([\s\S]*?)\n  \}/.exec(index);
-  assert.ok(body, 'onPullRefresh body not found');
+test('62 static: home 日程面板 pull-to-refresh runs the configured cycle (pull+push) then re-renders', () => {
+  // S3 迁移后真首页 = pages/Home.ets + panes/SchedulePane.ets（Index 仅留作 fallback 路由）。
+  // 断言锚点从 Index 迁到真 body；旧断言一条未删，只是不再让 fallback 路由替真面板背书。
+  const pane = src('pages/panes/SchedulePane.ets');
+  const body = /private async onPullRefresh\(\): Promise<void> \{([\s\S]*?)\n  \}/.exec(pane);
+  assert.ok(body, 'onPullRefresh body not found in SchedulePane');
   assert.match(body[1], /syncStatusStore\.setSyncing\(\)/);
   assert.match(body[1], /await syncProtocolStore\.runConfiguredCycle\(\)/);
   assert.match(body[1], /syncStatusStore\.fromCycle\(result/);
   assert.match(body[1], /this\.reload\(\)/);
   assert.match(body[1], /this\.loadSummary\(\)/);
   assert.doesNotMatch(body[1], /syncController\.pullNow/);
-  assert.match(index, /Refresh\(\{ refreshing: \$\$this\.refreshing \}\)/);
-  assert.match(index, /Refresh\(\{ refreshing: \$\$this\.paneRefreshing \}\)/);
+
+  // 三处下拉入口：紧凑列表 / 主从右栏 / 主从左栏（横屏真机实际渲染的那一条）。
+  const refreshSites = pane.match(/Refresh\(\{ refreshing: \$\$this\.\w+ \}\)/g) || [];
+  assert.equal(refreshSites.length, 3, '紧凑列表 / 右栏 / 宽屏左栏都必须包 Refresh');
+  assert.match(pane, /Refresh\(\{ refreshing: \$\$this\.refreshing \}\)/);
+  assert.match(pane, /Refresh\(\{ refreshing: \$\$this\.paneRefreshing \}\)/);
+  const wideStart = pane.indexOf('WideBody() {');
+  const wideEnd = pane.indexOf('AiPanel() {', wideStart);
+  assert.ok(wideStart >= 0 && wideEnd > wideStart, 'WideBody builder not found');
+  const wide = pane.slice(wideStart, wideEnd);
+  assert.match(wide, /Refresh\(\{ refreshing: \$\$this\.refreshing \}\)/, '横屏左栏缺 Refresh');
+  assert.match(wide, /this\.onPullRefresh\(\)/, '横屏左栏必须复用同一 pull handler');
+  assert.match(wide, /this\.refreshing = false/, '横屏刷新结束必须复位转圈');
+  // 布局纪律：Refresh 外不新增固定高度，列表区仍只有一层 .layoutWeight(1)。
+  const wideList = /Column\(\) \{\n\s*Refresh\(\{ refreshing: \$\$this\.refreshing \}\)([\s\S]*?)\n\s*\}\n\s*\.width\('100%'\)\n\s*\.layoutWeight\(1\)/.exec(wide);
+  assert.ok(wideList, '横屏列表区 Refresh 外必须保留 .width(100%) + .layoutWeight(1) 的唯一加权兄弟');
+  assert.doesNotMatch(wideList[1], /\.height\(/, 'Refresh 外不得加固定高度（横屏列表 0 高 bug 类）');
+  assert.match(pane, /List\(\) \{[\s\S]*?\.layoutWeight\(1\)/, '列表自身仍保留 layoutWeight(1)');
+
+  // fallback 路由保持原样：不是拿它替代面板断言，而是防止回退时两边漂移。
+  const fallback = src('pages/Index.ets');
+  assert.match(fallback, /Refresh\(\{ refreshing: \$\$this\.refreshing \}\)/);
+  assert.match(fallback, /private async onPullRefresh\(\)/);
   assert.match(src('services/recordWriter.ets'), /syncStatusStore\.setSyncing\(\)/);
+});
+
+test('62b static: 日程面板三态状态行文案与点一下重试保持不变', () => {
+  const pane = src('pages/panes/SchedulePane.ets');
+  const status = src('services/syncStatusStore.ets');
+  assert.match(status, /'已同步 · '/, '已同步·HH:MM 前缀不得改');
+  assert.match(status, /'同步中…'/, '同步中… 文案不得改');
+  assert.match(status, /'失败：'/, '失败：原因 前缀不得改');
+  const row = /SyncStatusRow\(\) \{([\s\S]*?)\n  \}/.exec(pane);
+  assert.ok(row, 'SyncStatusRow builder not found');
+  assert.match(row[1], /this\.syncStatus\.text/);
+  assert.match(row[1], /this\.syncStatus\.state === 'synced'/);
+  assert.match(row[1], /this\.syncStatus\.state === 'failed'/);
+  assert.match(row[1], /重试同步/, '失败态仍由状态行上的一次点击重试');
+  assert.match(row[1], /this\.retrySync\(\)/);
+  const wideStart = pane.indexOf('WideBody() {');
+  const wideEnd = pane.indexOf('AiPanel() {', wideStart);
+  assert.match(pane.slice(wideStart, wideEnd), /this\.SyncStatusRow\(\)/, '横屏也要显示同一三态行');
 });
 
 test('63 static: every create path routes through recordWriter (one sync trigger, no second impl)', () => {

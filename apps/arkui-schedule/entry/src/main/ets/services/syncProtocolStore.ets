@@ -40,7 +40,7 @@ import type {
   OutboxEntry, DayUnion, DayTexts, WriteGateInput, WriteGateResult
 } from '../model/syncProtocol';
 import type { ScheduleRecord } from '../model/types';
-import { runCyclePure } from '../model/syncCycle';
+import { runCyclePure, E_SYNC_UNAVAILABLE_CODE, unavailableOutcome } from '../model/syncCycle';
 import type { GitPort, CycleOutcome, DayRead, DayWriteTexts, WritePort } from '../model/syncCycle';
 
 /** git 命令执行器：接收参数数组，返回 stdout；非 0 退出由 runner 抛错。 */
@@ -127,6 +127,17 @@ export class SyncProtocolStore {
   /** 真实 git 绑定是否已注入（未注入时周期保持惰性、不伪造成功）。 */
   hasRunner(): boolean {
     return this.runner !== null;
+  }
+
+  /**
+   * 应用启动时的确定性绑定（EntryAbility.onCreate 调用）：runner + filesDir 同步一次到位。
+   * 父生命周期先于任何页面 aboutToAppear / 记录写入，因此首轮周期不可能在「未绑定」态发起；
+   * 页面 bootstrap 里的 setRunner/ensureReadyForBootstrap 保留为幂等兜底。
+   */
+  bindAtStartup(port: GitPort, ability: common.UIAbilityContext): void {
+    this.runner = port;
+    this.filesDir = ability.filesDir;
+    this.ready = true;
   }
 
   /** 页面 bootstrap 调用的公开初始化（只取 filesDir，不执行任何 git / 写盘）。 */
@@ -247,23 +258,42 @@ export class SyncProtocolStore {
   /**
    * 配置好的周期入口：recordWriter 写成功后无参调用（fire-and-forget）；
    * UI「重试同步」传入 ctx → 经 `runCycle(ctx)`（P2-5：runCycle 在 App 中的真实调用点）
-   * 再分派到同一 wired 周期。两者语义一致：未就绪返回 null，不伪造成功。
+   * 再分派到同一 wired 周期。两者语义一致：未就绪返回 typed E_SYNC_UNAVAILABLE（带中文下一步），
+   * 不伪造成功、也不静默停在「同步中…」。
    */
   async runConfiguredCycle(ctx?: SyncCycleContext): Promise<CycleResult | null> {
     if (this.runner === null || this.filesDir.length === 0 || !this.isEnabled()) {
-      return null;
+      // 绝不静默返回 null（旧实现让三态行永远停在「同步中…」）：返回 typed 结果，状态行进失败态、
+      // 文案带中文下一步，且可点「重试同步」。
+      const outbox: OutboxEntry[] = this.filesDir.length === 0 ? [] : this.readOutbox();
+      return this.outcomeToResult(unavailableOutcome(outbox));
     }
+    // 两条入口在此汇合：post-create fire-and-forget（无 ctx）与首页下拉刷新（无 ctx）直接进
+    // runWiredCycle；「重试同步」传 ctx → runCycle(ctx) → runner 非空时同一 runWiredCycle。
     if (ctx !== undefined) {
       return await this.runCycle(ctx);
     }
     return await this.runWiredCycle();
   }
 
-  /** 把 GitPort 绑定到本服务的文件 IO 后交给 runCyclePure；outbox 仍由本服务原子落盘。 */
+  /** 桥未就绪（超时后抛 E_SYNC_UNAVAILABLE）收敛成 typed CycleResult，统一走三态 + 重试入口。 */
   private async runWiredCycle(): Promise<CycleResult> {
+    const outbox: OutboxEntry[] = this.readOutbox();
+    try {
+      return await this.runWiredCycleWithOutbox(outbox);
+    } catch (error) {
+      const text: string = this.errorText(error);
+      if (text.indexOf(E_SYNC_UNAVAILABLE_CODE) === 0) {
+        return this.outcomeToResult(unavailableOutcome(outbox));
+      }
+      throw error;
+    }
+  }
+
+  /** 把 GitPort 绑定到本服务的文件 IO 后交给 runCyclePure；outbox 仍由本服务原子落盘。 */
+  private async runWiredCycleWithOutbox(outbox: OutboxEntry[]): Promise<CycleResult> {
     const port: GitPort = this.runner as GitPort;
     const now: Date = new Date();
-    const outbox: OutboxEntry[] = this.readOutbox();
     const remoteDays: string[] = port.listRemoteDays === undefined ? [] : await port.listRemoteDays();
     // P1-1：停放意图自身的 date 必须进周期 days。否则「新日期首次写盘就失败」的意图
     // 既不在 localDates()（本地没有 records.json）也不在 remoteDays（远端也没有），

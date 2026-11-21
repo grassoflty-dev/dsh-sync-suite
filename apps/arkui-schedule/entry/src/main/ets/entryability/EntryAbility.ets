@@ -9,7 +9,9 @@
  * 2. **第二道防线（异步）**：`detectPlatform()` 读设备信息（鸿蒙覆盖层读 `deviceInfo`，共享实现返回
  *    `'android'`）→ `setPlatform(p)` → 再 `installPlatformFeatures()`。用 `.then()` 链，不阻塞
  *    生命周期；检测/装配失败时 hilog 记录并按 Android 降级。
- * 3. 最后初始化日程存储（`<filesDir>/git-repo/devices/<deviceId>/`），页面加载外壳首页
+ * 3. 同步接线先于一切页面：同步绑定 GitRunner + filesDir（bindAtStartup），首轮周期
+ *    （建记录后的 fire-and-forget、下拉刷新）不会再撞上「runner 未绑定 / 桥未就绪」；
+ * 4. 最后初始化日程存储（`<filesDir>/git-repo/devices/<deviceId>/`），页面加载外壳首页
  *    `pages/Home`（mod-shell-schedule-pane 入口翻转）；`pages/Index` 仍在两份 main_pages.json
  *    注册为 fallback 路由，日程正文已迁入 `pages/panes/SchedulePane.ets`。
  *
@@ -30,6 +32,8 @@ import { installPlatformFeatures } from '../common/platformFeatures';
 import { applyThemeMode } from '../common/themeApply';
 import { scheduleStore } from '../services/scheduleStore';
 import { settingsStore } from '../services/settingsStore';
+import { syncProtocolStore } from '../services/syncProtocolStore';
+import { bridgeGitRunner } from '../services/gitRunner';
 
 const DOMAIN: number = 0x0000;
 const TAG: string = 'ScheduleEntry';
@@ -38,6 +42,12 @@ export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     // v2-only：激活 / 并存裁决 / 读模式三个持久化键已随模式开关一并移除，
     // 页面加载前不再有任何 PersistentStorage.persistProp 绑定。
+
+    // 同步接线确定性化：父生命周期先于任何页面 aboutToAppear / 记录写入，
+    // 在这里一次性绑定 GitRunner + filesDir，首轮周期不可能在「未绑定」态发起。
+    // 真实 isomorphic-git 桥仍需隐藏 Web 的 onPageEnd；BridgeGitRunner 会**有界等待**它，
+    // 因此「建记录→自动同步」不再因内核尚未就绪而报 E_SYNC_UNAVAILABLE（仅超时才报，带下一步）。
+    syncProtocolStore.bindAtStartup(bridgeGitRunner, this.context);
 
     // 第一道防线：同步 fail-closed（鸿蒙覆盖层会在此处直接切成 harmony + 能力开启）
     setPlatform('android');

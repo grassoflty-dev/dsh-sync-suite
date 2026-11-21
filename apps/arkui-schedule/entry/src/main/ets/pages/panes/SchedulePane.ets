@@ -10,6 +10,9 @@
  *   ⑤ 删掉页头「⚙ 设置」动作与 openSettings()（mod-settings-entry-dedupe）：设置出口唯一 =
  *      导航轨页脚齿轮（ShellRail.SettingsRow → Home.openSettings()），错误态的「去设置」也一并移除。
  * 列表区仍由唯一一个 .layoutWeight(1) 的加权兄弟吃掉余量（fix-landscape-list 的横屏修法不回退）。
+ * 下拉刷新：CompactBody / RightPane 随迁移保留了 Index 的 Refresh 接线，但 WideBody 左栏
+ * （横屏/宽屏实际渲染的日程列表）在迁移时漏掉 Refresh，真机无法下拉触发 git 同步；按同一套
+ * `onPullRefresh()` → `runConfiguredCycle()` 接线补回（mod-home-pull-refresh）。
  *
  * 已知边界：onPageShow() 的「保存返回一次性标记」消费在 fallback 路由（Index）照常触发；
  * 在 shell 路由下页面生命周期属于 Home，本批未把 Home 的 onPageShow 转发进来（unverified，
@@ -1768,9 +1771,14 @@ export struct SchedulePane {
           }
           .onRefreshing(() => {
             this.refreshing = true;
-            this.onPullRefresh().then(() => {
-              this.refreshing = false;
-            });
+            this.onPullRefresh()
+              .then(() => {
+                this.refreshing = false;
+              })
+              .catch(() => {
+                // 与右栏一致：即使下游意外 reject 也必须复位转圈，不能让用户只能杀进程
+                this.refreshing = false;
+              });
           })
         }
         .width('100%')
@@ -1809,8 +1817,23 @@ export struct SchedulePane {
             this.SummaryCard()
           }
           // 列表区：唯一吃余量的加权兄弟；汇总块是封顶的固定高度兄弟，不再与列表争高度。
+          // 横屏/宽屏也要能下拉跑同一套 git 周期（旧 Index 只在 CompactBody 包了 Refresh，
+          // 迁移后横屏日程列表同样漏掉 → 真机拉不动同步）。Refresh 只包列表，
+          // 外层布局不变：仍然只有这一层 .layoutWeight(1)，不加固定高度（横屏列表压成 0 高的 bug 类）。
           Column() {
-            this.RecordList()
+            Refresh({ refreshing: $$this.refreshing }) {
+              this.RecordList()
+            }
+            .onRefreshing(() => {
+              this.refreshing = true;
+              this.onPullRefresh()
+                .then(() => {
+                  this.refreshing = false;
+                })
+                .catch(() => {
+                  this.refreshing = false;
+                });
+            })
           }
           .width('100%')
           .layoutWeight(1)

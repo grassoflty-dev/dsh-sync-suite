@@ -8,24 +8,43 @@
  * 分支恒为 main、force 恒为 false、唯一的 reset 是 resetHard（本地分支指回 origin/main）。
  * addPaths 只缓冲路径，commit 时一次性经白名单提交（桥侧拒绝任何非 timeline/** 路径）。
  *
- * 未绑定 / 桥未就绪时所有方法抛 `E_SYNC_UNAVAILABLE`，由 syncStatusStore 显示为「只读·原因」，
- * 绝不静默降级为「假同步」。
+ * 未绑定 / 桥未就绪时先有界等待（首轮周期早于 WebView onPageEnd 是常态）；超时才抛带中文下一步的
+ * `E_SYNC_UNAVAILABLE`，由 syncStatusStore 显示为可点「重试同步」的失败行，绝不静默降级为「假同步」。
  */
 import { GitSyncService } from './GitSyncService';
-import type { GitPort } from '../model/syncCycle';
+import { runnerReadyDecision, E_SYNC_UNAVAILABLE_MESSAGE } from '../model/syncCycle';
+import type { GitPort, RunnerReadyDecision } from '../model/syncCycle';
 
-const UNAVAILABLE: string = 'E_SYNC_UNAVAILABLE: 同步内核或 GitRunner 未就绪';
+/** 首轮周期早于隐藏 Web 的 onPageEnd 时，最多等 10 秒再报 typed 错（不静默失败、不无限等）。 */
+const READY_TIMEOUT_MS: number = 10000;
+const READY_POLL_MS: number = 50;
 
 export class BridgeGitRunner implements GitPort {
   private pendingPaths: string[] = [];
 
-  /** 当前可用的服务实例（syncController / 设置页构造出的最后一个 GitSyncService）。 */
-  private service(): GitSyncService {
-    const active: GitSyncService | null = GitSyncService.active();
-    if (active === null || !active.isBridgeReady()) {
-      throw new Error(UNAVAILABLE);
+  /**
+   * 取可用的服务实例：隐藏 Web 的 onPageEnd 与首条记录写入的先后是不确定的。
+   * 旧实现一上来就抛 E_SYNC_UNAVAILABLE，导致「建记录→自动同步」总在内核就绪前失败、
+   * 用户不得不手动再点一次同步。这里改为**有界等待**：就绪后照常跑 pull→append→push；
+   * 只有超时才抛带中文下一步的 typed 错（状态行可点「重试同步」）。
+   */
+  private async requireService(): Promise<GitSyncService> {
+    const started: number = Date.now();
+    for (;;) {
+      const active: GitSyncService | null = GitSyncService.active();
+      const ready: boolean = active !== null && active.isBridgeReady();
+      const waited: number = Date.now() - started;
+      const decision: RunnerReadyDecision = runnerReadyDecision(ready, waited, READY_TIMEOUT_MS);
+      if (decision === 'ready' && active !== null) {
+        return active;
+      }
+      if (decision === 'unavailable') {
+        throw new Error(E_SYNC_UNAVAILABLE_MESSAGE);
+      }
+      await new Promise<void>((resolve: () => void): void => {
+        setTimeout(resolve, READY_POLL_MS);
+      });
     }
-    return active;
   }
 
   /** 桥是否可用（供激活闸与 UI 预检；不抛异常）。 */
@@ -36,27 +55,27 @@ export class BridgeGitRunner implements GitPort {
 
   async fetchMain(): Promise<void> {
     const args: Record<string, string> = {};
-    await this.service().v2Git('fetch', args);
+    await (await this.requireService()).v2Git('fetch', args);
   }
 
   async headSha(): Promise<string> {
     const args: Record<string, string> = { 'ref': 'HEAD' };
-    return (await this.service().v2Git('resolveRef', args)).oid;
+    return (await (await this.requireService()).v2Git('resolveRef', args)).oid;
   }
 
   async originMainSha(): Promise<string> {
     const args: Record<string, string> = { 'ref': 'refs/remotes/origin/main' };
-    return (await this.service().v2Git('resolveRef', args)).oid;
+    return (await (await this.requireService()).v2Git('resolveRef', args)).oid;
   }
 
   async showMain(path: string): Promise<string> {
     const args: Record<string, string> = { 'ref': 'origin/main', 'path': path };
-    return (await this.service().v2Git('readBlob', args)).value;
+    return (await (await this.requireService()).v2Git('readBlob', args)).value;
   }
 
   async branchName(): Promise<string> {
     const args: Record<string, string> = {};
-    return (await this.service().v2Git('currentBranch', args)).value;
+    return (await (await this.requireService()).v2Git('currentBranch', args)).value;
   }
 
   async headRelation(): Promise<string> {
@@ -69,7 +88,7 @@ export class BridgeGitRunner implements GitPort {
       return 'equal';
     }
     const args: Record<string, string> = { 'a': head, 'b': origin };
-    const base: string = (await this.service().v2Git('mergeBase', args)).oid;
+    const base: string = (await (await this.requireService()).v2Git('mergeBase', args)).oid;
     if (base === head) {
       return 'behind';
     }
@@ -81,12 +100,12 @@ export class BridgeGitRunner implements GitPort {
 
   async fastForward(): Promise<void> {
     const args: Record<string, string> = {};
-    await this.service().v2Git('fastForward', args);
+    await (await this.requireService()).v2Git('fastForward', args);
   }
 
   async listRemoteDays(): Promise<string[]> {
     const args: Record<string, string> = {};
-    const raw: string = (await this.service().v2Git('listDays', args)).value;
+    const raw: string = (await (await this.requireService()).v2Git('listDays', args)).value;
     try {
       const parsed: string[] = JSON.parse(raw) as string[];
       return Array.isArray(parsed) ? parsed : [];
@@ -108,17 +127,17 @@ export class BridgeGitRunner implements GitPort {
       'paths': JSON.stringify(this.pendingPaths), 'message': message
     };
     this.pendingPaths = [];
-    await this.service().v2Git('addCommit', args);
+    await (await this.requireService()).v2Git('addCommit', args);
   }
 
   async pushMain(): Promise<void> {
     const args: Record<string, string> = {};
-    await this.service().v2Git('push', args); // 桥侧 force=false，无 refspec 重写
+    await (await this.requireService()).v2Git('push', args); // 桥侧 force=false，无 refspec 重写
   }
 
   async resetHardOrigin(): Promise<void> {
     const args: Record<string, string> = {};
-    await this.service().v2Git('resetHard', args); // 唯一 reset；不删远端文件
+    await (await this.requireService()).v2Git('resetHard', args); // 唯一 reset；不删远端文件
   }
 }
 

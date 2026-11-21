@@ -114,6 +114,16 @@ export const E_CORRUPT_CODE: string = 'E_CORRUPT';
 export const E_CORRUPT_MESSAGE: string =
   'E_CORRUPT: 远端或本地 records.json 无法解析，或 date 字段与目录名不符，整日不动、意图留在 outbox';
 
+/** E_SYNC_UNAVAILABLE：GitRunner 未绑定 / 同步内核未就绪的 typed 码、原因与可执行下一步。 */
+export const E_SYNC_UNAVAILABLE_CODE: string = 'E_SYNC_UNAVAILABLE';
+export const E_SYNC_UNAVAILABLE_REASON: string = '同步内核或 GitRunner 未就绪';
+/** 中文下一步：不静默、给可操作动作（页面就绪后自动重试；仍失败则手动重试）。 */
+export const E_SYNC_UNAVAILABLE_NEXT_STEP: string =
+  '下一步：记录已保存在本机，请稍候；页面就绪后会自动重试，若仍未同步请下拉刷新或点状态行「重试同步」';
+/** 面向用户的完整 typed 文案（code + 原因 + 下一步），状态行原样显示。 */
+export const E_SYNC_UNAVAILABLE_MESSAGE: string =
+  `${E_SYNC_UNAVAILABLE_CODE}: ${E_SYNC_UNAVAILABLE_REASON}；${E_SYNC_UNAVAILABLE_NEXT_STEP}`;
+
 /**
  * 阶段 1 前置校验：任一侧非空 records.json 不可解析（day===null）或 `date` 与目录名不符
  * → 返回 typed 中文原因；空串表示可继续 union。缺文件（空文本）= 合法空日，不在此报错。
@@ -145,6 +155,33 @@ function corruptOutcome(reason: string, outbox: OutboxEntry[]): CycleOutcome {
     ok: false, code: E_CORRUPT_CODE, days: EMPTY_DAYS.slice(),
     applied: 0, dropped: 0, failed: countFailed(outbox),
     pending: replayable(outbox).length, message: reason,
+    conflicts: 0, added: 0, attempts: 0,
+    resultOutbox: outbox.slice(), droppedIds: []
+  };
+}
+
+/**
+ * 首轮周期可能早于隐藏 WebView 的 onPageEnd（GitSyncService 尚未构造/注册代理）。
+ * 此时不立刻失败，而是做**有界等待**；纯判定便于 fake-runner 测试钉住「等待→就绪 / 等待→typed 失败」。
+ */
+export type RunnerReadyDecision = 'ready' | 'wait' | 'unavailable';
+
+export function runnerReadyDecision(ready: boolean, waitedMs: number, timeoutMs: number): RunnerReadyDecision {
+  if (ready) {
+    return 'ready';
+  }
+  if (waitedMs >= timeoutMs) {
+    return 'unavailable';
+  }
+  return 'wait';
+}
+
+/** 未就绪的 typed 结果：零写入、零提交、意图原样留 outbox（可点状态行重试，绝不静默成功）。 */
+export function unavailableOutcome(outbox: OutboxEntry[]): CycleOutcome {
+  return {
+    ok: false, code: E_SYNC_UNAVAILABLE_CODE, days: EMPTY_DAYS.slice(),
+    applied: 0, dropped: 0, failed: countFailed(outbox),
+    pending: replayable(outbox).length, message: E_SYNC_UNAVAILABLE_MESSAGE,
     conflicts: 0, added: 0, attempts: 0,
     resultOutbox: outbox.slice(), droppedIds: []
   };
