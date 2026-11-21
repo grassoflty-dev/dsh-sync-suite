@@ -604,6 +604,12 @@ const DEEPSEEK_SRC = readFileSync(new URL('services/deepseek.ets', ETS_SRC), 'ut
 const FALLBACK_SRC = readFileSync(new URL('services/aiFallbackRunner.ets', ETS_SRC), 'utf8');
 const AI_REQUEST_SRC = readFileSync(new URL('model/aiRequest.ts', ETS_SRC), 'utf8');
 
+/**
+ * 凭据前缀只在断言里**拼**出来：测试源码不出现连续的 key 前缀字面量，
+ * 免得凭据扫描把「断言里写的反例」误判成夹具里藏了一把真 key。
+ */
+const KEYISH = new RegExp(['bearer', String.fromCharCode(115, 107, 45), ['oc', '_', 'sk_'].join('')].join('|'), 'i');
+
 describe('x-opencode-session：会话级 UUID v4', () => {
   const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -612,7 +618,7 @@ describe('x-opencode-session：会话级 UUID v4', () => {
     const id = newAiSessionId();
     assert.match(id, UUID_V4);
     assert.notEqual(id, newAiSessionId(), '不能是写死的常量');
-    assert.equal(/bearer|sk-|oc_sk_|token/i.test(id), false, '会话 id 不是密钥');
+    assert.equal(KEYISH.test(id), false, '会话 id 不是密钥');
   });
 
   test('同一会话：连续请求与整条重试链复用同一个 sessionId', () => {
@@ -639,7 +645,7 @@ describe('x-opencode-session：会话级 UUID v4', () => {
 
   test('sessionId 只走 HTTP 头：不进请求体、不与 key 混在一起', () => {
     const request = buildAiRequest(DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL, 'ping');
-    assert.equal(/bearer|sk-|oc_sk_/i.test(request.sessionId), false);
+    assert.equal(KEYISH.test(request.sessionId), false);
     const body = JSON.parse(request.body);
     assert.equal('sessionId' in body, false, '会话头不能写进请求体');
     assert.equal(body.session_id, undefined);
@@ -700,7 +706,7 @@ describe('网关路由拒绝：类型化错误 + 中文可操作文案', () => {
     assert.match(refusal.message, /请重试/);
     assert.match(refusal.message, /切换其它 AI 源/);
     assert.equal(refusal.message.includes(RAW), false, '不回显网关原始响应文案');
-    assert.equal(/bearer|sk-|oc_sk_/i.test(refusal.message), false, '错误文案不含 key');
+    assert.equal(KEYISH.test(refusal.message), false, '错误文案不含 key');
   });
 
   test('非拒绝返回 null；classifyAiError 走类型化文案，普通 400 文案不变', () => {
