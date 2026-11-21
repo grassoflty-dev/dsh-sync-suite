@@ -317,3 +317,7 @@ mod-v2-contract
 > 追加登记：`mod-shell-schedule-pane` = `3a0ca47`（日程正文迁入 `SchedulePane.ets`、入口翻到 Home、四面板 scaffold 落盘；哈希由 Lead 提交后回填）。
 
 > 追加登记：`mod-shell-schedule-pane` = `3a0ca47`（门槛 3010/3009/0/1、validate 8/8、tsc 0；评审并行补，出 P0/P1 以新模块修）。
+
+> 追加登记：`mod-settings-sync-min` / `mod-settings-remote-dedupe` = `f32abe8`（M1+M2 共改 Settings.ets，一笔两 id）。
+
+> 追加登记：`mod-settings-cloud-no-config` = `6198fc0`（云端对话零配置（仅只读说明））。
