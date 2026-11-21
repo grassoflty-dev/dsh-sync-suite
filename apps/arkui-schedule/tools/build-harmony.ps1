@@ -37,6 +37,9 @@
     5. Whole-body `try/finally` + `Exit-Build` helper: every `exit` goes through one finalizer.
     6. ASSERT: after restoring, `overlay.mjs status` must report `applied=false`; if it does not,
        the script exits 3 and prints the exact repair command. Never "warn and continue".
+     7. RESTORE WRAPPER (mod-build-restore-timeout): the finalizer's `restore` calls go through
+        `tools/overlay-restore.ps1`, which puts a 120 s deadline on node and fails loudly with a
+        greppable hint if the restore stalls. This finalizer keeps its own assert + exit-3 path.
 
   Note on PowerShell 5.1: `Register-EngineEvent -SourceIdentifier PowerShell.Exit -Action {...}`
   was measured on this machine and does NOT fire for `powershell -File` runs (see
@@ -77,6 +80,7 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $logDir = Join-Path $projectRoot '.build-logs'
 $overlay = Join-Path $projectRoot 'tools\overlay.mjs'
+$overlayRestore = Join-Path $projectRoot 'tools\overlay-restore.ps1'
 $overlayState = Join-Path $projectRoot '.platform-overlay'
 $buildingMarker = Join-Path $overlayState '.building'
 $deveco = if ($env:DEVECO_CLI_STUDIO_PATH) { $env:DEVECO_CLI_STUDIO_PATH } else { 'D:\A-DevEco\DevEco Studio' }
@@ -180,7 +184,10 @@ function Invoke-OverlayRestoreFinal {
   $ErrorActionPreference = 'Continue'
   try {
     Write-Host "overlay($Stage): restoring"
-    $restoreOut = & node $overlay restore 2>&1
+    # mod-build-restore-timeout: the wrapper enforces a deadline, asserts applied=false and
+    # exits non-zero with a greppable recovery hint when restore stalls. Exit code still
+    # flows through $LASTEXITCODE into the same $ok / retry / exit-3 logic below.
+    $restoreOut = & $overlayRestore 2>&1
     $restoreCode = $LASTEXITCODE
     foreach ($line in @($restoreOut)) { Write-Host "  $line" }
     $status = Get-OverlayStatusText
@@ -193,7 +200,7 @@ function Invoke-OverlayRestoreFinal {
     if (-not $ok) {
       # One retry: a transient file lock (antivirus, editor) is the only recoverable case.
       Write-Host '  restore 未通过断言，重试一次' -ForegroundColor Yellow
-      $retryOut = & node $overlay restore 2>&1
+      $retryOut = & $overlayRestore 2>&1
       $retryCode = $LASTEXITCODE
       foreach ($line in @($retryOut)) { Write-Host "  $line" }
       $status = Get-OverlayStatusText
