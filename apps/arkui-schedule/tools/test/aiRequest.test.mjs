@@ -14,6 +14,7 @@
 //
 // 该模块没有任何运行时 import，因此不需要 registerHooks 补 `.js` 后缀。
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
 
 const {
@@ -34,20 +35,27 @@ const {
   AI_PROBE_PROMPT,
   AI_READ_TIMEOUT_MS,
   AI_RETRY_BACKOFF_MS,
+  AI_SESSION_HEADER,
   AI_STATUS_NETWORK,
   AI_STATUS_TIMEOUT,
   AI_TIMEOUT_MS,
   DEFAULT_AI_BASE_URL,
   DEFAULT_AI_MODEL,
   AiFallbackError,
+  AiRouteRefusalError,
   aiChatUrl,
+  aiRouteRefusalError,
   buildAiRequest,
   clampAiTimeout,
   classifyAiError,
+  currentAiSessionId,
   defaultAiOptions,
   describeAiTestResult,
   describeUsage,
+  isAiRouteRefusal,
+  newAiSessionId,
   normalizeAiOptions,
+  restartAiSession,
   parseAiReply,
   parseAiReplyFull,
   parseUsage,
@@ -581,5 +589,134 @@ describe('clampAiTimeout：整体超时的有效下限 = 连接超时 + 1s', () 
     assert.equal(normalizeAiOptions({ ...defaultAiOptions(), timeoutMs: 30000 }).timeoutMs, 30000);
     // 解析层放过的 1s，发请求前会被 clampAiTimeout 抬起来 —— 两者是「输入夹取」与「有效值」两层
     assert.equal(clampAiTimeout(AI_MIN_TIMEOUT_MS), AI_MIN_TOTAL_TIMEOUT_MS);
+  });
+});
+
+// ---------------------------------------------------------------- OpenCode Go live-test fix
+//
+// 线上 400 `request is missing x-opencode-session and cannot be routed`：官方 Console 文档
+// `/docs/console/harnesses#sessions` 要求 Go 每条请求都带一个**稳定**的会话 id（路由 + prompt cache）。
+// 本应用没有跨请求聊天会话概念，故把「会话」定为一次应用运行（进程内单例，懒生成，重启换新）：
+// 同一会话内连续请求 / 重试链复用同一个 UUID v4；不写仓库、不写日志、不含 key。
+
+const ETS_SRC = new URL('../../entry/src/main/ets/', import.meta.url);
+const DEEPSEEK_SRC = readFileSync(new URL('services/deepseek.ets', ETS_SRC), 'utf8');
+const FALLBACK_SRC = readFileSync(new URL('services/aiFallbackRunner.ets', ETS_SRC), 'utf8');
+const AI_REQUEST_SRC = readFileSync(new URL('model/aiRequest.ts', ETS_SRC), 'utf8');
+
+describe('x-opencode-session：会话级 UUID v4', () => {
+  const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+  test('头名常量与官方一致；UUID v4 合法、每次新生成都不同、不含 key', () => {
+    assert.equal(AI_SESSION_HEADER, 'x-opencode-session');
+    const id = newAiSessionId();
+    assert.match(id, UUID_V4);
+    assert.notEqual(id, newAiSessionId(), '不能是写死的常量');
+    assert.equal(/bearer|sk-|oc_sk_|token/i.test(id), false, '会话 id 不是密钥');
+  });
+
+  test('同一会话：连续请求与整条重试链复用同一个 sessionId', () => {
+    const initial = restartAiSession();
+    const first = buildAiRequest(DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL, 'ping');
+    const second = buildAiRequest(DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL, '另一条汇总');
+    assert.match(first.sessionId, UUID_V4);
+    assert.equal(first.sessionId, initial, '第一个请求用当前会话 id');
+    assert.equal(second.sessionId, first.sessionId, 'successive requests in one session 必须同 id');
+    for (let retry = 0; retry < 3; retry++) {
+      assert.equal(first.sessionId, currentAiSessionId(), `重试 ${retry + 1} 必须复用同一会话 id`);
+      assert.equal(buildAiRequest(DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL, 'ping').sessionId, first.sessionId);
+    }
+  });
+
+  test('模拟应用重启：换新会话 id，之后的请求都用新值', () => {
+    const before = buildAiRequest(DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL, 'ping').sessionId;
+    const restarted = restartAiSession();
+    const after = buildAiRequest(DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL, 'ping').sessionId;
+    assert.match(restarted, UUID_V4);
+    assert.notEqual(restarted, before, '重启必须换 id（证明它是会话 id，不是常量）');
+    assert.equal(after, restarted);
+  });
+
+  test('sessionId 只走 HTTP 头：不进请求体、不与 key 混在一起', () => {
+    const request = buildAiRequest(DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL, 'ping');
+    assert.equal(/bearer|sk-|oc_sk_/i.test(request.sessionId), false);
+    const body = JSON.parse(request.body);
+    assert.equal('sessionId' in body, false, '会话头不能写进请求体');
+    assert.equal(body.session_id, undefined);
+    assert.equal(JSON.stringify(body).includes(request.sessionId), false);
+  });
+});
+
+describe('服务层：两条 HTTP 调用路径都发送 x-opencode-session（源码断言）', () => {
+  test('deepseek.ets 与 aiFallbackRunner.ets 各自恰好一处会话头，值取 request.sessionId', () => {
+    for (const [name, src] of [
+      ['deepseek.ets', DEEPSEEK_SRC],
+      ['aiFallbackRunner.ets', FALLBACK_SRC]
+    ]) {
+      const lines = src.split('\n').filter((line) => line.includes("'x-opencode-session'"));
+      assert.equal(lines.length, 1, `${name} 应恰好一处会话头，实际 ${lines.length}`);
+      assert.match(lines[0], /'x-opencode-session': request\.sessionId/);
+      assert.equal(/apiKey|Bearer|\bkey\b/i.test(lines[0]), false, `${name} 会话头不得拼 key：${lines[0]}`);
+    }
+  });
+
+  test('sessionId 由模型层单例生成，服务层不另造 UUID', () => {
+    assert.match(AI_REQUEST_SRC, /sessionId: currentAiSessionId\(\)/);
+    assert.match(DEEPSEEK_SRC, /await attemptOnce\(apiKey, request, route\)/, '重试链复用同一个 request 对象');
+    assert.match(FALLBACK_SRC, /sendOnce\(key, request\)/);
+    assert.equal(/randomUUID|newAiSessionId\(\)/.test(DEEPSEEK_SRC), false, '服务层不生成自己的会话 id');
+    assert.equal(/randomUUID|newAiSessionId\(\)/.test(FALLBACK_SRC), false);
+  });
+
+  test('日志未变：只有 provider/model/latency/ok；会话值与 key 都不打印', () => {
+    assert.match(DEEPSEEK_SRC, /console\.info\('\[ai\] provider=%s model=%s latency=%dms ok=%s'/);
+    assert.equal(/console\.(log|info|warn|error|debug)[^\n]*session/i.test(DEEPSEEK_SRC), false);
+    assert.equal(/console\.(log|info|warn|error|debug)/.test(FALLBACK_SRC), false, 'fallback 运行器本来就没有日志');
+  });
+});
+
+describe('网关路由拒绝：类型化错误 + 中文可操作文案', () => {
+  const RAW = 'request is missing x-opencode-session and cannot be routed';
+
+  test('只把 400 + 路由特征判为拒绝，普通 400 / 其它状态不误判', () => {
+    assert.equal(isAiRouteRefusal(400, RAW), true);
+    assert.equal(isAiRouteRefusal(400, JSON.stringify({ error: { message: 'invalid model' } })), false);
+    assert.equal(isAiRouteRefusal(400, ''), false);
+    assert.equal(isAiRouteRefusal(401, RAW), false);
+    assert.equal(isAiRouteRefusal(500, RAW), false);
+  });
+
+  test('工厂产出 AiRouteRefusalError：中文可操作 + status/code 诊断，不回显原始 body', () => {
+    const codeBody = JSON.stringify({ error: { code: 'route_missing_session', message: RAW } });
+    const refusal = aiRouteRefusalError(400, codeBody, 'OpenCode Go');
+    assert.ok(refusal instanceof AiRouteRefusalError);
+    assert.ok(refusal instanceof Error);
+    assert.equal(refusal.name, 'AiRouteRefusalError');
+    assert.equal(refusal.status, 400, '原始状态码留给诊断');
+    assert.equal(refusal.code, 'route_missing_session', '错误码留给诊断');
+    assert.match(refusal.message, /^OpenCode Go 400/);
+    assert.match(refusal.message, /会话标识/);
+    assert.match(refusal.message, /网关无法路由/);
+    assert.match(refusal.message, /请重试/);
+    assert.match(refusal.message, /切换其它 AI 源/);
+    assert.equal(refusal.message.includes(RAW), false, '不回显网关原始响应文案');
+    assert.equal(/bearer|sk-|oc_sk_/i.test(refusal.message), false, '错误文案不含 key');
+  });
+
+  test('非拒绝返回 null；classifyAiError 走类型化文案，普通 400 文案不变', () => {
+    assert.equal(aiRouteRefusalError(400, 'invalid model', 'OpenCode Go'), null);
+    const text = classifyAiError(400, RAW, 'OpenCode Go');
+    assert.match(text, /会话标识/);
+    assert.match(text, /网关无法路由/);
+    assert.match(text, /请重试/);
+    assert.equal(text.includes(RAW), false, '不把原始 body 摊给用户');
+    assert.match(classifyAiError(400, '', 'OpenCode Go'), /请求无效/, '普通 400 保持原样');
+  });
+
+  test('服务层：单源抛类型化错误，多源用同一类型化文案（保留不抛契约）', () => {
+    assert.match(DEEPSEEK_SRC, /const refusal = aiRouteRefusalError\(outcome\.status, outcome\.body, providerLabel\)/);
+    assert.match(DEEPSEEK_SRC, /throw refusal;/);
+    assert.match(FALLBACK_SRC, /aiRouteRefusalError\(response\.status, response\.body, preset\.label\)/);
+    assert.match(FALLBACK_SRC, /refusal !== null\s*\?\s*refusal\.message/);
   });
 });

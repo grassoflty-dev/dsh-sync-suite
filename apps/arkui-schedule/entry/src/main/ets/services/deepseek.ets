@@ -48,6 +48,7 @@ import {
   AI_STATUS_NETWORK,
   AI_STATUS_TIMEOUT,
   DEFAULT_AI_MODEL,
+  aiRouteRefusalError,
   buildAiRequest,
   clampAiTimeout,
   classifyAiError,
@@ -286,7 +287,10 @@ async function attemptOnce(apiKey: string, request: AiRequest, route: AiRoute): 
       method: http.RequestMethod.POST,
       header: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
+        'Authorization': `Bearer ${apiKey}`,
+        // OpenCode Go 网关强制要求会话头（缺失 → 400 cannot be routed）；其它 OpenAI 兼容源忽略未知头。
+        // 值来自 AiRequest.sessionId：会话级稳定，重试链复用同一个值，且不含 key。
+        'x-opencode-session': request.sessionId
       },
       extraData: request.body,
       expectDataType: http.HttpDataType.STRING,
@@ -352,6 +356,14 @@ async function callChat(
   let attempts: number = 0;
   while (attempts < maxAttempts) {
     const outcome: AiHttpOutcome = await attemptOnce(apiKey, request, route);
+    // 网关路由拒绝（如缺 x-opencode-session）：抛类型化错误。原始响应体只用于判定，不回显给用户。
+    // 错误对象带 status / code 供诊断；key 从未进入 outcome，不会随错误外泄。
+    if (outcome.responded) {
+      const refusal = aiRouteRefusalError(outcome.status, outcome.body, providerLabel);
+      if (refusal !== null) {
+        throw refusal;
+      }
+    }
     totalMs += outcome.elapsedMs;
     lastStatus = outcome.status;
     if (outcome.responded && outcome.status === 200) {

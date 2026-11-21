@@ -93,6 +93,62 @@ export const AI_STATUS_OK: number = 200;
 export const AI_SERVICE_LABEL: string = 'AI 服务';
 /** 错误响应体在文案里的最大截断长度。 */
 export const AI_ERROR_SNIPPET_MAX: number = 160;
+/**
+ * OpenCode Go 网关要求的会话标识请求头。
+ *
+ * 网关对 `/inference/go` 的每条请求都要求这个头，缺失时返回 400
+ * `request is missing x-opencode-session and cannot be routed`（官方 Console 文档
+ * `/docs/console/harnesses#sessions`：Go requires it）。头名只在这里定义一次，
+ * 服务层用字面量写进 header 对象（ArkTS 对计算属性名支持不稳），测试钉住两者一致。
+ */
+export const AI_SESSION_HEADER: string = 'x-opencode-session';
+
+/**
+ * 生成 UUID v4（16 个随机字节，版本/变体位固定）。
+ *
+ * 不 import `crypto`：`tools/tsconfig.json` 的 lib 只有 ES2021，且鸿蒙 ArkTS 运行时不保证有
+ * `globalThis.crypto.randomUUID`。`Math.random` 拼出的 122 位随机量足够做本地会话标识，
+ * 它既不是密钥也不携带任何用户/凭据信息。
+ */
+export function newAiSessionId(): string {
+  const bytes: number[] = [];
+  for (let i = 0; i < 16; i++) {
+    bytes.push(Math.floor(Math.random() * 256));
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10xx
+  const hex: string[] = [];
+  for (const byte of bytes) {
+    hex.push(`0${byte.toString(16)}`.slice(-2));
+  }
+  const text: string = hex.join('');
+  return `${text.slice(0, 8)}-${text.slice(8, 12)}-${text.slice(12, 16)}-${text.slice(16, 20)}-${text.slice(20)}`;
+}
+
+/**
+ * 当前 AI 会话标识（进程内内存态，首次 AI 调用时懒生成）。
+ *
+ * 为什么是「每次应用启动一个」而不是「每次请求一个」：网关用这个头做路由与 prompt cache 复用，
+ * 官方建议「每条请求都带同一个稳定会话 id」。本应用的一次汇总/连通性测试是独立的一次性任务，
+ * 没有跨请求的聊天会话概念，因此把「会话」定为一次应用运行（进程内单例）：同一进程内所有 AI
+ * 请求复用同一个值（包括重试链），应用重启自然换新。它只活在本进程内存里 —— 不写仓库、不写日志、
+ * 不进任何持久化文件，因此不存在凭据泄露面。测试用 `restartAiSession()` 模拟应用重启。
+ */
+let sessionIdInUse: string = '';
+
+/** 换一个新会话标识（应用重启的自然语义；单测里用它模拟重启，证明换 id 而非写死常量）。 */
+export function restartAiSession(): string {
+  sessionIdInUse = newAiSessionId();
+  return sessionIdInUse;
+}
+
+/** 取当前会话标识：懒生成，同一会话内每次调用都返回同一个值。 */
+export function currentAiSessionId(): string {
+  if (sessionIdInUse.length === 0) {
+    sessionIdInUse = newAiSessionId();
+  }
+  return sessionIdInUse;
+}
 
 /** 一次请求的采样/超时/重试参数（B2）。 */
 export interface AiOptions {
@@ -123,6 +179,13 @@ export interface AiRequest {
   timeoutMs: number;
   /** 自动重试次数（不含首次请求）。 */
   retries: number;
+  /**
+   * 本次会话的标识（UUID v4），服务层放进 `x-opencode-session` 头。
+   *
+   * 由 `buildAiRequest` 从 `currentAiSessionId()` 取，整个进程内所有请求（含重试）共享同一个值；
+   * 应用重启后由 `restartAiSession()` 换新的。它只经 HTTP 头发往 AI 网关，不进日志、不进仓库。
+   */
+  sessionId: string;
 }
 
 /** 消息体（system 可选 + user 一条）。 */
@@ -251,6 +314,75 @@ export class AiFallbackError extends Error {
     this.providerId = primary.providerId;
     this.fallbackProviderId = fallback.providerId;
   }
+}
+
+/**
+ * 网关「无法路由本次请求」的类型化错误（典型：缺/失效的 `x-opencode-session`，HTTP 400）。
+ *
+ * 服务端原始响应体只用于判定，不回显给用户（可能含网关内部细节）；本错误只带：
+ * - `status`：原始 HTTP 状态码（诊断用，不含 key）；
+ * - `code`：响应体 `error.code`（若有，诊断用）；
+ * - `message`：中文、可操作的一行文案（页面直接展示）。
+ */
+export class AiRouteRefusalError extends Error {
+  /** 原始 HTTP 状态码（通常是 400）。 */
+  status: number;
+  /** 服务端错误码（响应体 `error.code`，无则空串）。 */
+  code: string;
+
+  constructor(providerLabel: string, status: number, code: string = '') {
+    super(
+      `${providerLabel} ${status}：AI 服务拒绝了请求（会话标识 ${AI_SESSION_HEADER} 缺失或无效，网关无法路由）。` +
+        '请重试；若仍失败，请更新 App 或在设置页切换其它 AI 源。'
+    );
+    this.name = 'AiRouteRefusalError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/**
+ * 判定是否为「网关因会话标识而无法路由」的响应。
+ *
+ * 只在 400 且响应体出现强特征时命中：会话头名，或 `cannot be routed` + `session/route`。
+ * 普通 400（模型名错、参数错）不会误判，仍走原来的「请检查模型名」文案。
+ */
+export function isAiRouteRefusal(status: number, bodyText: string): boolean {
+  if (status !== 400) {
+    return false;
+  }
+  const text: string = typeof bodyText === 'string' ? bodyText.toLowerCase() : '';
+  if (text.indexOf(AI_SESSION_HEADER) >= 0) {
+    return true;
+  }
+  return text.indexOf('cannot be routed') >= 0 && (text.indexOf('session') >= 0 || text.indexOf('route') >= 0);
+}
+
+/** 从错误响应体里取 `error.code`（只留错误码，绝不回显 key / 正文）。 */
+function aiErrorCode(bodyText: string): string {
+  const text: string = typeof bodyText === 'string' ? bodyText.trim() : '';
+  if (text.length === 0) {
+    return '';
+  }
+  try {
+    const parsed: AiResponse | null = JSON.parse(text) as AiResponse | null;
+    if (parsed !== null && parsed.error !== undefined && typeof parsed.error.code === 'string') {
+      return parsed.error.code.trim().slice(0, AI_ERROR_SNIPPET_MAX);
+    }
+  } catch {
+    // 非 JSON：没有结构化错误码
+  }
+  return '';
+}
+
+/** 命中路由拒绝时返回类型化错误，否则返回 `null`（调用方据此决定是否抛出/换文案）。 */
+export function aiRouteRefusalError(status: number, bodyText: string, providerLabel: string): AiRouteRefusalError | null {
+  if (!isAiRouteRefusal(status, bodyText)) {
+    return null;
+  }
+  const label: string =
+    typeof providerLabel === 'string' && providerLabel.trim().length > 0 ? providerLabel.trim() : AI_SERVICE_LABEL;
+  return new AiRouteRefusalError(label, status, aiErrorCode(bodyText));
 }
 
 /** 默认参数（每次返回新对象，避免调用方改到共享常量）。 */
@@ -388,7 +520,10 @@ export function buildAiRequest(
     url: aiChatUrl(baseUrl),
     body: JSON.stringify(requestBody),
     timeoutMs: resolved.timeoutMs,
-    retries: resolved.retries
+    retries: resolved.retries,
+    // 会话级稳定：同一应用运行内所有请求（含重试）复用同一个 id；重启换新的。
+    // 这里只放 id，不放 key —— 密钥永远只出现在服务层的 Authorization 头里。
+    sessionId: currentAiSessionId()
   };
   return request;
 }
@@ -427,6 +562,11 @@ function aiErrorDetail(bodyText: string): string {
 export function classifyAiError(status: number, bodyText: string, providerLabel: string = AI_SERVICE_LABEL): string {
   const label: string =
     typeof providerLabel === 'string' && providerLabel.trim().length > 0 ? providerLabel.trim() : AI_SERVICE_LABEL;
+  // 路由拒绝是「可操作」错误：优先给类型化文案，绝不把网关原始响应体摊给用户
+  const refusal: AiRouteRefusalError | null = aiRouteRefusalError(status, bodyText, label);
+  if (refusal !== null) {
+    return refusal.message;
+  }
   switch (status) {
     case AI_STATUS_OK:
       return '';

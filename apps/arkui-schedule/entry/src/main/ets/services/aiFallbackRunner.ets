@@ -42,6 +42,7 @@ import type { AiProviderPreset } from '../model/aiProvider';
 import {
   AI_STATUS_NETWORK,
   AI_STATUS_TIMEOUT,
+  aiRouteRefusalError,
   buildAiRequest,
   classifyAiError,
   defaultAiOptions,
@@ -243,7 +244,9 @@ async function sendOnce(apiKey: string, request: AiRequest): Promise<HttpOutcome
       method: http.RequestMethod.POST,
       header: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
+        'Authorization': `Bearer ${apiKey}`,
+        // 与 deepseek.ets 同一会话头（OpenCode Go 必需，其它源忽略）；值来自会话级稳定的 request.sessionId。
+        'x-opencode-session': request.sessionId
       },
       extraData: request.body,
       expectDataType: http.HttpDataType.STRING,
@@ -369,9 +372,15 @@ async function attemptSource(
       return unparsable;
     }
   }
-  const message: string = response.responded
-    ? classifyAiError(response.status, response.body, preset.label)
-    : classifyAiError(response.status, response.error, preset.label);
+  // 路由拒绝：用类型化错误的中文可操作文案（不回显网关原始响应体）；本运行器保持「不抛异常」契约，
+  // 诊断照常逐条上界面。单源路径 services/deepseek.ets 则在 callChat 里直接抛同一个类型化错误。
+  const refusal = response.responded ? aiRouteRefusalError(response.status, response.body, preset.label) : null;
+  const message: string =
+    refusal !== null
+      ? refusal.message
+      : response.responded
+        ? classifyAiError(response.status, response.body, preset.label)
+        : classifyAiError(response.status, response.error, preset.label);
   const failed: SourceAttempt = {
     ok: false,
     status: response.status,

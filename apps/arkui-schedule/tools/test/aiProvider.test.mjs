@@ -455,3 +455,25 @@ describe('hintForProvider：失败后的下一步建议', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------- OpenCode Go live-test 400 的源/模型入口
+describe('OpenCode Go：所选源/模型与会话头修复的适用范围', () => {
+  test('预设钉住 live-test 那一对：opencode-go + deepseek-v4.1-flash', () => {
+    const preset = findProvider('opencode-go');
+    assert.equal(preset.id, 'opencode-go');
+    assert.equal(preset.baseURL, 'https://opencode.ai/inference/go/v1');
+    assert.equal(defaultModelOf('opencode-go'), 'deepseek-v4.1-flash');
+    assert.equal(
+      chatCompletionsURL(preset.baseURL),
+      'https://opencode.ai/inference/go/v1/chat/completions',
+      '服务层实际 POST 的端点'
+    );
+  });
+
+  test('保留用户手选模型；不切到 pay-as-you-go 端点（key/billing 不同）', () => {
+    assert.equal(resolveModel('opencode-go', 'deepseek-v4.1-flash'), 'deepseek-v4.1-flash');
+    const url = chatCompletionsURL(findProvider('opencode-go').baseURL);
+    assert.match(url, /^https:\/\/opencode\.ai\/inference\/go\/v1\/chat\/completions$/);
+    assert.equal(url.includes('/inference/openai/'), false, 'Go 端点是用户 key 所属计划，不能改投按量端点');
+  });
+});
