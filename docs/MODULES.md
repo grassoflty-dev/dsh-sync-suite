@@ -321,3 +321,5 @@ mod-v2-contract
 > 追加登记：`mod-settings-sync-min` / `mod-settings-remote-dedupe` = `f32abe8`（M1+M2 共改 Settings.ets，一笔两 id）。
 
 > 追加登记：`mod-settings-cloud-no-config` = `6198fc0`（云端对话零配置（仅只读说明））。
+
+> 追加登记：`mod-shell-pane-prop-fix` = `5e14bde`（编译已验证；壳冒烟 5/6 PASS）。
