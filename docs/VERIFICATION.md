@@ -1674,3 +1674,50 @@ GATE_VALIDATE_EXIT=0                 # ✅ 全部通过：8/8（relative 459 / m
 **git status --porcelain**：仅上述 6 个源码/守卫文件为 ` M`（ArkTS 修复，待 Lead 以新模块提交）；`.tmp/` 被 gitignore；本小节写入 `docs/VERIFICATION.md`。未触发「失败即本批修」的其它分支——2b 远程 DSH 面板缺失是占位设计（UI-DESIGN §12 / REVIEW-shell-schedule-pane §5），非小缺陷，建议后续模块 `mod-shell-instances-pane` 把真实实例列表迁入 `InstancesPane`。
 
 **unverified**：横屏 2560×1600 真机布局（设备物理竖屏、无旋转命令）；远程 DSH 面板内实例列表（FAILED，待后续模块）；真实 Git push/pull 与「已同步·HH:MM」；chat takeover；OCR/手写端到端；插件 live；签名材料 v1 回退（泄漏密钥）处置；§15.13/§15.14 其余项。
+
+### 15.16 远程 DSH 面板落真：构建 / 签名 / 装机 / 面板 re-smoke（2026-11-21，`mod-shell-instances-pane`；只追加，不改写 §15.1–§15.15）
+
+**结论**：§15.15 唯一 FAILED 项「2b 远程 DSH 实例列表」**翻转为 PASS**。真实正文已迁入 `pages/panes/InstancesPane.ets`（609 行），`pages/Instances.ets`（20 行）只装配同一面板作 `@Entry` 路由壳（单一事实来源）；两个入口（外壳轨 / 设置页）都显示同一份列表。占位串 `远程面板即将迁入` 已从源码与真机 dump 中绝迹。
+
+**门闸 tail（最终复跑；期间 `mod-settings-entry-dedupe` 并行改了日程页头，其 6 条守卫由该 lane 自行 retarget，本模块未改那些断言）**
+```
+[overlay] applied=false                      # 构建前 / 构建后两次确认
+GATE_TSC_EXIT=0                              # 无输出（tsc 只覆盖 tools/tsconfig.json 的纯 TS）
+GATE_TESTS_EXIT=0                            # ℹ tests 3025 / suites 359 / pass 3024 / fail 0 / skipped 1
+GATE_VALIDATE_EXIT=0                         # ✅ 全部通过：8/8（JSON5/JSON 70、相对 import 458、main 静态 import 584、页面 9、rawfile/git 2）
+```
+- 自有守卫：`shellLayout` 18→21 例（L-01..L-19）、`paneLayout` 18→20 例（P-01..P-20）、`instanceList` 25→33 例（U-01..U-16）；三份定向 72/72。新增断言覆盖：面板含本机首行与三动作、自带 `Scroll` + 页头 + `active→Visibility.Hidden`、路由壳不复制正文、四个 app 源码目录扫描确认占位串绝迹。
+- 九份守卫锚点 old→new（Lead 授权）：`b3Batch:309/316`、`bBatch:140`、`remoteSettings:34`、`remoteHints:144` 的 `pages/Instances.ets` → `pages/panes/InstancesPane.ets`（断言逐字不变）；`indexHeader` / `uiTokens` 的 3 占位→2 占位并给远程补真 body 正向断言、禁用计数 4→3；`shellLayout` / `paneLayout` 同口径。`structureGuards` SG-S4 的 `deepLinkId`/`active` 双向断言**未改、仍全绿**。
+
+**构建事实**：`hdc tconn 192.168.1.7:33023` → `Target is connected`；`build-harmony.ps1 -Cores 4 -Product default`。日志 `apps/arkui-schedule/.build-logs/build-20261121-134723.log`：`Finished :entry:default@CompileArkTS... after 5 min 54 s 463 ms`、`BUILD SUCCESSFUL in 12 min 15 s 54 ms`、`42 tasks in total: 23 executed, 19 up-to-date`。日志两处 `WARN: No signingConfig found for product default`（`SignHap` / `SignApp` 各一次）——见下方 signing chain 声明。产物 `entry-default-unsigned.hap` **4,839,569 B / SHA256=5C629F2E694040D635AEEBCB283611629B4B41E0FC2677D97C6B789743070296**；其内 `ets/modules.abc` **2,780,464 B / SHA256=35F42370253D7FC5BA4FB7E5361279B2CD48F63DE93AEB51EDBFEA1DD66A3117**，与磁盘 `loader_out/default/ets/modules.abc` **逐字节一致**；ABC 内命中 `远程 DSH` @152605、`添加实例` @578698、`还没有可管理的 DSH 实例` @578857，`远程面板即将迁入` **未命中**（`InstancesPane` @348787）。
+- 构建 wrapper 在 HAP 产出后未自行退出（所有 deveco/hvigor 进程 CPU 增量 0、覆盖层已自动恢复 `applied=false`），经核对 HAP 与 ABC 完整后 kill wrapper；未影响产物与工作区。
+
+**签名事实（signing chain，明确声明）**：`No signingConfig found for product default` 意味着 hvigor 的 `SignHap` / `SignApp` **没有给 HAP 签名**；本轮**装机用的 HAP 不是构建产物 `entry-default-unsigned.hap`，也不是 hvigor 签名产物**，而是单独走 `sign-hap.ps1` 的交付文件：
+```
+powershell -ExecutionPolicy Bypass -File apps/arkui-schedule/tools/sign-hap.ps1 `
+  -Hap entry/build/default/outputs/default/entry-default-unsigned.hap `
+  -StorePass $env:SIGN_PASS -Deliver      # JAVA_HOME=D:\jdk17\jdk-17, SIGN_PASS=itwill123
+```
+- 第 1 次尝试未传 `-StorePass`、脚本回退读 `signing/pass.txt` → `11014003 Init keystore failed / keystore password was incorrect`，未产出文件；第 2 次显式用 `SIGN_PASS` 成功。
+- `v2 signing material incomplete ... falling back to v1 (LEAKED KEY)` 告警仍在（密钥治理未决）；`Sign Hap success!` / `verify codesign success` / `verify-app success`。
+- 交付并装机：`apps/arkui-schedule/dist-harmony/arkui-schedule-harmony-debug-signed.hap` **4,900,124 B / SHA256=8E9B91BBE5F104507B6A8240526A5AADC7AAF0D2BFC41C78E28FF6DCEB862DFC**（签名日志 `.tmp/sign-instances-pane.log`）。
+- 链路：**源码 → hvigor unsigned HAP（未签名）→ sign-hap.ps1 离线签名 → dist-harmony 交付 HAP → hdc install -r → 设备**。
+
+**装机 / 启动**：`aa force-stop com.oray.sunloginclient` → `force stop process successfully`；`power-shell wakeup` + 上滑解锁；`hdc -t 192.168.1.7:33023 install -r <交付 HAP>` → `install bundle successfully`；`aa start -a EntryAbility -b com.itwill.schedule` → `start ability successfully`。启动页确为 `pages/Home`（见下 1）。
+
+**面板 re-smoke（`uitest dumpLayout` + `screenCap`，证据 `.tmp/device-shots/smoke-instances-*`）**
+
+| 项 | 判定 | 逐字证据 / 截图 |
+| --- | --- | --- |
+| 1 启动默认节 | **PASS** | rail `Text [dots]` / `[日程]` / `[远程 DSH]` / `[云端对话]` + `⚙ 设置`；内容区 `Text [dots]` + `新建对话（dots 尚未接线）`。`smoke-instances-01-launch.png/.json` |
+| 2 点轨「远程 DSH」→ 面板 | **PASS** | `Text [远程 DSH]` bounds `[608,878][1218,944]`；`Text [添加实例]` `[1218,863][1390,958]`；`Text [云端对话]` `[1390,863][1562,958]`；`Text [共 2 个实例]` `[608,989][1562,1036]`。主操作可点，无禁用 `（原因）`。`smoke-instances-02-pane.png/.json` |
+| 3 本机首行 + 三动作纪律 | **PASS** | `Text [本机（默认）]` `[608,1092][1290,1149]` + `Text [局域网直连]` + `Text [未知]`；`Text [未知 · 暂无记录]`；按钮 `Button [打开]` `[608,1225][761,1320]`、`Button [编辑]` `[780,1225][933,1320]`，**无删除按钮**。`smoke-instances-02-pane` |
+| 4 远程行 + 打码 URL + 三动作 | **PASS** | `Text [远程实例]` / `[手动填地址]` / `[未知]` / `[未知 · 暂无记录]` / `Text [http://192.168.1.6:3080/]`（**无 token**）；`Button [打开]` `[608,1584][761,1679]`、`Button [编辑]` `[780,1584][933,1679]`、`Button [删除]` `[952,1584][1105,1679]`。`smoke-instances-02-pane` |
+| 5 占位串绝迹 | **PASS** | dump 全文不含 `远程面板即将迁入` / `即将迁入` / `添加实例（` / `本页暂不展示任何记录。` / `token=`；ABC 内 `远程面板即将迁入` 未命中。 |
+| 6 空态真实性 | **PASS（当前不适用）** | 设备实例表已有 2 行，故显示真列表而非空态；空态四段文案仍由 `instanceList` U-02 / U-16 静态钉住，未在本次装机上触发（无实例设备 `unverified`）。 |
+| 7 顶层页 route 单一事实来源 | **PASS** | 设置齿轮 → `Text [远程实例与云端对话]`（`smoke-instances-03-settings.png/.json`）→ 点击进入 `pages/Instances`，显示同样的 `Text [远程 DSH]` / `[添加实例]` / `[云端对话]` / `[共 2 个实例]` / `[本机（默认）]` / `[远程实例]` 与同样的 5 个按钮（本机 2 / 远程 3），只是内容区从 x=608 变为 x=38（无 rail），证明同一 InstancesPane 被复用而非第二份正文。`smoke-instances-04-route.png/.json` |
+| 8 横屏 | **BLOCKED（设备物理竖屏）** | 沿用 §15.15 2f：无软件旋转手段，仍 `[0,0][1600,2560]`；未改源码。 |
+
+**本次改动 / 提交状态**：本模块源码、九份守卫与 `MODULES` / `ROADMAP` / `UI-DESIGN` 登记已由 Lead 提交为 `d9c015c` + `fc6dfd7`；本节为最后追加（未提交）。写入时 `git status --porcelain` 仅剩另一 lane 的 `apps/arkui-schedule/tools/build-harmony.ps1`（M）与 `apps/arkui-schedule/tools/overlay-restore-status.mjs` / `overlay-restore.ps1`（??），**均非本模块文件**；本模块未改 `.git`、未提交。
+
+**unverified**：横屏 2560×1600 布局（设备物理竖屏）；「打开」跳转内嵌 Web 后的可达回写与错误卡（本次只验动作渲染，未点开）；添加 / 编辑 / 删除表单的真机交互（静态守卫 + 编译证据在，未逐个点）；空态在无实例设备的真机呈现；v1 签名密钥泄漏处置；`remember`/chat takeover、Git push/pull 与 OCR/手写端到端（沿用 §15.15）。
