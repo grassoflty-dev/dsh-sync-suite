@@ -214,14 +214,24 @@ describe('面板布局：单 flex 层 + 列表高度纪律 + 保活', () => {
       '仅宽屏/横屏封顶；竖屏保持自然高');
   });
 
-  test('P-06 两个断点的列表包在加权 Column 里，SummaryCard 永远是其兄弟', () => {
+  test('P-06 两个断点都经同一个共享 Refresh 包装，列表包在加权 Column 里，SummaryCard 永远是其兄弟', () => {
     const schedule = pane('SchedulePane');
+    // 共享包装是唯一渲染 RecordList 的地方：竖屏 CompactBody 与横屏 WideBody 都必须调用它。
+    const shared = blockAfter(schedule.source, '\n  RefreshableList() ');
+    assert.match(shared, /this\.RecordList\(\)/, '共享包装必须渲染列表');
+    assert.match(shared, /Refresh\(\{ refreshing: \$\$this\.refreshing \}\)/, '共享包装必须包 Refresh');
+    assert.match(shared, /this\.onPullRefresh\(\)/, '共享包装复用同一 pull handler');
+    assert.equal((shared.match(/this\.refreshing = false/g) || []).length, 2, '成功与失败都复位转圈');
     for (const builder of ['CompactBody', 'WideBody']) {
       const body = blockAfter(schedule.source, `\n  ${builder}() `);
-      const listAt = body.indexOf('this.RecordList()');
-      assert.ok(listAt >= 0, `${builder} 必须渲染 RecordList`);
+      assert.equal((body.match(/this\.RefreshableList\(\)/g) || []).length, 1,
+        `${builder} 必须且只能调用一次共享 Refresh 包装`);
+      assert.doesNotMatch(body, /this\.RecordList\(\)/, `${builder} 不得绕过共享包装直接渲染列表`);
+      assert.doesNotMatch(body, /Refresh\(\{/, `${builder} 不得内联第二套 Refresh`);
+      const listAt = body.indexOf('this.RefreshableList()');
+      assert.ok(listAt >= 0, `${builder} 必须渲染刷新列表`);
       const wrapper = columnWithAttributesBefore(body, listAt);
-      assert.match(wrapper, /this\.RecordList\(\)/, `${builder} 的列表包裹层必须直接包含 RecordList`);
+      assert.match(wrapper, /this\.RefreshableList\(\)/, `${builder} 的列表包裹层必须直接包含共享包装`);
       assert.match(wrapper, /\.layoutWeight\(1\)/, `${builder} 的列表包裹层必须吃余量`);
       assert.equal(/\.height\(\s*\d+(\.\d+)?\s*\)/.test(wrapper), false,
         `${builder} 的列表包裹层不得固定高度（否则列表被饿死）`);
@@ -414,8 +424,14 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     assert.match(p.body, /^\s*Scroll\(\) \{/, '面板自带 Scroll（根即滚动容器）');
     assert.equal(/PageLayout\(/.test(p.source), false, '不得再套固定页头 + 内容的双层壳');
     const header = blockAfter(raw, '\n  Header() ');
-    assert.match(readonlyRegions(header), /Text\('云端对话'\)/, '只读页头保留桥接出口');
-    assert.equal(/Text\('添加实例'\)/.test(readonlyRegions(header)), false, '只读页头不得有添加实例');
+    const readonlyHeader = readonlyRegions(header);
+    // mod-pane-header-nav-dedupe（old→new，收紧）：旧断言钉「只读页头保留云端对话桥接」；
+    // 现在换段只走 rail，页头不得有跨节导航，只读页头只有标题、没有任何点击动作。
+    assert.equal(/Text\('云端对话'\)|openChats|pages\/Chats/.test(header), false,
+      '页头不得有「云端对话」跨节桥接');
+    assert.equal((readonlyHeader.match(/Text\(/g) ?? []).length, 1, '只读页头只有标题一处 Text');
+    assert.equal(/onClick\(/.test(readonlyHeader), false, '只读页头没有任何点击动作');
+    assert.equal(/Text\('添加实例'\)/.test(readonlyHeader), false, '只读页头不得有添加实例');
     assert.match(configRegions(header).join('\n'), /Text\('添加实例'\)/, '配置模式页头有添加实例');
     const rows = blockAfter(raw, '\n  InstanceRow(');
     assert.match(readonlyRegions(rows), /label: '打开'/, '两种模式都能打开实例');
@@ -462,12 +478,35 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     assert.equal((HOME.match(/onOpenSettings: \(\): void => \{\s*\n\s*this\.openSettings\(\);/g) ?? []).length, 2,
       '宽屏常驻轨与 compact 抽屉轨都把齿轮事件接到 openSettings');
     assert.match(pane('SchedulePane').source, /Button\('新建'\)/, '日程：新建');
-    // mod-instances-pane-readonly（old→new，不比原来弱）：面板主操作仍 pane 专属；
-    // 「添加实例」只在配置模式，首页只读面板用「云端对话」桥接 + 空态跳设置实例路由。
+    // mod-pane-header-nav-dedupe（old→new，收紧）：面板主操作仍 pane 专属；
+    // 「添加实例」只在配置模式；只读页头没有跨节导航，云端对话分段只从 ShellRail 进入。
     const instancesRaw = PANE_RAW.get('InstancesPane');
-    assert.match(readonlyRegions(instancesRaw), /Text\('云端对话'\)/, '远程 DSH（只读）：桥接');
+    assert.equal(/Text\('云端对话'\)|openChats|pages\/Chats/.test(instancesRaw), false,
+      '实例面板不得有跨节导航到云端对话');
     assert.match(configRegions(instancesRaw).join('\n'), /Text\('添加实例'\)/, '远程 DSH（设置）：添加实例');
     assert.match(pane('DotsPane').source, /新建对话/, 'dots：新建对话');
     assert.match(pane('CloudChatPane').source, /新建对话/, '云端对话：新建对话');
+  });
+
+  // mod-pane-header-nav-dedupe（新增正向守卫）：面板页头只放 pane 专属动作，跨节导航一律不在页头。
+  test('P-22 任何面板页头都没有跨节导航：换段只走 rail（Home.selectSection ← ShellRail.onSelect）', () => {
+    for (const name of PANE_NAMES) {
+      const p = pane(name);
+      assert.equal(/selectSection|SHELL_SECTION_[A-Z_]+|onSelect: \(next: ShellSection\)/.test(p.source), false,
+        `${name} 不得自行切段（换段只走 rail）`);
+      assert.equal(/pushUrl\(\{\s*url:\s*'pages\/(Chats|Home)'/.test(p.source), false,
+        `${name} 不得 push 跨节目标页 pages/Chats / pages/Home`);
+    }
+    const raw = PANE_RAW.get('InstancesPane');
+    const header = blockAfter(raw, '\n  Header() ');
+    assert.equal(/Text\('云端对话'\)|openChats|pages\/Chats/.test(header), false,
+      '实例面板页头不得有「云端对话」跨节桥接');
+    assert.equal((readonlyRegions(header).match(/Text\(/g) ?? []).length, 1, '只读页头只有标题');
+    assert.equal(/onClick\(/.test(readonlyRegions(header)), false, '只读页头无点击动作');
+    assert.match(configRegions(header).join('\n'), /Text\('添加实例'\)/, '配置页头只有 pane 专属「添加实例」');
+    assert.match(HOME, /private selectSection\(section: ShellSection\)/, '外壳拥有唯一选段入口');
+    assert.equal((HOME.match(/onSelect: \(next: ShellSection\)/g) ?? []).length, 2,
+      '宽屏常驻轨与抽屉轨都把选段回传给外壳');
+    assert.match(RAIL, /onSelect: \(section: ShellSection\) => void/, 'rail 只发 onSelect，不自己切页');
   });
 });

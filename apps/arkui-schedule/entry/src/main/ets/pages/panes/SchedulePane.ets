@@ -10,9 +10,11 @@
  *   ⑤ 删掉页头「⚙ 设置」动作与 openSettings()（mod-settings-entry-dedupe）：设置出口唯一 =
  *      导航轨页脚齿轮（ShellRail.SettingsRow → Home.openSettings()），错误态的「去设置」也一并移除。
  * 列表区仍由唯一一个 .layoutWeight(1) 的加权兄弟吃掉余量（fix-landscape-list 的横屏修法不回退）。
- * 下拉刷新：CompactBody / RightPane 随迁移保留了 Index 的 Refresh 接线，但 WideBody 左栏
- * （横屏/宽屏实际渲染的日程列表）在迁移时漏掉 Refresh，真机无法下拉触发 git 同步；按同一套
- * `onPullRefresh()` → `runConfiguredCycle()` 接线补回（mod-home-pull-refresh）。
+ * 下拉刷新（mod-fix-pull-refresh → mod-fix-pull-refresh-shared）：先前只在 WideBody 左栏补过
+ * Refresh（横屏），竖屏真机实际走的是 CompactBody（内容宽 <840vp → 单列）。现在两栏共用同一个
+ * `RefreshableList()` @Builder，统一 `onPullRefresh()` → `runConfiguredCycle()`（拉远端 + 推本地）
+ * → reload()/loadSummary()；右栏仍用自己的 `paneRefreshing`。共享包装让「只修一栏」的布局漂移
+ * 无法再发生（静态守卫同时钉住竖屏与横屏两处调用）。
  *
  * 已知边界：onPageShow() 的「保存返回一次性标记」消费在 fallback 路由（Index）照常触发；
  * 在 shell 路由下页面生命周期属于 Home，本批未把 Home 的 onPageShow 转发进来（unverified，
@@ -86,6 +88,7 @@ import { timelineStore } from '../../services/timelineStore';
 import { recordWriter } from '../../services/recordWriter';
 import { syncProtocolStore } from '../../services/syncProtocolStore';
 import { bridgeGitRunner } from '../../services/gitRunner';
+import { bindBridgeRunner } from '../../services/gitRunner';
 import { syncStatusStore } from '../../services/syncStatusStore';
 import type { SyncStatusView } from '../../services/syncStatusStore';
 import { outboxStore } from '../../services/outboxStore';
@@ -306,6 +309,8 @@ export struct SchedulePane {
    */
   private async onPullRefresh(): Promise<void> {
     try {
+      // 与「重试同步」同一条确定性绑定入口：下拉刷新也绝不在 runner 未绑定态发起周期。
+      bindBridgeRunner(getContext(this) as common.UIAbilityContext);
       syncStatusStore.setSyncing();
       const result = await syncProtocolStore.runConfiguredCycle();
       this.syncStatus = result !== null
@@ -326,6 +331,8 @@ export struct SchedulePane {
    */
   private async retrySync(): Promise<void> {
     try {
+      // 用户点「重试同步」是真实路径：绑定与周期同处一次点击，不再赌启动链/页面 bootstrap 的时序。
+      bindBridgeRunner(getContext(this) as common.UIAbilityContext);
       for (const entry of outboxStore.list()) {
         if (entry.state === 'failed') {
           outboxStore.retry(entry.intentId);
@@ -1690,6 +1697,32 @@ export struct SchedulePane {
     }
   }
 
+  /**
+   * 唯一的「下拉刷新 → 同步周期 → 重绘」列表包装（mod-fix-pull-refresh-shared）。
+   *
+   * CompactBody（竖屏真机渲染的那一栏）与 WideBody 左栏（横屏/宽屏）都只调用这一处，
+   * 避免以后有人只给其中一栏补 Refresh、另一栏在真机上拉不动却没有测试发现。
+   * 三态状态行由两栏各自的 SyncStatusRow() 负责，这里不重复渲染。
+   * 布局纪律：Refresh 只包列表，外层 Column 仍是唯一 .layoutWeight(1) 加权兄弟，不新增固定高度。
+   */
+  @Builder
+  RefreshableList() {
+    Refresh({ refreshing: $$this.refreshing }) {
+      this.RecordList()
+    }
+    .onRefreshing(() => {
+      this.refreshing = true;
+      this.onPullRefresh()
+        .then(() => {
+          this.refreshing = false;
+        })
+        .catch(() => {
+          // 下游意外 reject 也必须复位转圈，不能让用户只能杀进程
+          this.refreshing = false;
+        });
+    })
+  }
+
   /** 宽屏/横屏右栏：三态（空 / 详情 / 编辑），内容限宽 720vp 居中便于阅读；支持下拉刷新。 */
   @Builder
   RightPane() {
@@ -1763,23 +1796,10 @@ export struct SchedulePane {
         if (this.tab === 'today') {
           this.SummaryCard()
         }
-        // 列表区：唯一吃余量的加权兄弟；Refresh 只包列表，不改主从/单列结构。
+        // 列表区：唯一吃余量的加权兄弟；下拉刷新统一走 RefreshableList()（与横屏同一条代码路径）。
         // 汇总块已封顶（宽屏）或自然高（竖屏），无论哪种都不会把这里挤成 0 高。
         Column() {
-          Refresh({ refreshing: $$this.refreshing }) {
-            this.RecordList()
-          }
-          .onRefreshing(() => {
-            this.refreshing = true;
-            this.onPullRefresh()
-              .then(() => {
-                this.refreshing = false;
-              })
-              .catch(() => {
-                // 与右栏一致：即使下游意外 reject 也必须复位转圈，不能让用户只能杀进程
-                this.refreshing = false;
-              });
-          })
+          this.RefreshableList()
         }
         .width('100%')
         .layoutWeight(1)
@@ -1817,23 +1837,10 @@ export struct SchedulePane {
             this.SummaryCard()
           }
           // 列表区：唯一吃余量的加权兄弟；汇总块是封顶的固定高度兄弟，不再与列表争高度。
-          // 横屏/宽屏也要能下拉跑同一套 git 周期（旧 Index 只在 CompactBody 包了 Refresh，
-          // 迁移后横屏日程列表同样漏掉 → 真机拉不动同步）。Refresh 只包列表，
+          // 横屏/宽屏与竖屏共用 RefreshableList()：同一套 git 周期、同一处 spinner 复位；
           // 外层布局不变：仍然只有这一层 .layoutWeight(1)，不加固定高度（横屏列表压成 0 高的 bug 类）。
           Column() {
-            Refresh({ refreshing: $$this.refreshing }) {
-              this.RecordList()
-            }
-            .onRefreshing(() => {
-              this.refreshing = true;
-              this.onPullRefresh()
-                .then(() => {
-                  this.refreshing = false;
-                })
-                .catch(() => {
-                  this.refreshing = false;
-                });
-            })
+            this.RefreshableList()
           }
           .width('100%')
           .layoutWeight(1)

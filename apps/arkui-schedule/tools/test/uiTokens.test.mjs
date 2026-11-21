@@ -184,7 +184,7 @@ test('Index 双栏骨架：左日期列（DateBlock/ModeTabs/新建）+ 右列�
   const start = INDEX.indexOf('WideBody() {')
   assert.notEqual(start, -1)
   const body = INDEX.slice(start, INDEX.indexOf('\n  }', start))
-  for (const piece of ['this.DateBlock()', 'this.ModeTabs()', 'this.SidebarAction()', 'this.RecordList()']) {
+  for (const piece of ['this.DateBlock()', 'this.ModeTabs()', 'this.SidebarAction()', 'this.RefreshableList()']) {
     assert.ok(body.includes(piece), `WideBody 缺少 ${piece}`)
   }
   assert.match(body, /\.vertical\(true\)/, '两栏之间必须有竖分割线')
@@ -574,4 +574,34 @@ test('U-S5 设置四行根页与三个子页都不新增设置入口（U-S4 仍�
   assert.match(api, /router\.back\(\)/, 'API 子页只 back，不新增设置入口')
   assert.equal(/高级/.test(api.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')), false,
     'API 真页面不得出现「高级」控件')
+})
+
+// mod-pane-header-nav-dedupe（新增正向守卫）：面板页头只放 pane 专属动作，换段只走 rail。
+test('U-S6 四面板页头无跨节导航：云端对话等分段只从 ShellRail 进入，实例页头只读为空 / 配置为添加实例', () => {
+  const panes = [
+    ['SchedulePane.ets', readFileSync(new URL('../../entry/src/main/ets/pages/panes/SchedulePane.ets', import.meta.url), 'utf8')],
+    ['DotsPane.ets', PANE_CODES[0]],
+    ['CloudChatPane.ets', PANE_CODES[1]],
+    ['InstancesPane.ets', INSTANCES_CODE]
+  ]
+  for (const [name, code] of panes) {
+    const stripped = stripComments(code)
+    assert.equal(/selectSection|SHELL_SECTION_[A-Z_]+|onSelect: \(next: ShellSection\)/.test(stripped), false,
+      `${name} 不得自行切段（换段只走 rail）`)
+    assert.equal(/pushUrl\(\{\s*url:\s*'pages\/(Chats|Home)'/.test(stripped), false,
+      `${name} 不得 push 跨节目标页 pages/Chats / pages/Home`)
+  }
+  // 实例面板：跨节桥接彻底绝迹（旧 U-11/U-15 改为正向绝迹断言）。
+  assert.equal(/Text\('云端对话'\)|openChats|pages\/Chats/.test(INSTANCES_CODE), false,
+    '实例面板不得有「云端对话」跨节桥接')
+  assert.match(INSTANCES_CODE, /Text\('添加实例'\)/, '配置页头仍保留 pane 专属「添加实例」')
+  // 只读页头在 configurable 门控之前只有标题，没有任何 onClick（跨节导航 / 配置入口都不在页头）。
+  const header = INSTANCES_CODE.slice(
+    INSTANCES_CODE.indexOf('Header() {'), INSTANCES_CODE.indexOf('EmptyView() {'))
+  const gateAt = header.indexOf('if (this.configurable) {')
+  assert.ok(gateAt > 0, '页头必须由 configurable 门控「添加实例」')
+  assert.equal(/onClick\(/.test(header.slice(0, gateAt)), false, '只读页头无点击动作')
+  // 唯一换段入口在外壳。
+  assert.match(stripComments(HOME), /private selectSection\(section: ShellSection\)/)
+  assert.match(stripComments(SHELL_RAIL), /onSelect: \(section: ShellSection\) => void/)
 })

@@ -15,7 +15,7 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { stripComments } from './helpers/etsSource.mjs';
+import { matchBrace, stripComments } from './helpers/etsSource.mjs';
 import { requireOverlayRestored } from './guard.mjs';
 
 requireOverlayRestored('syncWiring.test.mjs');
@@ -51,6 +51,15 @@ const APP = join(HERE, '..', '..');
 const ETS = join(APP, 'entry', 'src', 'main', 'ets');
 function src(rel) {
   return stripComments(readFileSync(join(ETS, rel), 'utf8'));
+}
+
+/** 按 marker 切出 `@Builder Name() { ... }` 的内部文本（注释已剥，行号无关）。 */
+function builderBody(source, name) {
+  const marker = `\n  ${name}() {`;
+  const at = source.indexOf(marker);
+  assert.ok(at >= 0, `${name} builder not found`);
+  const [start, end] = matchBrace(source, source.indexOf('{', at));
+  return source.slice(start + 1, end - 1);
 }
 
 const DAY = '2026-11-19';
@@ -802,9 +811,10 @@ test('61 offline / transport E_IO → typed failure + intent parked for retry (n
   assert.equal(fake.resetCount, MAX_ATTEMPTS, '拒推只能 reset --hard origin/main，绝不 force-push');
 });
 
-test('62 static: home 日程面板 pull-to-refresh runs the configured cycle (pull+push) then re-renders', () => {
+test('62 static: BOTH portrait CompactBody and wide WideBody use ONE shared Refresh wrapper → configured cycle', () => {
   // S3 迁移后真首页 = pages/Home.ets + panes/SchedulePane.ets（Index 仅留作 fallback 路由）。
-  // 断言锚点从 Index 迁到真 body；旧断言一条未删，只是不再让 fallback 路由替真面板背书。
+  // 竖屏平板内容宽 <840vp → masterDetail=false → CompactBody；横屏/宽屏才走 WideBody。
+  // 两栏必须调用同一个 RefreshableList()，不能再出现「只给一栏补 Refresh、真机拉不动」的布局漂移。
   const pane = src('pages/panes/SchedulePane.ets');
   const body = /private async onPullRefresh\(\): Promise<void> \{([\s\S]*?)\n  \}/.exec(pane);
   assert.ok(body, 'onPullRefresh body not found in SchedulePane');
@@ -815,22 +825,35 @@ test('62 static: home 日程面板 pull-to-refresh runs the configured cycle (pu
   assert.match(body[1], /this\.loadSummary\(\)/);
   assert.doesNotMatch(body[1], /syncController\.pullNow/);
 
-  // 三处下拉入口：紧凑列表 / 主从右栏 / 主从左栏（横屏真机实际渲染的那一条）。
+  const compact = builderBody(pane, 'CompactBody');
+  const wide = builderBody(pane, 'WideBody');
+  const shared = builderBody(pane, 'RefreshableList');
+  const right = builderBody(pane, 'RightPane');
+
+  // 唯一的列表 Refresh 包装：共享 builder 里一处，右栏独立 paneRefreshing 一处。
+  // 旧断言「3 处字面 Refresh」改成「共享 1 + 右栏 1」，再由下面「两栏都调用共享 builder」
+  // 保证三处入口都在（不再靠数字碰运气，也不再只钉横屏那一处）。
   const refreshSites = pane.match(/Refresh\(\{ refreshing: \$\$this\.\w+ \}\)/g) || [];
-  assert.equal(refreshSites.length, 3, '紧凑列表 / 右栏 / 宽屏左栏都必须包 Refresh');
-  assert.match(pane, /Refresh\(\{ refreshing: \$\$this\.refreshing \}\)/);
-  assert.match(pane, /Refresh\(\{ refreshing: \$\$this\.paneRefreshing \}\)/);
-  const wideStart = pane.indexOf('WideBody() {');
-  const wideEnd = pane.indexOf('AiPanel() {', wideStart);
-  assert.ok(wideStart >= 0 && wideEnd > wideStart, 'WideBody builder not found');
-  const wide = pane.slice(wideStart, wideEnd);
-  assert.match(wide, /Refresh\(\{ refreshing: \$\$this\.refreshing \}\)/, '横屏左栏缺 Refresh');
-  assert.match(wide, /this\.onPullRefresh\(\)/, '横屏左栏必须复用同一 pull handler');
-  assert.match(wide, /this\.refreshing = false/, '横屏刷新结束必须复位转圈');
-  // 布局纪律：Refresh 外不新增固定高度，列表区仍只有一层 .layoutWeight(1)。
-  const wideList = /Column\(\) \{\n\s*Refresh\(\{ refreshing: \$\$this\.refreshing \}\)([\s\S]*?)\n\s*\}\n\s*\.width\('100%'\)\n\s*\.layoutWeight\(1\)/.exec(wide);
-  assert.ok(wideList, '横屏列表区 Refresh 外必须保留 .width(100%) + .layoutWeight(1) 的唯一加权兄弟');
-  assert.doesNotMatch(wideList[1], /\.height\(/, 'Refresh 外不得加固定高度（横屏列表 0 高 bug 类）');
+  assert.equal(refreshSites.length, 2, '共享列表包装 + 右栏各一处 Refresh（列表只写一次）');
+  assert.match(shared, /Refresh\(\{ refreshing: \$\$this\.refreshing \}\)/);
+  assert.match(shared, /this\.RecordList\(\)/, '共享包装必须渲染真实列表');
+  assert.match(shared, /this\.onPullRefresh\(\)/, '共享包装复用同一 pull handler');
+  assert.equal((shared.match(/this\.refreshing = false/g) || []).length, 2,
+    '成功与 reject 两路都要复位转圈');
+  assert.match(right, /Refresh\(\{ refreshing: \$\$this\.paneRefreshing \}\)/);
+  assert.match(right, /this\.onPullRefresh\(\)/, '右栏复用同一 pull handler');
+
+  // 两栏必须走同一条代码路径：各自恰好一次调用共享 builder，且不再内联 Refresh / RecordList。
+  for (const [name, source] of [['CompactBody（竖屏）', compact], ['WideBody（横屏/宽屏）', wide]]) {
+    assert.equal((source.match(/this\.RefreshableList\(\)/g) || []).length, 1,
+      `${name} 必须且只能调用一次共享 Refresh 包装`);
+    assert.doesNotMatch(source, /Refresh\(\{/, `${name} 不得再内联第二套 Refresh`);
+    assert.doesNotMatch(source, /this\.RecordList\(\)/, `${name} 的列表只能经共享包装渲染`);
+    assert.match(source, /this\.SyncStatusRow\(\)/, `${name} 必须显示同一三态状态行`);
+    // 布局纪律：Refresh 外仍只有一层 .width(100%) + .layoutWeight(1) 加权兄弟，无定高包装。
+    const list = /Column\(\) \{\n\s*this\.RefreshableList\(\)\n\s*\}\n\s*\.width\('100%'\)\n\s*\.layoutWeight\(1\)/.exec(source);
+    assert.ok(list, `${name} 列表区必须保留唯一加权兄弟包裹共享 Refresh`);
+  }
   assert.match(pane, /List\(\) \{[\s\S]*?\.layoutWeight\(1\)/, '列表自身仍保留 layoutWeight(1)');
 
   // fallback 路由保持原样：不是拿它替代面板断言，而是防止回退时两边漂移。
@@ -853,9 +876,10 @@ test('62b static: 日程面板三态状态行文案与点一下重试保持不�
   assert.match(row[1], /this\.syncStatus\.state === 'failed'/);
   assert.match(row[1], /重试同步/, '失败态仍由状态行上的一次点击重试');
   assert.match(row[1], /this\.retrySync\(\)/);
-  const wideStart = pane.indexOf('WideBody() {');
-  const wideEnd = pane.indexOf('AiPanel() {', wideStart);
-  assert.match(pane.slice(wideStart, wideEnd), /this\.SyncStatusRow\(\)/, '横屏也要显示同一三态行');
+  // 竖屏与横屏都必须显示同一三态行（不再只钉横屏那一处）。
+  for (const name of ['CompactBody', 'WideBody']) {
+    assert.match(builderBody(pane, name), /this\.SyncStatusRow\(\)/, `${name} 也要显示同一三态行`);
+  }
 });
 
 test('63 static: every create path routes through recordWriter (one sync trigger, no second impl)', () => {
