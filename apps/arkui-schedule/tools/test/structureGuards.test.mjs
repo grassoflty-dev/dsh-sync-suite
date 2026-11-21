@@ -32,7 +32,9 @@ import {
 // 构建期 overlay 生效时，本文件的结构扫描结论无意义 → 硬失败（不跳过、不自动 restore）。
 requireOverlayRestored('structureGuards.test.mjs');
 
-const PAGE_SETTINGS = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'pages', 'Settings.ets');
+// mod-settings-root（old→new）：section 装配点随实现从 pages/Settings.ets 搬到组件宿主，
+// 断言（少传 / 多传都报）不变，只换锚点文件；根页现在是四行菜单，不再装配 section。
+const PAGE_SETTINGS = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'components', 'settings', 'SettingsHost.ets');
 // S4 外壳真值：装配（Home ↔ ShellRail）+ 两份页面清单登记。
 const PAGE_HOME = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'pages', 'Home.ets');
 const SHELL_RAIL = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'components', 'shell', 'ShellRail.ets');
@@ -56,7 +58,8 @@ const SECTION_FILES = [
  *
  * 这两条都是「只被 PageLayout 的 onBreakpointChange 布局回调写入」的半个断点字段：
  * 页面真正参与布局的是同一次回调里的另一个字段（Index 读 `contentWidth` 算栏宽、
- * Settings 读 `breakpoint` 选骨架），留下来的这个既没有渲染影响，也不拦保存。
+ * SchedulePane 依 `contentWidth` 决定主从），留下来的这个既没有渲染影响，也不拦保存。
+ * mod-settings-root 后 SettingsHost 的两个半断点字段已删除，不再需要白名单条目。
  * 之所以不直接删：回调签名 `(breakpoint, widthVp)` 是 PageLayout 定的，删一个字段要动
  * 组件的对外契约，属于另一件事；这里先用白名单把「新出现的死状态」挡住。
  */
@@ -66,11 +69,9 @@ const STATE_READ_ALLOWLIST = [
     field: 'breakpoint',
     reason: '只由 PageLayout.onBreakpointChange 写入；Index 的栏宽分支读 contentWidth，breakpoint 暂无消费者'
   },
-  {
-    file: 'main/ets/pages/Settings.ets',
-    field: 'contentWidth',
-    reason: '只由 PageLayout.onBreakpointChange 写入；Settings 的骨架分支读 breakpoint，contentWidth 暂无消费者'
-  },
+  // mod-settings-root：SettingsHost 的 `breakpoint` / `contentWidth` 随旧断点骨架一起删除
+  //（子页只有一层 Scroll、没有消费者），原来给 contentWidth 的白名单条目也一并移除，
+  // 不留过期白名单。下表只剩 Index 与 SchedulePane 两个真实半断点字段。
   {
     file: 'main/ets/pages/panes/SchedulePane.ets',
     field: 'breakpoint',
@@ -91,11 +92,13 @@ describe('结构断言：@State 至少被读一次 / issue 必须有渲染落点
     );
   });
 
-  test('死状态检查不会漏：临时把 contentWidth 从白名单里去掉必须被抓住（自测）', () => {
-    const { violations } = unreadStateFields(componentFiles(), STATE_READ_ALLOWLIST.filter((item) => item.field !== 'contentWidth'));
+  // mod-settings-root（old→new，不是放宽）：旧自测拿 SettingsHost.contentWidth 当样本；
+  // 该字段随旧断点骨架删除后，改用 Index.breakpoint（同类型「只写不读」字段）验证检查器有效性。
+  test('死状态检查不会漏：临时把 Index.breakpoint 从白名单里去掉必须被抓住（自测）', () => {
+    const { violations } = unreadStateFields(componentFiles(), STATE_READ_ALLOWLIST.filter((item) => !(item.file.endsWith('pages/Index.ets') && item.field === 'breakpoint')));
     assert.deepEqual(
       violations.map((item) => `${item.file} ${item.field}`),
-      ['main/ets/pages/Settings.ets contentWidth'],
+      ['main/ets/pages/Index.ets breakpoint'],
       '去掉白名单条目后必须只剩这一条死状态，否则检查本身失效了'
     );
   });
@@ -114,7 +117,8 @@ describe('结构断言：@State 至少被读一次 / issue 必须有渲染落点
     // deviceIdError / authorError / gitUsernameError 随 mod-settings-sync-min 删除）
     // + 2 个警告（identityWarning / attachmentWarning）
     // + 页面侧同类字段（lastSyncError / remoteUrlError）都要被扫到；删除控件后下限同步减。
-    const settingsFields = collectIssueFields(files).filter((item) => item.file.startsWith('main/ets/pages/Settings.ets'));
+    // mod-settings-root（old→new）：锚点从 pages/Settings.ets 换到实现宿主，字段集合与下限不变。
+    const settingsFields = collectIssueFields(files).filter((item) => item.file.startsWith('main/ets/components/settings/SettingsHost.ets'));
     // mod-settings-remote-dedupe：remoteUrlError 随远程组一起删除（6 = 3 内联错误 + 2 警告 + lastSyncError）
     assert.ok(settingsFields.length >= 6, `Settings 的校验类字段只剩 ${settingsFields.length} 个，检查范围疑似缩了`);
   });
@@ -219,9 +223,11 @@ describe('结构断言：@State 至少被读一次 / issue 必须有渲染落点
   });
 
   test('白名单过期要报错（防止只增不减）', () => {
+    // mod-settings-root（old→new）：deviceId 随实现搬到组件宿主，假白名单的文件锚点跟着改；
+    // 自测意图不变（一条「字段现在会被读」+ 一条「字段不存在」）。
     const stale = [
-      { file: 'main/ets/pages/Settings.ets', field: 'deviceId', reason: 'fake：这个字段其实会被读' },
-      { file: 'main/ets/pages/Settings.ets', field: 'noSuchField', reason: 'fake：这个字段不存在' }
+      { file: 'main/ets/components/settings/SettingsHost.ets', field: 'deviceId', reason: 'fake：这个字段其实会被读' },
+      { file: 'main/ets/components/settings/SettingsHost.ets', field: 'noSuchField', reason: 'fake：这个字段不存在' }
     ];
     const { violations } = unreadStateFields(componentFiles(), stale);
     const messages = violations.map((item) => `${item.field}: ${item.reason}`);
@@ -232,7 +238,9 @@ describe('结构断言：@State 至少被读一次 / issue 必须有渲染落点
   test('collectStateFields 覆盖到页面与组件（不是只扫一个文件；S4 追加外壳两文件）', () => {
     const fields = collectStateFields(componentFiles());
     const files = new Set(fields.map((item) => item.file));
-    assert.ok(files.has('main/ets/pages/Settings.ets'), '必须扫到 Settings 页面');
+    assert.ok(files.has('main/ets/pages/Settings.ets'), '必须扫到 Settings 四行根页');
+    // mod-settings-root：实现宿主搬到 components/settings，必须一并进死状态扫描范围。
+    assert.ok(files.has('main/ets/components/settings/SettingsHost.ets'), '必须扫到 SettingsHost 实现宿主');
     assert.ok(files.has('main/ets/pages/Index.ets'), '必须扫到 Index 页面');
     // S4：新增的两个文件必须进扫描范围（否则外壳的 @State 死状态检查等于没跑）。
     assert.ok(files.has('main/ets/pages/Home.ets'), '必须扫到新的外壳页 Home.ets');
@@ -269,11 +277,18 @@ describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
     }
   });
 
-  test('SG-S2 外壳登记进两份页面清单（main 9 页，harmony 为超集）', () => {
+  test('SG-S2 外壳登记进两份页面清单（mod-settings-root 后 main 12 页，harmony 13 页为超集）', () => {
     assert.ok(MAIN_PAGES.src.includes('pages/Home'), 'main main_pages.json 缺少 pages/Home');
     assert.ok(HARMONY_PAGES.src.includes('pages/Home'), 'harmony main_pages.json 缺少 pages/Home');
-    assert.equal(MAIN_PAGES.src.length, 9, 'main 清单应为 9 页（与 validate-app 的 pages 9 一致）');
+    // 旧断言 main 9 → 新 main 12（+ 三个设置子页）；不是放宽：页数与 validate-app 的 pages 计数
+    // 必须一致，且四个设置路由逐个钉住，harmony 13 必须是真超集。
+    assert.equal(MAIN_PAGES.src.length, 12, 'main 清单应为 12 页（与 validate-app 的 pages 12 一致）');
+    assert.equal(HARMONY_PAGES.src.length, 13, 'harmony 清单应为 13 页（原 10 + 三个设置子页）');
     assert.equal(new Set(MAIN_PAGES.src).size, MAIN_PAGES.src.length, 'main 清单不得重复');
+    for (const route of ['pages/Settings', 'pages/SettingsSync', 'pages/SettingsExportImport', 'pages/SettingsApi']) {
+      assert.ok(MAIN_PAGES.src.includes(route), `main 清单缺少 ${route}`);
+      assert.ok(HARMONY_PAGES.src.includes(route), `harmony 清单缺少 ${route}`);
+    }
     for (const entry of MAIN_PAGES.src) {
       assert.ok(HARMONY_PAGES.src.includes(entry), `harmony 清单必须是 main 的超集，缺少 ${entry}`);
     }

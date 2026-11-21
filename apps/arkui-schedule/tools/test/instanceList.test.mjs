@@ -283,11 +283,14 @@ describe('静态断言：页面、入口与存储接线', () => {
     assert.match(PAGE, /label: '重新添加'/);
   });
 
-  test('U-07 设置入口升级为「远程实例与云端对话 ›」且指向 pages/Instances', () => {
-    assert.match(SETTINGS, /Text\('远程实例与云端对话'\)/);
-    assert.match(SETTINGS, /router\.pushUrl\(\{ url: 'pages\/Instances' \}\)/);
+  // mod-settings-root（old→new，不比原来弱）：旧入口是长滚动里的一行「远程实例与云端对话 ›」；
+  // 现在是四行菜单中的「远程实例」行，摘要从实例数派生，仍指向同一个 pages/Instances 路由。
+  test('U-07 设置入口升级为四行菜单的「远程实例」行且指向 pages/Instances', () => {
+    assert.match(SETTINGS, /ROUTE_INSTANCES: string = 'pages\/Instances'/);
+    assert.match(SETTINGS, /this\.MenuRow\('远程实例', this\.instanceSummary, ROUTE_INSTANCES\)/);
+    assert.match(SETTINGS, /instanceStore\.list\(\)\.length/, '摘要必须是真实实例数');
     assert.equal(SETTINGS.includes("router.pushUrl({ url: 'pages/Chats' })"), false, '旧入口不得残留');
-    assert.match(SETTINGS, /this\.ChatEntryRow\(\)/);
+    assert.equal(SETTINGS.includes('远程实例与云端对话'), false, '旧入口文案已从根页移除');
   });
 
   test('U-08 store 的 ensureSeeded 幂等接线（比较信封、无变化不写盘）', () => {

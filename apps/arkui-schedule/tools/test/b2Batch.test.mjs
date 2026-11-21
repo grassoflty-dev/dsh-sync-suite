@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
-import { readSettingsPage } from './settingsSources.mjs';
+import { readSettingsRoot } from './settingsSources.mjs';
 
 const PANEL = readFileSync(
   new URL('../../entry/src/main/ets/components/ExportImportPanel.ets', import.meta.url),
@@ -20,7 +20,7 @@ const DATA = readFileSync(
   new URL('../../entry/src/main/ets/components/settings/DataSection.ets', import.meta.url),
   'utf8'
 );
-const PAGE = readSettingsPage();
+const PAGE = readSettingsRoot();
 
 /**
  * 剥掉块注释与行注释，但**保留字符串字面量里的 `//`**（避免把 URL / 文案误当注释）。
@@ -107,11 +107,7 @@ function assertOrdered(text, tokens, label) {
 
 const QUICK_ROW = bodyFrom(PANEL, 'QuickRangeRow() {');
 const BUILD = bodyFrom(PANEL, 'build() {');
-const JUMP = bodyFrom(PAGE, 'private jumpToGroup(');
-const ANCHOR_CHIP = bodyFrom(PAGE, 'GroupAnchorChip(label: string, index: number)');
-const ANCHOR_BAR = bodyFrom(PAGE, 'GroupAnchorBar() {');
-const COMPACT = bodyFrom(PAGE, 'CompactBody() {');
-const WIDE = bodyFrom(PAGE, 'WideBody() {');
+const ROOT_BUILD = bodyFrom(PAGE, 'build() {');
 
 // ---------------------------------------------------------------------------
 // 面板：导出区间快捷 chip（D4）—— chip 只写本地输入态，没有静默禁用，也不散落 new Date()。
@@ -220,117 +216,74 @@ describe('B2 面板 ExportImportPanel.ets：快捷 chip 的源码级契约', () 
 // ---------------------------------------------------------------------------
 // 设置页：仅紧凑屏的组锚点——真滚到目标组（pageScroller.scrollTo），未测量时 toast 说明原因。
 // ---------------------------------------------------------------------------
-describe('B2 设置页 Settings.ets（紧凑屏）：组锚点真跳转的源码级契约', () => {
-  test('B2-18 常量 ANCHOR_NOT_READY + 非 @State 的 groupOffsets + 三个新方法齐备', () => {
-    assert.match(
-      PAGE,
-      /const ANCHOR_NOT_READY: string = '页面还在排版，稍后再点一次';/,
-      '契约丢了：缺 ANCHOR_NOT_READY 常量或文案不符'
-    );
-    assert.match(
-      PAGE,
-      /private groupOffsets: number\[\] = \[-1, -1, -1, -1, -1\];/,
-      '契约丢了：groupOffsets 必须是 5 个 -1 的普通私有字段'
-    );
-    assert.equal(/@State\s+groupOffsets/.test(PAGE), false, '契约丢了：groupOffsets 不得是 @State（测量缓存无需触发重绘）');
-    assert.match(PAGE, /private lengthToVp\(value: Length \| undefined\): number/, '契约丢了：缺 lengthToVp');
-    assert.match(PAGE, /private measureGroup\(index: number, area: Area\): void/, '契约丢了：缺 measureGroup');
-    assert.match(PAGE, /private jumpToGroup\(index: number\): void/, '契约丢了：缺 jumpToGroup');
-  });
-
-  test('B2-19 jumpToGroup 用 pageScroller.scrollTo({ yOffset: offset, animation })，未测量则 toast，绝不只有 scrollEdge', () => {
-    assert.match(JUMP, /this\.pageScroller\.scrollTo\(\{/, '契约丢了：jumpToGroup 没调用 pageScroller.scrollTo');
-    assert.match(JUMP, /yOffset: offset/, '契约丢了：scrollTo 的 yOffset 必须取测到的 offset');
-    // 评审 P1-1：只钉「yOffset: offset」挡不住「把 offset 硬编码/按比例算」的假跳转，
-    // 必须钉住 offset 真的来自 onAreaChange 写入的测量缓存。
-    assert.match(
-      JUMP,
-      /const offset:\s*number\s*=\s*this\.groupOffsets\[index\];/,
-      '契约丢了：yOffset 必须来自测量缓存 this.groupOffsets[index]，不得硬编码/按比例算'
-    );
-    assert.equal(/yOffset:\s*\d/.test(JUMP), false, '契约丢了：不得把 offset 硬编码成数字字面量');
-    assert.match(JUMP, /animation:\s*\{\s*duration:\s*250\s*\}/, '契约丢了：滚动动画时长应为 250ms');
-    assert.match(JUMP, /offset < 0/, '契约丢了：未测量分支缺 offset < 0 判定');
-    assert.match(JUMP, /promptAction\.showToast\(\{ message: ANCHOR_NOT_READY \}\)/, '契约丢了：未测量分支缺 toast 原因');
-    assert.match(JUMP, /ANCHOR_NOT_READY/, '契约丢了：jumpToGroup 没引用 ANCHOR_NOT_READY');
-    assert.equal(JUMP.includes('scrollEdge'), false, '契约丢了：不能用 scrollEdge 冒充真跳转');
-  });
-
-  test('B2-20 GroupAnchorBar 五个标签按 同步/AI/远程/数据/关于 顺序，且恰好 5 次 GroupAnchorChip', () => {
-    assertOrdered(ANCHOR_BAR, ["'同步'", "'AI'", "'远程'", "'数据'", "'关于'"], 'GroupAnchorBar');
-    const chips = ANCHOR_BAR.match(/this\.GroupAnchorChip\(/g) ?? [];
-    assert.equal(chips.length, 5, '契约丢了：锚点行必须恰好五个 chip');
-  });
-
-  test('B2-21 锚点是原生 Button(label) + jumpToGroup(index)，不是 Text 点击，且无 .enabled(false)', () => {
-    assert.match(ANCHOR_CHIP, /Button\(label\)/, '契约丢了：锚点必须用原生 Button(label)');
-    assert.match(ANCHOR_CHIP, /this\.jumpToGroup\(index\)/, '契约丢了：锚点点击必须调 jumpToGroup(index)');
-    assert.match(ANCHOR_CHIP, /\.layoutWeight\(1\)/, '契约丢了：锚点必须等宽（layoutWeight(1)）');
-    assert.match(ANCHOR_CHIP, /\.height\(TOUCH_MIN\)/, '契约丢了：锚点命中区高度必须是 TOUCH_MIN');
-    for (const [name, slice] of [
-      ['GroupAnchorChip', ANCHOR_CHIP],
-      ['GroupAnchorBar', ANCHOR_BAR]
+// mod-settings-root（old → new，不比原来弱）：
+// 旧 B2-18..B2-25 钉的是「长滚动页面内 5 个组锚点 → pageScroller.scrollTo 真跳转」。
+// 该页面结构已由批准的设计整体替换成四行菜单 + 四个真实路由子页；实现文本连同旧 builder
+// 原样保留在 components/settings/SettingsHost.ets，由 settingsSources.readSettingsPage() 换锚点后
+// 逐字保留、没有删断言。这里把「页内滚动跳转」的契约改成「行级路由跳转」：
+// 旧：5 个 chip + scrollTo(offset) + 未测量 toast；
+// 新：恰好 4 行 + 每行一次 push(ROUTE_*) + 每行的摘要来自持久化状态 + 页脚版本。
+// 新契约更强：路由是真实可返回的导航（不是页内 offset），且摘要不能写死。
+describe('B2 设置根页 Settings.ets（四行菜单）：行级路由跳转的源码级契约', () => {
+  test('B2-18 四个路由常量指向真实子页，没有指回根页', () => {
+    for (const [name, route] of [
+      ['ROUTE_SYNC', 'pages/SettingsSync'],
+      ['ROUTE_INSTANCES', 'pages/Instances'],
+      ['ROUTE_DATA', 'pages/SettingsExportImport'],
+      ['ROUTE_API', 'pages/SettingsApi']
     ]) {
-      assert.equal(/\bText\(/.test(slice), false, `契约丢了：${name} 不得用 Text( 当按钮`);
-      assert.equal(slice.includes('.enabled(false)'), false, `契约丢了：${name} 不得静默禁用`);
+      assert.match(PAGE, new RegExp(`const ${name}: string = '${route.replaceAll('/', '\\/')}';`),
+        `契约丢了：${name} 必须指向 ${route}`);
     }
+    assert.equal(/ROUTE_[A-Z]+: string = 'pages\/Settings';/.test(PAGE), false, '子页路由不得指回根页造成循环');
   });
 
-  test('B2-22 CompactBody 顺序：Scroll → GroupAnchorBar → IssuesBanner → SyncGroup，五组埋点各一次(0..4)', () => {
-    assertOrdered(
-      COMPACT,
-      ['Scroll(this.pageScroller)', 'this.GroupAnchorBar()', 'this.IssuesBanner()', 'this.SyncGroup()'],
-      'CompactBody'
-    );
-    const calls = COMPACT.match(/this\.measureGroup\(\d+,/g) ?? [];
-    assert.equal(calls.length, 5, `契约丢了：measureGroup 调用应恰好 5 次，实际 ${calls.length}`);
-    for (let index = 0; index < 5; index += 1) {
-      assert.equal(
-        calls.filter((call) => call === `this.measureGroup(${index},`).length,
-        1,
-        `契约丢了：measureGroup(${index}, ...) 必须恰好一次`
-      );
-    }
-    // mod-settings-remote-dedupe（old→new）：旧断言钉住 ChatEntryRow 在紧凑屏里**裸调用**；
-    // 现在唯一入口行收进 RemoteGroup（RemoteGroup 本身只剩这一行），断言改钉「调用一次 + 组内一行」。
-    assert.equal((COMPACT.match(/this\.RemoteGroup\(\)/g) ?? []).length, 1, '紧凑屏应恰好调用一次 RemoteGroup（唯一入口组）');
-    const PAGE_SRC = readSettingsPage();
-    const remoteGroup = PAGE_SRC.slice(PAGE_SRC.indexOf('RemoteGroup() {'), PAGE_SRC.indexOf('DataGroup() {'));
-    assert.equal((remoteGroup.match(/this\.ChatEntryRow\(\)/g) ?? []).length, 1, 'RemoteGroup 只渲染一行入口，不能重复');
+  test('B2-19 四行按 同步仓库 / 远程实例 / 数据导入导出 / API 配置 顺序，且恰好 4 次 MenuRow', () => {
+    assertOrdered(ROOT_BUILD, [
+      "this.MenuRow('同步仓库'",
+      "this.MenuRow('远程实例'",
+      "this.MenuRow('数据导入导出'",
+      "this.MenuRow('API 配置'"
+    ], 'Settings.build()');
+    const rows = PAGE.match(/this\.MenuRow\(/g) ?? [];
+    assert.equal(rows.length, 4, `契约丢了：根页恰好四行，实际 ${rows.length}`);
   });
 
-  test('B2-23 WideBody 完全没被锚点污染，五个组的调用仍在', () => {
-    for (const token of ['GroupAnchorBar', 'measureGroup', 'onAreaChange']) {
-      assert.equal(WIDE.includes(token), false, `契约丢了：宽屏骨架不得出现 ${token}（只改紧凑屏）`);
-    }
-    for (const group of ['SyncGroup', 'AiGroup', 'RemoteGroup', 'DataGroup', 'AboutGroup']) {
-      assert.ok(WIDE.includes(`this.${group}()`), `契约丢了：宽屏仍须调用 this.${group}()`);
-    }
-  });
-
-  test('B2-24 宽窄两套骨架都以 this.SaveButton() 收尾（Scroll 在前、保存按钮在后）', () => {
-    for (const [name, slice] of [
-      ['CompactBody', COMPACT],
-      ['WideBody', WIDE]
+  test('B2-20 每行都接自己的摘要状态并真的 push 对应路由', () => {
+    for (const [title, summary, route] of [
+      ['同步仓库', 'repoSummary', 'ROUTE_SYNC'],
+      ['远程实例', 'instanceSummary', 'ROUTE_INSTANCES'],
+      ['数据导入导出', 'dataSummary', 'ROUTE_DATA'],
+      ['API 配置', 'apiSummary', 'ROUTE_API']
     ]) {
-      const scrollIndex = slice.indexOf('Scroll(this.pageScroller)');
-      const saveIndex = slice.lastIndexOf('this.SaveButton()');
-      assert.ok(scrollIndex >= 0, `${name}：缺 Scroll(this.pageScroller)`);
-      assert.ok(saveIndex > scrollIndex, `${name}：SaveButton 必须排在 Scroll 之后`);
-      assert.equal(
-        /(?:Sync|Ai|Remote|Data|About)Group\(\)/.test(slice.slice(saveIndex)),
-        false,
-        `${name}：SaveButton 之后不得再有组调用（必须收尾）`
-      );
+      assert.match(PAGE, new RegExp(`this\\.MenuRow\\('${title}', this\\.${summary}, ${route}\\)`),
+        `契约丢了：「${title}」行没有接摘要 / 路由`);
     }
+    assert.match(PAGE, /private push\(route: string\): void/, '跳转必须集中在 push()');
+    assert.match(PAGE, /router\.pushUrl\(\{ url: route \}\)/, 'push() 必须真的调用 router.pushUrl');
   });
 
-  test('B2-25 交互一致性（STATE-UI）：锚点无 .enabled(，未测量分支给中文 toast，不是静默吞点击', () => {
-    assert.equal(ANCHOR_CHIP.includes('.enabled('), false, '契约丢了：锚点不得出现任何 .enabled( 静默禁用');
-    assert.match(
-      JUMP,
-      /if \(offset < 0\) \{[\s\S]*?promptAction\.showToast\(\{ message: ANCHOR_NOT_READY \}\)/,
-      '契约丢了：未测量（offset < 0）分支必须给中文 toast 说明原因'
-    );
+  test('B2-21 行是 Row + onClick，命中区 ≥ TOUCH_MIN，无 .enabled(false) 静默禁用', () => {
+    const row = bodyFrom(PAGE, 'MenuRow(title: string, summary: string, route: string) {');
+    assert.match(row, /Row\(\{ space: SPACING\.sm \}\)/, '行必须是 Row');
+    assert.match(row, /\.onClick\(\(\) => \{\s*this\.push\(route\);/, '点击必须调 push(route)');
+    assert.match(row, /\.minHeight\(TOUCH_MIN \+ SPACING\.md\)/, '命中区必须 ≥ TOUCH_MIN');
+    assert.equal(row.includes('.enabled(false)'), false, '行不得静默禁用');
+    assert.match(ROOT_BUILD, /Scroll\(\)/, '四行必须放在自己的 Scroll 里');
+  });
+
+  test('B2-22 摘要来自持久化状态，不是写死的假状态', () => {
+    assert.match(PAGE, /await settingsStore\.load\(\)/, '根页必须读 settingsStore 才能给同步 / API 摘要');
+    assert.match(PAGE, /syncRowSummary\(settings\.lastSyncAt, settings\.lastSyncError\)/, '同步摘要来源');
+    assert.match(PAGE, /instanceStore\.list\(\)\.length/, '实例计数来源');
+    assert.match(PAGE, /dataRowSummary\(/, '数据行摘要来源');
+    assert.match(PAGE, /apiRowSummary\(/, 'API 行摘要来源');
+  });
+
+  test('B2-23 页脚只有版本信息，根页不渲染任何 section body', () => {
+    assert.match(ROOT_BUILD, /关于 · v\$\{APP_VERSION\}/, '保留版本页脚');
+    for (const token of ['SyncSection(', 'AiSection(', 'DataSection(', 'AboutSection(', 'ExportImportPanel(']) {
+      assert.equal(PAGE.includes(token), false, `根页不得渲染 ${token}`);
+    }
   });
 });

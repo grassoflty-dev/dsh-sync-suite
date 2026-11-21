@@ -8,9 +8,10 @@
 // 已 retarget 到这里的「已删除 + 静默默认值」口径，不是简单删除。
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { readSettingsFile, readSettingsSources } from './settingsSources.mjs';
+import { readSettingsFile, readSettingsPage, readSettingsSources } from './settingsSources.mjs';
 
-const PAGE = readSettingsFile('pages/Settings.ets');
+// mod-settings-root（old→new）：业务实现从 pages/Settings.ets 搬到组件宿主，断言不变。
+const PAGE = readSettingsPage();
 const SYNC = readSettingsFile('components/settings/SyncSection.ets');
 const SOURCES = readSettingsSources();
 

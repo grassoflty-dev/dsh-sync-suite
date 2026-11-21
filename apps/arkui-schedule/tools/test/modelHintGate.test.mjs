@@ -10,10 +10,11 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, test } from 'node:test';
-import { readSettingsFile, readSettingsSources } from './settingsSources.mjs';
+import { readSettingsFile, readSettingsPage, readSettingsSources } from './settingsSources.mjs';
 
 const AI_SECTION = readSettingsFile('components/settings/AiSection.ets');
-const PAGE = readSettingsFile('pages/Settings.ets');
+// mod-settings-root（old→new）：锚点随实现搬到组件宿主；断言逐字保留。
+const PAGE = readSettingsPage();
 const SOURCES = readSettingsSources();
 
 const BUILT = fileURLToPath(new URL('../.build/model/aiProvider.js', import.meta.url));

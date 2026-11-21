@@ -5,10 +5,16 @@
 // 不算用户可见文案，故意不扫——v2 的导出/导入是保留的产品功能，只是不再用版本号包装它。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readSettingsFile, readSettingsSources } from './settingsSources.mjs';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { ETS_ROOT, readSettingsFile, readSettingsPage, readSettingsRoot, readSettingsSources } from './settingsSources.mjs';
 
 const FILES = [
   'pages/Settings.ets',
+  'pages/SettingsSync.ets',
+  'pages/SettingsExportImport.ets',
+  'pages/SettingsApi.ets',
+  'components/settings/SettingsHost.ets',
   'components/settings/SettingsBits.ets',
   'components/settings/SyncSection.ets',
   'components/settings/AiSection.ets',
@@ -136,7 +142,9 @@ function withoutComments(source) {
 test('C3 备份节已删、媒体能力并入主流程（没有孤儿 props/handlers）', () => {
   const panel = withoutComments(readSettingsFile('components/ExportImportPanel.ets'));
   const data = withoutComments(readSettingsFile('components/settings/DataSection.ets'));
-  const page = withoutComments(readSettingsFile('pages/Settings.ets'));
+  // mod-settings-root（old→new）：实现从 pages/Settings.ets 搬到组件宿主，正文文本不变；
+  // 断言跟着代码换锚点，仍钉住同一条「主流程完整包导出 / 试算 / 落盘」契约。
+  const page = withoutComments(readSettingsPage());
   for (const [name, source] of [['panel', panel], ['data', data], ['page', page]]) {
     for (const token of [
       'V2Section', '日程备份', '导出备份', '选择备份并试算', '确认导入备份',
@@ -166,4 +174,66 @@ test('C4 AI 配置无「高级」按钮与手输模型名文案，预设服务/�
   assert.match(ai, /Text\('服务'\)/, '服务下拉行仍在');
   assert.match(ai, /Text\('模型'\)/, '模型下拉行仍在');
   assert.match(ai, /this\.FieldLabel\('接口地址 baseURL'\)/, '自定义源接口地址仍在');
+});
+
+// ---------------------------------------------------------------- mod-settings-root
+//
+// 旧断言组（组锚点 5 段、长滚动五组）随实现迁到 SettingsHost，原来的文本断言在
+// readSettingsPage() 换锚点后逐字保留、没有删。下面三条是新增的正向断言，钉住新结构：
+// C5 四行 + 摘要来源（不是「只有四个字」的空壳），C6 根页不渲染任何 section body，
+// C7 四个路由在两份 main_pages.json 都登记（页数 12 / 13 与 validate-app 一致）。
+// 设置入口唯一性继续由 uiTokens.test.mjs 的 U-S4 `settingsPushFiles() === ['Home.ets']` 钉住，
+// 本文件不重复、也不放宽那条断言。
+
+test('C5 根页恰好四行菜单：标题 / 摘要来源 / 页脚版本号', () => {
+  const root = readSettingsRoot();
+  assert.equal((root.match(/this\.MenuRow\(/g) ?? []).length, 4, '根页只能有四行菜单');
+  for (const [title, summary, route] of [
+    ['同步仓库', 'repoSummary', 'ROUTE_SYNC'],
+    ['远程实例', 'instanceSummary', 'ROUTE_INSTANCES'],
+    ['数据导入导出', 'dataSummary', 'ROUTE_DATA'],
+    ['API 配置', 'apiSummary', 'ROUTE_API']
+  ]) {
+    assert.match(root, new RegExp(`this\\.MenuRow\\('${title}', this\\.${summary}, ${route}\\)`),
+      `缺少「${title}」行或其摘要接线`);
+  }
+  // 摘要来源必须读真实持久化状态，不允许写死文案。
+  assert.match(root, /syncRowSummary\(settings\.lastSyncAt, settings\.lastSyncError\)/, '同步行摘要来源');
+  assert.match(root, /repoHostOf\(settings\.repoUrl\)/, '同步行的仓库主机来源');
+  assert.match(root, /instanceStore\.list\(\)\.length/, '实例行计数来源');
+  assert.match(root, /dataRowSummary\(/, '数据行摘要来源');
+  assert.match(root, /LAST_EXPORT_AT_KEY/, '导出时刻键');
+  assert.match(root, /LAST_IMPORT_AT_KEY/, '导入时刻键');
+  assert.match(root, /apiRowSummary\(/, 'API 行摘要来源');
+  assert.match(root, /关于 · v\$\{APP_VERSION\}/, '页脚保留版本信息');
+});
+
+test('C6 根页不渲染任何 section body（也不直接挂实现宿主）', () => {
+  const root = withoutComments(readSettingsRoot());
+  for (const token of [
+    'SyncSection(', 'AiSection(', 'DataSection(', 'AboutSection(',
+    'ExportImportPanel(', 'SettingsHost(', 'ChatEntryRow('
+  ]) {
+    assert.equal(root.includes(token), false, `根页不得渲染 ${token}`);
+  }
+  // 旧五组锚点也绝不在根页复活：那会退回长滚动、破坏四行菜单。
+  for (const token of ['CompactBody()', 'WideBody()', 'GroupAnchorBar()', 'SaveButton()']) {
+    assert.equal(root.includes(`this.${token}`), false, `根页不得调用 ${token}`);
+  }
+});
+
+test('C7 四个子路由 + Instances 在两份页面清单都登记（main 12 / harmony 13）', () => {
+  const readPages = (relative) => JSON.parse(readFileSync(join(ETS_ROOT, '..', 'resources', relative), 'utf8')).src;
+  const main = readPages('base/profile/main_pages.json');
+  const harmony = readPages('../../harmony/resources/base/profile/main_pages.json');
+  for (const route of [
+    'pages/Settings', 'pages/SettingsSync', 'pages/SettingsExportImport',
+    'pages/SettingsApi', 'pages/Instances'
+  ]) {
+    assert.ok(main.includes(route), `main 清单缺少 ${route}`);
+    assert.ok(harmony.includes(route), `harmony 清单缺少 ${route}`);
+  }
+  assert.equal(main.length, 12, 'main 清单应为 12 页（原 9 + 三个设置子页）');
+  assert.equal(harmony.length, 13, 'harmony 清单应为 13 页（原 10 + 三个设置子页）');
+  assert.equal(new Set(main).size, main.length, 'main 清单不得重复登记');
 });

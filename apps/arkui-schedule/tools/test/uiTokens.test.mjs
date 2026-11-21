@@ -534,3 +534,26 @@ test('U-S4 外壳只有一个设置出口：rail 齿轮 + 父页 openSettings，
   // 旧断言「Index 页头唯一动作 ⚙ 设置」→ 新断言：日程面板页头无设置动作（去重）。
   assert.equal(/headerActionTwo|onHeaderActionTwo/.test(INDEX_CODE), false, '日程面板页头不得有设置动作')
 })
+
+// mod-settings-root（新增，不替代 U-S4）：U-S4 的 `settingsPushFiles() === ['Home.ets']`
+// 一字未改，仍钉住「rail 齿轮是全外壳唯一设置入口」。这里只补新文件的反向断言：
+// 四行根页 push 的是四个子页、子页只 back，没有任何一处重新 push `pages/Settings`。
+test('U-S5 设置四行根页与三个子页都不新增设置入口（U-S4 仍是唯一性判据）', () => {
+  const roots = ['Settings.ets', 'SettingsSync.ets', 'SettingsExportImport.ets', 'SettingsApi.ets']
+    .map((name) => [name, stripComments(readFileSync(new URL(`../../entry/src/main/ets/pages/${name}`, import.meta.url), 'utf8'))])
+  for (const [name, code] of roots) {
+    assert.equal(/router\.pushUrl\(\{\s*url:\s*'pages\/Settings'\s*\}\)/.test(code), false,
+      `${name} 不得再次 push 设置根页（唯一入口仍是 rail 齿轮）`)
+  }
+  assert.deepEqual(settingsPushFiles(), ['Home.ets'],
+    'U-S4 不削弱：外壳 + 四面板里 Settings push 仍恰好一处、位于 Home.ets')
+  for (const [name, section, title] of [
+    ['SettingsSync.ets', 'sync', '同步仓库'],
+    ['SettingsExportImport.ets', 'data', '数据导入导出'],
+    ['SettingsApi.ets', 'api', 'API 配置']
+  ]) {
+    const code = roots.find(([file]) => file === name)[1]
+    assert.match(code, new RegExp(`SettingsHost\\(\\{ section: '${section}', pageTitle: '${title}' \\}\\)`),
+      `${name} 必须是复用同一宿主的薄壳`)
+  }
+})

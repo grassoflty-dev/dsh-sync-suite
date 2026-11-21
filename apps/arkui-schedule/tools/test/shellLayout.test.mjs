@@ -84,11 +84,12 @@ function contentStackBody() {
 }
 
 describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
-  test('L-01 外壳页存在且登记进两份页面清单（main 9 页，harmony 为超集）', () => {
+  test('L-01 外壳页存在且登记进两份页面清单（mod-settings-root 后 main 12 页，harmony 13 页为超集）', () => {
     assert.ok(HOME.length > 0, 'pages/Home.ets 必须有内容');
     assert.ok(MAIN_PAGES.src.includes('pages/Home'), 'main main_pages.json 缺少 pages/Home');
     assert.ok(HARMONY_PAGES.src.includes('pages/Home'), 'harmony main_pages.json 缺少 pages/Home');
-    assert.equal(MAIN_PAGES.src.length, 9, 'main 页面清单应为 9 页（validate-app 的 pages 计数）');
+    // 旧断言 9 → 新 12（+ 三个设置子页）；页数与 validate-app 的 pages 计数保持一致。
+    assert.equal(MAIN_PAGES.src.length, 12, 'main 页面清单应为 12 页（validate-app 的 pages 计数）');
     assert.equal(new Set(MAIN_PAGES.src).size, MAIN_PAGES.src.length, 'main 清单不得重复登记');
     for (const entry of MAIN_PAGES.src) {
       assert.ok(HARMONY_PAGES.src.includes(entry), `harmony 清单必须是 main 的超集，缺少 ${entry}`);
@@ -328,8 +329,9 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.equal(ENTRY_ABILITY.includes("loadContent('pages/Index'"), false, '入口不得再指向旧首页');
     assert.ok(MAIN_PAGES.src.includes('pages/Index'), 'main 清单必须保留 fallback 路由 pages/Index');
     assert.ok(HARMONY_PAGES.src.includes('pages/Index'), 'harmony 清单必须保留 fallback 路由 pages/Index');
-    assert.equal(MAIN_PAGES.src.length, 9, 'main 页面数仍为 9（不新增/删除页面）');
-    assert.equal(HARMONY_PAGES.src.length, 10, 'harmony 页面数仍为 10（main 的超集）');
+    // mod-settings-root（old→new）：仍钉「入口是 Home、Index 是 fallback」，页数按新增三个设置子页上调。
+    assert.equal(MAIN_PAGES.src.length, 12, 'main 页面数应为 12（原 9 + 三个设置子页）');
+    assert.equal(HARMONY_PAGES.src.length, 13, 'harmony 页面数应为 13（main 的超集）');
   });
 
   test('L-18 日程真 body：SchedulePane 拥有两 tab / 搜索 / 汇总 / 撤销 / 加权列表', () => {

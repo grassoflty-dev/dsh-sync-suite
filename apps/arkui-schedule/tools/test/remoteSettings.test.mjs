@@ -12,7 +12,7 @@ import { existsSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, test } from 'node:test';
-import { readSettingsFile, readSettingsSources } from './settingsSources.mjs';
+import { readSettingsFile, readSettingsPage, readSettingsSources } from './settingsSources.mjs';
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -27,7 +27,8 @@ registerHooks({
   }
 });
 
-const PAGE = readSettingsFile('pages/Settings.ets');
+// mod-settings-root（old→new）：远程入口行随实现搬到组件宿主，断言不变、只换锚点。
+const PAGE = readSettingsPage();
 const SOURCES = readSettingsSources();
 const STORE = readSettingsFile('services/settingsStore.ets');
 const SEED = readSettingsFile('model/instanceSeed.ts');

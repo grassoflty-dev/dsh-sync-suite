@@ -21,8 +21,18 @@ export function readSettingsFile(relative) {
   return readFileSync(join(ETS_ROOT, relative), 'utf8');
 }
 
-/** 设置页本体（装配 + 全部 @State + 业务方法 + 五个弹层）。 */
+/**
+ * 设置业务本体的锚点（mod-settings-root 旧 → 新）：
+ * 旧 `pages/Settings.ets` 是长滚动实现；现在该文件是四行菜单根页，
+ * 全部 @State / 业务方法 / 五个弹层 / 旧 builder 原样搬到 `components/settings/SettingsHost.ets`。
+ * 这里跟着代码换锚点，断言本身不变、也不放宽：文件里仍是同一份实现文本。
+ */
 export function readSettingsPage() {
+  return readSettingsFile('components/settings/SettingsHost.ets');
+}
+
+/** 四行菜单根页（新文件；只放菜单与页脚，不渲染任何 section body）。 */
+export function readSettingsRoot() {
   return readSettingsFile('pages/Settings.ets');
 }
 
@@ -55,6 +65,7 @@ export function readSettingsBits() {
 export function readSettingsSources() {
   const files = [
     'pages/Settings.ets',
+    'components/settings/SettingsHost.ets',
     'components/settings/SettingsBits.ets',
     'components/settings/SyncSection.ets',
     'components/settings/AiSection.ets',

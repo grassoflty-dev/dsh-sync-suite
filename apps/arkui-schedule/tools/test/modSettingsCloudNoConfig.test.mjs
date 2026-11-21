@@ -4,9 +4,11 @@
 // ③ 列表仍然从 git 工作副本的 chats/index.jsonl 读数据（没有把功能一起删掉）。
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { readSettingsFile, readSettingsSources } from './settingsSources.mjs';
+import { readSettingsFile, readSettingsPage, readSettingsSources } from './settingsSources.mjs';
 
-const PAGE = readSettingsFile('pages/Settings.ets');
+// mod-settings-root（old→new）：入口行随实现从 pages/Settings.ets 搬到组件宿主；
+// 本用例只查「导航入口里没有配置控件」，断言不变，只换锚点。
+const PAGE = readSettingsPage();
 const SOURCES = readSettingsSources();
 const STORE = readSettingsFile('services/settingsStore.ets');
 const CHATS = readSettingsFile('pages/Chats.ets');

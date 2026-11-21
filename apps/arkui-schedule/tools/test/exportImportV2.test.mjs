@@ -89,8 +89,9 @@ const PANEL = readFileSync(
   new URL('../../entry/src/main/ets/components/ExportImportPanel.ets', import.meta.url),
   'utf8'
 ).replace(/\r\n/g, '\n');
+// mod-settings-root（old→new）：锚点从 pages/Settings.ets 换到组件宿主，断言不变。
 const SETTINGS = readFileSync(
-  new URL('../../entry/src/main/ets/pages/Settings.ets', import.meta.url),
+  new URL('../../entry/src/main/ets/components/settings/SettingsHost.ets', import.meta.url),
   'utf8'
 ).replace(/\r\n/g, '\n');
 
