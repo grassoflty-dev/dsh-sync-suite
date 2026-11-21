@@ -1,6 +1,6 @@
 # Plugin writer review (r4 — final gate)
 
-> **Provenance:** dispatched to an independent read-only reviewer; it overran its 5-minute time-box without writing a file, so the Designer executed this checklist directly (Lead-authorised). Every claim below was verified against the current tree by reading the source and running the gates; the independent reviewer's separate file for this round does not exist.
+> **Provenance:** dispatched to an independent read-only reviewer; it overran its 5-minute time-box without writing a file, so the Designer executed this checklist directly (Lead-authorised). Every claim below was verified against the current tree by reading the source and running the gates; the independent reviewer's separate file for this round does not exist. 文中的 “HEAD `cc146ac`” 指**被评审的模块提交**，不是评审时的树 HEAD（评审时树 HEAD 为 `5ab478e`，`cdd2fce` 在 HEAD~2）。
 
 ## Verdict
 
