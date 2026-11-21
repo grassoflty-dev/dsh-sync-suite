@@ -1675,6 +1675,33 @@ GATE_VALIDATE_EXIT=0                 # ✅ 全部通过：8/8（relative 459 / m
 
 **unverified**：横屏 2560×1600 真机布局（设备物理竖屏、无旋转命令）；远程 DSH 面板内实例列表（FAILED，待后续模块）；真实 Git push/pull 与「已同步·HH:MM」；chat takeover；OCR/手写端到端；插件 live；签名材料 v1 回退（泄漏密钥）处置；§15.13/§15.14 其余项。
 
+### 15.16a 远程 DSH 面板落真：构建 / 签名 / 装机 / re-smoke（2026-11-21，`instances-device` 独立复验；追加于 §15.16 之后，不改写 §15.1–§15.16）
+
+> 本节由 `instances-device` 在并行 lane 已写入 §15.16（提交 `b7b875c`）后追加，作为独立的第二遍构建/签名/装机/面板复验；两节签名 HAP 的 SHA256 不同系每次离线签名的时戳差异，装机链路与面板结论一致。为避免小节号重复，编号写作 15.16a。
+
+**交付树与构建判定**：`git rev-parse HEAD` = `fc6dfd77cf6771f7b1f4d222c0777084a444021a`，改动前 `git status --porcelain` 干净。unsigned HAP `apps/arkui-schedule/entry/build/default/outputs/default/entry-default-unsigned.hap` mtime `2026-11-21T14:00:47+08:00`，新于 tracked 源码最新 mtime `2026-11-21T13:45:43+08:00`（`tools/test/paneLayout.test.mjs`）→ **跳过重建**；沿用 `.build-logs/build-20261121-134723.log`（逐字 `BUILD SUCCESSFUL in 12 min 15 s 54 ms`），未出现 `overlay.mjs status applied=true` 的 stall，故未执行 restore。
+
+**签名链（显式声明）**：同一次构建日志逐字打印 `hvigor WARN: No signingConfig found for product default` —— hvigor 的 `default` product **没有签名配置**，`entry-default-unsigned.hap` 未签名、不能装机。真机装的**不是**这份 unsigned 构建产物，而是 `sign-hap.ps1` 对它离线签名、`-Deliver` 到 `apps/arkui-schedule/dist-harmony/arkui-schedule-harmony-debug-signed.hap` 的那份。链路 = 构建产物 unsigned HAP → `hap-sign-tool.jar sign-app` → 交付 HAP → `hdc install -r`。签名用 `-ExecutionPolicy Bypass` + `$env:JAVA_HOME='D:\jdk17\jdk-17'` + `$env:SIGN_PASS='itwill123'`；v2 材料缺 `.cer`/`.p7b`，脚本告警 `falling back to v1 (LEAKED KEY)`，证书链 Huawei CBG Root CA G2 → Huawei CBG Developer Relations CA G2 → 调试叶证书（有效期至 2027-11-15）。工具输出逐字 `Sign Hap success!` / `sign-app success` / `verify-app success` / `verify: Verify success`。交付 HAP **4,900,124 B，SHA256=318FDDA591F3E1C94E9AE5D2EEE5EFC63B65BF1A13135AA8A2AFB1A0FD81616F**。
+
+**装机 / 启动**：`hdc tconn 192.168.1.7:33023`（全程 `-t 192.168.1.7:33023`），每次注入前 `aa force-stop com.oray.sunloginclient` + `power-shell wakeup` + 解锁上滑；`install -r` → `install bundle successfully`；`aa start -a EntryAbility -b com.itwill.schedule` → `start ability successfully`。启动仍是 `pages/Home` 外壳 dots 节（`dots` / `新建对话（dots 尚未接线）` / `dots 尚未接线`）。
+
+**远程 DSH 面板 re-smoke**（`uitest dumpLayout -p` + `uitest screenCap -p`，证据 `.tmp/device-shots/instances-pane-*`）：
+
+| 项 | 判定 | 逐字证据 / 截图 |
+| --- | --- | --- |
+| 外壳进入远程 DSH | **PASS** | 页脚轨道 `Text [远程 DSH]`（选中，bounds `[166,361][542,418]`）；面板页头 `Text [远程 DSH]` `[608,878][1218,944]` + `Text [添加实例]` `[1218,863][1390,958]` + `Text [云端对话]` `[1390,863][1562,958]`。`instances-pane-01-launch.png/.json`、`instances-pane-02-remote-pane.png/.json` |
+| 本机首行 + 字段 | **PASS** | `Text [共 2 个实例]`；`Text [本机（默认）]` `[608,1092][1290,1149]` 先于 `Text [远程实例]` `[608,1404][1290,1461]`；本机附 `局域网直连` / `未知` / `未知 · 暂无记录`。`instances-pane-02-remote-pane.png/.json` |
+| 远程行 name/mode/reachability/打码 URL | **PASS** | `Text [远程实例]` / `Text [手动填地址]` / `Text [未知]` / `Text [未知 · 暂无记录]` / `Text [http://192.168.1.6:3080/]`；全部 dump grep `token=[A-Za-z0-9_-]{4,}` 无命中，URL **无 token**。`instances-pane-02-remote-pane.png/.json` |
+| 打开/编辑/删除三动作，本机无删除 | **PASS** | 本机行只有 `Button [打开]` `[608,1225][761,1320]` + `Button [编辑]` `[780,1225][933,1320]`；远程行另有 `Button [删除]` `[952,1584][1105,1679]`。`instances-pane-02-remote-pane.png/.json` |
+| 本机编辑无 URL 框 / 远程编辑有 | **PASS** | 本机点「编辑」得 `Text [编辑实例]` + `TextInput [本机（默认）] hint=[实例名称]` + `保存`/`取消`，**无** URL 输入框与 Select；远程点「编辑」得 `TextInput [远程实例]` + `TextInput [http://192.168.1.6:3080/] hint=[http://192.168.1.6:3080/?token=…]`。`instances-pane-03-local-edit.png/.json`、`instances-pane-04-remote-edit.png/.json`；已点「取消」还原，`instances-pane-05-final.png/.json` 恢复两行 |
+| 空态（无远程时） | **PASS（静态守卫；真机未触发）** | `InstancesPane.ets:606` 仅 `this.views.length === 0` 走 `EmptyView()`；文案为 `还没有可管理的 DSH 实例` + 电脑 DSH 显示二维码与链接的指引 + `添加实例` + `用浏览器打开`，无占位口吻。当前播种了 1 条远程，删除会丢原行令牌，故未为看空态而破坏设备状态 |
+| typed `lastProblem()` 行 | **PASS** | `InstancesPane.ets:384` 仅 `this.problem !== 'ok'` 渲染 `ProblemRow()`；当前 `lastProblem()='ok'`，dump 中无 typed 原因文案、无 `重新添加` 动作，grep `重新添加` 无命中。`instances-pane-02-remote-pane.png/.json`、`instances-pane-05-final.png/.json` |
+| 占位文案绝迹 | **PASS** | 全部 5 份 dump grep `即将迁入` / `远程面板即将迁入` 均无命中；页头是真实 `添加实例` / `云端对话` 动作，不是 disabled 的「添加实例（远程面板即将迁入）」。§15.15 的 2b **FAILED** 已翻转为本项 **PASS** |
+
+**git status --porcelain**：任务开始时在 `fc6dfd7` 干净；执行期间并行 lane 提交 `b7b875c`（其内容即上方 §15.16），并留下 `apps/arkui-schedule/tools/build-harmony.ps1`（M）及 `SettingsHost.ets` / `settingsMenu.ts` / `overlay-restore-status.mjs` / `overlay-restore.ps1` / `overlayRestoreTimeout.test.mjs` / `settingsMenu.test.mjs`（??）等**非本模块**改动。本 lane 未改源码、未提交，工作区差异中属于本 lane 的只有 `docs/VERIFICATION.md`（`.tmp/` 被 gitignore，证据脚本与截图不入仓）。
+
+**unverified**：横屏 2560×1600 真机布局（设备物理竖屏、无软件旋转手段，landscape 保持未验证）；空态与 typed 问题行的真机触发（需破坏性改设备数据，改以源码条件守卫 + 当前无问题行的 dump 佐证）。
+
 ### 15.16 远程 DSH 面板落真：构建 / 签名 / 装机 / 面板 re-smoke（2026-11-21，`mod-shell-instances-pane`；只追加，不改写 §15.1–§15.15）
 
 **结论**：§15.15 唯一 FAILED 项「2b 远程 DSH 实例列表」**翻转为 PASS**。真实正文已迁入 `pages/panes/InstancesPane.ets`（609 行），`pages/Instances.ets`（20 行）只装配同一面板作 `@Entry` 路由壳（单一事实来源）；两个入口（外壳轨 / 设置页）都显示同一份列表。占位串 `远程面板即将迁入` 已从源码与真机 dump 中绝迹。
