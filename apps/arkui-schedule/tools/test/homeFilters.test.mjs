@@ -13,7 +13,8 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { describe, test } from 'node:test';
 
 const HERE = new URL('./', import.meta.url);
-const INDEX_PATH = new URL('../../entry/src/main/ets/pages/Index.ets', import.meta.url);
+// S3：日程契约锚点从 fallback 路由 pages/Index.ets 移到真 body 所在的日程面板。
+const INDEX_PATH = new URL('../../entry/src/main/ets/pages/panes/SchedulePane.ets', import.meta.url);
 const QUERY_PATH = new URL('../../entry/src/main/ets/model/query.ts', import.meta.url);
 const TIMELINE_PATH = new URL('../../entry/src/main/ets/services/timelineStore.ets', import.meta.url);
 const DEVICE_ACCEPT_PATH = new URL('../device-accept.mjs', import.meta.url);
@@ -134,7 +135,7 @@ describe('mod-home-filters-2 · 控制集恰好两 tab，开关彻底删除', ()
     const source = readFileSync(INDEX_PATH, 'utf8');
     for (const dead of ['QuickRecordBar', 'QuickRecordRow', 'quickBusy', 'submitQuickRecord',
       'defaultAuthorOrMe', '快速记一条', '回车保存', '已记下']) {
-      assert.equal(source.includes(dead), false, `Index.ets 不应再出现快捷记录痕迹：${dead}`);
+      assert.equal(source.includes(dead), false, `SchedulePane.ets 不应再出现快捷记录痕迹：${dead}`);
     }
     assert.ok(INDEX.includes("Button('新建')"), '唯一创建入口「新建」必须仍在');
   });
@@ -159,7 +160,7 @@ describe('mod-home-filters-2 · 控制集恰好两 tab，开关彻底删除', ()
 
   test('首页 UI 源码不含被删控件名（旧状态 chip / 旧跨日 tab / 开关文案）', () => {
     for (const label of [...REMOVED_LABELS, TOGGLE_LABEL]) {
-      assert.equal(INDEX_RAW.includes(label), false, `Index.ets 不应再出现被删控件名 ${label}`);
+      assert.equal(INDEX_RAW.includes(label), false, `SchedulePane.ets 不应再出现被删控件名 ${label}`);
     }
     assert.equal(INDEX_RAW.includes(TODAY_TODO), false, '旧「今日待办」按钮名必须删除');
     assert.equal(INDEX.includes("this.StatusChip('"), false);
@@ -247,10 +248,10 @@ describe('mod-home-filters-2 · 计数、空态与不变量', () => {
     assert.equal(INDEX.includes('这一天还没有日程'), false);
   });
 
-  // mod-home-entries retarget：本条原先只钉「汇总 / 列表 / 撤销 / 主操作」的渲染位置，
-  // 首页双格条新增后，补钉它在两个断点里都位于主操作之上（原快捷记录行的位置）。
-  // 这是**收紧**而非放宽：旧断言全部保留，再加一条精确位置断言，防止双格条掉到主操作之下或漏渲染。
-  test('今日汇总块 / 撤销条 / 两个断点的渲染位置未被本模块改动（含对话双格条位于主操作之上）', () => {
+  // mod-home-entries retarget → S3 retarget：本条原先钉「汇总 / 列表 / 撤销 / 主操作」的渲染位置，
+  // 双格条新增后补钉它在主操作之上；S3 把两条对话入口删掉（外壳导航轨取代），
+  // 旧的位置断言改成「双格条绝迹 + 加权列表区直接接唯一主操作」——覆盖不降反升。
+  test('今日汇总块 / 撤销条 / 两个断点的渲染位置未被本模块改动（双格条已由导航轨取代）', () => {
     for (const builderName of ['CompactBody', 'WideBody']) {
       const body = bodyFrom(INDEX, `\n  ${builderName}() {`);
       for (const piece of ['this.ModeTabs()', 'this.SearchFilterBar()', 'this.RecordList()', 'this.UndoBar()']) {
@@ -258,13 +259,14 @@ describe('mod-home-filters-2 · 计数、空态与不变量', () => {
       }
       assert.ok(body.includes('this.SummaryCard()'), `${builderName} 仍须渲染今日汇总块`);
       assert.ok(body.includes("if (this.tab === 'today') {"), `${builderName} 的汇总块必须按新 tab 名门控`);
-      const entriesAt = body.indexOf('this.ChatEntries()');
+      assert.equal(body.includes('this.ChatEntries()'), false, `${builderName} 不得再渲染对话双格条（导航轨取代）`);
       const action = builderName === 'CompactBody' ? 'this.PrimaryAction()' : 'this.SidebarAction()';
       const actionAt = body.indexOf(action);
-      assert.ok(entriesAt >= 0, `${builderName} 必须渲染对话双格条`);
-      assert.ok(actionAt > entriesAt, `${builderName} 的双格条必须位于唯一主操作 ${action} 之上`);
+      const listAt = body.indexOf('.layoutWeight(1)');
+      assert.ok(listAt >= 0 && actionAt > listAt, `${builderName} 的主操作 ${action} 必须落在加权列表区之后`);
     }
     assert.ok(INDEX.includes('this.UndoBar()'));
+    assert.ok(!/^\s*ChatEntries\(/m.test(INDEX), '日程面板不得再声明 ChatEntries builder');
   });
 });
 

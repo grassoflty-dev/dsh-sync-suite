@@ -21,6 +21,10 @@ const MAIN_PAGES = JSON.parse(
 const HARMONY_PAGES = JSON.parse(
   readFileSync(new URL('../../entry/src/harmony/resources/base/profile/main_pages.json', import.meta.url), 'utf8')
 );
+const ENTRY_ABILITY = stripComments(
+  readFileSync(new URL('../../entry/src/main/ets/entryability/EntryAbility.ets', import.meta.url), 'utf8')
+);
+const PANE_DIR = new URL('../../entry/src/main/ets/pages/panes/', import.meta.url);
 
 /** 取 marker 之后那对花括号的内部文本（marker 形如 `build() ` / `onBackPress() `）。 */
 function blockAfter(source, marker) {
@@ -30,12 +34,6 @@ function blockAfter(source, marker) {
   assert.notEqual(brace, -1, `${marker} 后面没有花括号`);
   const [start, end] = matchBrace(source, brace);
   return source.slice(start + 1, end - 1);
-}
-
-/** 取某个 @Builder 的方法体（Home 里的 builder 都是两空格缩进）。 */
-function builderBody(source, name) {
-  const marker = `\n  ${name}(`;
-  return blockAfter(source, marker);
 }
 
 /** 取 `Stack({...}) { ... }` 这类「配置对象 + builder 体」构造器的 builder 体（跳过第一对花括号）。 */
@@ -49,12 +47,27 @@ function configuredBlockAfter(source, marker) {
   return source.slice(start + 1, end - 1);
 }
 
+// S3：四个 @Builder 已变成四个外部组件文件；PANES 保留顺序，新增各自的文件与占位元数据。
 const PANES = [
-  ['DotsPane', 'dots', 'SHELL_SECTION_DOTS'],
-  ['SchedulePane', '日程', 'SHELL_SECTION_SCHEDULE'],
-  ['RemotePane', '远程 DSH', 'SHELL_SECTION_INSTANCES'],
-  ['ChatPane', '云端对话', 'SHELL_SECTION_CLOUD_CHAT']
+  { name: 'DotsPane', file: 'DotsPane.ets', constant: 'SHELL_SECTION_DOTS' },
+  { name: 'SchedulePane', file: 'SchedulePane.ets', constant: 'SHELL_SECTION_SCHEDULE' },
+  { name: 'InstancesPane', file: 'InstancesPane.ets', constant: 'SHELL_SECTION_INSTANCES' },
+  { name: 'CloudChatPane', file: 'CloudChatPane.ets', constant: 'SHELL_SECTION_CLOUD_CHAT' }
 ];
+/** 三个「即将迁入」占位（日程已是真 body，不属于占位）。 */
+const SCAFFOLDS = [
+  { name: 'DotsPane', file: 'DotsPane.ets', label: 'dots', action: '新建对话', reason: 'REASON_DOTS', empty: '还没有 dots 对话' },
+  { name: 'InstancesPane', file: 'InstancesPane.ets', label: '远程 DSH', action: '添加实例', reason: 'REASON_REMOTE', empty: '远程 DSH' },
+  { name: 'CloudChatPane', file: 'CloudChatPane.ets', label: '云端对话', action: '新建对话', reason: 'REASON_CLOUD', empty: '云端对话' }
+];
+const PANE_SOURCE = new Map(
+  PANES.map((pane) => [pane.name, stripComments(readFileSync(new URL(pane.file, PANE_DIR), 'utf8'))])
+);
+
+/** 外部组件的 build() 区间（替代旧 Home 里的同名 @Builder 区间）。 */
+function paneBody(name) {
+  return blockAfter(PANE_SOURCE.get(name), '\n  build() ');
+}
 
 const BUILD = blockAfter(HOME, '\n  build() ');
 const STACK_MARKER = 'Stack({ alignContent: Alignment.TopStart })';
@@ -79,20 +92,22 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     }
   });
 
-  test('L-02 唯一的 flex 切分在内容 Stack；另一处 layoutWeight 只是标题省略号', () => {
+  test('L-02 唯一的 flex 切分在内容 Stack；三个占位页头各一处标题省略号', () => {
     const buildSplits = BUILD.match(/layoutWeight\(1\)/g) ?? [];
     assert.equal(buildSplits.length, 1, `build() 里只允许一处 layoutWeight(1) flex 切分，实际 ${buildSplits.length} 处`);
     // 唯一的那一处紧跟在四面板 Stack 的闭合之后（width/height 100% → layoutWeight）。
     assert.match(
       BUILD,
-      /this\.ChatPane\([^\n]*\)\s*\n\s*\}\s*\n\s*\.width\('100%'\)\s*\n\s*\.height\('100%'\)\s*\n\s*\.layoutWeight\(1\)/,
+      /CloudChatPane\(\{[\s\S]*?\}\)\s*\n\s*\}\s*\n\s*\.width\('100%'\)\s*\n\s*\.height\('100%'\)\s*\n\s*\.layoutWeight\(1\)/,
       'flex 切分必须是包住四个面板的内容 Stack 的属性'
     );
-    // 全文恰好两处：内容 Stack + PaneHeader 标题（uiTokens §8.3 的 maxLines/省略号规则，不是 flex 切分）。
+    // 旧「PaneHeader 标题省略号」那一处随页头一起搬进三个占位组件；Home 自身只剩内容 Stack。
     const all = HOME.match(/layoutWeight\(1\)/g) ?? [];
-    assert.equal(all.length, 2, `全文只允许已登记的两处 layoutWeight(1)，实际 ${all.length} 处`);
-    assert.equal((builderBody(HOME, 'PaneHeader').match(/layoutWeight\(1\)/g) ?? []).length, 1,
-      '第二处必须登记为 PaneHeader 标题的省略号，不是新的 flex 切分');
+    assert.equal(all.length, 1, `外壳页只允许已登记的一处 layoutWeight(1)，实际 ${all.length} 处`);
+    for (const scaffold of SCAFFOLDS) {
+      const inHeader = (paneBody(scaffold.name).match(/layoutWeight\(1\)/g) ?? []).length;
+      assert.equal(inHeader, 1, `${scaffold.name} 的标题省略号只能占一处，不是新的 flex 切分`);
+    }
   });
 
   test('L-03 没有嵌套的固定高度 Column 包住内容区（只有一层 Row → Stack）', () => {
@@ -109,40 +124,47 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.equal(/\.height\(\s*\d+(\.\d+)?\s*\)/.test(tail), false, '内容区不得写死 vp 高度');
   });
 
-  test('L-04 四个面板各自用 Scroll 承载滚动，内容 Stack 本身不滚动', () => {
+  test('L-04 四个面板各自承载滚动，内容 Stack 本身不滚动', () => {
     const content = contentStackBody();
     assert.equal(/Scroll\(/.test(content), false, '内容 Stack 不得再包一层 Scroll');
     assert.equal(/Column\(/.test(content), false, '内容 Stack 只能是面板叠放层，不得有布局 Column');
-    for (const [builder] of PANES) {
-      const body = builderBody(HOME, builder);
-      assert.match(body, /^\s*Scroll\(\) \{/, `${builder} 必须以自己的 Scroll 开头`);
+    for (const scaffold of SCAFFOLDS) {
+      assert.match(paneBody(scaffold.name), /^\s*Scroll\(\) \{/, `${scaffold.name} 必须以自己的 Scroll 开头`);
     }
+    // 日程真 body 的滚动纪律：汇总块自带 Scroll、列表区是唯一的加权兄弟（横屏修复不回退）。
+    const schedule = PANE_SOURCE.get('SchedulePane');
+    assert.match(schedule, /Scroll\(\) \{/, '日程面板必须自己承载汇总块的滚动');
+    assert.match(blockAfter(schedule, '\n  ListRows() {'), /\.layoutWeight\(1\)/, '列表必须持有 layoutWeight(1)');
   });
 
   test('L-05 四面板在**同一个** Stack 里无条件实例化，顺序固定', () => {
     const content = contentStackBody();
     assert.equal((content.match(/Stack\(\{ alignContent/g) ?? []).length, 0, '四面板之间不得再嵌套 Stack');
     let previous = -1;
-    for (const [builder] of PANES) {
-      const at = content.indexOf(`this.${builder}(`);
-      assert.ok(at >= 0, `内容 Stack 必须实例化 ${builder}`);
-      assert.ok(at > previous, `${builder} 的顺序错乱`);
+    for (const { name } of PANES) {
+      const at = content.indexOf(`${name}({`);
+      assert.ok(at >= 0, `内容 Stack 必须实例化 ${name}`);
+      assert.ok(at > previous, `${name} 的顺序错乱`);
       previous = at;
     }
-    assert.equal((content.match(/this\.(?:Dots|Schedule|Remote|Chat)Pane\(/g) ?? []).length, 4, '必须恰好四个面板调用');
+    assert.equal((content.match(/\b(?:Dots|Schedule|Instances|CloudChat)Pane\(\{/g) ?? []).length, 4,
+      '必须恰好四个面板装配');
     assert.equal(/\bif\s*\(/.test(content), false, '面板不得用 if/else 条件渲染（会卸载、丢 @State）');
   });
 
   test('L-06 保活：四个面板都用 Visibility.Hidden 隐藏，不用 None/卸载', () => {
-    const hidden = HOME.match(/\.visibility\(active \? Visibility\.Visible : Visibility\.Hidden\)/g) ?? [];
+    const hidden = [...PANE_SOURCE.values()].flatMap((source) =>
+      source.match(/\.visibility\(this\.active \? Visibility\.Visible : Visibility\.Hidden\)/g) ?? []);
     assert.equal(hidden.length, 4, `四个面板都要 active→Visible/Hidden，实际 ${hidden.length} 处`);
-    for (const [builder] of PANES) {
-      assert.match(builderBody(HOME, builder), /\.visibility\(active \? Visibility\.Visible : Visibility\.Hidden\)/,
-        `${builder} 必须保持 Hidden 保活接线`);
+    for (const { name } of PANES) {
+      assert.match(PANE_SOURCE.get(name), /\.visibility\(this\.active \? Visibility\.Visible : Visibility\.Hidden\)/,
+        `${name} 必须保持 Hidden 保活接线`);
+      assert.match(BUILD, new RegExp(`${name}\\(\\{[\\s\\S]{0,200}active: this\\.section === SHELL_SECTION_[A-Z_]+`),
+        `${name} 必须收到 active 分段判定`);
     }
     // Visibility.None 只允许出现在抽屉轨的挂起上，不允许出现在任何面板里。
-    for (const [builder] of PANES) {
-      assert.equal(/Visibility\.None/.test(builderBody(HOME, builder)), false, `${builder} 不得用 None 卸载`);
+    for (const { name } of PANES) {
+      assert.equal(/Visibility\.None/.test(PANE_SOURCE.get(name)), false, `${name} 不得用 None 卸载`);
     }
     assert.match(HOME, /\.visibility\(this\.drawerOpen \? Visibility\.Visible : Visibility\.None\)/,
       '抽屉轨用 None 挂起（不占布局但保持组件在树上）');
@@ -156,7 +178,7 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
 
   test('L-08 深链 section 严格归一：四个合法 id 之外一律回落 dots', () => {
     const fn = blockAfter(HOME, 'function parseSection(');
-    for (const [, , constant] of PANES) {
+    for (const { constant } of PANES) {
       assert.ok(fn.includes(constant), `parseSection 必须认识 ${constant}`);
     }
     const returns = fn.match(/return\s+[^;]+;/g) ?? [];
@@ -189,37 +211,44 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.match(RAIL, /const RAIL_COMPACT_WIDTH: number = 72;/, '抽屉窄轨 72vp');
   });
 
-  test('L-11 四个面板各有带分段标签的页头，动作槽禁用并写出原因', () => {
-    for (const [builder, label] of PANES) {
-      const body = builderBody(HOME, builder);
-      assert.match(body, new RegExp(`this\\.PaneHeader\\('${label}', '[^']+', REASON_[A-Z]+\\)`),
-        `${builder} 必须有带「${label}」标签的 PaneHeader`);
+  test('L-11 三个占位各有带分段标签的页头，动作槽禁用并写出原因；日程用真页头', () => {
+    for (const { name, label, action, reason } of SCAFFOLDS) {
+      const body = paneBody(name);
+      assert.match(body, new RegExp(`Text\\('${label}'\\)`), `${name} 必须有「${label}」分段标签`);
+      const actionSlot = 'Text(`' + action + '（${' + reason + '}）`)';
+      assert.ok(body.includes(actionSlot), `${name} 的动作槽必须显示「${action}（原因）」`);
+      assert.match(body, /\.enabled\(false\)/, `${name} 的占位动作必须禁用（无假入口）`);
     }
-    const header = builderBody(HOME, 'PaneHeader');
-    assert.match(header, /Text\(title\)/, '页头标题显示分段名');
-    assert.match(header, /Text\(`\$\{actionLabel\}（\$\{reason\}）`\)/, '动作槽显示「动作（原因）」');
-    assert.match(header, /\.enabled\(false\)/, '占位动作必须禁用（无假入口）');
+    // 日程不再是占位：它保留 Index 的真页头（PageLayout 的唯一设置出口），没有禁用原因。
+    const schedule = PANE_SOURCE.get('SchedulePane');
+    assert.match(schedule, /headerActionTwo: '⚙ 设置'/, '日程面板沿用真页头的唯一设置出口');
+    assert.equal(/即将迁入/.test(schedule), false, '日程面板不得残留占位文案');
   });
 
   test('L-12 dots 占位：禁用输入框 + 字面原因「dots 尚未接线」', () => {
-    assert.match(HOME, /const REASON_DOTS: string = 'dots 尚未接线';/, '必须逐字保留禁用原因');
-    const body = builderBody(HOME, 'DotsPane');
+    const source = PANE_SOURCE.get('DotsPane');
+    assert.match(source, /const REASON_DOTS: string = 'dots 尚未接线';/, '必须逐字保留禁用原因');
+    const body = paneBody('DotsPane');
     assert.match(body, /TextInput\(\{ placeholder: '输入给 dots 的指令…' \}\)/, 'dots 占位要有输入框');
     assert.match(body, /\.enabled\(false\)/, '该输入框必须禁用');
     assert.match(body, /Text\(REASON_DOTS\)/, '原因必须可见');
     assert.match(body, /还没有 dots 对话/, 'dots 空聊天气态文案');
   });
 
-  test('L-13 任何占位都不渲染假记录行（无列表/勾选/示例数据）', () => {
-    for (const [builder] of PANES) {
-      const body = builderBody(HOME, builder);
+  test('L-13 三个占位都不渲染假记录行；日程面板反而必须渲染真行', () => {
+    for (const { name } of SCAFFOLDS) {
+      const body = paneBody(name);
       for (const fake of ['ForEach(', 'RecordRow(', 'Checkbox(', '示例', 'Lorem', '假数据']) {
-        assert.equal(body.includes(fake), false, `${builder} 不得出现假行标记「${fake}」`);
+        assert.equal(body.includes(fake), false, `${name} 不得出现假行标记「${fake}」`);
       }
     }
-    const explanatory = (HOME.match(/本页暂不展示任何记录。/g) ?? []).length;
-    assert.equal(explanatory, 3, '日程 / 远程 / 云端三个占位各有一句「本页暂不展示任何记录。」');
+    const explanatory = [...SCAFFOLDS].flatMap(({ name }) =>
+      PANE_SOURCE.get(name).match(/本页暂不展示任何记录。/g) ?? []).length;
+    assert.equal(explanatory, 2, '日程占位已换成真 body：只剩远程 / 云端两句「本页暂不展示任何记录。」');
     assert.equal(/ForEach\(/.test(HOME), false, '外壳页整体不渲染任何列表行');
+    const schedule = PANE_SOURCE.get('SchedulePane');
+    assert.match(schedule, /ForEach\(\s*this\.visibleRecords/, '日程面板必须渲染真实记录行');
+    assert.match(schedule, /RecordRow\(\{/, '日程面板必须装配 RecordRow');
   });
 
   test('L-14 齿轮是出口不是第五个 section：四节顺序 + 分隔线 + SettingsRow', () => {
@@ -255,5 +284,27 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     // 宽屏轨只在非 compact 渲染一次，抽屉轨只在 compact 渲染一次，二者互斥。
     assert.match(root, /if \(!this\.isCompact\(\)\) \{[\s\S]*?ShellRail\(\{/, '宽屏常驻轨分支');
     assert.equal((root.match(/ShellRail\(\{/g) ?? []).length, 2, '常驻轨 + 抽屉轨各一处装配');
+  });
+
+  test('L-17 入口翻转：EntryAbility 加载 pages/Home，pages/Index 仍是 fallback 路由', () => {
+    assert.match(ENTRY_ABILITY, /loadContent\('pages\/Home'/, '启动页必须是外壳 Home');
+    assert.equal(ENTRY_ABILITY.includes("loadContent('pages/Index'"), false, '入口不得再指向旧首页');
+    assert.ok(MAIN_PAGES.src.includes('pages/Index'), 'main 清单必须保留 fallback 路由 pages/Index');
+    assert.ok(HARMONY_PAGES.src.includes('pages/Index'), 'harmony 清单必须保留 fallback 路由 pages/Index');
+    assert.equal(MAIN_PAGES.src.length, 9, 'main 页面数仍为 9（不新增/删除页面）');
+    assert.equal(HARMONY_PAGES.src.length, 10, 'harmony 页面数仍为 10（main 的超集）');
+  });
+
+  test('L-18 日程真 body：SchedulePane 拥有两 tab / 搜索 / 汇总 / 撤销 / 加权列表', () => {
+    const schedule = PANE_SOURCE.get('SchedulePane');
+    for (const token of ['ModeTabs()', 'SearchFilterBar()', 'SummaryCard()', 'UndoBar()',
+      'RecordList()', '当日全部日程', '未完成', "Button('新建')"]) {
+      assert.ok(schedule.includes(token), `日程面板必须拥有 ${token}`);
+    }
+    const list = blockAfter(schedule, '\n  ListRows() {');
+    assert.match(list, /List\(\) \{/, '列表区仍是 List');
+    assert.match(list, /\.layoutWeight\(1\)/, '列表必须持有唯一吃余量的 layoutWeight(1)');
+    assert.equal(/ChatEntries|openChats|ChatKind/.test(schedule.replace(/^\s*\*.*$/gm, '')), false,
+      '日程面板不得保留被导航轨取代的两格入口（注释里的迁移说明不算）');
   });
 });

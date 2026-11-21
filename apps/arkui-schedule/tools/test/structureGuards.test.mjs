@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
-import { APP_ROOT, stripComments } from './helpers/etsSource.mjs';
+import { APP_ROOT, relToEts, stripComments } from './helpers/etsSource.mjs';
 import { requireOverlayRestored } from './guard.mjs';
 import {
   collectIssueFields,
@@ -24,6 +24,7 @@ import {
   hasRenderSite,
   passedKeys,
   propWiringViolations,
+  structNameOf,
   unreadStateFields,
   wiringViolations
 } from './helpers/structureGuards.mjs';
@@ -35,6 +36,9 @@ const PAGE_SETTINGS = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'pages', 'Se
 // S4 外壳真值：装配（Home ↔ ShellRail）+ 两份页面清单登记。
 const PAGE_HOME = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'pages', 'Home.ets');
 const SHELL_RAIL = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'components', 'shell', 'ShellRail.ets');
+const ENTRY_ABILITY = join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'entryability', 'EntryAbility.ets');
+const PANE_FILES = ['SchedulePane', 'InstancesPane', 'CloudChatPane', 'DotsPane']
+  .map((name) => join(APP_ROOT, 'entry', 'src', 'main', 'ets', 'pages', 'panes', `${name}.ets`));
 const HOME_CODE = stripComments(readFileSync(PAGE_HOME, 'utf8'));
 const RAIL_CODE = stripComments(readFileSync(SHELL_RAIL, 'utf8'));
 const MAIN_PAGES = JSON.parse(readFileSync(join(APP_ROOT, 'entry', 'src', 'main', 'resources', 'base', 'profile', 'main_pages.json'), 'utf8'));
@@ -42,7 +46,7 @@ const HARMONY_PAGES = JSON.parse(readFileSync(join(APP_ROOT, 'entry', 'src', 'ha
 const SECTION_FILES = [
   'components/settings/SyncSection.ets',
   'components/settings/AiSection.ets',
-  'components/settings/RemoteSection.ets',
+  // RemoteSection.ets 随 mod-settings-remote-dedupe 删除（配置统一在 pages/Instances）
   'components/settings/DataSection.ets',
   'components/settings/AboutSection.ets'
 ].map((relative) => join(APP_ROOT, 'entry', 'src', 'main', 'ets', ...relative.split('/')));
@@ -66,6 +70,11 @@ const STATE_READ_ALLOWLIST = [
     file: 'main/ets/pages/Settings.ets',
     field: 'contentWidth',
     reason: '只由 PageLayout.onBreakpointChange 写入；Settings 的骨架分支读 breakpoint，contentWidth 暂无消费者'
+  },
+  {
+    file: 'main/ets/pages/panes/SchedulePane.ets',
+    field: 'breakpoint',
+    reason: 'S3 从 Index 逐字迁入：同理由只由 PageLayout.onBreakpointChange 写入；主从分支读 contentWidth，breakpoint 暂无消费者'
   }
 ];
 
@@ -100,11 +109,14 @@ describe('结构断言：@State 至少被读一次 / issue 必须有渲染落点
       [],
       '幽灵报错：issue 字段没有渲染落点'
     );
-    // 覆盖率下限：Settings 的 6 个内联错误（branchError 随 mod-settings-lean 删除，
-    // aiModelError 随 mod-ai-drop-advanced 删除）+ 2 个警告
-    // + 页面侧同类字段（lastSyncError / remoteUrlError）都要被扫到；删除一个控件后下限同步减 1。
+    // 覆盖率下限：Settings 的 3 个内联错误（repoUrlError / tokenError / aiBaseUrlError；
+    // branchError 随 mod-settings-lean、aiModelError 随 mod-ai-drop-advanced、
+    // deviceIdError / authorError / gitUsernameError 随 mod-settings-sync-min 删除）
+    // + 2 个警告（identityWarning / attachmentWarning）
+    // + 页面侧同类字段（lastSyncError / remoteUrlError）都要被扫到；删除控件后下限同步减。
     const settingsFields = collectIssueFields(files).filter((item) => item.file.startsWith('main/ets/pages/Settings.ets'));
-    assert.ok(settingsFields.length >= 10, `Settings 的校验类字段只剩 ${settingsFields.length} 个，检查范围疑似缩了`);
+    // mod-settings-remote-dedupe：remoteUrlError 随远程组一起删除（6 = 3 内联错误 + 2 警告 + lastSyncError）
+    assert.ok(settingsFields.length >= 6, `Settings 的校验类字段只剩 ${settingsFields.length} 个，检查范围疑似缩了`);
   });
 
   test('装配对齐：页面传给五个 section 的 props 与组件声明双向一致', (t) => {
@@ -226,6 +238,12 @@ describe('结构断言：@State 至少被读一次 / issue 必须有渲染落点
     assert.ok(files.has('main/ets/pages/Home.ets'), '必须扫到新的外壳页 Home.ets');
     assert.ok(files.has('main/ets/components/shell/ShellRail.ets'), '必须扫到 ShellRail.ets');
     assert.ok(fields.length > 100, `@State 总数 ${fields.length} 明显偏少`);
+    // S3：四个面板下沉到 pages/panes/，必须全部进扫描文件集（三个占位只有 @Prop，
+    // 不产生 @State 字段，所以要直接查 componentFiles() 而不是查 fields）。
+    const scanned = new Set(componentFiles().map((file) => relToEts(file)));
+    for (const pane of ['SchedulePane', 'InstancesPane', 'CloudChatPane', 'DotsPane']) {
+      assert.ok(scanned.has(`main/ets/pages/panes/${pane}.ets`), `必须扫到面板 ${pane}.ets`);
+    }
   });
 });
 
@@ -276,5 +294,33 @@ describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
     assert.match(HOME_CODE, /onOpenSettings: \(\): void => \{\s*\n\s*this\.openSettings\(\);/, '父页接住齿轮事件');
     const fired = RAIL_CODE.match(/this\.onOpenSettings\(\)/g) ?? [];
     assert.equal(fired.length, 1, 'rail 只在齿轮行 onClick 发一次事件，不得自行跳页或重复触发');
+  });
+
+  test('SG-S4 四面板的 id / active props 与 Home 的四处装配双向齐全', () => {
+    assert.equal(PANE_FILES.length, 4, '四个面板文件必须齐全');
+    const calls = [...HOME_CODE.matchAll(/\b(?:Dots|Schedule|Instances|CloudChat)Pane\(\{/g)];
+    assert.equal(calls.length, 4, 'Home 必须装配四个面板（不卸载）');
+    for (const file of PANE_FILES) {
+      const code = stripComments(readFileSync(file, 'utf8'));
+      const name = structNameOf(file);
+      assert.ok(name.length > 0, `${file} 必须导出一个 struct`);
+      assert.match(code, /@Prop id: string/, `${name} 缺少深链 id prop`);
+      assert.match(code, /@Prop active: boolean/, `${name} 缺少保活 active prop`);
+      const at = HOME_CODE.indexOf(`${name}({`);
+      assert.ok(at >= 0, `Home 没有装配 ${name}`);
+      const keys = passedKeys(HOME_CODE.slice(at), name);
+      assert.ok(keys !== null, `${name} 装配点必须有属性区`);
+      assert.deepEqual([...keys].sort(), ['active', 'id'], '少传 = 保活/深链断线；多传 = 名字拼错被静默忽略');
+    }
+  });
+
+  test('SG-S5 启动入口是 pages/Home，pages/Index 仍登记为 fallback 路由', () => {
+    const entry = stripComments(readFileSync(ENTRY_ABILITY, 'utf8'));
+    assert.match(entry, /loadContent\('pages\/Home'/, '入口必须翻到外壳 Home');
+    assert.equal(entry.includes("loadContent('pages/Index'"), false, '入口不得再指向旧首页');
+    for (const pages of [MAIN_PAGES, HARMONY_PAGES]) {
+      assert.ok(pages.src.includes('pages/Home'), '页面清单必须登记外壳 Home');
+      assert.ok(pages.src.includes('pages/Index'), '页面清单必须保留 fallback Index');
+    }
   });
 });

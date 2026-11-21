@@ -495,3 +495,19 @@ Index 侧 :146-153 的断言（`settingsStore.load(` 必须早于 `await summari
 S3 迁入时只换文件锚点），并新增外壳页头/断点/令牌/装配守卫共 11 例。`tsc` 只覆盖 `tools/tsconfig.json`
 的纯 TS（`components/` 与 `pages/` 被排除），所以 **`Home.ets` / `ShellRail.ets` 的 ArkTS 编译与真机观感
 `unverified`**，首次真实编译留给下一次设备 pass。
+
+**S3 落地更新（`mod-shell-schedule-pane`，2026-11-21）**：本节「四个面板当前是占位」与「S3 迁入时换锚点」
+两条已经落地——
+- **日程现在是真 body**：`pages/panes/SchedulePane.ets` 逐字承接 `pages/Index.ets` 的日程正文
+  （两 tab / 新建 / 搜索 / 汇总卡 / 列表 / 撤销条 / 主从右栏 / AI 面板），只删掉表格里说的首页双格条
+  （导航轨已有 dots / 云端对话两个分段，页内双入口重复）。列表仍由唯一的 `.layoutWeight(1)` 加权兄弟吃余量，
+  `SummaryCard` 仍是封顶兄弟（`fix-landscape-list` 横屏修法不回退）。`pages/Index.ets` 保留为 fallback 路由、未改。
+- **入口已经是 Home**：`EntryAbility.onWindowStageCreate` 改为 `loadContent('pages/Home')`；两份
+  `main_pages.json` 仍各登记 `pages/Home` 与 `pages/Index`（main 9 / harmony 10 页，不变）。
+- **其余三面仍是表格所述的占位**：`DotsPane` / `InstancesPane` / `CloudChatPane` 各带分段标签页头、
+  禁用主操作与逐字原因，没有假行；compact 的 ☰ 开抽屉入口上提到 Home 的 root Stack（面板不再自持）。
+- 四个 `@Builder` 已变为四个外部 `@Component`，props 统一 `id: string`（深链预留）+ `active: boolean`
+  （分段可见性）；`active → Visibility.Visible/Hidden` 的保活接线随组件一起下沉，不卸载的语义不变。
+- `validate-app` 的页面发现改为只认 `pages/` 顶层 `.ets`（子目录组件不登记为路由页），因此页数仍为 9；
+  `Color.Transparent` 因日程 body 的逐字复制由 1 处变 2 处（Index fallback + SchedulePane），预算显式登记并
+  用逐文件断言防止扩散。真机 ArkTS 编译 / 四节交互仍 `unverified`。

@@ -23,7 +23,8 @@ import {
   touchPadding
 } from '../.build/common/uiTokens.js'
 
-const INDEX = readFileSync(new URL('../../entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8')
+// S3：日程契约锚点从 fallback 路由 pages/Index.ets 移到真 body 所在的日程面板；断言不动。
+const INDEX = readFileSync(new URL('../../entry/src/main/ets/pages/panes/SchedulePane.ets', import.meta.url), 'utf8')
 const PAGE_LAYOUT = readFileSync(new URL('../../entry/src/main/ets/components/PageLayout.ets', import.meta.url), 'utf8')
 // 因 A2 拆分移动：设置页界面拆到 `pages/Settings.ets` + `components/settings/*.ets`，
 // 「设置页」的静态断言锚点改成两者合并（页面 + 五个 section + bits）；断言本身不变。
@@ -35,6 +36,9 @@ const EDITOR_VIEW = readFileSync(new URL('../../entry/src/main/ets/components/Re
 // S4 外壳：`pages/Home.ets` 是真首页，`ShellRail` 是它的导航轨。
 const HOME = readFileSync(new URL('../../entry/src/main/ets/pages/Home.ets', import.meta.url), 'utf8')
 const SHELL_RAIL = readFileSync(new URL('../../entry/src/main/ets/components/shell/ShellRail.ets', import.meta.url), 'utf8')
+// S3：三个「即将迁入」占位的页头动作搬进各自文件，不再是 Home 的 @Builder。
+const PANE_CODES = ['DotsPane.ets', 'InstancesPane.ets', 'CloudChatPane.ets'].map((name) =>
+  stripComments(readFileSync(new URL(`../../entry/src/main/ets/pages/panes/${name}`, import.meta.url), 'utf8')))
 
 /** 去掉块注释与整行行注释：结构守卫只对「代码」生效，注释里允许写「已删除」之类的说明 */
 function stripComments(source) {
@@ -457,15 +461,18 @@ test('U-S1 外壳断点与 Index / PageLayout 同源：onAreaChange + resolveBre
 })
 
 test('U-S2 外壳页头标题是分段标签；日程 pane 的相对日期标题契约仍在（不删旧断言）', () => {
-  const labels = HOME.match(/this\.PaneHeader\('[^']+', '[^']+', REASON_[A-Z]+\)/g) ?? []
-  assert.equal(labels.length, 4, '四个面板各一个带分段标签的页头')
-  for (const label of ['dots', '日程', '远程 DSH', '云端对话']) {
-    assert.ok(labels.some((call) => call.includes(`'${label}'`)), `缺少分段标签「${label}」`)
-  }
+  // 旧 PaneHeader 四行调用随 S3 拆成：三个占位各自带标签页头 + 日程面板的真 PageLayout 页头。
+  const labels = ['dots', '远程 DSH', '云端对话']
+  labels.forEach((label, index) => {
+    assert.match(PANE_CODES[index], new RegExp(`Text\\('${label}'\\)`), `缺少分段标签「${label}」`)
+    assert.match(PANE_CODES[index], /REASON_[A-Z]+/, `「${label}」必须写出禁用原因`)
+  })
+  assert.match(INDEX, /title: this\.pageTitle\(\)/, '日程面板标题仍走相对日期语义')
   assert.match(SHELL_RAIL, /label: 'dots'/)
+  assert.match(SHELL_RAIL, /label: '日程'/)
   assert.match(SHELL_RAIL, /label: '云端对话'/)
   assert.equal(/pageTitle\(\)|subtitleText\(\)/.test(HOME), false, '相对日期标题属于日程面板，不属于外壳')
-  // 旧断言仍钉在 Index.ets（S3 迁入 日程 pane 后改锚点，断言不动）。
+  // 旧断言已随 S3 迁到 pages/panes/SchedulePane.ets（锚点换了，断言不动）。
   assert.match(INDEX, /subtitle: this\.subtitleText\(\)/)
   assert.match(INDEX, /return this\.selectedDate === localDateKey\(new Date\(\)\) \? '今天' : '日程';/)
 })
@@ -492,7 +499,8 @@ test('U-S4 外壳只有一个设置出口：rail 齿轮 + 父页 openSettings，
   const pushes = home.match(/pushUrl\(\{ url: 'pages\/Settings' \}\)/g) ?? []
   assert.equal(pushes.length, 1, '外壳里只能有一处进设置页')
   assert.match(home, /private openSettings\(\): void/, '跳转集中在 openSettings()')
-  assert.equal((home.match(/\.enabled\(false\)/g) ?? []).length, 2, 'PaneHeader 动作槽 + dots 输入框禁用')
+  const disabled = PANE_CODES.flatMap((code) => code.match(/\.enabled\(false\)/g) ?? [])
+  assert.equal(disabled.length, 4, '三个占位动作槽 + dots 输入框禁用（随页头抽壳搬进各自文件）')
   // 旧断言未删：Index 仍钉着「页头唯一动作 ⚙ 设置」（S3 后随日程 pane body 迁移）。
   assert.match(INDEX, /headerActionTwo: '⚙ 设置'/)
 })

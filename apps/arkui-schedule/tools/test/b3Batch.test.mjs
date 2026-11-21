@@ -11,18 +11,18 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
-import { readRemoteSection, readSettingsPage } from './settingsSources.mjs';
+import { readSettingsPage } from './settingsSources.mjs';
 
 // 纯逻辑：homeRefresh.ts 零 SDK import，编译产物可直接 import（无运行时相对依赖）。
 const { SAVED_MARKER_KEY, encodeSavedMarker, decodeSavedMarker, containsRecordVersion } =
   await import('../.build/model/homeRefresh.js');
 
 const ETS = new URL('../../entry/src/main/ets/', import.meta.url);
-const INDEX = readFileSync(new URL('pages/Index.ets', ETS), 'utf8');
+// S3：日程契约锚点从 fallback 路由 pages/Index.ets 移到真 body 所在的日程面板。
+const INDEX = readFileSync(new URL('pages/panes/SchedulePane.ets', ETS), 'utf8');
 const EDITOR = readFileSync(new URL('components/RecordEditorView.ets', ETS), 'utf8');
 const EDIT = readFileSync(new URL('pages/Edit.ets', ETS), 'utf8');
 const SETTINGS = readSettingsPage();
-const REMOTE = readRemoteSection();
 
 /** 从 `signature` 起按大括号配平截取方法 / Builder 体（含签名自身，避免相邻方法互相污染）。 */
 function bodyFrom(source, signature) {
@@ -137,8 +137,9 @@ const RECONCILE = bodyFrom(INDEX, 'private reconcileSavedRow(saved: SavedMarker)
 const EDITOR_SAVE = bodyFrom(EDITOR, 'private save(): void {');
 const MARKER_OF = bodyFrom(EDITOR, 'private savedMarkerOf(record: ScheduleRecord): SavedMarker {');
 const EDIT_VIEW = braceBlockFrom(EDIT, 'RecordEditorView({');
-const NORMALIZE = bodyFrom(SETTINGS, 'private normalizeRemoteOnBlur(): void {');
-const REMOTE_GROUP = bodyFrom(SETTINGS, 'RemoteGroup() {');
+// mod-settings-remote-dedupe（old→new）：normalizeRemoteOnBlur / RemoteSection 装配已随远程组删除。
+// 旧锚点不再可取；C 段断言整体 retarget 到「字段确实删除 + 入口唯一 + 迁移幂等」，
+// 避免留下取不到锚点的死断言（那会让测试永久红而不是守约）。
 
 const FULL_MARKER = {
   id: 'r1',
@@ -200,14 +201,14 @@ describe('B3 纯逻辑 homeRefresh：一次性标记的编解码与版本判定'
 });
 
 // ---------------------------------------------------------------------------
-// B. 路径 1：Index.ets + RecordEditorView.ets + Edit.ets 的静态契约
+// B. 路径 1：SchedulePane.ets（S3 迁入的日程正文）+ RecordEditorView.ets + Edit.ets 的静态契约
 // ---------------------------------------------------------------------------
 describe('B3 路径 1：保存返回首页走局部刷新的源码级契约', () => {
   test('B3-07（v2-only  retarget）onPageShow ready 分支：先 consume 再 reload；无 v1 索引对账', () => {
     assertOrdered(
       READY_BRANCH,
       ['this.consumeSavedMarker()', 'this.reload()'],
-      'Index.onPageShow.ready'
+      'SchedulePane.onPageShow.ready'
     );
     assert.doesNotMatch(READY_BRANCH, /reconcileIfDue/, 'v2-only：不得再写 v1 索引');
     assert.match(SAVED_BRANCH, /this\.reload\(\);/, '保存分支必须重读列表');
@@ -281,71 +282,47 @@ describe('B3 路径 1：保存返回首页走局部刷新的源码级契约', ()
 });
 
 // ---------------------------------------------------------------------------
-// C. D1-P2：Settings.ets + RemoteSection.ets 的失焦归一静态契约
+// C. mod-settings-remote-dedupe：设置页远程组已删除，归一/配置收敛到实例页
 // ---------------------------------------------------------------------------
-describe('B3 D1-P2：DSH 地址失焦即归一的源码级契约', () => {
-  test('B3-12 normalizeRemoteOnBlur 只借 parseRemoteInput 归一，令牌绝不进输入框', () => {
-    assert.match(NORMALIZE, /parseRemoteInput\(/, '归一必须复用 model 的 parseRemoteInput');
-    assert.match(NORMALIZE, /parsed\.kind !== 'url'/, '令牌片段/非法地址必须早退');
-    assert.match(NORMALIZE, /const normalized: string = parsed\.url;/, '归一化结果必须来自 parsed.url');
-    assert.match(NORMALIZE, /this\.remoteUrl = normalized;/, '输入框只能写 parsed.url 派生值');
-    assert.equal(NORMALIZE.includes('mergeRemoteToken('), false, '绝不调用 mergeRemoteToken（令牌不进输入框）');
-    assert.equal(NORMALIZE.includes('remoteToken'), false, '方法体内不得出现 remoteToken');
-    assert.equal(NORMALIZE.includes('savedRemoteToken'), false, '方法体内不得出现 savedRemoteToken');
-  });
-
-  test('B3-13 一次性提示受 parsed.hadScheme 分支控制，lastBlurNormalizeText 比较并写入', () => {
-    assert.match(NORMALIZE, /'已自动补 http:\/\/'/, '补协议提示文案固定');
-    assert.match(
-      NORMALIZE,
-      /if \(!parsed\.hadScheme\) \{[\s\S]*?'已自动补 http:\/\/'/,
-      '「已自动补 http://」必须在 !parsed.hadScheme 分支内'
-    );
-    assert.match(NORMALIZE, /this\.lastBlurNormalizeText === raw/, '去重键必须被比较');
-    assert.match(NORMALIZE, /this\.lastBlurNormalizeText = raw;/, '去重键必须被写入');
-  });
-
-  test('B3-14 保存/跳转顺序未改：normalizeRemoteOnBlur 内不得 save / pushUrl / openRemote', () => {
-    for (const token of ['settingsStore.save', 'router.pushUrl', 'openRemote(']) {
-      assert.equal(NORMALIZE.includes(token), false, `契约丢了：normalizeRemoteOnBlur 不得出现 ${token}`);
+describe('B3 C（retarget）：远程组删除后，地址归一仍在实例页、设置页无重复字段', () => {
+  test('B3-12（old→new）normalizeRemoteOnBlur 与 RemoteSection 一并删除；归一是实例页的职责', () => {
+    for (const gone of [
+      /normalizeRemoteOnBlur/, /parseRemoteInput/, /lastBlurNormalizeText/,
+      /onBlurRemoteUrl/, /onChangeRemoteUrl/, /savedRemoteToken/
+    ]) {
+      assert.equal(gone.test(SETTINGS), false, `设置页残留已删远程归一逻辑：${gone}`);
     }
   });
 
-  test('B3-15 RemoteSection：地址框 onChangeRemoteUrl 后紧跟 onBlurRemoteUrl()，且全文件仅此一处 onBlur', () => {
-    const changeCall = 'this.onChangeRemoteUrl(value);';
-    const changeAt = REMOTE.indexOf(changeCall);
-    assert.ok(changeAt >= 0, '契约丢了：地址框没有 onChangeRemoteUrl 调用');
-    const blurAt = REMOTE.indexOf('.onBlur(() => {', changeAt);
-    assert.ok(blurAt > changeAt, '契约丢了：onChangeRemoteUrl 之后必须紧跟 .onBlur');
-    const between = REMOTE.slice(changeAt + changeCall.length, blurAt);
-    assert.match(between, /^\s*\}\)\s*$/, '契约丢了：onChange 闭合后必须紧跟 .onBlur，中间不许插别的调用');
-    const blurCall = 'this.onBlurRemoteUrl();';
-    const callAt = REMOTE.indexOf(blurCall, changeAt);
-    assert.ok(callAt > blurAt, '契约丢了：.onBlur 回调里必须调 onBlurRemoteUrl()');
-    const blurBody = REMOTE.slice(blurAt, callAt + blurCall.length);
-    assert.match(
-      blurBody,
-      /^\.onBlur\(\(\) => \{\s*this\.onBlurRemoteUrl\(\);$/,
-      '契约丢了：onBlur 必须直接调 onBlurRemoteUrl()'
-    );
-    assert.equal(
-      (REMOTE.match(/onBlurRemoteUrl: \(\) => void/g) ?? []).length,
-      1,
-      'onBlurRemoteUrl prop 声明必须恰好 1 处'
-    );
-    assert.equal((REMOTE.match(/\.onBlur\(/g) ?? []).length, 1, '全文件 .onBlur( 必须恰好 1 处（其余输入框不许乱加）');
+  test('B3-13（old→new）RemoteSection.ets 文件删除，设置页不再导入/装配它', () => {
+    assert.equal(SETTINGS.includes("from '../components/settings/RemoteSection'"), false, '不该再导入 RemoteSection');
+    assert.equal(/RemoteSection\(\{/.test(SETTINGS), false, '不该再装配 RemoteSection');
   });
 
-  test('B3-16 Settings.RemoteGroup 把 onBlurRemoteUrl 装配到 RemoteSection({...})', () => {
-    assert.match(REMOTE_GROUP, /RemoteSection\(\{/, 'RemoteGroup 必须渲染 RemoteSection');
-    assert.match(REMOTE_GROUP, /onBlurRemoteUrl: \(\): void => \{/, '必须装配 onBlurRemoteUrl 回调');
-    assert.match(REMOTE_GROUP, /this\.normalizeRemoteOnBlur\(\);/, '回调必须转调 normalizeRemoteOnBlur');
+  test('B3-14（old→new）入口唯一：RemoteGroup 只渲染 ChatEntryRow，指向 pages/Instances', () => {
+    const group = bodyFrom(SETTINGS, 'RemoteGroup() {');
+    assert.equal((group.match(/this\.ChatEntryRow\(\)/g) ?? []).length, 1, '入口行恰好一行');
+    assert.equal((group.match(/TextInput\(/g) ?? []).length, 0, '入口组里不该有输入框');
+    assert.match(SETTINGS, /router\.pushUrl\(\{ url: 'pages\/Instances' \}\)/, '入口指向实例页');
+    // 归一规则本身仍在 model 层，由实例页 submitForm 复用（不是删掉校验）
+    assert.match(
+      readFileSync(new URL('pages/Instances.ets', ETS), 'utf8'),
+      /normalizeRemoteUrl\(this\.formUrl\.trim\(\)\)/,
+      '实例页保存仍走同一条归一规则'
+    );
+  });
+
+  test('B3-15（old→new）旧值不丢：实例页 bootstrap 把 remoteUrl / lastOk / mode / token 全量播种', () => {
+    const page = readFileSync(new URL('pages/Instances.ets', ETS), 'utf8');
+    for (const field of ['remoteUrl', 'remoteLastOk', 'remoteMode', 'remoteToken']) {
+      assert.match(page, new RegExp(`${field}: settings\\.${field}`), `播种必须带上旧 ${field}`);
+    }
   });
 
   // mod-home-drop-quick：快捷记录的独立写入路径已删除，SAVED_MARKER_KEY 只属于编辑页返回。
   test('B3-17（mod-home-drop-quick）首页无快捷记录写入路径；唯一新建入口 onNewTap 仍在', () => {
     for (const dead of ['QuickRecordBar', 'QuickRecordRow', 'quickBusy', 'submitQuickRecord', '快速记一条', '回车保存']) {
-      assert.equal(INDEX.includes(dead), false, `Index.ets 不应再出现快捷记录痕迹：${dead}`);
+      assert.equal(INDEX.includes(dead), false, `SchedulePane.ets 不应再出现快捷记录痕迹：${dead}`);
     }
     assert.equal(INDEX.includes("Button('新建')"), true, '唯一新建入口必须仍在');
     assert.ok(INDEX.includes('private onNewTap(): void'), 'onNewTap 必须仍在');

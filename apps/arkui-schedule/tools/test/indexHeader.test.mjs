@@ -1,9 +1,10 @@
 // 页头守卫（源码级，防回归）：**页头不再有「✨ AI 汇总」图标入口**。
 //
-// 【mod-shell-rail / S4 重定位】外壳 `pages/Home.ets` 成为首页后，本文件分两块：
+// 【mod-shell-rail / S4 重定位 + mod-shell-schedule-pane / S3 落盘】外壳 `pages/Home.ets`
+// 成为首页后，本文件分两块：
 //   1. 原四条用例（Index.ets 的页头 / 汇总块 / AiPanel）**一条未删**，只是改标为
-//      「日程面板契约」——S3 把 Index 的 body 迁进 shell 的 日程 pane 时，只改文件锚点，
-//      断言本身不动；在那之前 Index.ets 仍是这些行为的真值来源；
+//      「日程面板契约」——S3 已把 Index 的 body 迁进 `pages/panes/SchedulePane.ets`，
+//      本批只换文件锚点、断言逐字不动；Index.ets 保留为 fallback 路由；
 //   2. 新增外壳页头用例：真实首页外壳的「页头」= `Home.PaneHeader(分段标签, 动作, 原因)`
 //      + `ShellRail` 的 ⚙ 齿轮行。旧断言钉的属性（一个设置出口、无假按钮、页头标题是
 //      当前视图语义而非相对日期）逐条映射到新外壳，见每个新用例的 `H-*` 编号。
@@ -26,14 +27,19 @@ import { describe, test } from 'node:test';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const etsDir = join(here, '..', '..', 'entry', 'src', 'main', 'ets');
-const pagePath = join(etsDir, 'pages', 'Index.ets');
+// S3：日程契约锚点已从 fallback 路由 pages/Index.ets 移到真 body 所在的日程面板。
+const pagePath = join(etsDir, 'pages', 'panes', 'SchedulePane.ets');
 const source = readFileSync(pagePath, 'utf8');
 // S4：外壳真值来源（新首页 = Home + ShellRail）。
 const HOME = readFileSync(join(etsDir, 'pages', 'Home.ets'), 'utf8');
+const PANE_DIR = join(etsDir, 'pages', 'panes');
+const SCAFFOLD_PANES = ['DotsPane.ets', 'InstancesPane.ets', 'CloudChatPane.ets']
+  .map((name) => readFileSync(join(PANE_DIR, name), 'utf8'));
 const RAIL = readFileSync(join(etsDir, 'components', 'shell', 'ShellRail.ets'), 'utf8');
 const stripNotes = (text) => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 const HOME_CODE = stripNotes(HOME);
 const RAIL_CODE = stripNotes(RAIL);
+const PANE_CODES = SCAFFOLD_PANES.map((text) => stripNotes(text));
 
 /** 去掉注释后的「代码」视图（注释里可以解释为什么删，不算违规）。 */
 const code = source
@@ -60,11 +66,11 @@ function pageLayoutProps() {
 
 // S4：原「首页页头」四例保留，重标为「日程面板契约」。S3 落盘后把 pagePath 指向
 // 日程 pane 的 body 源文件即可；断言逐字不变，覆盖不降级。
-describe('日程面板契约（S3 迁入前的 Index.ets 真值）：AI 汇总图标入口已删除', () => {
+describe('日程面板契约（S3 已迁入 SchedulePane.ets）：AI 汇总图标入口已删除', () => {
   test('源码里不再出现「✨ AI 汇总」文案与页头 handler 标识', () => {
     // 全文（含注释）断言：连解释性注释里也不要留着这个入口的名字，防止被误恢复
     for (const banned of ['✨ AI 汇总', '✨ 生成中…', 'headerActionOne', 'onHeaderActionOne', 'onHeaderSummaryAction']) {
-      assert.equal(source.includes(banned), false, `Index.ets 不得再出现「${banned}」`);
+      assert.equal(source.includes(banned), false, `SchedulePane.ets 不得再出现「${banned}」`);
     }
     // 也没有改名后残留的页头 AI 入口（例如 aiPanelOpen / openAiPanelFromHeader 之类）
     assert.equal(/openAiPanel(?:FromHeader|OnHeader)/.test(code), false, '不得有页头专用的 AI 面板 opener');
@@ -125,14 +131,16 @@ describe('日程面板契约（S3 迁入前的 Index.ets 真值）：AI 汇总�
 //   · 「✨ AI 汇总 / headerActionOne / onHeaderSummaryAction 绝迹」→ H-3：同样这些标识在外壳里绝迹；
 //   · 「首页无 tab / 汇总 / 列表重逻辑」→ H-4：Home 不复制 今日/未完成、summaryStore、RecordList —— 它们留在日程面板契约里。
 describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作', () => {
-  test('H-1 外壳页头标题 = 分段标签，四个面板各一处 PaneHeader', () => {
-    const paneHeaders = HOME.match(/this\.PaneHeader\('[^']+', '[^']+', REASON_[A-Z]+\)/g) ?? [];
-    assert.equal(paneHeaders.length, 4, '四个面板都要有带分段标签的页头');
-    for (const label of ['dots', '日程', '远程 DSH', '云端对话']) {
-      assert.ok(paneHeaders.some((call) => call.includes(`'${label}'`)), `缺少「${label}」分段页头`);
-    }
-    assert.match(HOME, /PaneHeader\(title: string, actionLabel: string, reason: string\)/);
-    assert.match(HOME, /Text\(title\)/, '页头标题显示分段名（对应旧 pageTitle() 的语义）');
+  test('H-1 外壳页头标题 = 分段标签，三个占位各有带标签页头、日程用真页头', () => {
+    // 旧 PaneHeader builder 随 S3 抽壳落到三个占位文件里；断言从「Home 里四行调用」
+    // 改成「三个占位文件各一处标签 + 日程面板保留真页头」，覆盖面不减。
+    const labels = ['dots', '远程 DSH', '云端对话'];
+    labels.forEach((label, index) => {
+      assert.match(PANE_CODES[index], new RegExp(`Text\\('${label}'\\)`), `缺少「${label}」分段标签`);
+      assert.match(PANE_CODES[index], /REASON_[A-Z]+/, `${label} 页头必须写出禁用原因`);
+    });
+    assert.match(source, /title: this\.pageTitle\(\)/, '日程面板的真页头标题仍走 pageTitle()');
+    assert.match(source, /headerActionTwo: '⚙ 设置'/, '日程面板沿用唯一设置出口');
     assert.match(RAIL, /label: 'dots'/);
     assert.match(RAIL, /label: '日程'/);
     assert.match(RAIL, /label: '远程 DSH'/);
@@ -149,12 +157,15 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
     const pushes = HOME.match(/pushUrl\(\{ url: 'pages\/Settings' \}\)/g) ?? [];
     assert.equal(pushes.length, 1, '外壳里只能有一处进设置页的跳转');
     assert.match(HOME, /private openSettings\(\): void/, '跳转集中在 openSettings()');
-    // 面板动作槽：PaneHeader 的动作 Text 与 dots 输入框都 .enabled(false)，不是可点的假按钮；
-    // 四个面板共用同一个 PaneHeader builder，所以源码里是 2 处禁用而非 5 处。
-    const disabled = HOME_CODE.match(/\.enabled\(false\)/g) ?? [];
-    assert.equal(disabled.length, 2, 'PaneHeader 动作槽 + dots 输入框各一处禁用');
-    assert.match(HOME_CODE, /PaneHeader\(title: string[\s\S]{0,1800}\.enabled\(false\)/, 'PaneHeader 的动作槽必须禁用');
-    assert.match(HOME_CODE, /TextInput\(\{ placeholder: '输入给 dots 的指令…' \}\)[\s\S]{0,300}\.enabled\(false\)/,
+    // 面板动作槽随 S3 抽壳搬进三个占位文件：三个禁用动作 + dots 禁用输入框 = 4 处，
+    // 比原来「Home 里 2 处」更细（每个占位各自禁用，不会漏掉某个面板）。
+    const disabled = PANE_CODES.flatMap((code) => code.match(/\.enabled\(false\)/g) ?? []);
+    assert.equal(disabled.length, 4, '三个占位动作槽 + dots 输入框各一处禁用');
+    for (const [index, code] of PANE_CODES.entries()) {
+      assert.match(code, /\.enabled\(false\)/, `占位 ${index} 的主动作必须禁用（无假入口）`);
+      assert.equal(/pushUrl\(/.test(code), false, `占位 ${index} 不得自行跳页（设置出口唯一）`);
+    }
+    assert.match(PANE_CODES[0], /TextInput\(\{ placeholder: '输入给 dots 的指令…' \}\)[\s\S]{0,300}\.enabled\(false\)/,
       'dots 输入框必须禁用（无假入口）');
   });
 

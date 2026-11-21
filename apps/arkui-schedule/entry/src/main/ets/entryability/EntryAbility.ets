@@ -9,7 +9,9 @@
  * 2. **第二道防线（异步）**：`detectPlatform()` 读设备信息（鸿蒙覆盖层读 `deviceInfo`，共享实现返回
  *    `'android'`）→ `setPlatform(p)` → 再 `installPlatformFeatures()`。用 `.then()` 链，不阻塞
  *    生命周期；检测/装配失败时 hilog 记录并按 Android 降级。
- * 3. 最后初始化日程存储（`<filesDir>/git-repo/devices/<deviceId>/`），页面加载首页 `pages/Index`。
+ * 3. 最后初始化日程存储（`<filesDir>/git-repo/devices/<deviceId>/`），页面加载外壳首页
+ *    `pages/Home`（mod-shell-schedule-pane 入口翻转）；`pages/Index` 仍在两份 main_pages.json
+ *    注册为 fallback 路由，日程正文已迁入 `pages/panes/SchedulePane.ets`。
  *
  * 深色模式（三态 `system`/`light`/`dark`，持久化在 `settingsStore` 的 `themeMode`）：
  * `onCreate` 里读一次并 `applicationContext.setColorMode()`——`system` 传
@@ -93,7 +95,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
-    windowStage.loadContent('pages/Index', (err) => {
+    windowStage.loadContent('pages/Home', (err) => {
       if (err.code !== 0) {
         hilog.error(DOMAIN, TAG, '加载首页失败：%{public}s', JSON.stringify(err));
         return;
