@@ -1996,7 +1996,9 @@
   // 硬约束（与契约 §9 一致）：分支恒为 main；force 恒为 false；只有一个 resetHard，
   // 且它只把本地分支指回 origin/main（远端文件一个都不删、历史不改写）。
   // args.op ∈ fetch | resolveRef | currentBranch | readBlob | mergeBase |
-  //           fastForward | addCommit | push | resetHard
+  //           fastForward | addCommit | push | resetHard |
+  //           remoteLayout | listLocalTimeline | readLocalTimelineSchema
+  //           （首跑引导：远端引用探测 / 本地初始树枚举 / §11 schema 标记读取）
 
   /** 把一个 oid/ref 解析成 sha；已经是 40 位十六进制时直接返回。 */
   async function v2OidOf(git, ref) {
@@ -2043,6 +2045,59 @@
       }
       days.sort();
       out.value = JSON.stringify(days);
+      return out;
+    }
+    if (op === 'remoteLayout') {
+      // 首跑探测：直接读服务端引用 advertisement，不经过 fetch —— 空仓库上 `fetch origin main`
+      // 会抛 "Could not find origin/main"，那是首跑态不是传输故障，必须先分流。
+      // 任何 heads/tags/pull 引用都没有才算空仓库（可引导）；只要有任何引用却没有 main，
+      // 就是别人的历史（例如只有 tags 的仓库），拒绝引导、保留 typed 错误。
+      var url = requireRepoUrl(config);
+      var info = await git.getRemoteInfo({
+        http: session.http, url: url, onAuth: makeOnAuth(config)
+      });
+      var refs = (info && info.refs) || {};
+      var heads = refs.heads || {};
+      var names = Object.keys(heads);
+      names.sort();
+      // 引用总览（诊断用）：heads 原名在前，其它类别带类别前缀追加，顺序确定。
+      var allNames = names.slice();
+      var categories = Object.keys(refs);
+      categories.sort();
+      for (var c = 0; c < categories.length; c++) {
+        var group = refs[categories[c]];
+        if (!group || typeof group !== 'object') { continue; }
+        var groupNames = Object.keys(group);
+        groupNames.sort();
+        for (var g = 0; g < groupNames.length; g++) {
+          var label = categories[c] === 'heads' ? groupNames[g] : categories[c] + '/' + groupNames[g];
+          if (allNames.indexOf(label) < 0) { allNames.push(label); }
+        }
+      }
+      out.value = JSON.stringify({
+        hasMain: Object.prototype.hasOwnProperty.call(heads, 'main'),
+        isEmpty: allNames.length === 0,
+        refs: allNames
+      });
+      return out;
+    }
+    if (op === 'listLocalTimeline') {
+      // 首跑引导：本地工作副本 timeline/** 的相对路径（schema.json + 各日文件 + 账本）。
+      var timelineDir = pathJoin(session.repoRoot, 'timeline');
+      out.value = JSON.stringify(listFilesRecursive(timelineDir, 'timeline'));
+      return out;
+    }
+    if (op === 'readLocalTimelineSchema') {
+      // §11 门禁前置：读工作副本 timeline/schema.json 原文；复用 listFilesRecursive 同一套宿主 fs
+      // 访问器（hostCall fileExists / readFileBase64）。缺文件或读不到一律空串，绝不抛；
+      // 空串交给 ArkTS 侧 parseSchemaMarker 判为未知版本，fail-closed 为 E_SCHEMA_UNKNOWN。
+      try {
+        var schemaPath = pathJoin(pathJoin(session.repoRoot, 'timeline'), 'schema.json');
+        var encoded = readHostFileBase64(schemaPath);
+        out.value = encoded === null ? '' : utf8Decode(base64ToBytes(encoded));
+      } catch (error) {
+        out.value = '';
+      }
       return out;
     }
     if (op === 'readBlob') {

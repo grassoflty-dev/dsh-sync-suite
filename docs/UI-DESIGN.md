@@ -593,3 +593,5 @@ API Key 密码框、自定义源才显示接口地址，没有「高级」控制
 保存落盘与弹层观感 `unverified`（设备 lane 在跑，本批不做构建 / 装机）。
 
 **远程实例入口去重（`mod-settings-instances-entry-dedupe`，2026-11-21）**：设置树里指向可配置实例页 `pages/Instances` 的导航只剩一条——四行菜单的「远程实例」行（`pages/Settings.ets`，`ROUTE_INSTANCES`）。旧 `SettingsHost` 长滚动里的「远程实例与云端对话 ›」行（`ChatEntryRow` → `openInstances`）、包装它的 `RemoteGroup()`、两套历史骨架的两处装配与「远程」锚点 chip 一并删除（不留「永远 toast 未测量」的死锚点）；实例页内部（列表 / 表单 / 播种 / 打开）一字未改。`instancesEntryDedupe.test.mjs` 正向钉住「Settings 树里 `pages/Instances` 字面量恰好 1 处、文件列表 === `['pages/Settings.ets']`」，旧文案全树绝迹，两份 `main_pages.json` 与顶层页装配仍保证路由可达；四份旧守卫按 old→new retarget（旧断言一条未删）。真机编译 / 观感 `unverified`（本批不做构建 / 装机）。
+
+**面板页头去跨节导航（`mod-pane-header-nav-dedupe`，2026-11-21）**：四面板页头只放 pane 专属动作，换段只走 `ShellRail`（`onSelect` → `Home.selectSection()`）。远程 DSH 页头删掉与轨重复的「云端对话」按钮及其 `openChats()` handler：只读页头只剩标题、无点击动作；配置页头仍只有「添加实例」。`instanceList` U-11/U-15、`paneLayout` P-19/P-21、`shellLayout` L-11/L-20 由「桥接存在」retarget 为「跨节导航绝迹 + 只读页头为空 / 配置为添加实例」（旧断言未删），三份守卫各补一条正向守卫（U-S6 / P-22 / L-21）钉「四面板无跨节 push、无切段状态、选段只在 rail」。真机编译 / 观感 `unverified`（设备 lane 在跑，本批不做构建 / 装机）。

@@ -23,6 +23,54 @@ import {
 } from './syncProtocol';
 import type { OutboxEntry, WriteGateResult, DayTexts, DayUnion } from './syncProtocol';
 import { parseSchemaMarker, parseTimelineDay } from './timeline';
+import { decideFreshStart } from './freshStart';
+import type { FreshStartDecision } from './freshStart';
+
+/**
+ * mod-sync-empty-repo-bootstrap：首次同步的远端状态探测（只读，不依赖 fetch 是否成功）。
+ *
+ * 检测规则（三种状态，互斥且穷尽）：
+ * - `hasMain === true`                    → 普通周期：门禁 / ff / union / commit / push 全部不变；
+ * - `hasMain === false && isEmpty`        → E_REMOTE_EMPTY 首跑态：远端连一个引用都没有，这是**正常起点**，
+ *   引导建 `main`（不是错误、不需要用户确认）；
+ * - `hasMain === false && !isEmpty`       → 远端非空但没有 `main`（只有 master 或无关历史）：
+ *   **保留 typed 错误，绝不引导覆盖别人的历史**。这一区分是本模块的安全底线。
+ *
+ * 说明：在空远端上 `git fetch origin main` 会以 "Could not find origin/main" 失败（这是首跑态，不是传输故障），
+ * 所以状态探测放在 fetch **之前**，由桥的 `getRemoteInfo` 直接列举服务端引用，绕过 fetch 的 ref 解析。
+ */
+export interface RemoteLayout {
+  /** 服务端是否存在 refs/heads/main。 */
+  hasMain: boolean;
+  /** 服务端是否完全为空：任何 heads/tags/pull 引用都没有（= 首跑态）。 */
+  isEmpty: boolean;
+  /** 服务端已有分支名（诊断 / 中文文案用）。 */
+  refs: string[];
+}
+
+export type RemoteStateDecision = 'normal' | 'bootstrap' | 'no-main';
+
+/** 纯判定：与 git / IO 无关，便于 fake-runner 精确钉住三种状态。 */
+export function remoteStateDecision(hasMain: boolean, isEmpty: boolean): RemoteStateDecision {
+  if (hasMain) {
+    return 'normal';
+  }
+  return isEmpty ? 'bootstrap' : 'no-main';
+}
+
+/** 首跑态的 typed 码与中文文案（状态标记，不作为失败上报）。 */
+export const E_REMOTE_EMPTY_CODE: string = 'E_REMOTE_EMPTY';
+export const E_REMOTE_EMPTY_MESSAGE: string = '远端仓库为空（首次同步的正常起点），正在初始化 main 时间线';
+/**
+ * 非空但无 main 的 typed 错误：逐字保留桥侧既有错误文案，再给可执行的中文下一步。
+ * 不引入新的错误码，避免改变 UI 既有分类（仍归 E_GIT）。
+ */
+export const E_NO_MAIN_CODE: string = 'E_GIT';
+export const E_NO_MAIN_MESSAGE: string =
+  'E_GIT: 远端仓库为空，或分支/引用不存在：Could not find origin/main. ' +
+  '下一步：远端已有其它分支或提交历史但没有 main，本应用不会覆盖它；请检查仓库地址，或在远端建立 main 分支后重试';
+/** 引导提交信息：只建一次，后续周期继续用 [`COMMIT_PREFIX`]。 */
+export const BOOTSTRAP_COMMIT_MESSAGE: string = '[v2] bootstrap main';
 
 /** 单日读取输入：远端/本地 records.json 与本地两本账本；远端账本可显式给出，否则用 showMain 取。 */
 export interface DayRead {
@@ -79,6 +127,12 @@ export interface GitPort {
   fastForward(): Promise<void>;
   /** 可选：远端有 records.json 的日目录；服务用它合并出周期覆盖的 days。 */
   listRemoteDays?(): Promise<string[]>;
+  /** 可选（首跑引导）：服务端引用快照；未注入的旧端口跳过引导、保持原有周期。 */
+  remoteLayout?(): Promise<RemoteLayout>;
+  /** 可选（首跑引导）：本地工作副本 timeline/** 的相对路径（schema.json + 各日文件）。 */
+  localTimelinePaths?(): Promise<string[]>;
+  /** 可选（首跑引导 §11）：本地工作副本 timeline/schema.json 原文（缺文件 = 空串）。 */
+  localSchemaText?(): Promise<string>;
 }
 
 /** 周期结果：前 8 个字段是任务指定的 tri-state 契约，其余为出队/审计所需的扩展。 */
@@ -104,6 +158,8 @@ export interface CycleOutcome {
   resultOutbox: OutboxEntry[];
   /** 扩展：dropped 的 intentId（驱动「该记录已被删除，编辑未同步」提示）。 */
   droppedIds: string[];
+  /** 扩展：本周期是否执行了首跑引导（空远端建 main）；普通周期为 false/absent。 */
+  bootstrapped?: boolean;
 }
 
 const COMMIT_PREFIX: string = '[v2] sync ';
@@ -297,6 +353,21 @@ async function gateOf(port: GitPort): Promise<WriteGateResult> {
   return assertWritable(input);
 }
 
+/**
+ * 引导路径的 schema 判定：先用 decideFreshStart 区分「缺标记 = 正常起点」与「标记存在但不可识别」，
+ * 再交给与普通周期同一个 assertWritable 产出逐字 typed 码与文案。
+ * 空远端没有 HEAD/origin/main 可断言，故用相等占位让祖先维度恒过；分支维度已单独校验。
+ */
+function bootstrapSchemaGate(schemaText: string, branch: string): WriteGateResult {
+  const fresh: FreshStartDecision = decideFreshStart(schemaText);
+  const marker = fresh.needSchema ? null : parseSchemaMarker(schemaText);
+  return assertWritable({
+    schemaVersion: marker !== null && marker.ok ? marker.version : null,
+    branch: branch, headSha: '', originMainSha: '',
+    headIsAncestorOfOrigin: true, originIsAncestorOfHead: true
+  });
+}
+
 /** 门禁失败：零写入、零 git 提交，返回 typed 原因与 outbox 现状。 */
 function gateFailure(gate: WriteGateResult, outbox: OutboxEntry[]): CycleOutcome {
   return {
@@ -308,11 +379,73 @@ function gateFailure(gate: WriteGateResult, outbox: OutboxEntry[]): CycleOutcome
   };
 }
 
+/** 非空无 main 的 typed 结果：零写入、零提交、意图原样留 outbox（绝不引导覆盖他人历史）。 */
+function noMainOutcome(outbox: OutboxEntry[]): CycleOutcome {
+  return {
+    ok: false, code: E_NO_MAIN_CODE, days: EMPTY_DAYS.slice(),
+    applied: 0, dropped: 0, failed: countFailed(outbox),
+    pending: replayable(outbox).length, message: E_NO_MAIN_MESSAGE,
+    conflicts: 0, added: 0, attempts: 0,
+    resultOutbox: outbox.slice(), droppedIds: []
+  };
+}
+
+/** fetch 传输失败的 typed 结果：不静默吞掉网络/认证故障，也不伪装成首跑态。 */
+function pullFailureOutcome(text: string, outbox: OutboxEntry[]): CycleOutcome {
+  return {
+    ok: false, code: 'E_PULL_FAILED', days: EMPTY_DAYS.slice(),
+    applied: 0, dropped: 0, failed: countFailed(outbox),
+    pending: replayable(outbox).length,
+    message: `E_PULL_FAILED: 拉取远端失败（${text}）；下一步：检查网络与仓库地址后点「重试同步」`,
+    conflicts: 0, added: 0, attempts: 0,
+    resultOutbox: outbox.slice(), droppedIds: []
+  };
+}
+
 /**
- * 单一同步周期（纯决策）。详见文件头；write 缺省时只产出决策（预览），
- * 生产调用（syncProtocolStore）必须注入 WritePort，否则 union 文本不会落盘。
+ * 探测失败码的保真：底层 typed 码（E_AUTH / E_IO / E_GIT / E_SYNC_UNAVAILABLE）原样透出，
+ * 其它传输错误归 E_GIT。E_SYNC_UNAVAILABLE 是 requireService() 的就绪故障，不能被探测 catch 改写成
+ * E_GIT（那会给出错误的「检查网络与仓库地址」下一步）。与 typedPushError 不同，
+ * 这里绝不产生 E_PUSH_REJECTED —— 探测阶段还没有推送任何字节。
  */
-export async function runCyclePure(
+function typedProbeCode(text: string): string {
+  const matched: RegExpExecArray | null = /^(E_[A-Z_]+)/.exec(text);
+  if (matched !== null &&
+      (matched[1] === 'E_AUTH' || matched[1] === 'E_IO' || matched[1] === 'E_GIT' ||
+       matched[1] === E_SYNC_UNAVAILABLE_CODE)) {
+    return matched[1];
+  }
+  return 'E_GIT';
+}
+
+/** 远端状态探测失败的 typed 结果：零写入、零提交、不 bump attempts（探测阶段没有推送）。 */
+function probeFailureOutcome(text: string, outbox: OutboxEntry[]): CycleOutcome {
+  const code: string = typedProbeCode(text);
+  const message: string = code === E_SYNC_UNAVAILABLE_CODE
+    ? `远端状态探测失败；${E_SYNC_UNAVAILABLE_MESSAGE}（${text}）`
+    : `${code}: 远端状态探测失败（${text}）；下一步：检查网络与仓库地址后点「重试同步」`;
+  return {
+    ok: false, code: code, days: EMPTY_DAYS.slice(),
+    applied: 0, dropped: 0, failed: countFailed(outbox),
+    pending: replayable(outbox).length,
+    message: message,
+    conflicts: 0, added: 0, attempts: 0,
+    resultOutbox: outbox.slice(), droppedIds: []
+  };
+}
+
+/**
+ * 首跑引导（E_REMOTE_EMPTY 状态）：为**完全为空**的远端建第一个 main 提交。
+ *
+ * 门禁例外说明（唯一一处）：§11 门禁要求 `HEAD == origin/main`，但空远端上 origin/main 根本不存在，
+ * 无法断言；此处只验证「分支是 main + 远端确认为空」，随即 push 建 main 并 fetch 建立跟踪引用，
+ * 再回到普通周期过完整门禁。非空无 main 的远端**不进本函数**（由 noMainOutcome 拒绝）。
+ *
+ * 幂等：只有 `remoteStateDecision(...) === 'bootstrap'` 才会调用本函数；main 一旦存在即走普通路径，
+ * 所以第二次运行不会再建根提交。引导内部 commit 走既有 addPaths/commit（桥侧 nothing-to-commit 为 no-op），
+ * 推送失败时下一次重跑会对同一棵树重试，不会堆叠重复根提交。
+ */
+async function bootstrapEmptyRemote(
   port: GitPort,
   days: string[],
   readDay: (date: string) => Promise<DayRead>,
@@ -320,8 +453,189 @@ export async function runCyclePure(
   now: Date,
   write?: WritePort
 ): Promise<CycleOutcome> {
-  // 步骤 1：fetch（只读）→ 步骤 2：§11 门禁（以 freshly fetched origin/main 计算祖先关系）。
+  const branch: string = (await port.branchName()).trim();
+  if (branch !== 'main') {
+    return gateFailure({ ok: false, code: 'E_BRANCH_MISMATCH', message: '分支不是 main，拒绝写入' }, outbox);
+  }
+
+  // §11 门禁：任何 timeline 目录文件的写句柄之前必须先读仓库级 schema.json。
+  // 用 decideFreshStart 区分「缺标记 = 空仓库正常起点」与「标记存在但不可识别 = E_SCHEMA_UNKNOWN」；
+  // 标记缺失且有 WritePort 时放行到阶段 1 —— 生产 writer 就是 syncProtocolStore.writeDay，
+  // 它在写任何 timeline 文件前调用 timelineWriteStore.ensureSkeleton() 幂等建 v2 骨架
+  // （纯模型自己不建，零新增 IO）；阶段 1 之后必须重读复核（见下），否则绝不 addPaths/commit。
+  // 端口未实现 localSchemaText、读取抛错，或纯预览没有 WritePort（没人能建骨架）时一律 fail-closed。
+  // 生产 runner 总是与 localTimelinePaths 一起提供这两个方法。
+  let schemaText: string = '';
+  let schemaReadable: boolean = false;
+  if (port.localSchemaText !== undefined) {
+    try {
+      schemaText = await port.localSchemaText();
+      schemaReadable = true;
+    } catch (error) {
+      schemaReadable = false;
+    }
+  }
+  const fresh: FreshStartDecision = decideFreshStart(schemaText);
+  if (!schemaReadable || (fresh.needSchema && write === undefined) || fresh.unsupported) {
+    return gateFailure(bootstrapSchemaGate(schemaText, branch), outbox);
+  }
+  if (!fresh.needSchema) {
+    const schemaGate: WriteGateResult = bootstrapSchemaGate(schemaText, branch);
+    if (!schemaGate.ok) {
+      return gateFailure(schemaGate, outbox);
+    }
+  }
+  const needsPostWriteCheck: boolean = fresh.needSchema;
+
+  // 阶段 1：远端为空 → 无并发冲突可能。用既有 unionDay + WritePort 把本地记录与 outbox 意图落盘，
+  // 这些字节随后一起进入初始提交（「via existing writer/commit path」）。
+  const derived: string[] = [];
+  for (const date of days) {
+    const read: DayRead = await readDay(date);
+    const corrupt: string = dayIntegrityError(date, read.remote, read.local);
+    if (corrupt.length > 0) {
+      await persistOutbox(write, outbox);
+      return corruptOutcome(corrupt, outbox);
+    }
+    const emptyRemoteTexts: DayTexts = { records: '', deleted: '', restore: '' };
+    const localTexts: DayTexts = { records: read.local, deleted: read.deleted, restore: read.restore };
+    const union: DayUnion = unionDay(date, emptyRemoteTexts, localTexts, entriesForDate(outbox, date), now);
+    if (write !== undefined) {
+      await write.writeDay(date, {
+        records: union.text, deleted: union.deleted,
+        restore: union.restored, conflicts: union.conflicts
+      });
+    }
+    // 回退枚举必须与 WritePort 实际写下的文件集合一致：有 WritePort 时 records/deleted/restore
+    // 三个文件每轮都写（内容可能为空），conflicts 仅在有审计行时写；无 WritePort（纯预览）没有写句柄，
+    // 才退回按非空内容推断。否则初始提交树会与工作副本不一致。
+    const written: string[] = [];
+    if (write !== undefined) {
+      written.push(`timeline/${date}/records.json`);
+      written.push(`timeline/${date}/deleted.jsonl`);
+      written.push(`timeline/${date}/restore.jsonl`);
+    } else {
+      if (union.text.length > 0) {
+        written.push(`timeline/${date}/records.json`);
+      }
+      if (union.deleted.length > 0) {
+        written.push(`timeline/${date}/deleted.jsonl`);
+      }
+      if (union.restored.length > 0) {
+        written.push(`timeline/${date}/restore.jsonl`);
+      }
+    }
+    if (union.conflicts.length > 0) {
+      written.push(`timeline/${date}/conflicts.jsonl`);
+    }
+    for (const path of written) {
+      if (derived.indexOf(path) < 0) {
+        derived.push(path);
+      }
+    }
+  }
+
+  // 兜底复核：阶段 1 之前标记缺失时，writer 本应建好 v2 骨架；这里重读并再过一次同一个门禁。
+  // 仍然缺失 / 不可识别 / 版本不是 2 → 零 addPaths、零 commit、零 push，绝不提交无标记的树。
+  if (needsPostWriteCheck) {
+    let afterText: string = '';
+    if (port.localSchemaText !== undefined) {
+      try {
+        afterText = await port.localSchemaText();
+      } catch (error) {
+        afterText = '';
+      }
+    }
+    const afterGate: WriteGateResult = bootstrapSchemaGate(afterText, branch);
+    if (!afterGate.ok) {
+      return gateFailure(afterGate, outbox);
+    }
+  }
+
+  // 阶段 2：初始提交树 = schema.json + 本地全量 timeline 文件；端口未枚举时回退到本次派生日文件。
+  let paths: string[] = [];
+  if (port.localTimelinePaths !== undefined) {
+    paths = await port.localTimelinePaths();
+  } else {
+    paths = derived.slice();
+  }
+  if (paths.indexOf('timeline/schema.json') < 0) {
+    paths = ['timeline/schema.json'].concat(paths);
+  }
+
+  // 阶段 3：commit + push（无 force / 无 reset / 不改写历史）。失败即 typed 错误 + outbox 停放，
+  // 绝不把「本地已提交但没推成功」的中间态报成成功。
+  try {
+    await port.addPaths(paths);
+    await port.commit(BOOTSTRAP_COMMIT_MESSAGE);
+    await port.pushMain();
+  } catch (error) {
+    const text: string = error instanceof Error ? error.message : String(error);
+    const typed: TypedPushError = typedPushError(text);
+    const parked: OutboxEntry[] = bumpAttempts(outbox, text);
+    await persistOutbox(write, parked);
+    return {
+      ok: false, code: typed.code, days: EMPTY_DAYS.slice(),
+      applied: 0, dropped: 0, failed: countFailed(parked),
+      pending: replayable(parked).length,
+      message: `首次初始化 main 推送失败；${typed.message}（${text}）`,
+      conflicts: 0, added: 0, attempts: 1,
+      resultOutbox: parked, droppedIds: [], bootstrapped: true
+    };
+  }
+
+  // 阶段 4：fetch 建立 origin/main 跟踪引用（本项目的 upstream 语义 = refs/remotes/origin/main）。
   await port.fetchMain();
+
+  // 阶段 5：回到普通周期过完整门禁。意图已落在初始提交里，union 幂等判定把它们出队，用户看到「已同步」。
+  const resumed: CycleOutcome = await runCyclePure(port, days, readDay, outbox, now, write, true);
+  resumed.bootstrapped = true;
+  return resumed;
+}
+
+/**
+ * 单一同步周期（纯决策）。详见文件头；write 缺省时只产出决策（预览），
+ * 生产调用（syncProtocolStore）必须注入 WritePort，否则 union 文本不会落盘。
+ * `skipBootstrapProbe` 只由首跑引导的「继续普通周期」内部使用，防止递归回引导。
+ */
+export async function runCyclePure(
+  port: GitPort,
+  days: string[],
+  readDay: (date: string) => Promise<DayRead>,
+  outbox: OutboxEntry[],
+  now: Date,
+  write?: WritePort,
+  skipBootstrapProbe?: boolean
+): Promise<CycleOutcome> {
+  // 步骤 0（可选）：远端引用探测在 fetch 之前 —— 空远端的 `fetch origin main` 会直接抛
+  // "Could not find origin/main"，那是首跑态而非传输故障，必须先分流。未注入该端口的调用保持原行为。
+  if (skipBootstrapProbe !== true && port.remoteLayout !== undefined) {
+    let layout: RemoteLayout;
+    try {
+      layout = await port.remoteLayout();
+    } catch (error) {
+      // 首调用的认证/传输故障必须和 fetch 失败一样进入 typed 三态结果，不能逃逸成未捕获 rejection。
+      // 异常一律不映射成 isEmpty=true —— fail-closed：探测不到远端状态就绝不引导写历史。
+      const text: string = error instanceof Error ? error.message : String(error);
+      await persistOutbox(write, outbox);
+      return probeFailureOutcome(text, outbox);
+    }
+    const decision: RemoteStateDecision = remoteStateDecision(layout.hasMain, layout.isEmpty);
+    if (decision === 'bootstrap') {
+      return await bootstrapEmptyRemote(port, days, readDay, outbox, now, write);
+    }
+    if (decision === 'no-main') {
+      return noMainOutcome(outbox);
+    }
+  }
+  // 步骤 1：fetch（只读）→ 步骤 2：§11 门禁（以 freshly fetched origin/main 计算祖先关系）。
+  try {
+    await port.fetchMain();
+  } catch (error) {
+    const text: string = error instanceof Error ? error.message : String(error);
+    await persistOutbox(write, outbox);
+    return pullFailureOutcome(text, outbox);
+  }
   let gate: WriteGateResult = await gateOf(port);
   if (!gate.ok) {
     return gateFailure(gate, outbox);

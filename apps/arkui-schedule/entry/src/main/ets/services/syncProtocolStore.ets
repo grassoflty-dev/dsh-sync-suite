@@ -318,6 +318,7 @@ export class SyncProtocolStore {
     };
     const write: WritePort = {
       writeDay: async (date: string, texts: DayWriteTexts): Promise<void> => {
+        timelineWriteStore.ensureSkeleton(); // 引导阶段可能还没有仓库骨架（首装未进过任何页面就同步）；幂等：已存在 v2 标记时不写
         this.writeDayTexts(date, texts);
       },
       // P1-3：纯决策层每次失败尝试后当场落盘 attempts/state，崩溃不重置跨会话预算。

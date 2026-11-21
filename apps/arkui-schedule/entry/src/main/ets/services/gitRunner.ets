@@ -15,7 +15,7 @@ import { GitSyncService } from './GitSyncService';
 import { syncController } from './syncController';
 import { syncProtocolStore } from './syncProtocolStore';
 import { runnerReadyDecision, E_SYNC_UNAVAILABLE_MESSAGE } from '../model/syncCycle';
-import type { GitPort, RunnerReadyDecision } from '../model/syncCycle';
+import type { GitPort, RemoteLayout, RunnerReadyDecision } from '../model/syncCycle';
 import type { common } from '@kit.AbilityKit';
 
 /** 首轮周期早于隐藏 Web 的 onPageEnd 时，最多等 10 秒再报 typed 错（不静默失败、不无限等）。 */
@@ -128,6 +128,47 @@ export class BridgeGitRunner implements GitPort {
     } catch (error) {
       return [];
     }
+  }
+
+  /**
+   * 首跑探测：直接列举服务端引用，不依赖 fetch（空远端上 `fetch origin main` 会因缺少引用失败）。
+   * 解析失败时按「非空且无 main」fail-closed —— 绝不盲目引导，避免覆盖别人的历史。
+   */
+  async remoteLayout(): Promise<RemoteLayout> {
+    const args: Record<string, string> = {};
+    const raw: string = (await (await this.requireService()).v2Git('remoteLayout', args)).value;
+    try {
+      const parsed: RemoteLayout = JSON.parse(raw) as RemoteLayout;
+      return {
+        hasMain: parsed.hasMain === true,
+        isEmpty: parsed.isEmpty === true,
+        refs: Array.isArray(parsed.refs) ? parsed.refs : []
+      };
+    } catch (error) {
+      return { hasMain: false, isEmpty: false, refs: [] };
+    }
+  }
+
+  /** 首跑引导：列出本地工作副本 timeline/** 的相对路径（含 schema.json 与各日文件）。 */
+  async localTimelinePaths(): Promise<string[]> {
+    const args: Record<string, string> = {};
+    const raw: string = (await (await this.requireService()).v2Git('listLocalTimeline', args)).value;
+    try {
+      const parsed: string[] = JSON.parse(raw) as string[];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+      return [];
+    }
+  }
+
+  /**
+   * §11 门禁前置：读本地工作副本 timeline/schema.json 原文（缺文件 = 空串）。
+   * 桥侧对缺文件返回空串且不抛；空串由 parseSchemaMarker 判为未知版本，fail-closed。
+   */
+  async localSchemaText(): Promise<string> {
+    const args: Record<string, string> = {};
+    const raw: string = (await (await this.requireService()).v2Git('readLocalTimelineSchema', args)).value;
+    return typeof raw === 'string' ? raw : '';
   }
 
   /** 只缓冲：真正的 git add + commit 在 commit() 里一次完成（syncCycle 的调用顺序固定）。 */
