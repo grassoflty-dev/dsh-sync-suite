@@ -143,3 +143,7 @@ node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json 
 ## 7. 构建 / 签名（`tools/sign-hap.ps1`）
 
 - 口令解析顺序固定为 `-StorePass/-KeyPass` 显式参数 → 环境变量 `SIGN_PASS`（可选 `SIGN_KEY_PASS`）→ `signing/pass.txt`（去 UTF-8 BOM、只去掉行尾 CRLF，空格/制表符当作口令字符保留）；签名前用 `keytool -list` 预检 keystore，打不开即报 `[sign-hap] 密码无法打开 keystore：检查 -StorePass / signing/pass.txt（不要打印密码）` 而不打印口令；v2 材料（`itwill-debug-v2.p12/.cer/.p7b`）不齐时**默认拒绝**使用已泄露的 v1 调试密钥，确有 Reproduction 需要须显式加 `-AllowLegacyV1Key`，届时会打印含 `LEAKED v1 signing key` 的高亮警告。
+
+- **可证明装机的规则**：每次要通过 `install -r` 证明“新包已上机”，先把 `AppScope/app.json5` 的
+  `versionCode` 自增 1，再用 `bm dump -n com.itwill.schedule` 核对 `versionCode` 变化；
+  只凭 HAP 文件时间戳不能证明替换成功。
