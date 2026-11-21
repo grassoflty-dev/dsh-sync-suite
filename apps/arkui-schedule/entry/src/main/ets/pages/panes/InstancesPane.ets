@@ -313,13 +313,6 @@ export struct InstancesPane {
     this.reload();
   }
 
-  /** 原有「云端对话（只读）」列表仍是独立页：设置入口升级到本页后，从这里保留一条桥接路径。 */
-  private openChats(): void {
-    router.pushUrl({ url: 'pages/Chats' }).catch((error: Error) => {
-      promptAction.showToast({ message: `打开云端对话失败：${describeError(error)}`, duration: 3000 });
-    });
-  }
-
   /**
    * 空态次操作：把旧设置里的 DSH 地址交给系统浏览器；没填就说明原因，不假装能开。
    *
@@ -347,7 +340,10 @@ export struct InstancesPane {
 
   // ------------------------------------------------------------------ 渲染
 
-  /** 分段页头：左标题（省略号）+「云端对话」桥接；「添加实例」只在可配置模式出现。 */
+  /**
+   * 分段页头：左标题（省略号）+ pane 专属动作——「添加实例」只在可配置模式出现；
+   * 只读页头只有标题，没有任何跨节导航（换段只走 ShellRail，云端对话等分段由轨负责）。
+   */
   @Builder
   Header() {
     Row() {
@@ -370,15 +366,6 @@ export struct InstancesPane {
             this.showAdd();
           })
       }
-      Text('云端对话')
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.brand'))
-        .height(TOUCH_MIN)
-        .padding({ left: SPACING.sm, right: SPACING.sm })
-        .onClick(() => {
-          this.openChats();
-        })
     }
     .width('100%')
     .alignItems(VerticalAlign.Center)

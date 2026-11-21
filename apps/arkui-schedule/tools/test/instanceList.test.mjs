@@ -80,6 +80,14 @@ function blankBlock(source, markerAt) {
   return source.slice(0, start) + ' '.repeat(end - start) + source.slice(end);
 }
 
+/** 取 `Header() { ... }` 之类 builder 的花括号内部文本（页头形状守卫用）。 */
+function blockAfter(source, marker) {
+  const at = source.indexOf(marker);
+  assert.notEqual(at, -1, `找不到 ${marker}`);
+  const [start, end] = matchBrace(source, source.indexOf('{', at));
+  return source.slice(start + 1, end - 1);
+}
+
 /** 所有配置专属区域：模式门控块 + 只在配置模式下被调用的 FormPanel builder。 */
 function configBlocks(source) {
   const out = [];
@@ -383,10 +391,20 @@ describe('静态断言：页面、入口与存储接线', () => {
     assert.match(PAGE, /EMPTY_TITLE: string = '还没有可管理的 DSH 实例'/);
   });
 
-  test('U-11 设置入口升级后仍可从实例面板桥接回原云端对话列表', () => {
-    assert.match(PAGE, /router\.pushUrl\(\{ url: 'pages\/Chats' \}\)/);
-    // old: PageLayout.headerActionTwo:'云端对话' → new: 面板页头的 Text('云端对话') 出口。
-    assert.match(PAGE, /Text\('云端对话'\)/);
+  // mod-pane-header-nav-dedupe（old→new，收紧）：旧断言钉「实例面板页头有云端对话桥接出口」；
+  // 现定版「换段只走 ShellRail」——页头不得有跨节导航，云端对话分段只能从轨进入。
+  // 新断言正向钉「实例面板无 pages/Chats push / 无 openChats / 无云对话页头动作」，
+  // 并确认云端对话分段仍由外壳的 onSelect 唯一拥有（比旧的「有桥接」更强）。
+  test('U-11 实例面板页头无跨节导航：云端对话只从导航轨进入', () => {
+    assert.equal(/pages\/Chats/.test(PAGE), false, '实例面板不得 push 云端对话独立页（跨节导航）');
+    assert.equal(/openChats/.test(PAGE), false, '实例面板不得保留 openChats 桥接 handler');
+    assert.equal(/Text\('云端对话'\)/.test(PAGE), false, '实例面板页头不得有「云端对话」跨节动作');
+    assert.equal(/selectSection|SHELL_SECTION_[A-Z_]+|onSelect: \(next: ShellSection\)/.test(PAGE), false,
+      '面板不得自行切段');
+    // 分段切换只属于外壳：Home 持有 section 与 selectSection，ShellRail 发 onSelect。
+    assert.match(HOME, /private selectSection\(section: ShellSection\)/);
+    const rail = readFileSync(new URL('../../entry/src/main/ets/components/shell/ShellRail.ets', import.meta.url), 'utf8');
+    assert.match(rail, /onSelect: \(section: ShellSection\) => void/, 'rail 只发 onSelect，不自己跳页');
   });
 
   test('U-12 令牌出口边界：Want.uri 只能来自 stripRemoteToken() 后的地址', async () => {
@@ -440,11 +458,16 @@ describe('静态断言：页面、入口与存储接线', () => {
     assert.match(STORE, /redacted\(\): RedactedInstance\[\]/, '渲染视图来自 store 的排序副本');
   });
 
-  // mod-instances-pane-readonly（old→new，收紧）：页头主操作按模式分叉，保活 / Scroll 不变。
-  test('U-15 面板页头 + 自带 Scroll + 保活接线；添加实例只在配置模式', () => {
+  // mod-instances-pane-readonly（old→new，收紧）+ mod-pane-header-nav-dedupe：
+  // 页头主操作按模式分叉，保活 / Scroll 不变；只读页头只剩标题、无跨节导航。
+  test('U-15 面板页头 + 自带 Scroll + 保活接线；添加实例只在配置模式，只读页头为空', () => {
     assert.match(PAGE, /Text\('远程 DSH'\)/, '分段标题');
     assert.match(configBlocks(PAGE).join('\n'), /Text\('添加实例'\)/, '配置模式主操作');
-    assert.match(readonlySource(PAGE), /Text\('云端对话'\)/, '只读页头保留桥接出口');
+    const header = blockAfter(PAGE, '\n  Header() ');
+    assert.equal(/Text\('云端对话'\)|openChats|pages\/Chats/.test(header), false,
+      '页头不得有「云端对话」跨节桥接（换段只走 rail）');
+    assert.equal((readonlySource(header).match(/Text\(/g) ?? []).length, 1, '只读页头只有标题一处 Text');
+    assert.equal(/onClick\(/.test(readonlySource(header)), false, '只读页头没有任何点击动作');
     assert.equal(/Text\('添加实例'\)/.test(readonlySource(PAGE)), false,
       '首页面板不得展示添加实例');
     assert.match(PAGE, /^\s*Scroll\(\) \{/m, '面板自带 Scroll');

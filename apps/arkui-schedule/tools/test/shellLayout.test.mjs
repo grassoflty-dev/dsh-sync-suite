@@ -279,12 +279,16 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       '日程面板页头不得有设置动作（唯一出口 = rail 齿轮 → Home.openSettings）');
     assert.match(schedule, /Button\('新建'\)/, '日程面板的主操作是「新建」');
     assert.equal(/即将迁入/.test(schedule), false, '日程面板不得残留占位文案');
-    // mod-instances-pane-readonly（old→new，收紧）：远程 DSH 不再是占位；首页只读页头
-    // 不再有「添加实例」（它只在配置模式出现），但「云端对话」桥接仍可点；禁用原因已绝迹。
+    // mod-pane-header-nav-dedupe（old→new，收紧）：远程 DSH 不再是占位；首页只读页头只有标题
+    // （无「添加实例」，也无「云端对话」跨节导航）；禁用原因已绝迹。
     const instances = PANE_SOURCE.get('InstancesPane');
     const instancesRaw = PANE_RAW.get('InstancesPane');
-    const readonlyHeader = readonlyRegions(blockAfter(instancesRaw, '\n  Header() '));
-    assert.match(readonlyHeader, /Text\('云端对话'\)/, '只读页头保留可点桥接出口');
+    const header = blockAfter(instancesRaw, '\n  Header() ');
+    const readonlyHeader = readonlyRegions(header);
+    assert.equal(/Text\('云端对话'\)|openChats|pages\/Chats/.test(header), false,
+      '页头不得有跨节导航「云端对话」');
+    assert.equal((readonlyHeader.match(/Text\(/g) ?? []).length, 1, '只读页头只有标题');
+    assert.equal(/onClick\(/.test(readonlyHeader), false, '只读页头没有点击动作');
     assert.equal(/Text\('添加实例'\)/.test(readonlyHeader), false, '首页面板不得展示添加实例');
     assert.match(configRegions(instancesRaw).join('\n'), /Text\('添加实例'\)/, '配置模式保留添加实例');
     assert.equal(/REASON_REMOTE|远程面板即将迁入|本页暂不展示任何记录/.test(instances), false,
@@ -424,13 +428,37 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       '常驻轨与抽屉轨都把齿轮事件接到 openSettings');
     // 面板主操作必须 pane 专属，不能有设置动作。
     assert.match(PANE_SOURCE.get('SchedulePane'), /Button\('新建'\)/, '日程：新建');
-    // mod-instances-pane-readonly（old→new，不比原来弱）：面板主操作仍 pane 专属，
-    // 但「添加实例」只在配置模式；首页分段用「云端对话」桥接 + 空态跳设置，不展示配置。
-    assert.match(readonlyRegions(PANE_RAW.get('InstancesPane')), /Text\('云端对话'\)/,
-      '远程 DSH（只读）：云端对话桥接');
-    assert.match(configRegions(PANE_RAW.get('InstancesPane')).join('\n'), /Text\('添加实例'\)/,
+    // mod-pane-header-nav-dedupe（old→new，收紧）：面板主操作仍 pane 专属，「添加实例」只在配置模式；
+    // 只读页头没有跨节导航，云端对话分段只从 rail 进入。
+    const instancesRaw = PANE_RAW.get('InstancesPane');
+    assert.equal(/Text\('云端对话'\)|openChats|pages\/Chats/.test(instancesRaw), false,
+      '远程 DSH（只读）：页头不得有跨节导航到云端对话');
+    assert.match(configRegions(instancesRaw).join('\n'), /Text\('添加实例'\)/,
       '远程 DSH（设置模式）：添加实例');
     assert.match(PANE_SOURCE.get('DotsPane'), /新建对话/, 'dots：新建对话');
     assert.match(PANE_SOURCE.get('CloudChatPane'), /新建对话/, '云端对话：新建对话');
+  });
+
+  // mod-pane-header-nav-dedupe（新增正向守卫）：跨节导航只在 rail；面板页头只放 pane 专属动作。
+  test('L-21 四面板页头无跨节导航，换段只走 ShellRail.onSelect → Home.selectSection', () => {
+    for (const { name } of PANES) {
+      const code = PANE_SOURCE.get(name);
+      assert.equal(/selectSection|SHELL_SECTION_[A-Z_]+|onSelect: \(next: ShellSection\)/.test(code), false,
+        `${name} 不得在页头 / 面板里切段`);
+      assert.equal(/pushUrl\(\{\s*url:\s*'pages\/(Chats|Home)'/.test(code), false,
+        `${name} 不得 push 跨节目标页 pages/Chats / pages/Home`);
+    }
+    const header = blockAfter(PANE_RAW.get('InstancesPane'), '\n  Header() ');
+    const readonlyHeader = readonlyRegions(header);
+    assert.equal(/Text\('云端对话'\)|openChats|pages\/Chats/.test(header), false,
+      '实例面板页头不得有云端对话跨节桥接');
+    assert.equal((readonlyHeader.match(/Text\(/g) ?? []).length, 1, '只读页头只有标题');
+    assert.equal(/onClick\(/.test(readonlyHeader), false, '只读页头无点击动作');
+    assert.match(configRegions(PANE_RAW.get('InstancesPane')).join('\n'), /Text\('添加实例'\)/,
+      '配置页头只有 pane 专属「添加实例」');
+    assert.match(HOME, /private selectSection\(section: ShellSection\)/, '外壳拥有唯一选段入口');
+    assert.equal((HOME.match(/onSelect: \(next: ShellSection\)/g) ?? []).length, 2,
+      '常驻轨与抽屉轨都把选段回传给外壳');
+    assert.match(RAIL, /onSelect: \(section: ShellSection\) => void/, 'rail 只发 onSelect');
   });
 });

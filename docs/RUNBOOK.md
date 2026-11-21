@@ -144,6 +144,11 @@ node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json 
 
 - 口令解析顺序固定为 `-StorePass/-KeyPass` 显式参数 → 环境变量 `SIGN_PASS`（可选 `SIGN_KEY_PASS`）→ `signing/pass.txt`（去 UTF-8 BOM、只去掉行尾 CRLF，空格/制表符当作口令字符保留）；签名前用 `keytool -list` 预检 keystore，打不开即报 `[sign-hap] 密码无法打开 keystore：检查 -StorePass / signing/pass.txt（不要打印密码）` 而不打印口令；v2 材料（`itwill-debug-v2.p12/.cer/.p7b`）不齐时**默认拒绝**使用已泄露的 v1 调试密钥，确有 Reproduction 需要须显式加 `-AllowLegacyV1Key`，届时会打印含 `LEAKED v1 signing key` 的高亮警告。
 
-- **可证明装机的规则**：每次要通过 `install -r` 证明“新包已上机”，先把 `AppScope/app.json5` 的
-  `versionCode` 自增 1，再用 `bm dump -n com.itwill.schedule` 核对 `versionCode` 变化；
-  只凭 HAP 文件时间戳不能证明替换成功。
+- **可证安装 = install 输出 + 内容哈希比对（或新构建独有的行为），不要依赖 bm dump 的 versionCode。**
+  - 本机（MLR-AL00 / API 26）上 `bm dump -n com.itwill.schedule` 的 `versionCode` 恒为 `0`、`versionName` 为空，
+    **不能**用来证明替换成功；把 `versionCode` 自增当作安装证据是无效的。
+  - **内容证明**：从设备取回 `.../haps/entry/modules.abc`（或 `resources.index`），与已签名 HAP 内同名条目比对 SHA256；
+    相等即证明该构建已安装。
+  - **行为证明**：只在新构建里出现的界面特征（例如设置四行菜单、关于页版本文案、某个按钮已消失）。
+  - 操作记录仍保留 `install bundle successfully` + `aa start` 输出。
+  - `versionCode` 仍需按发布递增（AppGallery 要求），但**不作为安装证明**引用。
