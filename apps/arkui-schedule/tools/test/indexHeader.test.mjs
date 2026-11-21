@@ -117,7 +117,7 @@ describe('日程面板契约（S3 已迁入 SchedulePane.ets）：AI 汇总图�
     for (const builder of ['CompactBody', 'WideBody']) {
       const body = memberBody(builder);
       const cardAt = body.indexOf('this.SummaryCard()');
-      const listAt = body.indexOf('this.RecordList()');
+      const listAt = body.indexOf('this.RefreshableList()');
       assert.ok(cardAt >= 0, `${builder} 必须渲染汇总块`);
       assert.ok(listAt > cardAt, `${builder} 的汇总块必须在列表之前（列表第一项）`);
     }

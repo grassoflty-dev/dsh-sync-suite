@@ -254,7 +254,7 @@ describe('mod-home-filters-2 · 计数、空态与不变量', () => {
   test('今日汇总块 / 撤销条 / 两个断点的渲染位置未被本模块改动（双格条已由导航轨取代）', () => {
     for (const builderName of ['CompactBody', 'WideBody']) {
       const body = bodyFrom(INDEX, `\n  ${builderName}() {`);
-      for (const piece of ['this.ModeTabs()', 'this.SearchFilterBar()', 'this.RecordList()', 'this.UndoBar()']) {
+      for (const piece of ['this.ModeTabs()', 'this.SearchFilterBar()', 'this.RefreshableList()', 'this.UndoBar()']) {
         assert.ok(body.includes(piece), `${builderName} 仍须渲染 ${piece}`);
       }
       assert.ok(body.includes('this.SummaryCard()'), `${builderName} 仍须渲染今日汇总块`);
