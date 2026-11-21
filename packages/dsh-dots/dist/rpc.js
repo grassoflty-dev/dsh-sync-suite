@@ -20,7 +20,23 @@ import { applySelected, previewRollback, rollbackSnapshot } from './engine/resto
 import { containsSecretValue } from './engine/secrets.js';
 import { SettingsStore, LocalStateStore, normalizeSettings, resolveToken } from './engine/settings.js';
 import { SnapshotStore } from './engine/snapshot.js';
+// mod-plugin-remote-tools：只读远程工具。四个 action 只接受 instanceId 走 allow-list，
+// 不接调用方 URL；grant 表与实例清单都落在插件状态目录（同步仓库之外）。
+import { GrantStore } from './remote/grants.js';
+import { InstanceRegistry, redactInstanceUrl } from './remote/instances.js';
+import { localSessionEvents, localSessionInfo, localSessionList } from './remote/localRead.js';
+import { projectInstanceList, projectReadResult } from './remote/projection.js';
+import { mapRemoteCode, remoteToolError, REMOTE_TOOL_ERROR_CODES } from './remote/toolErrors.js';
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
+/**
+ * 远端只读响应的字节硬上限 4 MiB（4 * 1024 * 1024）。
+ * 取值依据：本工具一次最多投影 500 条事件，每条正文在白名单里截到 2000 字符；
+ * 中文按 UTF-8 最坏 3 字节/字符 ≈ 500 * 2000 * 3 = 3 MB，再加 JSON 键与转义余量，
+ * 4 MiB 覆盖合法上限且仍把恶意 peer 的内存占用钉死在一个量级。
+ * 注意：8 秒 AbortSignal 只是**时间**上限；没有这个字节上限，peer 可以在 8 秒内
+ * 推任意大体量，解析前就把进程内存吃光。
+ */
+const REMOTE_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
 function ok(data) {
     return { ok: true, data };
 }
@@ -40,6 +56,11 @@ export function createRpcService(options = {}) {
     const snapshots = new SnapshotStore(paths.snapshotRoot);
     const cache = new PreviewCache();
     const hooks = options.hooks;
+    // 只读工具的依赖：默认落插件状态目录；HTTP 默认走全局 fetch（无新依赖、无 token 日志）。
+    const instances = options.remoteTools?.instances ?? new InstanceRegistry({ homeDir: options.homeDir });
+    const grants = options.remoteTools?.grants ?? new GrantStore({ homeDir: options.homeDir, now });
+    const remoteFetch = options.remoteTools?.fetch ??
+        ((url, init) => fetch(url, init));
     let queue = Promise.resolve();
     let disposed = false;
     function enqueue(task) {
@@ -554,6 +575,237 @@ export function createRpcService(options = {}) {
         }
         return outcome;
     }
+    /** action → grant 工具 id（view 子集）。 */
+    function readToolOf(action) {
+        switch (action) {
+            case 'sessionList': return 'session.list';
+            case 'sessionInfo': return 'session.info';
+            case 'sessionEvents': return 'session.events';
+        }
+    }
+    /** 唯一的实例解析入口：id 非法 / 不在清单 → E_INSTANCE_UNKNOWN。 */
+    function resolveInstance(payload) {
+        const id = asString(payload.instanceId).trim();
+        if (id === '')
+            throw remoteToolError('E_VALIDATION', 'instanceId 不能为空');
+        const instance = instances.get(id);
+        if (instance === null) {
+            throw remoteToolError(REMOTE_TOOL_ERROR_CODES.INSTANCE_UNKNOWN, '未知实例（不在允许清单里）', { instanceId: id });
+        }
+        return instance;
+    }
+    /** 门禁：精确实例 + 精确工具 + 有效期；拒绝码与"未知实例"可区分。 */
+    function assertGrant(instanceId, tool) {
+        if (!grants.isGranted(instanceId, tool)) {
+            throw remoteToolError(REMOTE_TOOL_ERROR_CODES.GRANT_DENIED, '没有该实例的工具授权', { instanceId, tool });
+        }
+    }
+    /** 超上限：独立 typed 码，details 只有数字上限，绝不回显响应体。 */
+    function tooLarge(instanceId, tool) {
+        return remoteToolError(REMOTE_TOOL_ERROR_CODES.REMOTE_TOO_LARGE, '目标实例的响应体超过字节上限', {
+            instanceId,
+            tool,
+            limit: REMOTE_RESPONSE_MAX_BYTES,
+        });
+    }
+    /**
+     * 字节级封顶读取：先看 Content-Length（当它>上限直接拒，不再读一字节），
+     * 但**绝不信任它**——无论它缺失、撒谎说很小、还是和实际不符，都按流分块累计真实字节，
+     * 一旦越过上限立即 cancel() 并抛 typed 错误；最后才对已封顶的字节做 JSON.parse。
+     */
+    async function readCappedBody(response, instanceId, tool) {
+        const declared = response.headers?.get('content-length');
+        if (declared !== null && declared !== undefined) {
+            const announced = Number(declared);
+            if (Number.isFinite(announced) && announced > REMOTE_RESPONSE_MAX_BYTES)
+                throw tooLarge(instanceId, tool);
+        }
+        let bytes;
+        const reader = response.body?.getReader();
+        if (reader !== undefined && reader !== null) {
+            const chunks = [];
+            let total = 0;
+            try {
+                for (;;) {
+                    const chunk = await reader.read();
+                    if (chunk.done === true)
+                        break;
+                    const value = chunk.value ?? new Uint8Array(0);
+                    total += value.byteLength;
+                    if (total > REMOTE_RESPONSE_MAX_BYTES) {
+                        try {
+                            await reader.cancel('response-too-large');
+                        }
+                        catch {
+                            /* 取消失败不改变"已拒绝"这一事实 */
+                        }
+                        throw tooLarge(instanceId, tool);
+                    }
+                    chunks.push(value);
+                }
+            }
+            finally {
+                // 正常读完也释放锁；异常路径的 cancel 已在上面处理。
+                const release = reader.releaseLock;
+                if (typeof release === 'function') {
+                    try {
+                        release.call(reader);
+                    }
+                    catch {
+                        /* 释放失败不影响结果 */
+                    }
+                }
+            }
+            bytes = new Uint8Array(total);
+            let at = 0;
+            for (const chunk of chunks) {
+                bytes.set(chunk, at);
+                at += chunk.byteLength;
+            }
+        }
+        else {
+            // 没有流接口的假实现/老运行时：至少在拿到完整 buffer 后按真实字节再封一次。
+            let buffer;
+            try {
+                buffer = await response.arrayBuffer();
+            }
+            catch {
+                throw remoteToolError(REMOTE_TOOL_ERROR_CODES.REMOTE_BAD_RESPONSE, '目标实例返回了无法解析的响应', { instanceId, tool });
+            }
+            if (buffer.byteLength > REMOTE_RESPONSE_MAX_BYTES)
+                throw tooLarge(instanceId, tool);
+            bytes = new Uint8Array(buffer);
+        }
+        // 到这里字节已被钉死在上限内；解析失败也只给 typed 错误，不回显任何正文。
+        try {
+            return JSON.parse(Buffer.from(bytes).toString('utf8'));
+        }
+        catch {
+            throw remoteToolError(REMOTE_TOOL_ERROR_CODES.REMOTE_BAD_RESPONSE, '目标实例返回了无法解析的响应', { instanceId, tool });
+        }
+    }
+    /**
+     * 统一只读传输：
+     *   - 本机（baseUrl 为空）→ 直接读本地会话，避免 local→HTTP→local 递归；
+     *   - 远程 → 只向清单登记的 base URL 的 `/dsh-dots/rpc` POST 同名只读 action。
+     * 请求体里 instanceId 恒为 `local`（让对端读它自己），调用方给的 url 字段被忽略。
+     */
+    async function remoteRead(instance, action, tool, args) {
+        if (instance.baseUrl === '') {
+            let local;
+            if (action === 'sessionList')
+                local = await localSessionList(args, options.homeDir);
+            else if (action === 'sessionInfo')
+                local = await localSessionInfo(args, options.homeDir);
+            else
+                local = await localSessionEvents(args, options.homeDir);
+            if (local === null)
+                throw new SyncError('E_NOT_FOUND', '本机没有这个会话');
+            // 本机路径与远端路径共用同一投影函数，结构按构造同形。
+            return projectReadResult(action, local, instance.id);
+        }
+        let url;
+        try {
+            const parsed = new URL(instance.baseUrl);
+            parsed.pathname = '/dsh-dots/rpc';
+            parsed.search = '';
+            parsed.hash = '';
+            url = parsed.toString();
+        }
+        catch {
+            throw remoteToolError(REMOTE_TOOL_ERROR_CODES.REMOTE_UNSUPPORTED, '实例地址不可用', { instanceId: instance.id, tool });
+        }
+        let response;
+        try {
+            response = await remoteFetch(url, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                // 注意：绝不把调用方 payload 里的 url / baseUrl 拼进来（allow-list 不可绕过）。
+                body: JSON.stringify({ action, ...args, instanceId: 'local' }),
+                signal: AbortSignal.timeout(options.networkTimeoutMs ?? 8000),
+            });
+        }
+        catch {
+            throw remoteToolError(REMOTE_TOOL_ERROR_CODES.REMOTE_UNREACHABLE, '目标实例不可达（网络失败或超时）', { instanceId: instance.id, tool });
+        }
+        const status = response.status;
+        if (status === 401 || status === 403) {
+            throw remoteToolError(REMOTE_TOOL_ERROR_CODES.REMOTE_AUTH_REJECTED, '目标实例拒绝了访问令牌', { instanceId: instance.id, tool, status });
+        }
+        if (status === 404) {
+            throw remoteToolError(REMOTE_TOOL_ERROR_CODES.REMOTE_UNSUPPORTED, '目标实例不支持该只读动作', { instanceId: instance.id, tool, status });
+        }
+        if (!response.ok) {
+            throw remoteToolError(REMOTE_TOOL_ERROR_CODES.REMOTE_UNREACHABLE, '目标实例返回异常状态', { instanceId: instance.id, tool, status });
+        }
+        // 先按字节封顶再解析；json() 不再被调用（响应体绝不会被无界读入内存）。
+        const body = await readCappedBody(response, instance.id, tool);
+        if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+            throw remoteToolError(REMOTE_TOOL_ERROR_CODES.REMOTE_BAD_RESPONSE, '目标实例返回了异常的响应结构', { instanceId: instance.id, tool });
+        }
+        const rpc = body;
+        if (rpc.ok !== true) {
+            // 只映射白名单 code，且 details 里没有远端文案（可能含凭据）。
+            throw remoteToolError(mapRemoteCode(rpc.error?.code), '目标实例拒绝了这次读取', { instanceId: instance.id, tool });
+        }
+        // 只把 peer 数据按白名单投影后交给调用方，未知字段（token/path/额外数组）一律不进结果。
+        return projectReadResult(action, rpc.data, instance.id);
+    }
+    /** 当前实例已经 granted 的 view 能力（给 UI 渲染徽章，不泄漏未授权实例）。 */
+    function grantedCaps(instanceId) {
+        const caps = [];
+        if (grants.isGranted(instanceId, 'session.list'))
+            caps.push('sessionList');
+        if (grants.isGranted(instanceId, 'session.info'))
+            caps.push('sessionInfo');
+        if (grants.isGranted(instanceId, 'session.events'))
+            caps.push('sessionEvents');
+        return caps;
+    }
+    /** 列实例：无 instance.list 授权的实例根本不出现在结果里（fail-closed）。 */
+    async function instanceList() {
+        const out = [];
+        for (const instance of instances.list()) {
+            if (!grants.isGranted(instance.id, 'instance.list'))
+                continue;
+            // 只回打码地址；真身 base 与任何 token 都不出这个边界。
+            out.push({
+                id: instance.id,
+                displayName: instance.displayName,
+                mode: instance.mode,
+                urlMasked: redactInstanceUrl(instance.baseUrl),
+                capabilities: grantedCaps(instance.id),
+            });
+        }
+        // 和远端路径同款白名单投影；本地构造也不允许意外多字段。
+        return { instances: projectInstanceList(out) };
+    }
+    async function sessionList(payload) {
+        const instance = resolveInstance(payload);
+        const tool = readToolOf('sessionList');
+        assertGrant(instance.id, tool);
+        return await remoteRead(instance, 'sessionList', tool, { limit: payload.limit, cursor: payload.cursor });
+    }
+    async function sessionInfo(payload) {
+        const instance = resolveInstance(payload);
+        const tool = readToolOf('sessionInfo');
+        assertGrant(instance.id, tool);
+        if (asString(payload.sessionId).trim() === '')
+            throw remoteToolError('E_VALIDATION', 'sessionId 不能为空');
+        return await remoteRead(instance, 'sessionInfo', tool, { sessionId: asString(payload.sessionId).trim() });
+    }
+    async function sessionEvents(payload) {
+        const instance = resolveInstance(payload);
+        const tool = readToolOf('sessionEvents');
+        assertGrant(instance.id, tool);
+        if (asString(payload.sessionId).trim() === '')
+            throw remoteToolError('E_VALIDATION', 'sessionId 不能为空');
+        return await remoteRead(instance, 'sessionEvents', tool, {
+            sessionId: asString(payload.sessionId).trim(),
+            fromSeq: payload.fromSeq,
+            limit: payload.limit,
+        });
+    }
     async function handleRpc(body) {
         try {
             if (disposed)
@@ -613,6 +865,15 @@ export function createRpcService(options = {}) {
                     return ok(await enqueue(() => chatExportAll(payload)));
                 case 'chatExportOne':
                     return ok(await enqueue(() => chatExportOne(payload)));
+                // ---- mod-plugin-remote-tools：只读远程工具（无 prompt / create / lease 写动作） ----
+                case 'instanceList':
+                    return ok(await enqueue(instanceList));
+                case 'sessionList':
+                    return ok(await enqueue(() => sessionList(payload)));
+                case 'sessionInfo':
+                    return ok(await enqueue(() => sessionInfo(payload)));
+                case 'sessionEvents':
+                    return ok(await enqueue(() => sessionEvents(payload)));
                 default:
                     throw new SyncError('E_UNKNOWN_ACTION', `未知 action：${action}`, { action });
             }
