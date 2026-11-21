@@ -22,6 +22,8 @@ import { createHttpHandler, createRpcService } from './rpc.js'
 import type { ConnectionLike, RpcService } from './rpc.js'
 import { registerScheduleTools } from './schedule/tools.js'
 import type { ScheduleToolOptions, ToolsServiceLike } from './schedule/tools.js'
+// v2 写半侧：首跑迁移门禁 + 同步周期接线；与 v1 日程工具完全平行，不重连 schedule_*。
+import { mountV2Sync } from './sync/bootstrap.js'
 
 export interface PluginConfig {
   /** 覆盖 `~`（测试/多用户场景）；默认取 `os.homedir()` 或 `DSH_HOME`。 */
@@ -170,4 +172,11 @@ export function apply(ctx: HostContext, config: PluginConfig = {}): void {
       allowLocalRepo: config.allowLocalRepo === true,
     })
   }
+
+  // v2 写半侧：迁移门禁与同步周期只在这里挂一次；装配/启动失败不冒泡，v1 面不受影响。
+  // 运行时不持有可卸载句柄，故不新增 ctx.effect（保持既有 effect 数量契约）。
+  mountV2Sync(ctx, {
+    homeDir: config.homeDir,
+    allowLocalRepo: config.allowLocalRepo === true,
+  }, false)
 }
