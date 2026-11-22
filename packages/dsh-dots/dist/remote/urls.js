@@ -226,6 +226,17 @@ export function buildHttpsUrl(host, path = '/') {
     return `https://${formatAuthority(host)}${normalizePath(path)}`;
 }
 /**
+ * mod-remote-tls-termination：拼 `https://host[:port]/path`。
+ * 旁挂监听对外终结 TLS（自签证书），所以 lan/ipv6/tailscale 的可打开地址都必须是 https；
+ * `port <= 0` 表示"不确定端口"，省略端口段。
+ */
+export function buildHttpsUrlWithPort(host, port, path = '/') {
+    const authority = formatAuthority(host);
+    const suffix = normalizePath(path);
+    const portPart = Number.isInteger(port) && port > 0 ? `:${port}` : '';
+    return `https://${authority}${portPart}${suffix}`;
+}
+/**
  * 手动地址归一：缺协议按 `http://` 补（用户常从别处粘 `192.168.1.6:40596/`），
  * 其余 scheme 一律拒。注意这是**渲染期**的容错，落盘校验更严（见 accessMode.ts）。
  */
@@ -309,7 +320,7 @@ export function urlForMode(mode, settings, ctx) {
             const port = effectivePort(settings, ctx);
             if (port <= 0)
                 return urlFail('还不知道 DSH 的监听端口，请先确认端口设置');
-            return urlOk(buildHttpUrl(v4.value, port));
+            return urlOk(buildHttpsUrlWithPort(v4.value, port));
         }
         case 'ipv6': {
             const configured = settings.ipv6Address.trim();
@@ -321,8 +332,9 @@ export function urlForMode(mode, settings, ctx) {
             const port = effectivePort(settings, ctx);
             if (port <= 0)
                 return urlFail('还不知道 DSH 的监听端口，请先确认端口设置');
-            return urlOk(buildHttpUrl(v6.value, port));
+            return urlOk(buildHttpsUrlWithPort(v6.value, port));
         }
+        // mod-remote-tls-termination：旁挂监听对外一律 HTTPS（自签证书 + 配对指纹 pin）。
         case 'tailscale': {
             const configured = settings.tailscaleHost.trim();
             if (configured === '')
@@ -333,7 +345,7 @@ export function urlForMode(mode, settings, ctx) {
             const port = effectivePort(settings, ctx);
             if (port <= 0)
                 return urlFail('还不知道 DSH 的监听端口，请先确认端口设置');
-            return urlOk(buildHttpUrl(host.value, port));
+            return urlOk(buildHttpsUrlWithPort(host.value, port));
         }
         case 'cloudflare': {
             const configured = settings.cloudflareHost.trim();

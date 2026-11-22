@@ -171,6 +171,8 @@ export interface RemoteStatus {
   urls: RemoteUrlEntry[]
   /** 最近一次自检结果（可为 null = 从未探测）。 */
   probe: RemoteProbeResult | null
+  /** mod-remote-tls-termination：当前旁挂监听是否用 TLS 对外（未运行时为 false）。 */
+  tls: boolean
 }
 
 /** `remoteGetState` 返回体。 */

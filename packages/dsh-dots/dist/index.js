@@ -47,6 +47,23 @@ export function apply(ctx, config = {}) {
     let remote = null;
     const pairing = createPairingService({
         homeDir: config.homeDir,
+        // mod-pairing-listener-truth：show() 只认运行监听的事实。这里从 remote.service 投影
+        // boundAddress / port / mode / tls（都是 server.address() 与持久化的真值），进程内读取、
+        // 不联网、不回显 token。remote 晚于 pairing 装配，故用闭包惰性读取。
+        listenerState: async () => {
+            const active = remote;
+            if (active === null)
+                return null;
+            const state = await active.service.getState();
+            const status = state.status;
+            return {
+                running: status.running === true,
+                address: status.boundAddress,
+                port: status.port,
+                mode: state.settings.mode,
+                tls: status.tls === true,
+            };
+        },
         onTokenChanged: (event) => {
             const active = remote;
             if (active === null)

@@ -84,7 +84,7 @@ test('联调：remoteShowLink 真的生成地址与二维码矩阵，且是唯�
   })
   const link = await service.handleRpc({ action: 'remoteShowLink' })
   assert.equal(link.ok, true, JSON.stringify(link))
-  assert.match(link.data.url, /^http:\/\/192\.168\.1\.6:3080\/\?token=/)
+  assert.match(link.data.url, /^https:\/\/192\.168\.1\.6:3080\/\?token=/, '旁挂监听已改为 HTTPS')
   assert.ok(link.data.qr.size >= 21 && link.data.qr.size <= 177, `二维码尺寸异常：${link.data.qr.size}`)
   assert.equal(link.data.qr.modules.length, link.data.qr.size)
 
@@ -181,7 +181,7 @@ test('联调：「访问令牌（可选）」落盘 → getState 只有 tokenSet
 
   const link = await service.handleRpc({ action: 'remoteShowLink' })
   assert.equal(link.ok, true, JSON.stringify(link))
-  assert.equal(link.data.url, 'http://192.168.1.6:3080/?token=' + PASTED, '链接里必须是粘贴的令牌')
+  assert.equal(link.data.url, 'https://192.168.1.6:3080/?token=' + PASTED, '链接里必须是粘贴的令牌（HTTPS）')
   assert.ok(link.data.qr.size >= 21, '二维码仍然照常生成')
 
   // 清除粘贴的令牌 → 回落到自动令牌（首次装配已落盘）

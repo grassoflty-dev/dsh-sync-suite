@@ -46,6 +46,8 @@ export interface RemoteListenerStartOptions {
   port: number
   bindAddress: string
   upstream: { baseUrl: string; headers?: Record<string, string> | (() => Record<string, string>) }
+  /** mod-remote-tls-termination：配对证书 + 私钥；缺失时本层就 fail-closed，绝不退化成明文。 */
+  tls: { cert: string; key: string }
   authorize?: (input: RemoteAuthorizeInput) => RemoteAuthorizeResult
   /** 入站连接审计钩子（由装配层接到配对服务的脱敏环）。 */
   onConnect?: (info: { at: string; remoteAddress: string }) => void
@@ -326,6 +328,8 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
       token: { exists: token !== null, masked: token === null ? '' : maskToken(token), createdAt: tokenRecord?.createdAt ?? null },
       urls,
       probe: runtime.probe,
+      // 只有真的起了监听才说"已加密"；未运行/启动失败一律 false（不冒充加密）。
+      tls: handle !== null,
     }
   }
 
@@ -405,12 +409,24 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
         return status()
       }
       const listenPort = settings.port > 0 ? settings.port : port
+      // mod-remote-tls-termination：密钥材料是启动前置条件，不是可选项。
+      // 读不到就拒绝起监听（fail-closed）——宁可"远程访问不可用"，也绝不开一个明文端口。
+      // 证书由 pairingProvision 生成并落 store（readCert 已校验指纹格式），私钥只在此处流转。
+      const cert = store.readCert()
+      if (cert === null) {
+        runtime.lastError = {
+          code: 'E_NO_TLS_CERT',
+          message: '配对证书缺失或已损坏，已拒绝启动远程监听（不会回落明文 HTTP）；请先在设置里完成配对',
+        }
+        return status()
+      }
       let handle: RemoteListenerHandle
       try {
         handle = await options.startListener({
           port: listenPort,
           bindAddress: bind.address,
           upstream: { baseUrl: `http://127.0.0.1:${String(port)}` },
+          tls: { cert: cert.certPem, key: cert.keyPem },
           authorize: authorizer,
           ...(options.onConnect === undefined ? {} : { onConnect: options.onConnect }),
         })

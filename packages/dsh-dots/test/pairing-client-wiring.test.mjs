@@ -620,23 +620,38 @@ test('H6：轮换 → 停止 → 切换传输 ⇒ 已停止状态仍不被遮住
   assert.equal(status.includes(zh['lean.remote.rotated']), false)
 })
 
-test('H7：单向 kill switch —— 清单与字典里都没有任何「重新开始接受」控件', async () => {
-  const { mount } = await renderReal()
-  const remote = nodesOf(mount.tree).filter((n) => n.props && n.props.id === 'dots-remote')[0]
+test('H7（决定已逆转）：停止态有「开始接受连接」且没有二维码/复制；运行中才显示停止', async () => {
+  // 早先的「单向 kill switch」决定已被 mod-pairing-listener-truth 逆转：fresh install
+  // enabled:false 且没有 start 控件时配对永远不可能工作。这里改成正向守卫。
+  const stopped = await renderReal({
+    routes: {
+      remoteGetState: () => ({
+        ok: true,
+        data: { settings: { mode: 'lan' }, status: { running: false, probe: null }, modes: [] }
+      })
+    }
+  })
+  const remote = nodesOf(stopped.mount.tree).filter((n) => n.props && n.props.id === 'dots-remote')[0]
   const remoteNodes = []
   walk(remote.props.children, (n) => remoteNodes.push(n))
   const buttons = remoteNodes.filter((n) => n.type === 'button').map((n) => textOf(n.props.children))
   assert.deepEqual(buttons, [
-    zh['lean.remote.qr.show'], zh['lean.remote.copy'], zh['lean.remote.generate'],
-    zh['lean.remote.selfcheck'], zh['lean.remote.stop']
-  ], '按钮清单仍只有五个，停止是终态')
-  const banned = ['重新开始接受', '重新接受', '恢复接受', '再次接受', 'resume listening', 'restart listening', 'start listening']
-  const sources = [JSON.stringify(mount.tree), readFileSync(path.join(pkgDir, 'src', 'client.js'), 'utf8'), zhSrc(), enSrc()]
-  for (const source of sources) {
-    for (const term of banned) {
-      assert.equal(source.includes(term), false, `kill switch 必须保持单向，不得出现「${term}」`)
-    }
-  }
+    zh['lean.remote.generate'], zh['lean.remote.selfcheck'], zh['lean.remote.start']
+  ], '停止态只有自检/生成 + 开始接受；没有二维码与复制入口')
+  assert.equal(dataText(stopped.mount.tree, 'remote-running'), zh['lean.remote.stopped'])
+
+  const running = await renderReal()
+  const runningRemote = nodesOf(running.mount.tree).filter((n) => n.props && n.props.id === 'dots-remote')[0]
+  const runningNodes = []
+  walk(runningRemote.props.children, (n) => runningNodes.push(n))
+  const runningButtons = runningNodes.filter((n) => n.type === 'button').map((n) => textOf(n.props.children))
+  assert.ok(runningButtons.includes(zh['lean.remote.stop']), '运行中必须显示停止控件')
+  assert.equal(runningButtons.includes(zh['lean.remote.start']), false)
+  assert.equal(dataText(running.mount.tree, 'remote-running'), zh['lean.remote.started'])
+
+  const src = readFileSync(path.join(pkgDir, 'src', 'client.js'), 'utf8')
+  const lean = src.slice(src.indexOf('function LeanRemoteGroup('), src.indexOf('function DotsPanel('))
+  assert.equal((lean.match(/rpcCall\('remoteStart'/g) || []).length, 1, '精简面板恰好一处 remoteStart')
 })
 
 test('H8：加密说明逐字存在于三处字典（zh.json / en.json / client 内置）', () => {

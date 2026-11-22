@@ -15,10 +15,10 @@ import { createPairingAudit, } from './pairingAudit.js';
 import { defaultDeviceId } from '../engine/settings.js';
 import { defaultRemoteSettings, normalizeRemoteSettings } from './accessMode.js';
 import { generateToken } from './auth.js';
-import { buildPairingPayload, describePairing, formatPairingText, normalisePairingHost, PairingError, serialisePairingPayload, } from './pairingPayload.js';
+import { assertPairingTransportHostFamily, buildPairingPayload, describePairing, formatPairingText, normalisePairingHost, PairingError, serialisePairingPayload, } from './pairingPayload.js';
 import { encodeQr } from './qr.js';
 import { generatePairingCertificate } from './pairingTls.js';
-import { selectPairingTransport, defaultInterfaceSeam, transportReasonLines, } from './pairingTransport.js';
+import { selectPairingTransport, defaultInterfaceSeam, transportReasonLines, TRANSPORT_REFUSAL, transportOfBoundAddress, } from './pairingTransport.js';
 import { RemoteStore } from './store.js';
 /** 稳定的首选端口；被占用才向上扫描，选中的端口记进 remote.json，跨重启不再重掷。 */
 export const PAIRING_PREFERRED_PORT = 44996;
@@ -65,12 +65,24 @@ async function choosePort(previous, preferred, free) {
     }
     throw new PairingError('E_PAIRING_PORT', '没有可用端口，请释放一个本机端口后重试');
 }
-/** 把端口写回既有 remote.json；其它字段逐字保留（不新造第二份设置）。 */
-function persistPort(store, port) {
+/**
+ * 把**选中的方式 + 绑定地址 + 端口**一起写回既有 remote.json；其它字段逐字保留。
+ *
+ * mod-pairing-listener-truth：方式是 UI 显示与监听绑定的唯一真相，必须跟着选择一起落盘。
+ * 以前只写 port、mode 永远是默认 `lan`，于是 UI 说 IPv6、磁盘写 lan，用户扫码拿到 LAN 地址
+ * 还以为"自动选了 IPv6"。写盘前过 `normalizeRemoteSettings` 校验：非法地址一律 typed 失败，
+ * 绝不留下"mode 变了、地址没变"的半套状态。失败选择不写盘（调用点在所有步骤成功之后）。
+ */
+function fieldOf(transport) {
+    return transport === 'ipv6' ? 'ipv6Address' : transport === 'tailscale' ? 'tailscaleHost' : 'lanAddress';
+}
+function persistEndpoint(store, port, transport, host) {
     const raw = store.readRawSettings();
     const base = defaultRemoteSettings();
     const previous = raw === null ? base : normalizeRemoteSettings(raw, base);
-    store.writeSettings({ ...previous, port });
+    const address = host.replace(/^\[|\]$/g, '');
+    const next = normalizeRemoteSettings({ ...previous, port, mode: transport, [fieldOf(transport)]: address }, previous);
+    store.writeSettings(next);
 }
 export function createPairingProvisioner(options = {}) {
     const now = options.now ?? (() => new Date());
@@ -81,6 +93,7 @@ export function createPairingProvisioner(options = {}) {
     const makeToken = options.generateTokenFn ?? (() => generateToken(32));
     const makeCert = options.generateCertFn ?? (() => generatePairingCertificate({ now }));
     function resolveEndpoint() {
+        // 显式 transport + host（直连调用/测试夹具）：只校验地址与族，不经网卡枚举。
         if (options.transport !== undefined && options.host !== undefined) {
             const host = normalisePairingHost(options.host, options.transport);
             if (!host.ok)
@@ -88,6 +101,17 @@ export function createPairingProvisioner(options = {}) {
             return { transport: options.transport, host: host.value, auto: false };
         }
         const selection = selectPairingTransport(seam, { override: options.transport });
+        // mod-pairing-listener-truth：显式选择不可用 ⇒ typed 拒绝，**绝不**回落到自动选择再 QR 一个
+        // LAN 地址。selectPairingTransport 仍保留自动回落给"候选展示"用，但 provisioning 不消费它。
+        if (options.transport !== undefined) {
+            const candidate = selection.candidates[options.transport];
+            if (candidate === undefined || candidate.available !== true) {
+                const refusal = TRANSPORT_REFUSAL[options.transport];
+                if (refusal === undefined)
+                    throw new PairingError('E_PAIRING_TRANSPORT', '不支持的传输方式');
+                throw new PairingError(refusal.code, refusal.reason);
+            }
+        }
         if (selection.selected === null || selection.selectedHost === '') {
             throw new PairingError('E_PAIRING_HOST', '未检测到可用网络，请先连同一 Wi-Fi 或登录 Tailscale');
         }
@@ -187,8 +211,10 @@ export function createPairingProvisioner(options = {}) {
             // 绝不留下"没有证据却说已公告"的假状态。
         }
         // 5) 最后写盘：不变量 = 被记录的端口要么已发布，要么下次 run 由 marker 重发修复。
-        if (chosen.changed)
-            persistPort(store, chosen.port);
+        //    方式 + 地址与端口同一事务写入；任何一步失败（含上面的 typed 拒绝）都不会走到这里。
+        if (chosen.changed || settings.mode !== endpoint.transport || settings[fieldOf(endpoint.transport)] !== endpoint.host.replace(/^\[|\]$/g, '')) {
+            persistEndpoint(store, chosen.port, endpoint.transport, endpoint.host);
+        }
         return {
             state,
             view,
@@ -227,9 +253,79 @@ export function createPairingService(options = {}) {
     return {
         provision: (override) => provisionerFor(override).provision(),
         async show(override) {
-            const result = await provisionerFor(override).provision();
+            // mod-pairing-listener-truth：先证明监听在跑。没有接缝 / 未运行 / 没有真实绑定地址 ⇒
+            // typed E_LISTENER_NOT_RUNNING，绝不生成任何 QR 或可复制配对串。
+            const requested = override === undefined || override === 'auto' ? undefined : override;
+            let live = null;
+            if (typeof options.listenerState === 'function') {
+                try {
+                    live = await options.listenerState();
+                }
+                catch {
+                    live = null;
+                }
+            }
+            if (live === null || live.running !== true ||
+                typeof live.address !== 'string' || live.address.trim() === '' ||
+                !Number.isInteger(live.port) || live.port < 1 || live.port > 65535) {
+                throw new PairingError('E_LISTENER_NOT_RUNNING', '监听器未启动，不能生成配对二维码；请先点击「开始接受连接」');
+            }
+            if (live.tls !== true) {
+                throw new PairingError('E_LISTENER_TLS_NOT_READY', '监听未启用 TLS，已拒绝生成配对载荷');
+            }
+            // 显式覆盖若不可用 ⇒ typed 拒绝；若与绑定地址族不一致也拒绝。绝不把"用户选了 IPv6"
+            // 变成一张 LAN 二维码。"监听未启动"优先，所以这段放在上面的 running 门禁之后。
+            if (requested !== undefined) {
+                const candidate = selectPairingTransport(seam, { override: requested }).candidates[requested];
+                if (candidate === undefined || candidate.available !== true) {
+                    throw new PairingError(TRANSPORT_REFUSAL[requested].code, TRANSPORT_REFUSAL[requested].reason);
+                }
+            }
+            // 方式来自绑定地址族（IPv6 / tailnet / LAN），不是网卡枚举；再与持久化的 mode 交叉核对，
+            // 不一致就 typed 拒绝，绝不把"UI 说 IPv6、磁盘写 lan"的旧病态重新画成二维码。
+            const transport = transportOfBoundAddress(live.address);
+            if (transport === null) {
+                throw new PairingError('E_TRANSPORT_HOST_MISMATCH', '监听绑定地址不是可配对的局域网 / tailnet / IPv6 地址');
+            }
+            if (live.mode !== null && live.mode !== transport) {
+                throw new PairingError('E_TRANSPORT_MISMATCH', '访问方式与监听绑定地址不一致，请停止后重新启动监听');
+            }
+            if (requested !== undefined && requested !== transport) {
+                throw new PairingError('E_TRANSPORT_MISMATCH', '所选方式与监听绑定地址不一致，请停止后重新启动监听');
+            }
+            const host = normalisePairingHost(live.address, transport);
+            if (!host.ok)
+                throw new PairingError('E_TRANSPORT_HOST_MISMATCH', host.reason);
+            assertPairingTransportHostFamily(transport, host.value);
+            const store = new RemoteStore({ homeDir: options.homeDir });
+            const tokenRecord = store.readToken();
+            if (tokenRecord === null || tokenRecord.token === '') {
+                throw new PairingError('E_PAIRING_TOKEN', '配对令牌缺失，请先完成配置');
+            }
+            const cert = store.readCert();
+            if (cert === null)
+                throw new PairingError('E_NO_TLS_CERT', '配对证书缺失，已拒绝生成载荷');
+            const payload = buildPairingPayload({
+                instanceId: options.instanceId ?? defaultDeviceId(),
+                transport,
+                host: host.value,
+                port: live.port,
+                token: tokenRecord.token,
+                tlsFingerprint: cert.fingerprint,
+                announceRef: options.announceRef ?? '',
+            });
+            const canonical = serialisePairingPayload(payload);
+            const text = formatPairingText(payload);
             try {
-                return { payload: result.payload, text: result.text, qr: encodeQr(result.text, 'M') };
+                return {
+                    payload: canonical,
+                    text,
+                    qr: encodeQr(text, 'M'),
+                    transport,
+                    host: payload.host,
+                    port: payload.port,
+                    tls: live.tls,
+                };
             }
             catch {
                 // 二维码编码失败只给原因：RangeError 消息里只有字节数，但统一转成 typed 码更安全。

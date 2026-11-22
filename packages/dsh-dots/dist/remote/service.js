@@ -252,6 +252,8 @@ export function createRemoteService(options = {}) {
             token: { exists: token !== null, masked: token === null ? '' : maskToken(token), createdAt: tokenRecord?.createdAt ?? null },
             urls,
             probe: runtime.probe,
+            // 只有真的起了监听才说"已加密"；未运行/启动失败一律 false（不冒充加密）。
+            tls: handle !== null,
         };
     }
     function labelOfMode(mode) {
@@ -329,12 +331,24 @@ export function createRemoteService(options = {}) {
                 return status();
             }
             const listenPort = settings.port > 0 ? settings.port : port;
+            // mod-remote-tls-termination：密钥材料是启动前置条件，不是可选项。
+            // 读不到就拒绝起监听（fail-closed）——宁可"远程访问不可用"，也绝不开一个明文端口。
+            // 证书由 pairingProvision 生成并落 store（readCert 已校验指纹格式），私钥只在此处流转。
+            const cert = store.readCert();
+            if (cert === null) {
+                runtime.lastError = {
+                    code: 'E_NO_TLS_CERT',
+                    message: '配对证书缺失或已损坏，已拒绝启动远程监听（不会回落明文 HTTP）；请先在设置里完成配对',
+                };
+                return status();
+            }
             let handle;
             try {
                 handle = await options.startListener({
                     port: listenPort,
                     bindAddress: bind.address,
                     upstream: { baseUrl: `http://127.0.0.1:${String(port)}` },
+                    tls: { cert: cert.certPem, key: cert.keyPem },
                     authorize: authorizer,
                     ...(options.onConnect === undefined ? {} : { onConnect: options.onConnect }),
                 });

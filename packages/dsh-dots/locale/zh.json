@@ -322,5 +322,8 @@
   "lean.remote.audit.title": "谁连进来过",
   "lean.remote.audit.empty": "暂无入站连接记录",
   "lean.remote.stop": "停止接受连接",
-  "lean.remote.stopped": "已停止接受连接"
+  "lean.remote.start": "开始接受连接",
+  "lean.remote.started": "已启动",
+  "lean.remote.stopped": "未启动",
+  "lean.remote.start.failed": "监听启动失败"
 }

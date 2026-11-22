@@ -20,6 +20,8 @@ import path from 'node:path'
 import { createRemoteService, redactUrlForDisplay } from '../dist/remote/service.js'
 import { createRemoteModule } from '../dist/remote/index.js'
 import { isBindableAddress, isBindableIpv6Address, isBindableLanAddress } from '../dist/remote/listener.js'
+import { RemoteStore } from '../dist/remote/store.js'
+import { generatePairingCertificate } from '../dist/remote/pairingTls.js'
 
 const LAN = '192.168.1.6'
 
@@ -27,6 +29,11 @@ async function makeHome(t) {
   const home = await mkdtemp(path.join(tmpdir(), 'dsh-remote-svc-'))
   t.after(() => rm(home, { recursive: true, force: true }))
   return home
+}
+
+/** mod-remote-tls-termination：起监听的前置条件；只写公钥指纹可公开的 PEM 对，不打日志。 */
+function seedCert(home) {
+  new RemoteStore({ homeDir: home }).writeCert(generatePairingCertificate())
 }
 
 /** 假 DSH：只回一个 `does-not-matter` 的会话 cookie。 */
@@ -153,6 +160,7 @@ test('start：拿不到上游身份（connection 缺 authenticatedUrl）→ E_NO
 
 test('start：happy path → running，绑定具体地址，连接数来自 listener', async (t) => {
   const home = await makeHome(t)
+  seedCert(home)
   const fake = await startFakeDsh(t)
   const { gate } = fakeGate()
   const { start, calls } = fakeListener()
@@ -175,11 +183,37 @@ test('start：happy path → running，绑定具体地址，连接数来自 list
   assert.equal(calls[0].bindAddress, LAN)
   assert.equal(calls[0].port, fake.port, 'port:0 表示跟随 DSH 端口，由 service 解析后传具体值')
   assert.equal(typeof calls[0].authorize, 'function', 'must pass authorize hook')
+  assert.ok(typeof calls[0].tls?.cert === 'string' && calls[0].tls.cert.length > 0, '必须把证书交给 listener')
+  assert.ok(typeof calls[0].tls?.key === 'string' && calls[0].tls.key.length > 0, '必须把私钥交给 listener')
+  assert.equal(status.tls, true, '运行中的监听必须报告已加密')
   await service.stop()
+})
+
+test('start：缺配对证书 → E_NO_TLS_CERT，listener 一次都没被调用（无明文回落）', async (t) => {
+  const home = await makeHome(t) // 故意不写证书
+  const fake = await startFakeDsh(t)
+  const { gate } = fakeGate()
+  const { start, calls } = fakeListener()
+  const service = createRemoteService({
+    homeDir: home,
+    createGate: () => gate,
+    startListener: start,
+    webServer: { port: fake.port },
+    connection: { authenticatedUrl: (base) => `${base}?token=launch` },
+  })
+  await service.saveSettings({ mode: 'lan', lanAddress: LAN, port: 0 })
+  const status = await service.start()
+  assert.equal(status.running, false)
+  assert.equal(status.lastError.code, 'E_NO_TLS_CERT')
+  assert.match(status.lastError.message, /不会回落明文 HTTP/)
+  assert.equal(calls.length, 0, '没有证书就不许起任何监听')
+  assert.equal(status.tls, false, '没运行时不得冒充已加密')
+  await service.dispose()
 })
 
 test('start：listener 抛错 → E_LISTEN_FAILED（不冒泡）', async (t) => {
   const home = await makeHome(t)
+  seedCert(home)
   const fake = await startFakeDsh(t)
   const { gate } = fakeGate()
   const { start } = fakeListener()
@@ -214,6 +248,7 @@ test('rotateToken：写盘 + 通知 gate 吊销会话，状态里只有打码串
 
 test('saveSettings：非法值抛 E_VALIDATION；改方式会停掉旧监听', async (t) => {
   const home = await makeHome(t)
+  seedCert(home)
   const fake = await startFakeDsh(t)
   const { gate } = fakeGate()
   const { start } = fakeListener()
@@ -304,6 +339,7 @@ test('dispose：幂等，重复调用不抛', async (t) => {
 
 test('ipv6 方式：service 把具体 v6 字面量交给 listener（评审 M1 的 service 侧）', async (t) => {
   const home = await makeHome(t)
+  seedCert(home)
   const fake = await startFakeDsh(t)
   const { gate } = fakeGate()
   const { start, calls } = fakeListener()
@@ -413,7 +449,7 @@ test('showLink：优先用粘贴的令牌；清除后回落到自动令牌', asy
   await service.saveSettings({ mode: 'lan', lanAddress: LAN, port: 3080, token: PASTED })
 
   const pastedLink = await service.showLink()
-  assert.equal(pastedLink.url, `http://${LAN}:3080/?token=${PASTED}`, '链接里必须是粘贴的那个令牌')
+  assert.equal(pastedLink.url, `https://${LAN}:3080/?token=${PASTED}`, '链接里必须是粘贴的那个令牌（HTTPS）')
   assert.equal(pastedLink.url.includes(auto), false, '有粘贴令牌时不得混入自动令牌')
 
   // 手动方式也能用上粘贴的令牌（其余方式不展示该字段，但归一后仍按同一出口规则走）

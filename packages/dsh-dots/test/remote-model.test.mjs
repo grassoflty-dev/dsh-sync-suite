@@ -29,6 +29,7 @@ import {
   appendAccessToken,
   buildHttpUrl,
   buildHttpsUrl,
+  buildHttpsUrlWithPort,
   formatAuthority,
   maskToken,
   normalizeHostname,
@@ -487,7 +488,7 @@ test('normalizeHostname 的边界（无协议/路径/端口，小写输出）', 
   assert.equal(normalizeHostname(null).ok, false)
 })
 
-test('formatAuthority / buildHttpUrl / buildHttpsUrl 的拼装规则', () => {
+test('formatAuthority / buildHttpUrl / buildHttpsUrl / buildHttpsUrlWithPort 的拼装规则', () => {
   assert.equal(formatAuthority('2409:8a20::1'), '[2409:8a20::1]')
   assert.equal(formatAuthority('192.168.1.6'), '192.168.1.6')
   assert.equal(formatAuthority('example.com'), 'example.com')
@@ -497,19 +498,23 @@ test('formatAuthority / buildHttpUrl / buildHttpsUrl 的拼装规则', () => {
   assert.equal(buildHttpUrl('192.168.1.6', 40596, '/chat'), 'http://192.168.1.6:40596/chat')
   assert.equal(buildHttpsUrl('xxx.trycloudflare.com'), 'https://xxx.trycloudflare.com/')
   assert.equal(buildHttpsUrl('xxx.trycloudflare.com', '/chat'), 'https://xxx.trycloudflare.com/chat')
+  // mod-remote-tls-termination：旁挂监听对外终结 TLS，直连地址同样带端口但走 https
+  assert.equal(buildHttpsUrlWithPort('192.168.1.6', 40596), 'https://192.168.1.6:40596/')
+  assert.equal(buildHttpsUrlWithPort('2409:8a20::1', 40596), 'https://[2409:8a20::1]:40596/')
+  assert.equal(buildHttpsUrlWithPort('192.168.1.6', 0), 'https://192.168.1.6/')
 })
 
 test('urlForMode: lan 用设置里的地址，缺失时回退 ctx 网卡地址，都没有则报错', () => {
   const fromContext = urlForMode('lan', baseSettings(), CTX)
   assert.equal(fromContext.ok, true)
-  assert.equal(fromContext.url, 'http://192.168.1.6:40596/')
+  assert.equal(fromContext.url, 'https://192.168.1.6:40596/')
   assert.equal(fromContext.reason, '')
 
   const fromSettings = urlForMode('lan', baseSettings({ lanAddress: '192.168.1.7' }), CTX)
-  assert.equal(fromSettings.url, 'http://192.168.1.7:40596/')
+  assert.equal(fromSettings.url, 'https://192.168.1.7:40596/')
 
   const noPortSetting = urlForMode('lan', baseSettings({ port: 0 }), CTX)
-  assert.equal(noPortSetting.url, 'http://192.168.1.6:40596/', 'port=0 时应跟随 dshPort')
+  assert.equal(noPortSetting.url, 'https://192.168.1.6:40596/', 'port=0 时应跟随 dshPort')
 
   const missing = urlForMode('lan', baseSettings(), { lanAddress: null, dshPort: 40596 })
   assert.equal(missing.ok, false)
@@ -524,7 +529,7 @@ test('urlForMode: lan 用设置里的地址，缺失时回退 ctx 网卡地址�
 test('urlForMode: ipv6 地址裹方括号、非法地址报错', () => {
   const ok = urlForMode('ipv6', baseSettings({ ipv6Address: '2409:8a20:4cad:ba20::1' }), CTX)
   assert.equal(ok.ok, true)
-  assert.equal(ok.url, 'http://[2409:8a20:4cad:ba20::1]:40596/')
+  assert.equal(ok.url, 'https://[2409:8a20:4cad:ba20::1]:40596/')
 
   const empty = urlForMode('ipv6', baseSettings(), CTX)
   assert.equal(empty.ok, false)
@@ -536,13 +541,13 @@ test('urlForMode: ipv6 地址裹方括号、非法地址报错', () => {
   assert.ok(bracketed.reason.includes('方括号'))
 })
 
-test('urlForMode: tailscale 走 http，cloudflare 走 https 且不带端口', () => {
+test('urlForMode: tailscale 走 https（自签证书），cloudflare 走 https 且不带端口', () => {
   const tailscale = urlForMode('tailscale', baseSettings({ tailscaleHost: '100.101.102.103' }), CTX)
   assert.equal(tailscale.ok, true)
-  assert.equal(tailscale.url, 'http://100.101.102.103:40596/')
+  assert.equal(tailscale.url, 'https://100.101.102.103:40596/')
 
   const magicDns = urlForMode('tailscale', baseSettings({ tailscaleHost: 'MyPc.tailnet.ts.net' }), CTX)
-  assert.equal(magicDns.url, 'http://mypc.tailnet.ts.net:40596/')
+  assert.equal(magicDns.url, 'https://mypc.tailnet.ts.net:40596/')
 
   const emptyTailscale = urlForMode('tailscale', baseSettings(), CTX)
   assert.equal(emptyTailscale.ok, false)

@@ -1,5 +1,10 @@
 /**
- * 远程访问域（`src/remote/**`）：**旁挂监听 + 反向代理（HTTP + WebSocket）**。
+ * 远程访问域（`src/remote/**`）：**旁挂监听 + 反向代理（HTTPS + WSS）**。
+ *
+ * mod-remote-tls-termination：对外这一跳**始终**是 TLS（自签证书，配对时固定指纹）。
+ * 上游仍是 `http://127.0.0.1:<dsh端口>`（同机回环，不经过网卡）。不提供明文开关，
+ * 证书/私钥缺失或非法一律 fail-closed（typed `E_REMOTE_TLS_SETUP_FAILED`），
+ * **绝不**回落 `http.createServer()` —— 静默降级是 Blocker。
  *
  * 为什么是"旁挂"而不是改 DSH 自己的监听（踩坑记录，来自已安装的
  * `@feiyang666/dsh-mobile-remote@2.0.1` 的 `lib/lanproxy.js` 注释，只读参考、未 import）：
@@ -17,6 +22,8 @@
  *      请求放行到别处。
  *   3. **token 明文永不进错误消息与日志**：错误里只出现 scheme//host/path，查询串与
  *      userinfo 一律打码（`safeUrlText` / `scrubSecrets`），日志只写 errno 码（`codeOf`）。
+ *   4. **TLS 准入不可降级**（mod-remote-tls-termination）：`tls` 入参必填且必须是可用密钥材料；
+ *      失败只抛 typed `RemoteStartError`，不开明文监听、不写 certificate 内容到日志。
  *
  * 认证与路由**不在本文件**：本文件只提供 `authorize` 这一个门禁钩子，**HTTP 请求与
  * WebSocket upgrade 都必须过它**（upgrade 若绕过授权，等于开一条免令牌通道 —— DSH 的
@@ -24,6 +31,7 @@
  * 任何 cookie。（安全红线：绝不做"裸 GET / 自动补 token 并下发 cookie"这种事。）
  */
 import http, { STATUS_CODES } from 'node:http'
+import https from 'node:https'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo, Socket } from 'node:net'
 import { isIPv6 } from 'node:net'
@@ -105,8 +113,14 @@ export interface RemoteListenerOptions {
   port: number
   /** 必须是**具体**单播地址：局域网 IPv4（见 `isBindableLanAddress`），或公网 IPv6（见 `isBindableIpv6Address`）。 */
   bindAddress: string
-  /** 转发目标。 */
+  /** 转发目标（同机回环 HTTP）。 */
   upstream: RemoteUpstream
+  /**
+   * mod-remote-tls-termination：**必填**的 TLS 密钥材料（PEM 文本，来自
+   * `pairingTls.generatePairingCertificate` → `store.readCert`，私钥不出装配层）。
+   * 缺失 / 空串 / 非法 → typed `E_REMOTE_TLS_SETUP_FAILED`；本监听**没有**明文分支。
+   */
+  tls: { cert: string; key: string }
   /**
    * 鉴权/路由门禁，**HTTP 与 WebSocket upgrade 都必须过这里**。
    * 不传 = 不设门（仅测试/本机自用）；生产调用方必须传。
@@ -143,6 +157,7 @@ export type RemoteStartErrorCode =
   | 'E_REMOTE_INVALID_PORT'
   | 'E_REMOTE_INVALID_ADDRESS'
   | 'E_REMOTE_INVALID_UPSTREAM'
+  | 'E_REMOTE_TLS_SETUP_FAILED'
   | 'E_REMOTE_BIND_FAILED'
 
 /**
@@ -437,7 +452,8 @@ function outboundHeaders(
     const prevText = Array.isArray(prev) ? prev.join(', ') : prev
     out['x-forwarded-for'] = typeof prevText === 'string' && prevText !== '' ? `${prevText}, ${ip}` : ip
   }
-  out['x-forwarded-proto'] = 'http'
+  // 外部这一跳已被本监听终结为 HTTPS；上游（同机回环）仍是 http。
+  out['x-forwarded-proto'] = 'https'
   const originalHost = req.headers.host
   if (typeof originalHost === 'string' && originalHost !== '') out['x-forwarded-host'] = originalHost
   if (extraHeaders !== undefined) {
@@ -463,6 +479,7 @@ function isLoopbackHost(hostname: string): boolean {
  *
  * 上游看清楚平板访问的是 `192.168.1.6:3081`，但它自己生成的 302 只会写
  * `http://127.0.0.1:<上游端口>/…`；不改写平板就会跳到它自己的 localhost。
+ * 改写后的 scheme 必须是 `https`（本监听对外终结 TLS），否则平板会拿明文去连 TLS 端口。
  * 相对 `location` 不动（浏览器按外部 origin 解析，本来就是对的）。
  */
 function rewriteLocation(value: string, externalAuthority: string, upstreamHost: string): string {
@@ -477,7 +494,7 @@ function rewriteLocation(value: string, externalAuthority: string, upstreamHost:
   const host = parsed.hostname.toLowerCase()
   const isUpstream = host === upstreamHost.toLowerCase()
   if (!isUpstream && !isLoopbackHost(host)) return value
-  return `http://${externalAuthority}${parsed.pathname}${parsed.search}${parsed.hash}`
+  return `https://${externalAuthority}${parsed.pathname}${parsed.search}${parsed.hash}`
 }
 
 /** 组装回传给客户端的响应头（剔 cookie/逐跳头，按需改写 location，保留多值）。 */
@@ -723,6 +740,32 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
   const target = parseUpstream(options.upstream)
   const rewriteRedirects = options.rewriteRedirects !== false
 
+  // TLS 准入：只认非空 PEM 字符串；缺一即 fail-closed。错误里只写字段名与 errno 码，
+  // 绝不回显证书/私钥内容（token hygiene 的同一条纪律也适用于密钥材料）。
+  const tlsInput = options.tls
+  if (
+    tlsInput === null || typeof tlsInput !== 'object' ||
+    typeof tlsInput.cert !== 'string' || tlsInput.cert.trim() === '' ||
+    typeof tlsInput.key !== 'string' || tlsInput.key.trim() === ''
+  ) {
+    throw new RemoteStartError(
+      'E_REMOTE_TLS_SETUP_FAILED',
+      'TLS 证书或私钥缺失，已拒绝启动监听（不会回落明文 HTTP）',
+      { address, port: listenPort },
+    )
+  }
+  // 形状检查保证"坏密钥材料"在绑定端口之前就 typed 失败（不依赖 Node 版本何时抛）。
+  if (
+    !/-----BEGIN CERTIFICATE-----/.test(tlsInput.cert) ||
+    !/-----BEGIN (?:RSA |EC |ENCRYPTED )?PRIVATE KEY-----/.test(tlsInput.key)
+  ) {
+    throw new RemoteStartError(
+      'E_REMOTE_TLS_SETUP_FAILED',
+      'TLS 密钥材料格式非法，已拒绝启动监听（不会回落明文 HTTP）',
+      { address, port: listenPort },
+    )
+  }
+
   const log = (message: string): void => {
     if (typeof options.log !== 'function') return
     try {
@@ -745,7 +788,19 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
     log(`[remote] ${lastError.message}`)
   }
 
-  const server = http.createServer()
+  let server: https.Server
+  try {
+    // 唯一的服务端构造器：没有 http.createServer()，也就没有明文回落路径。
+    // rsa 自签证书由 pairingTls.ts 生成，指纹在配对时固定；这里只做 TLS 终结。
+    server = https.createServer({ cert: tlsInput.cert, key: tlsInput.key })
+  } catch (error) {
+    // 坏密钥材料（PEM 损坏/不匹配/不支持的曲线等）：typed 失败，绝不退化成明文。
+    throw new RemoteStartError(
+      'E_REMOTE_TLS_SETUP_FAILED',
+      `TLS 密钥材料不可用，已拒绝启动监听（${codeOf(error)}）`,
+      { address, port: listenPort, detail: codeOf(error) },
+    )
+  }
   // 长连接（SSE / WebSocket）不能被默认 keep-alive 超时误杀
   server.keepAliveTimeout = 65_000
   server.headersTimeout = 70_000

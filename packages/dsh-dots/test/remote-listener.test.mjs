@@ -3,14 +3,17 @@
  *
  * 覆盖：
  *   - `isBindableLanAddress` 的放行/拒绝表（含 IPv6、保留地址、非法字面量）；
- *   - HTTP 反代：状态码/正文/`host` 改写/`x-forwarded-*`/POST body/动态上游头；
+ *   - HTTPS 反代：状态码/正文/`host` 改写/`x-forwarded-*`（外部 https）/POST body/动态上游头；
  *   - 响应侧安全：`set-cookie` 必剥、`location` 用**请求 Host** 改写（可关）；
  *   - 门禁：HTTP 拒绝 401、`intercept` 自有接口不转发、放行后注入上游 cookie；
  *   - WebSocket：101 + 双向 echo；**未授权升级必须 401 且无 101、不建上游隧道**；
  *   - `close()` 后端口真释放（TCP 层 ECONNREFUSED）；绑定失败只抛 RemoteStartError；
  *   - 错误消息/日志里不出现 token 明文。
  *
- * 客户端为什么用 `node:http` 而不是全局 `fetch`：
+ * mod-remote-tls-termination：客户端改用 `node:https`（自签证书，rejectUnauthorized:false；
+ * pin 校验在 App 侧测）；WS 升级走 `tls.connect`。**明文回落不存在**，见 remote-tls.test.mjs。
+ *
+ * 客户端为什么用 `node:https` 而不是全局 `fetch`：
  *   本机设了 `NODE_USE_ENV_PROXY=1` + `HTTP_PROXY=http://127.0.0.1:7897`，而 `NO_PROXY`
  *   只含 `localhost,127.0.0.1`；对 `192.168.x.x` 的 `fetch` 会被系统代理接管 —— 实测
  *   TCP 层已经是 ECONNREFUSED，fetch 却报 `UND_ERR_SOCKET`（端口释放断言会误判）。
@@ -23,7 +26,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import https from 'node:https'
 import net from 'node:net'
+import tls from 'node:tls'
 import os from 'node:os'
 import {
   RemoteStartError,
@@ -31,6 +36,11 @@ import {
   scrubSecrets,
   startRemoteListener,
 } from '../dist/remote/listener.js'
+import { generatePairingCertificate } from '../dist/remote/pairingTls.js'
+
+/** 测试夹具：每张监听都配一张真实生成的证书；PEM 内容永不写进断言输出。 */
+const TEST_CERT = generatePairingCertificate()
+const TEST_TLS = { cert: TEST_CERT.certPem, key: TEST_CERT.keyPem }
 
 /** 本机第一块非回环 IPv4（没有就跳过关联网用例）。 */
 function findLanAddress() {
@@ -76,11 +86,12 @@ function fetchGoesThroughEnvProxy() {
   return !noProxy.some((entry) => entry === '*' || entry === LAN)
 }
 
-/** 等价于"浏览器发一个请求"：node:http 直连，agent:false（无池化、无环境代理）。 */
+/** 等价于"平板 WebView 发一个请求"：node:https 直连，agent:false（无池化、无环境代理）。
+ *  自签证书由测试夹具生成，客户端不校 CA（pin 的校验在 App 侧另测）。 */
 function httpRequest(url, options = {}) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url)
-    const request = http.request(
+    const request = https.request(
       {
         hostname: parsed.hostname,
         port: parsed.port,
@@ -88,6 +99,7 @@ function httpRequest(url, options = {}) {
         method: options.method ?? 'GET',
         headers: options.headers ?? {},
         agent: false,
+        rejectUnauthorized: false,
       },
       (response) => {
         const chunks = []
@@ -227,13 +239,14 @@ async function setup(t, config = {}) {
     port: 0,
     bindAddress: LAN,
     upstream: { baseUrl: fake.baseUrl, ...(config.upstream ?? {}) },
+    tls: TEST_TLS,
     ...(config.listener ?? {}),
   })
   t.after(async () => {
     await handle.close()
     await fake.close()
   })
-  return { fake, handle, base: `http://${LAN}:${handle.port}` }
+  return { fake, handle, base: `https://${LAN}:${handle.port}` }
 }
 
 /** 裸 socket 读取器：支持"等到 header 结束"与"等到 N 字节"。 */
@@ -322,11 +335,12 @@ class SocketReader {
   }
 }
 
+/** WSS 握手：TLS 之上写原始 Upgrade 字节。 */
 async function openWs(port, host, { path = '/ws', extraHeaders = {} } = {}) {
-  const socket = net.connect(port, host)
+  const socket = tls.connect({ port, host, rejectUnauthorized: false, servername: host })
   socket.setNoDelay(true)
   await new Promise((resolve, reject) => {
-    socket.once('connect', resolve)
+    socket.once('secureConnect', resolve)
     socket.once('error', reject)
   })
   const reader = new SocketReader(socket)
@@ -409,7 +423,7 @@ lanTest('HTTP 反代：状态码/正文/host 改写/x-forwarded-* 注入', async
   assert.equal(payload.url, '/x?a=1&b=2', 'path + query 必须原样转发')
   assert.equal(payload.host, `127.0.0.1:${fake.port}`, 'host 必须改写成上游 host')
   assert.ok(typeof payload.xff === 'string' && payload.xff !== '', 'x-forwarded-for 必须存在')
-  assert.equal(payload.xfp, 'http')
+  assert.equal(payload.xfp, 'https', '外部这一跳是 HTTPS，上游仍是 http')
   assert.equal(payload.xfh, `${LAN}:${handle.port}`, 'x-forwarded-host 是客户端原始 Host')
 
   // 上游确实收到了那条请求
@@ -428,6 +442,13 @@ test(
           : false,
   },
   async (t) => {
+    // 自签证书：全局 fetch 不提供"只信这张 pin"的入参，测试里临时关 CA 校验（仅此用例）。
+    const previousTlsEnv = process.env.NODE_TLS_REJECT_UNAUTHORIZED
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+    t.after(() => {
+      if (previousTlsEnv === undefined) delete process.env.NODE_TLS_REJECT_UNAUTHORIZED
+      else process.env.NODE_TLS_REJECT_UNAUTHORIZED = previousTlsEnv
+    })
     const { handle, base } = await setup(t)
     const response = await fetch(`${base}/x?a=1`)
     assert.equal(response.status, 200)
@@ -463,16 +484,16 @@ lanTest('响应侧安全：剥 set-cookie，location 用请求 Host 改写', asy
   assert.equal(redirect.status, 302)
   assert.equal(
     redirect.headers.location,
-    `http://${LAN}:${handle.port}/after-login?from=upstream`,
-    'location 必须用请求里的 Host（外部 authority）改写',
+    `https://${LAN}:${handle.port}/after-login?from=upstream`,
+    'location 必须用请求里的 Host（外部 authority）改写且保持 https',
   )
 })
 
 lanTest('响应侧安全：请求没有 Host（HTTP/1.0）时 location 保留上游原值', async (t) => {
   const { fake, handle } = await setup(t)
-  const socket = net.connect(handle.port, LAN)
+  const socket = tls.connect({ port: handle.port, host: LAN, rejectUnauthorized: false, servername: LAN })
   await new Promise((resolve, reject) => {
-    socket.once('connect', resolve)
+    socket.once('secureConnect', resolve)
     socket.once('error', reject)
   })
   const reader = new SocketReader(socket)
@@ -681,10 +702,11 @@ lanTest('close() 后端口真释放：再连必须 ECONNREFUSED', async (t) => {
     port: 0,
     bindAddress: LAN,
     upstream: { baseUrl: fake.baseUrl },
+    tls: TEST_TLS,
   })
   const { port } = handle
   // 关闭前是通的（node:http 直连，避免 undici keep-alive 池干扰后面的"端口释放"判定）
-  const alive = await httpRequest(`http://${LAN}:${port}/x`)
+  const alive = await httpRequest(`https://${LAN}:${port}/x`)
   assert.equal(alive.status, 200)
 
   await handle.close()
@@ -711,7 +733,7 @@ lanTest('close() 后端口真释放：再连必须 ECONNREFUSED', async (t) => {
   // HTTP 客户端：必须是 ECONNREFUSED（不是超时、不是 5xx）
   await assert.rejects(
     async () => {
-      await httpRequest(`http://${LAN}:${port}/x`)
+      await httpRequest(`https://${LAN}:${port}/x`)
     },
     (error) => {
       assert.equal(error.code, 'ECONNREFUSED', `期望 ECONNREFUSED，实际 ${String(error.code)}`)
@@ -723,7 +745,7 @@ lanTest('close() 后端口真释放：再连必须 ECONNREFUSED', async (t) => {
   if (!fetchGoesThroughEnvProxy()) {
     await assert.rejects(
       async () => {
-        await fetch(`http://${LAN}:${port}/x`)
+        await fetch(`https://${LAN}:${port}/x`)
       },
       (error) => {
         const code = error?.cause?.code ?? error?.code
@@ -750,7 +772,7 @@ lanTest('绑定已被占用端口：抛 RemoteStartError，且没有未捕获异
 
   let failure = null
   try {
-    await startRemoteListener({ port, bindAddress: LAN, upstream: { baseUrl: 'http://127.0.0.1:1' } })
+    await startRemoteListener({ port, bindAddress: LAN, upstream: { baseUrl: 'http://127.0.0.1:1' }, tls: TEST_TLS })
   } catch (error) {
     failure = error
   }
@@ -768,7 +790,7 @@ lanTest('绑定不可用地址：抛 RemoteStartError（EADDRNOTAVAIL），照�
   // 10.255.255.1 是合法局域网 IPv4 形态，但本机几乎不可能真配了它 → 绑定必然失败
   let failure = null
   try {
-    await startRemoteListener({ port: 0, bindAddress: '10.255.255.1', upstream: { baseUrl: 'http://127.0.0.1:1' } })
+    await startRemoteListener({ port: 0, bindAddress: '10.255.255.1', upstream: { baseUrl: 'http://127.0.0.1:1' }, tls: TEST_TLS })
   } catch (error) {
     failure = error
   }
@@ -782,6 +804,7 @@ test('非法绑定地址/上游：RemoteStartError 且消息里没有 token 明�
     port: 0,
     bindAddress: '0.0.0.0',
     upstream: { baseUrl: 'http://127.0.0.1:1' },
+    tls: TEST_TLS,
   }).then(
     () => null,
     (error) => error,
@@ -793,6 +816,7 @@ test('非法绑定地址/上游：RemoteStartError 且消息里没有 token 明�
     port: 0,
     bindAddress: LAN ?? '192.168.1.6',
     upstream: { baseUrl: 'https://user:PASSWORD-CANARY@example.invalid/x?token=TOKEN-CANARY-9f3a' },
+    tls: TEST_TLS,
   }).then(
     () => null,
     (error) => error,
@@ -809,12 +833,13 @@ lanTest('上游不可达：502 + lastError 带 errno 码（不含地址/凭据�
     port: 0,
     bindAddress: LAN,
     upstream: { baseUrl: `http://127.0.0.1:${deadPort}` },
+    tls: TEST_TLS,
   })
   t.after(async () => {
     await handle.close()
   })
 
-  const response = await httpRequest(`http://${LAN}:${handle.port}/x`)
+  const response = await httpRequest(`https://${LAN}:${handle.port}/x`)
   assert.equal(response.status, 502)
   assert.equal(response.text, 'remote upstream unavailable\n')
   assert.ok(handle.lastError !== null)

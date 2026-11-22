@@ -385,7 +385,10 @@ window.__ModuleLoader__.load({
       "lean.remote.audit.title": "谁连进来过",
       "lean.remote.audit.empty": "暂无入站连接记录",
       "lean.remote.stop": "停止接受连接",
-      "lean.remote.stopped": "已停止接受连接"
+      "lean.remote.start": "开始接受连接",
+      "lean.remote.started": "已启动",
+      "lean.remote.stopped": "未启动",
+      "lean.remote.start.failed": "监听启动失败"
     }
 
     const en = {
@@ -734,7 +737,10 @@ window.__ModuleLoader__.load({
       "lean.remote.audit.title": "Who connected",
       "lean.remote.audit.empty": "No incoming connections recorded",
       "lean.remote.stop": "Stop accepting connections",
-      "lean.remote.stopped": "Stopped accepting connections"
+      "lean.remote.start": "Start accepting connections",
+      "lean.remote.started": "Started",
+      "lean.remote.stopped": "Not started",
+      "lean.remote.start.failed": "Listener failed to start"
     }
 
     const DICTS = { zh: zh, en: en }
@@ -4556,6 +4562,11 @@ window.__ModuleLoader__.load({
 
       /** 显式动作：pairingShow 是唯一 secret 出口；state 只留 qr，payload / text 不落地。 */
       async function fetchQr(which) {
+        // mod-pairing-listener-truth：停止时不产生任何配对产物（前端先挡一道，引擎再 typed 拒绝）。
+        if (running !== true) {
+          setFailure('E_LISTENER_NOT_RUNNING：' + tr('lean.remote.start'))
+          return null
+        }
         const result = await rpcCall('pairingShow', { transport: which === '' ? 'auto' : which })
         if (!result.ok) {
           setFailure(localizeError(tr, result.error).message)
@@ -4631,15 +4642,51 @@ window.__ModuleLoader__.load({
             setFailure(localizeError(tr, result.error).message)
             return
           }
-          // 停止是终态：先清掉轮换提示，后续状态行才不会被 masked。
+          // 停止是终态：清掉轮换提示与二维码（没有监听就不该留下可复制的配对产物）。
           setRotated(false)
+          setShown(null)
           setRunning(false)
           const state = await rpcCall('remoteGetState', {})
           if (state.ok && state.data && state.data.status) setRunning(state.data.status.running === true)
         })
       }
 
+      /**
+       * mod-pairing-listener-truth：精简面板**能启动监听**（此前只有停止，fresh install 上
+       * enabled:false 永远无法配对）。仍走既有 remoteStart 路径，不另造第二套启动。
+       *
+       * remoteStart 的失败有两种形态：RPC 层 `ok:false`（服务未挂载等），或 `ok:true` 但
+       * `data.running !== true` + `data.lastError`（service.start() 的 fail-closed 返回值）。
+       * 两种都要把 **typed code + 中文原因** 写进状态行，绝不静默显示"已启动"。
+       */
+      function doStart() {
+        runTask('start', async function () {
+          const result = await rpcCall('remoteStart', {})
+          if (!result.ok) {
+            setFailure(localizeError(tr, result.error).message)
+            return
+          }
+          const status = result.data && typeof result.data === 'object' ? result.data : null
+          if (!status || status.running !== true) {
+            const err = status && status.lastError && typeof status.lastError === 'object' ? status.lastError : null
+            const code = err && err.code ? String(err.code) : 'E_LISTENER_NOT_RUNNING'
+            const message = err && err.message ? String(err.message) : tr('lean.remote.start.failed')
+            setFailure(code + '：' + message)
+            setRunning(false)
+            setShown(null)
+            return
+          }
+          setRunning(true)
+          setRotated(false)
+          // 旧二维码（若曾由枚举产生）在真正启动后作废；配对串只由新的 pairingShow 取。
+          setShown(null)
+          await refreshProvision(activeOverride())
+        })
+      }
+
       const qr = shown && shown.qr && typeof shown.qr === 'object' ? shown.qr : null
+      // 只有能证明监听在跑才给配对产物；null（尚未读到状态）也按"未启动"处理，fail-closed。
+      const stopped = running !== true
       const selected = transports && typeof transports.selected === 'string' ? transports.selected : ''
       const reasonLines = transports && Array.isArray(transports.reasonLines) ? transports.reasonLines : []
       const candidates = transports && transports.candidates && typeof transports.candidates === 'object' ? transports.candidates : {}
@@ -4700,22 +4747,23 @@ window.__ModuleLoader__.load({
                 // 切换方式后旧的"已重新生成"提示立即失效，不许继续遮住真实状态。
                 setRotated(false)
                 const next = value === 'auto' ? '' : value
-                const data = await refreshTransports(next)
-                if (!data) return
-                if (data.overrideUnavailable === true) {
-                  // 覆盖项不可用 → 明说回落，并用自动选中的真实方式继续，不给死地址。
-                  setOverride('')
-                  await refreshProvision('')
-                } else {
-                  setOverride(next)
-                  await refreshProvision(next)
-                }
+                // mod-pairing-listener-truth：先让引擎严格选择并落盘（mode + 地址同一事务）。
+                // 不可用会得到 typed 拒绝（例如 E_NO_IPV6_ADDRESS），状态行显示原因，
+                // mode 保持原值；绝不"静默回落成 lan 却把 UI 说成 IPv6"。
+                const ok = await refreshProvision(next)
+                if (!ok) return
+                setOverride(next)
+                await refreshTransports(next)
               })
             }
           })
         ),
         h('div', { 'data-lean': 'remote-transport', style: S.hint },
           selected !== '' ? tr('lean.remote.transport.selected', { mode: selected }) : tr('lean.remote.transport.none')
+        ),
+        // 运行状态单独一行讲真话：已启动 / 未启动。停止时下面的二维码与复制入口整体不渲染。
+        h('div', { 'data-lean': 'remote-running', style: S.hint },
+          stopped ? tr('lean.remote.stopped') : tr('lean.remote.started')
         ),
         transports && transports.tls === true
           ? h('div', { 'data-lean': 'remote-transport-honesty', style: S.hint }, tr('lean.remote.transport.encrypted'))
@@ -4726,7 +4774,8 @@ window.__ModuleLoader__.load({
           return h('div', { key: 'reason' + i, 'data-lean': 'remote-reason', style: S.hint }, line)
         }),
         portLine ? h('div', { 'data-lean': 'remote-port', style: S.hint }, portLine) : null,
-        h(
+        // 未启动 ⇒ 没有二维码入口、没有可复制配对串；启动是唯一可做的远程动作。
+        stopped ? null : h(
           'div',
           { style: S.row },
           h(Btn, { label: tr('lean.remote.qr.show'), disabled: Boolean(busy), onClick: doShow }),
@@ -4741,12 +4790,19 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: S.row },
-          h(Btn, {
-            label: tr('lean.remote.stop'),
-            disabled: Boolean(busy) || running === false,
-            danger: true,
-            onClick: doStop
-          })
+          stopped
+            ? h(Btn, {
+                label: tr('lean.remote.start'),
+                disabled: Boolean(busy),
+                primary: true,
+                onClick: doStart
+              })
+            : h(Btn, {
+                label: tr('lean.remote.stop'),
+                disabled: Boolean(busy),
+                danger: true,
+                onClick: doStop
+              })
         ),
         h('div', { role: 'status', 'data-lean': 'remote-status', style: S.hint }, statusLine),
         h('div', { 'data-lean': 'remote-announce', style: S.hint }, announceLine),

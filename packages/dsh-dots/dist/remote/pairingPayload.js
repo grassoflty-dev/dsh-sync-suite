@@ -257,8 +257,33 @@ export function parsePairingPayload(text) {
     }
     return validateAndNormalise(raw);
 }
+/**
+ * mod-pairing-listener-truth：**载荷构造处**的 transport/host 族一致性门禁。
+ *
+ * `normalisePairingHost()` 已经在 schema 校验里按 transport 检查过主机，但那是"解析输入"的
+ * 兜底；这里再钉一道显式门禁，保证任何从运行态拼出来的载荷都不可能带错族的地址（例如
+ * `transport: 'lan'` 却塞一个 IPv6 host，或 `transport: 'ipv6'` 却塞局域网 IPv4）。
+ * 失败只给 typed 码 + 不含值的中文原因，绝不把不一致的载荷交给 QR / 公告。
+ */
+export function assertPairingTransportHostFamily(transport, host) {
+    if (typeof host !== 'string' || host.trim() === '') {
+        fail('E_TRANSPORT_HOST_MISMATCH', '配对主机为空，无法确认传输方式');
+    }
+    const text = host.trim();
+    const inner = text.startsWith('[') && text.endsWith(']') ? text.slice(1, -1) : text;
+    // 只有真正的 IPv6 字面量才算 v6；`http://…` 也含冒号，不能被误判成 IPv6。
+    const isV6 = inner.includes(':') && !inner.includes('://') && !inner.includes('/');
+    if (transport === 'ipv6' && !isV6) {
+        fail('E_TRANSPORT_HOST_MISMATCH', 'IPv6 方式必须配 IPv6 主机地址');
+    }
+    if (transport !== 'ipv6' && isV6) {
+        fail('E_TRANSPORT_HOST_MISMATCH', '局域网 / Tailscale 方式不能配 IPv6 主机地址');
+    }
+}
 /** 从当前设置构造规范载荷（QR / 复制串只走这里）。 */
 export function buildPairingPayload(current) {
+    // 先钉族一致性，再做 schema 校验；两步都 fail-closed，错误里不带主机/令牌的值。
+    assertPairingTransportHostFamily(current.transport, current.host);
     return validateAndNormalise({
         v: 1,
         instanceId: current.instanceId,

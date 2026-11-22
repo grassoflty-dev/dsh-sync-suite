@@ -70,6 +70,42 @@ export const TRANSPORT_REASON_COPY = {
 
 export const TRANSPORT_PRIORITY: readonly PairingTransport[] = ['tailscale', 'lan', 'ipv6']
 
+/**
+ * mod-pairing-listener-truth：显式选择某方式但该方式不可用时，**typed 拒绝**的词表。
+ *
+ * 绝不"静默回落到自动选择再 QR 一个 LAN 地址"——用户选了 IPv6 却发现二维码里是 192.168.x，
+ * 正是本次 P0 的欺骗性来源。三条原因与 typed code 集中一处，UI / RPC / 测试同一事实来源。
+ */
+export interface TransportRefusal {
+  code: 'E_NO_IPV6_ADDRESS' | 'E_NO_TAILSCALE_ADDRESS' | 'E_NO_LAN_ADDRESS'
+  reason: string
+}
+
+export const TRANSPORT_REFUSAL: Readonly<Record<PairingTransport, TransportRefusal>> = {
+  tailscale: { code: 'E_NO_TAILSCALE_ADDRESS', reason: '本机未检测到 Tailscale 地址' },
+  lan: { code: 'E_NO_LAN_ADDRESS', reason: '本机未检测到局域网地址' },
+  ipv6: { code: 'E_NO_IPV6_ADDRESS', reason: '本机未检测到公网 IPv6 地址' },
+}
+
+/**
+ * 从**正在监听的绑定地址**反推传输方式（不是从网卡枚举猜）。
+ *
+ * - 带冒号（含方括号写法）→ `ipv6`；
+ * - `100.64.0.0/10` → `tailscale`；
+ * - RFC1918 IPv4 → `lan`；
+ * - 其它（通配 / 回环 / 公网 IPv4 / 非法文本）→ null，调用方 typed 拒绝。
+ */
+export function transportOfBoundAddress(address: unknown): PairingTransport | null {
+  if (typeof address !== 'string') return null
+  const text = address.trim()
+  if (text === '') return null
+  const inner = text.startsWith('[') && text.endsWith(']') ? text.slice(1, -1) : text
+  if (inner.includes(':')) return 'ipv6'
+  if (TAILSCALE_RE.test(inner)) return 'tailscale'
+  if (RFC1918_RE.test(inner)) return 'lan'
+  return null
+}
+
 export interface TransportCandidate {
   kind: PairingTransport
   available: boolean
@@ -80,6 +116,12 @@ export interface TransportCandidate {
 }
 
 export interface TransportSelection {
+  /**
+   * mod-remote-tls-termination：三种直连传输**现在都**由自签证书 + 配对指纹保护。
+   * 面板据此把「明文 HTTP」警告换成「已加密（自签名证书，按配对指纹校验）」，
+   * 而不是按 transport 名硬编码判断；未加密的传输（cloudflare/uu/manual 的旧路径）不带此布尔量。
+   */
+  tls: boolean
   /** 用户在设置里的请求值；`auto` = 全自动。 */
   requested: PairingTransport | 'auto'
   /** 最终选中的方式；没有任何可用网卡时为 null（UI 必须灰掉并展示 reason）。 */
@@ -172,7 +214,8 @@ export function selectPairingTransport(
       }
     }
   }
-  return { requested, selected, selectedHost, overrideUnavailable, candidates }
+  // 直连三方式统一走 HTTPS（listener 对外终结 TLS）；布尔量随视图出给面板做数据驱动文案。
+  return { tls: true, requested, selected, selectedHost, overrideUnavailable, candidates }
 }
 
 /** UI 用的三行理由（顺序固定 Tailscale / 局域网 / IPv6），另附局域网"也要令牌"的说明。 */
