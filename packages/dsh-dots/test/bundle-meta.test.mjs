@@ -78,7 +78,9 @@ test('bundle patch 只插入一个 dots 行，且 client 注册 id 与包名一�
   assert.match(patch, /id:\s*dots/)
   assert.match(patch, /name:\s*['"]?dsh-dots['"]?/)
   const client = readFileSync(path.join(pkgDir, 'src', 'client.js'), 'utf8')
-  assert.match(client, /__ModuleLoader__\.load\(\{\s*\n\s*id:\s*'dots'/)
+  // loader id 必须等于包名（旧断言写死 'dots'，正是本次线上加载失败的根因）。
+  const idRe = new RegExp(`__ModuleLoader__\\.load\\(\\{\\s*\\n\\s*id:\\s*'${pkg.name}'`)
+  assert.match(client, idRe, 'client loader id 必须等于 package.json.name')
 })
 
 test('README 记录 insert: 多行块限制（整块合并 + 不嵌套）', () => {

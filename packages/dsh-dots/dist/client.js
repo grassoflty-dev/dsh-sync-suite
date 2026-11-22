@@ -24,8 +24,12 @@
  *
  * Styling: inline styles only, colours exclusively from `--dsw-alias-*` theme variables.
  */
+// loader id 必须等于 package.json.name（DSH 以包名作为模块工厂的 key）。
+// 它与 settings.section 的 slot id `dots` / `dots-remote`、locale NS `dots`、
+// RPC 路径 `/dsh-dots/rpc` 是互相独立的命名空间，勿一并改名。
+// build.mjs 会用 package.json.name 重写下面的字面量，防止与包名漂移。
 window.__ModuleLoader__.load({
-  id: 'dots',
+  id: 'dsh-dots',
   factory(require) {
     const React = require('react')
     const h = React.createElement
