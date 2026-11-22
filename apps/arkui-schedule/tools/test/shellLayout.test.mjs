@@ -60,9 +60,13 @@ const PANES = [
  * 「禁用主操作 + typed 原因」与「空态标题」。mod-shell-dots-pane 已把正文换成真只读列表，
  * 因此这里不再表示「即将迁入」占位（另三面早已是真 body）。
  */
+// mod-dots-readonly：动作槽从「新建对话」改成禁用的「发指令」，原因改为 grant 口径。
 const SCAFFOLDS = [
-  { name: 'DotsPane', file: 'DotsPane.ets', label: 'dots', action: '新建对话', reason: 'REASON_DOTS', empty: '还没有 dots 对话' }
+  { name: 'DotsPane', file: 'DotsPane.ets', label: 'dots', action: '发指令', reason: 'REASON_DOTS', empty: '还没有 dots 对话' }
 ];
+const DOTS_REASON = '命令工具未授予，指令确认闸尚未接线';
+const DOTS_SUBTITLE = 'dots 只读查看会话，暂不能发指令。';
+const OLD_DOTS_SUBTITLE = 'dots 可查看实例并对会话发指令，所有操作需你确认。';
 const CLOUD_FILE = 'CloudChatPane.ets';
 const PANE_SOURCE = new Map(
   PANES.map((pane) => [pane.name, stripComments(readFileSync(new URL(pane.file, PANE_DIR), 'utf8'))])
@@ -278,8 +282,8 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       assert.match(body, new RegExp(`Text\\('${label}'\\)`), `${name} 必须有「${label}」分段标签`);
       const actionSlot = 'Text(`' + action + '（${' + reason + '}）`)';
       assert.ok(body.includes(actionSlot), `${name} 的动作槽必须显示「${action}（原因）」`);
-      assert.match(body, /\.enabled\(false\)/, `${name} 的「新建对话」动作必须禁用（无假入口）`);
-      assert.match(source, /const REASON_DOTS: string = 'dots 指令尚未接线';/,
+      assert.match(body, /\.enabled\(false\)/, `${name} 的「发指令」动作必须禁用（无假入口）`);
+      assert.match(source, /const REASON_DOTS: string = '命令工具未授予，指令确认闸尚未接线';/,
         `${name} 的禁用原因必须是今天成立的 typed 原因`);
       assert.equal(/TextInput\(|输入给 dots 的指令…/.test(source), false,
         `${name} 不得保留禁用输入框 / 假发送入口`);
@@ -322,9 +326,10 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     const body = paneBody('DotsPane');
     assert.equal(/dots 尚未接线|输入给 dots 的指令…/.test(source), false,
       '旧 scaffold 原因与输入框文案必须绝迹');
-    assert.match(source, /const REASON_DOTS: string = 'dots 指令尚未接线';/, '逐字保留新的 typed 禁用原因');
-    assert.match(body, /Text\(`新建对话（\$\{REASON_DOTS\}）`\)/, '禁用原因必须可见');
-    assert.match(body, /\.enabled\(false\)/, '「新建对话」动作必须禁用');
+    assert.match(source, /const REASON_DOTS: string = '命令工具未授予，指令确认闸尚未接线';/,
+      '逐字保留新的 typed 禁用原因');
+    assert.match(body, /Text\(`发指令（\$\{REASON_DOTS\}）`\)/, '禁用原因必须渲染在 Text 上');
+    assert.match(body, /\.enabled\(false\)/, '「发指令」动作必须禁用');
     assert.equal(/TextInput\(|placeholder: '输入给 dots 的指令…'/.test(body), false,
       '发指令尚未接线，不得有输入框假入口');
     assert.match(source, /还没有 dots 对话/, 'dots 空态标题保留');
@@ -477,7 +482,7 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       '远程 DSH（只读）：页头不得有跨节导航到云端对话');
     assert.match(configRegions(instancesRaw).join('\n'), /Text\('添加实例'\)/,
       '远程 DSH（设置模式）：添加实例');
-    assert.match(PANE_SOURCE.get('DotsPane'), /新建对话/, 'dots：新建对话（禁用并携带 typed 原因）');
+    assert.match(PANE_SOURCE.get('DotsPane'), /发指令/, 'dots：发指令（禁用并携带 typed 原因）');
     // mod-shell-cloud-chat-pane（old→new，收紧）：云端面板已落真列表，禁用「新建对话」绝迹。
     assert.equal(/新建对话/.test(PANE_SOURCE.get('CloudChatPane')), false,
       '云端对话：禁用主操作绝迹');
@@ -551,5 +556,26 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     }
     assert.match(raw, /router\.pushUrl\(\{ url: 'pages\/ChatDetail', params: params \}\)/, '只 push 只读详情');
     assert.equal(/pushUrl/.test(body), false, '渲染树无跨节跳转');
+  });
+
+  // mod-dots-readonly（新增正向守卫）：授权行 read-only sourcing + 渲染原因 + 新副标题 + 零 mutation。
+  test('L-24 dots 只读授权行来自 instanceGrantStore；原因渲染在 Text；旧副标题绝迹；无 grant/revoke/prompt', () => {
+    const raw = PANE_RAW.get('DotsPane');
+    const code = PANE_SOURCE.get('DotsPane');
+    const body = paneBody('DotsPane');
+    assert.match(raw, /import \{ instanceGrantStore \} from '\.\.\/\.\.\/services\/instanceGrantStore';/);
+    assert.match(code, /instanceGrantStore\.lastProblem\(\)/, '坏信封 typed problem 读取');
+    assert.match(code, /instanceGrantStore\.redacted\(nowMs\)/, '只读 redacted 视图');
+    assert.match(body, /Text\(this\.grantLine\)/, '授权行是渲染文案');
+    assert.ok(code.includes('未授权 / 未知'), 'fail-closed 状态文案');
+    assert.match(body, /Text\(`发指令（\$\{REASON_DOTS\}）`\)/, '禁用原因在 Text 上');
+    assert.ok(code.includes(`const REASON_DOTS: string = '${DOTS_REASON}';`));
+    assert.equal(raw.includes(OLD_DOTS_SUBTITLE), false, '旧过度承诺副标题全文绝迹');
+    assert.ok(code.includes(`const DOTS_SUBTITLE: string = '${DOTS_SUBTITLE}';`));
+    assert.match(body, /Text\(DOTS_SUBTITLE\)/, '新副标题渲染');
+    for (const api of ['instanceGrantStore.upsert(', 'instanceGrantStore.revoke(', 'upsertGrant(',
+      'revokeGrant(', 'session.prompt(', 'sessionPrompt(']) {
+      assert.equal(code.includes(api), false, `只读面板不得调用 ${api}`);
+    }
   });
 });

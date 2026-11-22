@@ -185,10 +185,10 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
     const labels = ['dots'];
     labels.forEach((label, index) => {
       assert.match(PANE_CODES[index], new RegExp(`Text\\('${label}'\\)`), `缺少「${label}」分段标签`);
-      assert.match(PANE_CODES[index], /const REASON_DOTS: string = 'dots 指令尚未接线';/,
+      assert.match(PANE_CODES[index], /const REASON_DOTS: string = '命令工具未授予，指令确认闸尚未接线';/,
         `${label} 页头必须写出今天成立的 typed 禁用原因`);
-      assert.match(PANE_CODES[index], /新建对话（\$\{REASON_DOTS\}）/,
-        `${label} 禁用动作必须显示「新建对话（原因）」`);
+      assert.match(PANE_CODES[index], /发指令（\$\{REASON_DOTS\}）/,
+        `${label} 禁用动作必须显示「发指令（原因）」`);
     });
     // mod-shell-cloud-chat-pane（old→new，收紧）：云端标题仍在，禁用原因 / 占位文案绝迹。
     assert.match(PANE_CODES[1], /Text\('云端对话'\)/, '云端面板页头仍有分段标题');
@@ -237,8 +237,8 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
       'dots 面板已落真只读列表，不得保留禁用输入框 / 发送假入口（发指令属 mod-dots-readonly）');
     for (const [index, code] of PANE_CODES.entries()) {
       if (index === 0) {
-        assert.match(code, /Text\(`新建对话（\$\{REASON_DOTS\}）`\)[\s\S]{0,400}\.enabled\(false\)/,
-          'dots 的「新建对话」动作必须禁用并写出 typed 原因（无假入口）');
+        assert.match(code, /Text\(`发指令（\$\{REASON_DOTS\}）`\)[\s\S]{0,400}\.enabled\(false\)/,
+          'dots 的「发指令」动作必须禁用并把 typed 原因渲染在 Text 上（无假入口）');
       } else {
         assert.equal(/\.enabled\(false\)/.test(code), false, '云端面板已落真，不得有禁用假入口');
       }
@@ -278,8 +278,8 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
     // 面板只保留一个带 typed 原因的禁用「新建对话」动作，绝不渲染假的输入 / 发送入口。
     assert.equal(/TextInput\(|placeholder: '输入给 dots 的指令…'|pages\/Chats|pages\/Home/.test(PANE_CODES[0]), false,
       'dots 面板不得有禁用输入框、假发送入口或跨节页跳转');
-    assert.match(PANE_CODES[0], /Text\(`新建对话（\$\{REASON_DOTS\}）`\)/,
-      'dots 的禁用动作必须仍在并携带 typed 原因');
+    assert.match(PANE_CODES[0], /Text\(`发指令（\$\{REASON_DOTS\}）`\)/,
+      'dots 的禁用动作必须仍在并把 typed 原因渲染在 Text 上');
   });
 
   test('H-3 旧页头 AI 图标标识在外壳里绝迹（负向断言不删，换锚点）', () => {
@@ -314,5 +314,26 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
       assert.equal(dots.includes(fake), false, `dots 面板不得出现假行标记「${fake}」`);
     }
     assert.equal(/JSON\.parse\(|readTextSync\(/.test(dots), false, '不得自行解析 JSON / 读文件');
+  });
+
+  // mod-dots-readonly（新增正向守卫）：只读授权行 + 渲染原因 + 新副标题 + 零 mutation，四条同钉。
+  test('H-6 dots 只读授权行来自 instanceGrantStore；禁用原因渲染在 Text；旧副标题绝迹；无 grant/revoke/prompt', () => {
+    const raw = SCAFFOLD_PANES[0];
+    const dots = PANE_CODES[0];
+    assert.match(raw, /import \{ instanceGrantStore \} from '\.\.\/\.\.\/services\/instanceGrantStore';/);
+    assert.match(dots, /instanceGrantStore\.lastProblem\(\)/, 'typed problem 读取（坏信封 fail-closed）');
+    assert.match(dots, /instanceGrantStore\.redacted\(nowMs\)/, '只读 redacted 视图');
+    assert.match(dots, /Text\(this\.grantLine\)/, '授权行必须是渲染文案，不是注释 / 日志');
+    assert.ok(dots.includes('未授权 / 未知'), '坏信封 / 空表必须给「未授权 / 未知」');
+    assert.match(dots, /Text\(`发指令（\$\{REASON_DOTS\}）`\)/, '禁用原因必须在渲染的 Text 上');
+    assert.equal(/console\./.test(dots), false, '原因不得只写日志');
+    assert.equal(raw.includes('dots 可查看实例并对会话发指令，所有操作需你确认。'), false,
+      '旧过度承诺副标题全文绝迹');
+    assert.ok(dots.includes("const DOTS_SUBTITLE: string = 'dots 只读查看会话，暂不能发指令。';"));
+    assert.match(dots, /Text\(DOTS_SUBTITLE\)/, '新副标题必须渲染');
+    for (const api of ['instanceGrantStore.upsert(', 'instanceGrantStore.revoke(', 'upsertGrant(',
+      'revokeGrant(', 'session.prompt(', 'sessionPrompt(']) {
+      assert.equal(dots.includes(api), false, `只读面板不得调用 ${api}`);
+    }
   });
 });

@@ -512,9 +512,9 @@ test('U-S2 外壳页头标题是分段标签；dots 保留 typed 禁用原因，
   const labels = ['dots']
   labels.forEach((label, index) => {
     assert.match(PANE_CODES[index], new RegExp(`Text\\('${label}'\\)`), `缺少分段标签「${label}」`)
-    assert.match(PANE_CODES[index], /const REASON_DOTS: string = 'dots 指令尚未接线';/,
+    assert.match(PANE_CODES[index], /const REASON_DOTS: string = '命令工具未授予，指令确认闸尚未接线';/,
       `「${label}」必须写出今天成立的 typed 禁用原因`)
-    assert.match(PANE_CODES[index], /新建对话（\$\{REASON_DOTS\}）/, `「${label}」禁用动作必须显示原因`)
+    assert.match(PANE_CODES[index], /发指令（\$\{REASON_DOTS\}）/, `「${label}」禁用动作必须把原因渲染在 Text 上`)
   })
   // mod-shell-cloud-chat-pane（old→new，收紧）：云端标题仍在，禁用原因 / 占位文案绝迹。
   assert.match(PANE_CODES[1], /Text\('云端对话'\)/, '云端面板页头仍有分段标题')
@@ -661,4 +661,29 @@ test('U-S7 dots 面板是真列表：同款 chatStore/chatList 数据链 + ForEa
   assert.equal((dots.match(/aboutToAppear\(/g) ?? []).length, 1, '只读一次：只有一个 aboutToAppear')
   assert.equal(/onPageShow\(/.test(dots), false, '无 onPageShow')
   assert.deepEqual(settingsPushFiles(), ['Home.ets'], 'U-S4 不削弱：dots 面板不新增设置出口')
+})
+
+// mod-dots-readonly（新增正向守卫）：只读授权行 + 渲染原因 + 新副标题 + 零 mutation，同款令牌 / 保活。
+test('U-S8 dots 只读授权行来自 instanceGrantStore；禁用原因渲染在 Text；旧副标题绝迹；无 grant/revoke/prompt', () => {
+  const dots = PANE_CODES[0]
+  assert.match(dots, /import \{ instanceGrantStore \} from '\.\.\/\.\.\/services\/instanceGrantStore';/)
+  assert.match(dots, /instanceGrantStore\.lastProblem\(\)/)
+  assert.match(dots, /instanceGrantStore\.redacted\(nowMs\)/)
+  assert.match(dots, /Text\(this\.grantLine\)/, '授权行必须是渲染文案')
+  assert.ok(dots.includes('未授权 / 未知'), '坏信封 / 空表 fail-closed')
+  assert.match(dots, /Text\(`发指令（\$\{REASON_DOTS\}）`\)[\s\S]{0,400}\.enabled\(false\)/,
+    '禁用原因必须与 .enabled(false) 同处渲染节点')
+  assert.equal(/console\./.test(dots), false, '原因不得只写日志')
+  assert.equal(stripComments(dots).includes('dots 可查看实例并对会话发指令，所有操作需你确认。'), false,
+    '旧过度承诺副标题绝迹')
+  assert.ok(dots.includes("const DOTS_SUBTITLE: string = 'dots 只读查看会话，暂不能发指令。';"))
+  assert.match(dots, /Text\(DOTS_SUBTITLE\)/, '新副标题渲染')
+  for (const token of ['DIVIDER', 'FONT', 'LINE_HEIGHT', 'SPACING', 'TOUCH_MIN']) {
+    assert.match(dots, new RegExp(`\\b${token}\\b`), `授权行区域仍须引用令牌 ${token}`)
+  }
+  assert.equal(/(?:#[0-9A-Fa-f]{3,8}|Color\.[A-Z]|rgba?\()/.test(dots), false, '不得写裸色值')
+  for (const api of ['instanceGrantStore.upsert(', 'instanceGrantStore.revoke(', 'upsertGrant(',
+    'revokeGrant(', 'session.prompt(', 'sessionPrompt(']) {
+    assert.equal(dots.includes(api), false, `只读面板不得调用 ${api}`)
+  }
 })

@@ -393,20 +393,21 @@ describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
       '宽屏常驻轨与 compact 抽屉轨都必须把齿轮事件接到 openSettings');
   });
 
-  // mod-shell-dots-pane（新增正向守卫）：scaffold 只有两个 @Prop；落真后三个 @State 必须在渲染树里
-  // 真被读到（chats→ForEach、errorText→条件+ErrorState.why、loading→条件），且对外契约一字未改。
-  test('SG-S7 dots 面板落真：三个 @State 都有渲染落点，props / 保活 / 单一 aboutToAppear 不变', () => {
+  // mod-shell-dots-pane（新增正向守卫）/ mod-dots-readonly（retarget，收紧）：scaffold 只有两个 @Prop；
+  // 落真后四个 @State 必须在渲染树里真被读到（chats→ForEach、errorText→条件+ErrorState.why、
+  // loading→条件、grantLine→授权 Text），且对外契约一字未改。
+  test('SG-S7 dots 面板落真 + 只读授权行：四个 @State 都有渲染落点，props / 保活 / 单一 aboutToAppear 不变', () => {
     const file = PANE_FILES.find((path) => path.endsWith('DotsPane.ets'));
     const code = stripComments(readFileSync(file, 'utf8'));
     const fields = collectStateFields(componentFiles()).filter((item) =>
       item.file.endsWith('pages/panes/DotsPane.ets'));
-    assert.deepEqual(fields.map((item) => item.field).sort(), ['chats', 'errorText', 'loading'],
-      'dots 面板必须恰好声明这三个 @State（不多不少）');
-    for (const field of ['chats', 'errorText', 'loading']) {
+    assert.deepEqual(fields.map((item) => item.field).sort(), ['chats', 'errorText', 'grantLine', 'loading'],
+      'dots 面板必须恰好声明这四个 @State（不多不少）');
+    for (const field of ['chats', 'errorText', 'grantLine', 'loading']) {
       assert.ok(fieldUsage(code, field).reads > 0, `@State ${field} 必须被渲染树读到（不是死状态）`);
     }
-    // chats / errorText 还必须是「作为值」的真落点；loading 是纯分支标志，读在条件里即成立。
-    for (const field of ['chats', 'errorText']) {
+    // chats / errorText / grantLine 还必须是「作为值」的真落点；loading 是纯分支标志，读在条件里即成立。
+    for (const field of ['chats', 'errorText', 'grantLine']) {
       assert.equal(hasRenderSite(code, field), true, `@State ${field} 必须在 build()/@Builder 里有值落点`);
     }
     assert.match(code, /@Prop deepLinkId: string = '';/, '深链 prop 原样保留');
@@ -423,5 +424,17 @@ describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
     assert.match(code, /router\.pushUrl\(\{ url: 'pages\/ChatDetail', params: params \}\)/, '只 push 只读详情');
     assert.equal(/pushUrl\(\{\s*url:\s*'pages\/(Chats|Home|Settings)'/.test(code), false,
       '不得 push 跨节页 / 设置根页');
+    // mod-dots-readonly（收紧）：授权行确由 store 的 read API 派生，坏信封 fail-closed，
+    // 禁用原因有渲染落点且不是日志；任何 mutation / prompt API 都不许出现在代码视图里。
+    assert.match(code, /instanceGrantStore\.lastProblem\(\)/, '必须读 typed problem');
+    assert.match(code, /instanceGrantStore\.redacted\(nowMs\)/, '必须读 redacted 视图');
+    assert.match(code, /Text\(this\.grantLine\)/, '授权行必须渲染在 Text 上');
+    assert.ok(code.includes('未授权 / 未知'), '坏信封 / 空表 fail-closed');
+    assert.ok(code.includes('Text(`发指令（${REASON_DOTS}）`)'), '禁用原因必须有渲染落点');
+    assert.equal(/console\./.test(code), false, '禁用原因不得只写日志');
+    for (const api of ['instanceGrantStore.upsert(', 'instanceGrantStore.revoke(', 'upsertGrant(',
+      'revokeGrant(', 'session.prompt(', 'sessionPrompt(']) {
+      assert.equal(code.includes(api), false, `只读面板不得调用 ${api}`);
+    }
   });
 });

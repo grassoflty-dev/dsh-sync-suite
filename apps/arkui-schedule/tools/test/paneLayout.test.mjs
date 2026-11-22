@@ -34,9 +34,19 @@ const PANE_RAW = new Map(
  * 「禁用主操作 + typed 原因」与「空态标题」。日程 / 远程 / 云端早已是真 body，
  * dots 的正文也由 mod-shell-dots-pane 换成 chatStore+chatList 真列表；本数组不再表示占位正文。
  */
+// mod-dots-readonly：动作槽从「新建对话」改成禁用的「发指令」，原因改为今天成立的 grant 口径。
 const SCAFFOLDS = [
-  { name: 'DotsPane', action: '新建对话', reason: 'REASON_DOTS', empty: '还没有 dots 对话' }
+  { name: 'DotsPane', action: '发指令', reason: 'REASON_DOTS', empty: '还没有 dots 对话' }
 ];
+/** mod-dots-readonly：只读授权行 / 新副标题 / 禁用原因的逐字真值。 */
+const DOTS_REASON = '命令工具未授予，指令确认闸尚未接线';
+const DOTS_SUBTITLE = 'dots 只读查看会话，暂不能发指令。';
+const OLD_DOTS_SUBTITLE = 'dots 可查看实例并对会话发指令，所有操作需你确认。';
+const GRANT_READ_APIS = ['instanceGrantStore.lastProblem()', 'instanceGrantStore.redacted(', 'problemText(',
+  "const GRANT_LINE_PREFIX: string = 'dots 权限（只读）：'", '未授权 / 未知', 'GRANT_LINE_NO_COMMAND'];
+/** 只读纪律：面板里绝不允许出现任何变更 / 命令 / 写盘 API（名字级 pin）。 */
+const GRANT_MUTATION_APIS = ['instanceGrantStore.upsert(', 'instanceGrantStore.revoke(', 'upsertGrant(',
+  'revokeGrant(', 'session.prompt(', 'sessionPrompt(', 'AppStorage.setOrCreate', 'persistProp('];
 /** mod-shell-cloud-chat-pane：云端对话 scaffold 已换成真实只读会话列表。 */
 const CLOUD_CHAT = { name: 'CloudChatPane', title: '云端对话', nextStep: '先在设置里配置仓库' };
 
@@ -380,7 +390,7 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
       const p = pane(scaffold.name);
       assert.match(p.source, new RegExp(`const ${scaffold.reason}: string = '[^']+';`),
         `${scaffold.name} 必须有命名禁用原因`);
-      assert.match(p.source, /const REASON_DOTS: string = 'dots 指令尚未接线';/,
+      assert.match(p.source, /const REASON_DOTS: string = '命令工具未授予，指令确认闸尚未接线';/,
         `${scaffold.name} 禁用原因必须是今天成立的 typed 原因`);
       const actionSlot = 'Text(`' + scaffold.action + '（${' + scaffold.reason + '}）`)';
       assert.ok(p.body.includes(actionSlot), `${scaffold.name} 动作槽必须显示「${scaffold.action}（原因）」`);
@@ -401,9 +411,10 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     // 旧原因「dots 尚未接线」与旧输入框文案在代码视图里彻底绝迹（注释里的迁移记录已剥离）。
     assert.equal(/dots 尚未接线|输入给 dots 的指令…/.test(dots.source), false,
       '旧 scaffold 原因与输入框文案必须绝迹');
-    assert.match(dots.source, /const REASON_DOTS: string = 'dots 指令尚未接线';/, '新的 typed 禁用原因逐字保留');
-    assert.match(dots.body, /Text\(`新建对话（\$\{REASON_DOTS\}）`\)[\s\S]{0,400}\.enabled\(false\)/,
-      '「新建对话」必须禁用且显示 typed 原因');
+    assert.match(dots.source, /const REASON_DOTS: string = '命令工具未授予，指令确认闸尚未接线';/,
+      '新的 typed 禁用原因逐字保留（命令工具未授予 + 确认闸尚未接线）');
+    assert.match(dots.body, /Text\(`发指令（\$\{REASON_DOTS\}）`\)[\s\S]{0,400}\.enabled\(false\)/,
+      '「发指令」必须禁用且显示 typed 原因（渲染在 Text 上，不是日志）');
     assert.equal(/TextInput\(|placeholder: '输入给 dots 的指令…'/.test(dots.body), false,
       '发指令尚未接线，不得渲染输入框假入口');
     assert.match(dots.source, /ForEach\(\s*this\.chats/, '真实会话列表必须通过 ForEach 渲染');
@@ -411,11 +422,13 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
       '空态下一步必须逐字保留');
     assert.match(dots.source, /Text\(DOTS_NEXT_STEP\)/, '空态下一步必须渲染');
     assert.match(dots.source, /Text\('还没有 dots 对话'\)/, '空态标题必须诚实保留');
-    // intent 说明行仍可保留，但只能是无 onClick 的非动作字幕。
-    const subtitle = /Text\('dots 可查看实例并对会话发指令，所有操作需你确认。'\)/.exec(dots.body);
-    assert.ok(subtitle !== null, 'intent 字幕可保留为非动作说明');
+    // mod-dots-readonly（old→new，收紧）：旧过度承诺副标题绝迹，新只读副标题必须渲染在 Text 上且无点击动作。
+    assert.equal(dots.source.includes(OLD_DOTS_SUBTITLE), false, '过度承诺的旧副标题必须绝迹');
+    assert.ok(dots.source.includes(`const DOTS_SUBTITLE: string = '${DOTS_SUBTITLE}';`), '新副标题逐字保留');
+    const subtitle = /Text\(DOTS_SUBTITLE\)/.exec(dots.body);
+    assert.ok(subtitle !== null, '新只读副标题必须渲染为非动作字幕');
     assert.equal(/onClick\(/.test(dots.body.slice(subtitle.index, subtitle.index + 320)), false,
-      'intent 字幕不得带点击动作');
+      '字幕不得带点击动作');
   });
 
   // mod-instances-pane-readonly（old→new，不比原来弱）：旧断言只说「渲染树里无 pushUrl」；
@@ -529,7 +542,7 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     assert.equal(/Text\('云端对话'\)|openChats|pages\/Chats/.test(instancesRaw), false,
       '实例面板不得有跨节导航到云端对话');
     assert.match(configRegions(instancesRaw).join('\n'), /Text\('添加实例'\)/, '远程 DSH（设置）：添加实例');
-    assert.match(pane('DotsPane').source, /新建对话/, 'dots：新建对话（禁用并携带 typed 原因）');
+    assert.match(pane('DotsPane').source, /发指令/, 'dots：发指令（禁用并携带 typed 原因）');
     // mod-shell-cloud-chat-pane（old→new，收紧）：云端面板已落真列表，禁用「新建对话」假入口绝迹。
     assert.equal(/新建对话/.test(pane(CLOUD_CHAT.name).source), false,
       '云端对话：列表已落真，禁用主操作绝迹');
@@ -614,8 +627,13 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     }
     assert.equal(/JSON\.parse\(|readTextSync\(|fileIo|git-repo|syncController|pullNow/.test(dots.source), false,
       '面板不得自建解析 / 读文件 / RPC');
-    assert.equal(/TextInput\(|pages\/Settings|机制|sendCommand|grant/.test(dots.source), false,
-      '面板不得有输入框 / 第二处设置出口 / grant 或发指令入口');
+    // mod-dots-readonly（old→new，收紧）：旧 blanket 禁「grant」改为「只读 grant API 必须出现 +
+    // 任何变更 / 命令 API 绝迹」；输入框 / 第二处设置出口 / 机制说明的禁令原样保留。
+    assert.equal(/TextInput\(|pages\/Settings|机制|sendCommand/.test(dots.source), false,
+      '面板不得有输入框 / 第二处设置出口 / 机制说明 / 发指令入口');
+    for (const api of GRANT_READ_APIS) {
+      assert.ok(dots.source.includes(api), `只读授权行必须 sourced from ${api}`);
+    }
     assert.match(dots.source, /@Prop deepLinkId: string = '';/, '深链 prop 原样保留');
     assert.match(dots.source, /@Prop active: boolean = true;/, 'active prop 原样保留');
     assert.match(dots.body, /\.visibility\(this\.active \? Visibility\.Visible : Visibility\.Hidden\)/,
@@ -630,5 +648,39 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     assert.match(raw, /router\.pushUrl\(\{ url: 'pages\/ChatDetail', params: params \}\)/, '只 push 只读详情');
     assert.match(dots.source, /this\.openDetail\(id\)/, '行点击走统一出口');
     assert.equal(/pushUrl/.test(dots.body), false, '渲染树内不得直接 push');
+  });
+
+  // mod-dots-readonly（新增正向守卫）：只读授权行 + 渲染在 Text 上的禁用原因 + 新副标题 + 零 mutation。
+  test('P-26 dots 只读授权行来自 instanceGrantStore；禁用原因是渲染文案；旧副标题绝迹；无 grant/revoke/prompt', () => {
+    const dots = pane('DotsPane');
+    const raw = PANE_RAW.get('DotsPane');
+    const body = dots.body;
+    // 1. 授权行：从 store 的两个 read API 派生，且真的渲染在 Text 上（不是注释 / 日志）。
+    assert.match(raw, /import \{ instanceGrantStore \} from '\.\.\/\.\.\/services\/instanceGrantStore';/,
+      '必须导入 instanceGrantStore（store 首次被编译进产物）');
+    assert.match(dots.source, /const problem: GrantProblem = instanceGrantStore\.lastProblem\(\);/,
+      '必须读 typed problem（坏信封 fail-closed 的入口）');
+    assert.match(dots.source, /const views: RedactedGrant\[\] = instanceGrantStore\.redacted\(nowMs\);/,
+      '必须读 redacted 视图（view 权永不隐含 command 权）');
+    assert.ok(body.includes('Text(this.grantLine)'), '授权行必须渲染在 Text 上（用户可见，不是日志）');
+    assert.ok(/buildGrantLine\(\)/.test(dots.source) && raw.includes('this.grantLine = this.buildGrantLine();'),
+      '授权行必须在单一 aboutToAppear 里算一次');
+    // 2. 坏信封 / 空表 fail-closed：未授权 / 未知 + typed 原因，绝不声称权限存在。
+    assert.ok(dots.source.includes('未授权 / 未知'), '坏信封 / 空表必须给出「未授权 / 未知」');
+    assert.match(dots.source, /未授权 \/ 未知（\$\{problemText\(problem\)\}）/,
+      '坏信封必须带 typed problemText 原因');
+    // 3. 禁用原因是渲染在 Text 上的文案（source-shape，不是日志 / 注释）。
+    assert.ok(body.includes('Text(`发指令（${REASON_DOTS}）`)'), '禁用动作必须把原因渲染在 Text 上');
+    assert.match(body, /Text\(`发指令（\$\{REASON_DOTS\}）`\)[\s\S]{0,400}\.enabled\(false\)/,
+      '原因必须与 .enabled(false) 处于同一渲染节点（不是 console.log）');
+    assert.ok(dots.source.includes(`const REASON_DOTS: string = '${DOTS_REASON}';`), '禁用原因逐字保留');
+    assert.equal(/console\.|consoleInfo/.test(dots.source), false, '原因绝不能只写进日志');
+    // 4. 新副标题替换旧过度承诺（旧串全文绝迹）。
+    assert.equal(raw.includes(OLD_DOTS_SUBTITLE), false, '旧过度承诺副标题绝迹（含注释）');
+    assert.ok(body.includes('Text(DOTS_SUBTITLE)'), '新副标题必须渲染');
+    // 5. 零 mutation / 零 RPC / 零配置面。
+    for (const api of GRANT_MUTATION_APIS) {
+      assert.equal(dots.source.includes(api), false, `只读面板不得调用 ${api}`);
+    }
   });
 });

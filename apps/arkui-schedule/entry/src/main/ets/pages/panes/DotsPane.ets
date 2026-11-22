@@ -1,5 +1,5 @@
 /**
- * dots 分段：真实只读会话列表（mod-shell-dots-pane）。
+ * dots 分段：真实只读会话列表 + 只读授权视图（mod-shell-dots-pane / mod-dots-readonly）。
  *
  * 对外契约（Home 装配，一字未改）：
  *   - `@Prop deepLinkId`：深链携带的会话 id，预留给「按 id 打开指定 dots 会话」，当前不消费；
@@ -10,12 +10,16 @@
  * 的 filterByKind / sortChats / chatSummaryLine，只取 kind='dots'；不另建 store、不自行解析 JSON。
  * 点行进既有 `pages/ChatDetail`（只传 id，路由写法与 `pages/Chats.ets` 完全一致）。
  *
- * 本批**没有 grant 工具、没有发指令入口**——那是 mod-dots-readonly / mod-dots-commands 的活；
- * 「新建对话」保持禁用并给出今天成立的 typed 原因。加载 / 空 / 错误+重试 / 列表四态齐全，
- * 不渲染任何假行。说明行只是 intent 描述，不是可点动作。
+ * mod-dots-readonly：只读消费 `services/instanceGrantStore`（仅 lastProblem / redacted 两个 read API，
+ * 不调 upsert / revoke），在列表上方渲染一条紧凑的授权行 —— 当前有效实例的 view 工具并集 +
+ * 「命令工具 session.prompt 未授予」；坏信封 / 空表由 store 的 typed problem _fail-closed_ 到
+ * 「未授权 / 未知」，绝不声称权限存在。**发指令保持禁用**：原因写在禁用的 Text 上（渲染文案，
+ * 不是日志）——命令工具未授予、指令确认闸尚未接线。没有 grant UI / 没有 RPC / 没有配置面。
+ * 加载 / 空 / 错误+重试 / 列表四态齐全，不渲染任何假行。
  *
  * 历史锚点（守卫按源码文本钉住，勿当作现行语义）：
  * scaffold 原因旧值「dots 尚未接线」与禁用输入框 `输入给 dots 的指令…` 已随真列表移除，
+ * 旧的过度承诺副标题（「可发指令 + 所有操作需你确认」口径）已被只读口径取代；
  * 只在本注释里留迁移记录；渲染树里不再有它们。
  */
 import { common } from '@kit.AbilityKit';
@@ -27,15 +31,25 @@ import { ErrorState } from '../../components/state/ErrorState';
 import { LoadingState } from '../../components/state/LoadingState';
 import { chatSummaryLine, filterByKind, sortChats } from '../../model/chatList';
 import type { ChatIndexEntry, ChatKind } from '../../model/chatList';
+import { isViewTool, problemText, TOOL_SESSION_PROMPT, VIEW_TOOLS } from '../../model/instanceGrant';
+import type { GrantProblem, RedactedGrant } from '../../model/instanceGrant';
 import { chatStore } from '../../services/chatStore';
 import type { ChatListResult } from '../../services/chatStore';
+import { instanceGrantStore } from '../../services/instanceGrantStore';
 import { describeError } from '../../services/scheduleStore';
 
 /** 本分段只看 dots 会话；云端会话不在这里展示（分段切换只由 ShellRail 负责）。 */
 const PANE_KIND: ChatKind = 'dots';
 
-/** 禁用原因（无假入口）：发指令与新建 dots 会话尚未接线，今天成立。 */
-const REASON_DOTS: string = 'dots 指令尚未接线';
+/** 禁用原因（渲染在禁用的 Text 上，不是日志）：命令工具未授予 + 指令确认闸尚未接线，今天成立。 */
+const REASON_DOTS: string = '命令工具未授予，指令确认闸尚未接线';
+
+/** 新副标题：取代过度承诺的旧句，只陈述今天真做到的事（只读查看 + 发指令暂不可用）。 */
+const DOTS_SUBTITLE: string = 'dots 只读查看会话，暂不能发指令。';
+
+/** 只读授权行的固定片段：前缀 + 命令工具未授予的结论（view 权永不隐含 command 权）。 */
+const GRANT_LINE_PREFIX: string = 'dots 权限（只读）：';
+const GRANT_LINE_NO_COMMAND: string = `；命令工具 ${TOOL_SESSION_PROMPT} 未授予。`;
 
 /** 空态短下一步：dots 会话随同步仓库的 chats/index.jsonl 到来，本面板没有独立设置面。 */
 const DOTS_NEXT_STEP: string = '先在设置里同步一次仓库';
@@ -57,13 +71,54 @@ export struct DotsPane {
   @State errorText: string = '';
   /** 首次读取中。 */
   @State loading: boolean = true;
+  /** 只读授权行（单一 aboutToAppear 内算一次；坏信封 / 空表 fail-closed 到「未授权 / 未知」）。 */
+  @State grantLine: string = '';
 
   aboutToAppear(): void {
     chatStore.prepare(getContext(this) as common.UIAbilityContext);
     this.reload();
+    this.grantLine = this.buildGrantLine();
   }
 
   // ------------------------------------------------------------------ 数据
+
+  /**
+   * 只读授权行：只调 `instanceGrantStore.lastProblem()` / `redacted()`，绝不 grant / revoke。
+   * 坏信封 / 空表 / 无有效实例 → 「未授权 / 未知」+ typed 原因，绝不声称权限存在；
+   * 健康表 → 当前有效实例的 view 工具并集（canonical 顺序），命令工具固定给「未授予」结论。
+   */
+  private buildGrantLine(): string {
+    const problem: GrantProblem = instanceGrantStore.lastProblem();
+    const tail: string = GRANT_LINE_NO_COMMAND;
+    if (problem !== 'ok') {
+      return `${GRANT_LINE_PREFIX}未授权 / 未知（${problemText(problem)}）${tail}`;
+    }
+    const nowMs: number = Date.now();
+    const views: RedactedGrant[] = instanceGrantStore.redacted(nowMs);
+    const granted: string[] = [];
+    let instances: number = 0;
+    for (const view of views) {
+      if (!view.active) {
+        continue;
+      }
+      instances++;
+      for (const tool of view.tools) {
+        if (isViewTool(tool) && granted.indexOf(tool) < 0) {
+          granted.push(tool);
+        }
+      }
+    }
+    if (instances === 0 || granted.length === 0) {
+      return `${GRANT_LINE_PREFIX}未授权 / 未知${tail}`;
+    }
+    const ordered: string[] = [];
+    for (const tool of VIEW_TOOLS) {
+      if (granted.indexOf(tool) >= 0) {
+        ordered.push(tool);
+      }
+    }
+    return `${GRANT_LINE_PREFIX}${instances} 个实例已授权查看 ${ordered.join(' / ')}${tail}`;
+  }
 
   /** 读 `chats/index.jsonl` → 只取 dots 段 → 按更新时间倒序。失败只落 `errorText`，不抛。 */
   private async reload(): Promise<void> {
@@ -226,7 +281,7 @@ export struct DotsPane {
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(`新建对话（${REASON_DOTS}）`)
+          Text(`发指令（${REASON_DOTS}）`)
             .fontSize(FONT.caption)
             .lineHeight(LINE_HEIGHT.caption)
             .fontColor($r('app.color.text_secondary'))
@@ -238,11 +293,19 @@ export struct DotsPane {
         .alignItems(VerticalAlign.Center)
         .border({ width: { bottom: DIVIDER }, color: $r('app.color.divider') })
 
-        Text('dots 可查看实例并对会话发指令，所有操作需你确认。')
+        Text(DOTS_SUBTITLE)
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.text_secondary'))
           .width('100%')
+
+        Text(this.grantLine)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
 
         if (this.errorText.length > 0) {
           this.ErrorBlock()
