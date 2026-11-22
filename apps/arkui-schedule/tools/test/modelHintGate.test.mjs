@@ -6,6 +6,8 @@
 // ① 高级控件与手输模型名确实消失；② 服务 / 模型两个预设下拉仍接线；
 // ③ 自定义源的接口地址仍在（移出折叠区、选到 custom 时常驻显示）；
 // ④ 存量手输模型名仍能解析（源码链路 + resolveModel 纯函数）。
+// mod-ai-models-fetch 追加：模型下拉的数据源从「写死 modelsOf」变成「页面计算出的
+// 预设 / 缓存 / 在线列表 + 自定义条目」，这里的断言是**新增**（旧断言一条未删、未放宽）。
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -89,4 +91,59 @@ describe('mod-ai-drop-advanced：存量手输模型名不丢失', () => {
       assert.equal(resolveModel('deepseek', '   '), 'deepseek-chat', '纯空白回落默认模型');
     }
   );
+});
+
+describe('mod-ai-models-fetch：模型下拉从服务商列表填充（旧断言不删）', () => {
+  const page = readApiPage();
+  const section = readSettingsFile('components/settings/AiSection.ets');
+  const store = readSettingsFile('services/settingsStore.ets');
+  const provider = readSettingsFile('model/aiProvider.ts');
+  const deepseek = readSettingsFile('services/deepseek.ets');
+
+  test('picker renders fetched/cached ids: ForEach 消费 this.modelOptions()', () => {
+    // 旧断言「modelsOf(this.aiProviderId) 仍在」保留为预设兜底；新数据源另钉一条，不是替代。
+    assert.match(page, /modelsOf\(this\.aiProviderId\)/, '预设兜底列表仍在');
+    assert.match(page, /ForEach\(\s*this\.modelOptions\(\)/, '弹层现在消费页面计算出的选项');
+    assert.match(page, /this\.aiModelOptions = options/, '在线 / 缓存列表写入 @State');
+    assert.match(page, /options\.push\(\{ id: id, label: id \}\)/, '服务商返回的 id 原样显示，不美化');
+    assert.match(page, /fetchModelsOnline\(/, '刷新走服务层 GET …/models');
+    assert.match(page, /settingsStore\.loadAiModelsCache\(/, '打开页面读缓存');
+  });
+
+  test('custom/unknown entry: 保存值不在列表里仍以「自定义 / 未知」出现且可选', () => {
+    assert.match(page, /mergeModelIds\(ids, this\.aiModel\)/, '合并时保留保存值');
+    assert.match(page, /let label: string = customModelLabel\(id\)/, '列表外的 id 用自定义标签');
+    assert.match(page, /this\.pickModel\(item\.id\)/, '自定义条目点选仍写回 aiModel');
+    assert.match(page, /item\.id === this\.aiModel \? '✓' : ''/, '当前项仍打勾');
+  });
+
+  test('failed fetch: 保留缓存 + 类型化中文提示，界面标注过期', () => {
+    assert.match(page, /result\.kind === 'ok' && result\.models\.length > 0/, '只有成功才重铺列表');
+    assert.match(page, /this\.modelsStale = true/, '失败标注过期');
+    assert.match(page, /继续使用上次缓存，可能已过期/, '文案说明缓存还在');
+    assert.match(section, /this\.modelsStale \? \$r\('app\.color\.danger'\)/, '过期状态有可见红字');
+    const storeBody = provider.slice(provider.indexOf('export function withCachedModels('), provider.indexOf('export function decodeAiModelsCache('));
+    assert.match(storeBody, /if \(ids\.length === 0\) \{\s*return map;/, '空列表不许覆盖缓存');
+  });
+
+  test('no console.* includes the key：页面 / 组件 / store 零 console，服务层日志无 key', () => {
+    for (const src of [page, section, store]) {
+      assert.equal(/console\.(log|info|warn|error)|\bHilog\./.test(src), false, '凭据敏感文件不该有日志');
+    }
+    const calls = [...deepseek.matchAll(/console\.(?:log|info|warn|error|debug)\s*\(([^;]*)\)/g)];
+    for (const call of calls) {
+      for (const token of ['apiKey', 'aiKey', 'Authorization', 'Bearer', 'headers', 'response']) {
+        assert.equal(call[1].includes(token), false, `服务层日志不得带 ${token}`);
+      }
+    }
+    assert.match(deepseek, /'Authorization': `Bearer \$\{apiKey\}`/, 'key 只进请求头');
+  });
+
+  test('refresh action exists and is reachable：按钮 → 回调 → 页面 handler，无后台定时器', () => {
+    assert.match(section, /'刷新模型列表'/, '按钮存在');
+    assert.match(section, /this\.onRefreshModels\(\)/, '按钮调用回调');
+    assert.match(page, /onRefreshModels: \(\): void => \{\s*this\.refreshModels\(\);/, '页面接上 handler');
+    assert.match(page, /supportsModelsList\(providerId\)/, '不支持的源走静态列表');
+    assert.equal(/setInterval|setTimeout/.test(page + '\n' + section), false, '不得有后台自动刷新');
+  });
 });

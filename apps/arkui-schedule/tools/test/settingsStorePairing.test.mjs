@@ -39,6 +39,12 @@ function methodBody(source, signature) {
 }
 
 const KEYS = keyConstants(SETTINGS_STORE);
+/**
+ * mod-ai-models-fetch：模型列表缓存是**独立读写路径**的键，不进 `load()` / `save()` 整表 patch。
+ * 因此从「整表成对」清单里单独列出，并在下面用更强的断言钉住它自己的 get/put 成对性
+ * （不能因为表单保存把它清掉，也不能因为刷新缓存把其它设置清掉）。
+ */
+const INDEPENDENT_KEYS = new Set(['KEY_AI_MODELS_CACHE']);
 const LOAD_BODY = methodBody(SETTINGS_STORE, 'async load(');
 const SAVE_BODY = methodBody(SETTINGS_STORE, 'async save(');
 const SYNC_STATE_BODY = methodBody(SETTINGS_STORE, 'async saveSyncState(');
@@ -48,17 +54,33 @@ describe('settingsStore：每个 KEY 都成对读写', () => {
     assert.ok(KEYS.size >= 11, `键太少：${KEYS.size} → ${[...KEYS.keys()].join(',')}`);
   });
 
-  test('每个 KEY 在 load() 里被 prefs.get 读取', () => {
+  test('每个整表 KEY 在 load() 里被 prefs.get 读取', () => {
     for (const [constant, storageKey] of KEYS) {
+      if (INDEPENDENT_KEYS.has(constant)) {
+        continue;
+      }
       assert.ok(LOAD_BODY.includes(`prefs.get(${constant}`), `load() 没有读取 ${constant}（${storageKey}）`);
     }
   });
 
-  test('每个 KEY 在 save() 里被 prefs.put 写回（否则保存会丢掉新键）', () => {
+  test('每个整表 KEY 在 save() 里被 prefs.put 写回（否则保存会丢掉新键）', () => {
     for (const [constant, storageKey] of KEYS) {
+      if (INDEPENDENT_KEYS.has(constant)) {
+        continue;
+      }
       const inSave = SAVE_BODY.includes(`prefs.put(${constant}`);
       const inSyncState = SYNC_STATE_BODY.includes(`prefs.put(${constant}`);
       assert.ok(inSave || inSyncState, `save()/saveSyncState() 都没有写入 ${constant}（${storageKey}）`);
+    }
+  });
+
+  test('KEY_AI_MODELS_CACHE 独立成对：自有 get/put，且整表 load/save/saveSyncState 都不碰它', () => {
+    const loadCache = methodBody(SETTINGS_STORE, 'async loadAiModelsCache(');
+    const saveCache = methodBody(SETTINGS_STORE, 'async saveAiModelsCache(');
+    assert.match(loadCache, /prefs\.get\(KEY_AI_MODELS_CACHE, ''\)/, '缓存读取必须成对');
+    assert.match(saveCache, /prefs\.put\(KEY_AI_MODELS_CACHE, encodeAiModelsCache\(next\)\)/, '缓存写入必须成对');
+    for (const [name, body] of [['load()', LOAD_BODY], ['save()', SAVE_BODY], ['saveSyncState()', SYNC_STATE_BODY]]) {
+      assert.equal(body.includes('KEY_AI_MODELS_CACHE'), false, `${name} 不得覆盖模型列表缓存`);
     }
   });
 

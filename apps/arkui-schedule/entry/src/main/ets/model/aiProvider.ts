@@ -10,6 +10,10 @@
  *
  * B2 起本文件还提供「在线拉模型列表」：`parseModelsResponse`（纯解析）+ `modelsURL`（拼 /models）
  * + `fetchModels`（注入 fetch 便于测试，默认 `globalThis.fetch`，失败不抛）。
+ *
+ * mod-ai-models-fetch 追加：结果的 `kind` 把失败分成九个**类型**（页面按类型显示不同中文文案），
+ * 以及模型列表缓存的纯编解码 / 合并函数（provider id → ids + fetchedAt）与「自定义 / 未知」条目。
+ * 这些仍是零 import 的纯逻辑，Node 可直接跑；缓存真正落盘在 `services/settingsStore.ets`。
  */
 
 /** 单个模型选项（id 为请求体里的 `model` 值）。 */
@@ -338,6 +342,18 @@ export interface AiFetchResponse {
 /** 注入用的 fetch 形状（测试传假实现，生产用 `globalThis.fetch`）。 */
 export type AiFetchImpl = (url: string, init: AiFetchInit) => Promise<AiFetchResponse>;
 
+/** 拉模型列表的**类型化**结果分类（页面按 kind 取不同中文文案，不再靠字符串猜）。 */
+export type AiModelsKind =
+  | 'ok'
+  | 'config'
+  | 'network'
+  | 'timeout'
+  | 'unauthorized'
+  | 'forbidden'
+  | 'http'
+  | 'malformed'
+  | 'empty';
+
 /** 拉模型列表的结果（失败不抛，页面直接显示 `message`）。 */
 export interface AiModelsResult {
   ok: boolean;
@@ -347,6 +363,133 @@ export interface AiModelsResult {
   status: number;
   /** 中文文案（成功含数量，失败含原因）。 */
   message: string;
+  /** 失败类型；'ok' = 拿到非空列表，'empty'/'malformed' 是 HTTP 200 但不可用。 */
+  kind: AiModelsKind;
+}
+
+/** 单个源的模型列表缓存（只存成功拉到的列表）。 */
+export interface AiModelsCacheEntry {
+  /** 原样保留的模型 id（不归一、不美化）。 */
+  ids: string[];
+  /** 拉取成功的时刻（ISO 8601）。 */
+  fetchedAt: string;
+}
+
+/** 缓存表：provider id → 该源最近一次成功列表。 */
+export type AiModelsCacheMap = Record<string, AiModelsCacheEntry>;
+
+/** 支持 `GET …/models` 的源；全部为 OpenAI 兼容源，`custom` 需先填接口地址。 */
+export const MODELS_LIST_PROVIDERS: string[] = [
+  'deepseek',
+  'opencode-go',
+  'codex',
+  'openrouter',
+  CUSTOM_PROVIDER_ID
+];
+
+/** 该源有没有模型列表端点（未知源回退默认源，仍返回 true）。 */
+export function supportsModelsList(providerId: string): boolean {
+  const id: string = findProvider(providerId).id;
+  for (const candidate of MODELS_LIST_PROVIDERS) {
+    if (candidate === id) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 「自定义 / 未知」条目的展示名（保存的模型 id 不在列表里时仍可选）。 */
+export function customModelLabel(id: string): string {
+  return `自定义 / 未知：${id}`;
+}
+
+/**
+ * 合并列表与当前保存的模型 id：id 不在列表里时**追加**为自定义条目，绝不静默丢弃。
+ *
+ * 去重、保持原顺序；空 id 不追加。列表里已有的 id 原样保留，不改写标签。
+ */
+export function mergeModelIds(ids: string[], savedId: string): string[] {
+  const result: string[] = [];
+  for (const id of ids) {
+    if (typeof id === 'string' && id.trim().length > 0 && result.indexOf(id) < 0) {
+      result.push(id);
+    }
+  }
+  const saved: string = typeof savedId === 'string' ? savedId.trim() : '';
+  if (saved.length > 0 && result.indexOf(saved) < 0) {
+    result.push(saved);
+  }
+  return result;
+}
+
+/**
+ * 把某源的成功列表写进缓存表（纯 patch）：只替换该源条目，其它源逐字保留。
+ *
+ * `ids` 为空时**直接返回原表**：失败 / 空列表绝不覆盖上一次成功缓存。
+ */
+export function withCachedModels(
+  map: AiModelsCacheMap,
+  providerId: string,
+  ids: string[],
+  fetchedAt: string
+): AiModelsCacheMap {
+  if (ids.length === 0) {
+    return map;
+  }
+  const next: AiModelsCacheMap = {};
+  for (const key of Object.keys(map)) {
+    if (key !== providerId) {
+      next[key] = map[key];
+    }
+  }
+  next[providerId] = { ids: ids.slice(), fetchedAt: fetchedAt };
+  return next;
+}
+
+/** 解码 preferences 里的缓存串（坏 JSON / 旧结构 / 空列表条目一律丢掉，返回空表，不抛）。 */
+export function decodeAiModelsCache(text: string): AiModelsCacheMap {
+  const result: AiModelsCacheMap = {};
+  const raw: string = typeof text === 'string' ? text.trim() : '';
+  if (raw.length === 0) {
+    return result;
+  }
+  try {
+    const parsed: Object | null = JSON.parse(raw) as Object | null;
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return result;
+    }
+    const bag: Record<string, Object> = parsed as unknown as Record<string, Object>;
+    for (const key of Object.keys(bag)) {
+      const value: Object = bag[key];
+      if (value === null || typeof value !== 'object') {
+        continue;
+      }
+      const entry: Record<string, Object> = value as unknown as Record<string, Object>;
+      const idsRaw: Object = entry['ids'];
+      const fetchedAtRaw: Object = entry['fetchedAt'];
+      if (!Array.isArray(idsRaw) || typeof fetchedAtRaw !== 'string') {
+        continue;
+      }
+      const ids: string[] = [];
+      for (const item of idsRaw) {
+        if (typeof item === 'string' && item.trim().length > 0 && ids.indexOf(item) < 0) {
+          ids.push(item);
+        }
+      }
+      if (ids.length > 0) {
+        result[key] = { ids: ids, fetchedAt: fetchedAtRaw };
+      }
+    }
+  } catch {
+    // 坏数据当「没有缓存」：页面回落预设列表，不让一行脏数据影响设置页
+    return {};
+  }
+  return result;
+}
+
+/** 编码缓存表为 preferences 字符串（只存 id 与 fetchedAt，不含 key / URL / 响应正文）。 */
+export function encodeAiModelsCache(map: AiModelsCacheMap): string {
+  return JSON.stringify(map);
 }
 
 /** 拉模型列表超时的哨兵错误（比字符串匹配可靠）。 */
@@ -390,36 +533,74 @@ function defaultFetchImpl(): AiFetchImpl | null {
 function modelsFailureMessage(providerId: string, status: number): string {
   const preset: AiProviderPreset = findProvider(providerId);
   if (status === MODELS_STATUS_TIMEOUT) {
-    return '获取模型列表超时：请检查网络或代理后再试（也可手填模型名）';
+    return '获取模型列表超时：请检查网络或代理后再试（可继续用缓存列表）';
   }
   if (status === MODELS_STATUS_NETWORK) {
-    return '网络异常：无法连接接口（请检查网络、代理或防火墙；也可手填模型名）';
+    return '网络异常：无法连接接口（请检查网络、代理或防火墙；可继续用缓存列表）';
   }
   if (status === 401) {
     return `密钥无效或已失效：请核对 ${preset.label} 的 key 后重试`;
   }
   if (status === 403) {
-    return '无权限读取模型列表：请检查 key 的权限范围（也可手填模型名）';
+    return '无权限读取模型列表：请检查 key 的权限范围（可继续用缓存列表）';
   }
   if (status === 404) {
-    return '接口地址可能不对：请检查 …/v1 路径（也可手填模型名）';
+    return '接口地址可能不对：请检查 …/v1 路径（可继续用缓存列表）';
   }
   if (status === 429) {
-    return '请求过于频繁，请稍后再试（也可手填模型名）';
+    return '请求过于频繁，请稍后再试（可继续用缓存列表）';
   }
   if (status >= 500) {
-    return '服务端错误，请稍后再试（也可手填模型名）';
+    return '服务端错误，请稍后再试（可继续用缓存列表）';
   }
-  return `请求失败（HTTP ${status}）：可在「高级」里手填模型名`;
+  return `请求失败（HTTP ${status}）：请检查接口地址或稍后重试（可继续用缓存列表）`;
 }
 
-/** 组装失败结果。 */
-function modelsFailure(status: number, message: string): AiModelsResult {
+/** HTTP 状态码 → 失败类型（401/403 单独列，其余非 200 统一 'http'）。 */
+function modelsKindForStatus(status: number): AiModelsKind {
+  if (status === 401) {
+    return 'unauthorized';
+  }
+  if (status === 403) {
+    return 'forbidden';
+  }
+  return 'http';
+}
+
+/**
+ * 200 的响应体是不是「认识的结构」（即使列表为空）。
+ *
+ * 用来区分 `empty`（服务端明确返回空列表）与 `malformed`（结构不认识 / 坏 JSON）：
+ * 两者都解析出空数组，但页面文案不同，且都**不覆盖**已有缓存。
+ */
+function modelsEnvelopeRecognized(jsonText: string): boolean {
+  const text: string = typeof jsonText === 'string' ? jsonText.trim() : '';
+  if (text.length === 0) {
+    return false;
+  }
+  try {
+    const parsed: Object | null = JSON.parse(text) as Object | null;
+    if (Array.isArray(parsed)) {
+      return true;
+    }
+    if (parsed === null || typeof parsed !== 'object') {
+      return false;
+    }
+    const bag: Record<string, Object> = parsed as unknown as Record<string, Object>;
+    return Array.isArray(bag['data']) || Array.isArray(bag['models']);
+  } catch {
+    return false;
+  }
+}
+
+/** 组装失败结果（带类型，页面不需要再靠字符串猜原因）。 */
+function modelsFailure(status: number, message: string, kind: AiModelsKind): AiModelsResult {
   const failed: AiModelsResult = {
     ok: false,
     models: [],
     status: status,
-    message: message
+    message: message,
+    kind: kind
   };
   return failed;
 }
@@ -430,7 +611,8 @@ function modelsFailure(status: number, message: string): AiModelsResult {
  * - `baseURL` 为空时用预设地址（自定义源为空 → 返回失败，不猜地址）；
  * - `apiKey` 为空时不发 Authorization（本地自建服务通常不校验 key）；
  * - `fetchImpl` 可注入（测试用假实现），缺省 `globalThis.fetch`；
- * - **永不抛异常**：网络失败/超时/非 200 都折成 `{ok:false, status, message}`。
+ * - **永不抛异常**：网络失败/超时/非 200 都折成 `{ok:false, status, message, kind}`；
+ * - key 只进 `Authorization` 头，失败文案与日志均不带 key。
  *
  * @param providerId 源 id（未知回退默认源）
  * @param baseURL    接口基地址（空串用预设）
@@ -452,11 +634,15 @@ export async function fetchModels(
   try {
     url = modelsURL(base);
   } catch (error) {
-    return modelsFailure(MODELS_STATUS_NETWORK, describeErrorText(error));
+    return modelsFailure(MODELS_STATUS_NETWORK, describeErrorText(error), 'config');
   }
   const impl: AiFetchImpl | null = fetchImpl === undefined ? defaultFetchImpl() : fetchImpl;
   if (impl === null) {
-    return modelsFailure(MODELS_STATUS_NETWORK, '当前运行时不支持 fetch：无法在线获取模型列表（可手填模型名）');
+    return modelsFailure(
+      MODELS_STATUS_NETWORK,
+      '当前运行时不支持 fetch：无法在线获取模型列表（可继续用缓存列表）',
+      'network'
+    );
   }
   const key: string = typeof apiKey === 'string' ? apiKey.trim() : '';
   const headers: Record<string, string> = { 'Accept': 'application/json' };
@@ -479,9 +665,9 @@ export async function fetchModels(
     response = await Promise.race<AiFetchResponse>([impl(url, init), timeoutPromise]);
   } catch (error) {
     if (error instanceof AiModelsTimeoutError) {
-      return modelsFailure(MODELS_STATUS_TIMEOUT, modelsFailureMessage(preset.id, MODELS_STATUS_TIMEOUT));
+      return modelsFailure(MODELS_STATUS_TIMEOUT, modelsFailureMessage(preset.id, MODELS_STATUS_TIMEOUT), 'timeout');
     }
-    return modelsFailure(MODELS_STATUS_NETWORK, modelsFailureMessage(preset.id, MODELS_STATUS_NETWORK));
+    return modelsFailure(MODELS_STATUS_NETWORK, modelsFailureMessage(preset.id, MODELS_STATUS_NETWORK), 'network');
   } finally {
     if (timer >= 0) {
       timers.clearTimeout(timer);
@@ -491,26 +677,35 @@ export async function fetchModels(
   try {
     bodyText = await response.text();
   } catch (error) {
-    return modelsFailure(MODELS_STATUS_NETWORK, modelsFailureMessage(preset.id, MODELS_STATUS_NETWORK));
+    return modelsFailure(MODELS_STATUS_NETWORK, modelsFailureMessage(preset.id, MODELS_STATUS_NETWORK), 'network');
   }
   if (response.status !== 200) {
-    return modelsFailure(response.status, modelsFailureMessage(preset.id, response.status));
+    return modelsFailure(
+      response.status,
+      modelsFailureMessage(preset.id, response.status),
+      modelsKindForStatus(response.status)
+    );
   }
   const models: string[] = parseModelsResponse(bodyText);
   if (models.length === 0) {
-    const empty: AiModelsResult = {
+    const recognized: boolean = modelsEnvelopeRecognized(bodyText);
+    const unusable: AiModelsResult = {
       ok: true,
       models: [],
       status: 200,
-      message: '成功：HTTP 200，但返回的模型列表为空（可手填模型名）'
+      message: recognized
+        ? '成功：HTTP 200，但返回的模型列表为空（可继续用缓存列表）'
+        : '返回的数据格式无法识别：请用上次缓存或稍后重试',
+      kind: recognized ? 'empty' : 'malformed'
     };
-    return empty;
+    return unusable;
   }
   const succeeded: AiModelsResult = {
     ok: true,
     models: models,
     status: 200,
-    message: `成功：HTTP 200 / ${models.length} 个模型`
+    message: `成功：HTTP 200 / ${models.length} 个模型`,
+    kind: 'ok'
   };
   return succeeded;
 }

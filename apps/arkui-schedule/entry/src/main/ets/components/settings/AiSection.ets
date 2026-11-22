@@ -6,6 +6,7 @@
  *
  * 契约：
  * - 服务 / 模型是「点一行 → 页面开弹层选」的只读行（弹层仍在页面里）；
+ * - 模型行下方常驻「刷新模型列表」动作 + 一行来源 / 失败说明：失败保留缓存并标注「已过期」；
  * - API Key 只存本机（密码框），测试结果一行 + 失败时的「下一步」一行；
  * - 多源 fallback 面板放在 AI 组内（隐私决策不藏在折叠里），开关 / 列表 / 次数 / 诊断
  *   都在 `AiFallbackPanel` 内，本 section 只转发回调；
@@ -41,6 +42,12 @@ export struct AiSection {
   @Prop providerKeyHint: string = '';
   /** 当前模型展示名（页面 `modelLabel()` 派生）。 */
   @Prop modelLabel: string = '';
+  /** 模型列表来源 / 刷新结果的一行中文说明（含上次刷新时间或类型化失败原因）。 */
+  @Prop modelsHint: string = '';
+  /** 刷新失败但保留缓存：HintLine 前加「已过期」标注。 */
+  @Prop modelsStale: boolean = false;
+  /** 刷新中：按钮禁用并显示「刷新中…」，避免重复请求。 */
+  @Prop modelsBusy: boolean = false;
   /** 当前源是不是「自定义」（决定要不要显示接口地址 baseURL 行）。 */
   @Prop customProvider: boolean = false;
   /** 主源的展示名（给 fallback 面板说明「备用源里不要再选它」）。 */
@@ -57,6 +64,8 @@ export struct AiSection {
   onOpenProviderPanel: () => void = () => {};
   /** 点「模型」行 → 页面开模型选择弹层。 */
   onOpenModelPanel: () => void = () => {};
+  /** 点「刷新模型列表」→ 页面显式拉取服务商列表（失败不动缓存）。 */
+  onRefreshModels: () => void = () => {};
   onChangeAiKey: (value: string) => void = () => {};
   onTestAi: () => void = () => {};
   onChangeAiBaseURL: (value: string) => void = () => {};
@@ -156,6 +165,30 @@ export struct AiSection {
       Divider()
         .strokeWidth(DIVIDER)
         .color($r('app.color.divider'))
+
+      // 模型列表刷新：显式动作（无后台定时器）；失败时页面保留缓存并给出类型化中文文案。
+      Row({ space: SPACING.md }) {
+        Button(this.modelsBusy ? '刷新中…' : '刷新模型列表')
+          .height(TOUCH_MIN)
+          .fontSize(FONT.caption)
+          .backgroundColor($r('app.color.brand_soft'))
+          .fontColor($r('app.color.brand'))
+          .borderRadius(RADIUS.sm)
+          .enabled(!this.modelsBusy)
+          .onClick(() => {
+            this.onRefreshModels();
+          })
+        Text(this.modelsHint)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor(this.modelsStale ? $r('app.color.danger') : $r('app.color.text_secondary'))
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
+          .textAlign(TextAlign.Start)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
 
       this.FieldLabel('API Key（仅存本机）')
       TextInput({ text: this.aiKey, placeholder: 'sk-…' })

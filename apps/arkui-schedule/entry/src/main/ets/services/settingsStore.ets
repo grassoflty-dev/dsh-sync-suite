@@ -22,12 +22,16 @@ import type { AiOptions } from '../model/aiRequest';
 import {
   CUSTOM_PROVIDER_ID,
   DEFAULT_PROVIDER_ID,
+  decodeAiModelsCache,
   defaultModelOf,
+  encodeAiModelsCache,
   findProvider,
   migrateLegacyProviderId,
   normalizeBaseURL,
+  withCachedModels,
   resolveModel as resolveAiModel
 } from '../model/aiProvider';
+import type { AiModelsCacheEntry, AiModelsCacheMap } from '../model/aiProvider';
 import {
   DEFAULT_MAX_ATTEMPTS,
   normalizeMaxAttempts,
@@ -283,6 +287,12 @@ const KEY_REMOTE_LAST_OK: string = 'remoteLastOk';
 const KEY_LAST_SYNC_AT: string = 'lastSyncAt';
 const KEY_LAST_SYNC_ERROR: string = 'lastSyncError';
 const KEY_LAST_SYNC_ACTION: string = 'lastSyncAction';
+/**
+ * 模型列表缓存（mod-ai-models-fetch）：单个 JSON 串 `provider id → {ids, fetchedAt}`。
+ * 与 AI 源/模型等键同在 `schedule_settings`，但走**独立读写路径**——
+ * `save()` 的整表 patch 不碰它，刷新缓存也不碰其它设置键（互不清空）。
+ */
+const KEY_AI_MODELS_CACHE: string = 'aiModelsCache';
 
 /** 规范化设备标识：非法值回退默认，避免写出非法目录名。 */
 export function normalizeDeviceId(value: string): string {
@@ -781,6 +791,50 @@ export class SettingsStore {
     await prefs.flush();
     this.cache = next;
     return next;
+  }
+
+  /**
+   * 读模型列表缓存（mod-ai-models-fetch）：坏串 / 旧结构 → 空表，不抛、不改其它键。
+   *
+   * 只从 preferences 读这一个键，不经过 `this.cache`：整表 `save()` 不持有它，
+   * 因此刷新缓存与保存表单互不覆盖。
+   */
+  async loadAiModelsCache(context?: object): Promise<AiModelsCacheMap> {
+    if (context !== undefined && this.prefs === null) {
+      await this.init(context);
+    }
+    const prefs = this.requirePrefs();
+    return decodeAiModelsCache(readString(await prefs.get(KEY_AI_MODELS_CACHE, ''), ''));
+  }
+
+  /**
+   * 只写某源的模型列表缓存（patch 语义）：从磁盘读回整张表 → 合并该源 → 写回一个键。
+   *
+   * 其它设置键（含 aiKey / provider / model / 同步状态）一概不 put，不会被清空；
+   * 空列表由 `withCachedModels` 拒绝，因此失败刷新不会抹掉上一次成功缓存。
+   */
+  async saveAiModelsCache(
+    providerId: string,
+    ids: string[],
+    fetchedAt: string,
+    context?: object
+  ): Promise<AiModelsCacheEntry | null> {
+    if (context !== undefined && this.prefs === null) {
+      await this.init(context);
+    }
+    const prefs = this.requirePrefs();
+    const current: AiModelsCacheMap = decodeAiModelsCache(
+      readString(await prefs.get(KEY_AI_MODELS_CACHE, ''), '')
+    );
+    const next: AiModelsCacheMap = withCachedModels(current, providerId, ids, fetchedAt);
+    if (next === current) {
+      // 空列表 / 无变化：一个键都不写，绝不制造失败缓存
+      return null;
+    }
+    await prefs.put(KEY_AI_MODELS_CACHE, encodeAiModelsCache(next));
+    await prefs.flush();
+    const entry: AiModelsCacheEntry = next[providerId];
+    return entry;
   }
 
   private requirePrefs(): preferences.Preferences {

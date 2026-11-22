@@ -11,6 +11,8 @@
  * - 校验仍走 `checkSettingsFields`，与拆分前逐字一致；非本页字段传静默兜底值（仓库地址留空
  *   即跳过地址 / token 校验），本页只有自定义源接口地址一处可能报错，不会有幽灵红字；
  * - 服务 / 模型两个预设下拉的弹层在本页；接口地址只在「自定义」源显示；Key 走密码框；
+ * - 模型下拉列表先读上次成功缓存、再回落预设，「刷新模型列表」显式拉取服务商 `GET …/models`：
+ *   失败只标注过期、不清空列表；保存但已下线的模型以「自定义 / 未知：<id>」仍可选；
  * - 没有「高级」控制，也没有手输模型名（存量手输模型名由 `modelLabel` 原样显示）；
  * - 返回键走 `router.back()` 回设置根页。
  *
@@ -24,7 +26,7 @@ import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../commo
 import { normalizeDeviceId, settingsStore } from '../services/settingsStore';
 import type { ScheduleSettings, SettingsPatch } from '../services/settingsStore';
 import { describeError } from '../services/scheduleStore';
-import { testAiConnection } from '../services/deepseek';
+import { fetchModelsOnline, testAiConnection } from '../services/deepseek';
 import type { AiTestResult } from '../services/deepseek';
 import { validateRepoUrl } from '../model/repoUrl';
 import type { RepoUrlCheck } from '../model/repoUrl';
@@ -40,12 +42,15 @@ import {
   AI_PROVIDERS,
   CUSTOM_PROVIDER_ID,
   DEFAULT_PROVIDER_ID,
+  customModelLabel,
   defaultModelOf,
   findProvider,
   hintForProvider,
-  modelsOf
+  mergeModelIds,
+  modelsOf,
+  supportsModelsList
 } from '../model/aiProvider';
-import type { AiModelOption, AiProviderPreset } from '../model/aiProvider';
+import type { AiModelOption, AiModelsCacheEntry, AiModelsKind, AiProviderPreset } from '../model/aiProvider';
 import {
   DEFAULT_MAX_ATTEMPTS,
   MAX_FALLBACK_SOURCES,
@@ -85,6 +90,16 @@ struct SettingsApi {
   /** 失败后的一行可操作建议（成功时为空，不占行）。 */
   @State aiTestHint: string = '';
   @State aiTestBusy: boolean = false;
+
+  // ------------------------------------------------------------------ 模型列表在线拉取（mod-ai-models-fetch）
+  /** 模型下拉当前选项：预设 → 上次成功缓存 → 在线列表（id 保持服务商返回值原样）。 */
+  @State aiModelOptions: AiModelOption[] = [];
+  /** 列表来源 / 刷新结果的一行中文说明（含上次刷新时间或类型化失败原因）。 */
+  @State modelsHint: string = '';
+  /** 刷新失败但保留了缓存时为 true（界面标注「已过期」）。 */
+  @State modelsStale: boolean = false;
+  /** 刷新中：禁用按钮，防止并发重复请求。 */
+  @State modelsBusy: boolean = false;
 
   // ------------------------------------------------------------------ 多源 fallback（三个持久化键 + 只留内存的诊断）
   @State aiFallbackEnabled: boolean = false;
@@ -130,6 +145,11 @@ struct SettingsApi {
         return;
       }
       this.applySettings(settings);
+      // 缓存读取是本地 preferences 操作，不联网、不阻塞 UI；失败静默回落预设列表。
+      await this.restoreModelsCache();
+      if (this.disposed) {
+        return;
+      }
       this.ready = true;
     } catch (error) {
       if (this.disposed) {
@@ -151,6 +171,164 @@ struct SettingsApi {
     this.aiFallbackMaxAttempts = normalizeMaxAttempts(settings.aiFallbackMaxAttempts);
     this.deviceId = settings.deviceId;
     this.author = settings.author.trim().length > 0 ? settings.author : '我';
+  }
+
+  // ------------------------------------------------------------------ 模型列表（缓存 / 在线 / 自定义条目）
+
+  /** 预设列表快照（fetch 未跑 / 失败时的兜底，label 用预设中文名）。 */
+  private applyPresetOptions(): void {
+    const options: AiModelOption[] = [];
+    for (const item of modelsOf(this.aiProviderId)) {
+      options.push({ id: item.id, label: item.label });
+    }
+    this.aiModelOptions = options;
+    this.modelsHint = `预设模型列表（${options.length} 个）；可点「刷新模型列表」拉取服务商最新列表`;
+    this.modelsStale = false;
+  }
+
+  /** 用一组服务商返回的 id 铺列表：id 原样保留，label 也不美化。 */
+  private applyFetchedIds(ids: string[], hint: string, stale: boolean): void {
+    const options: AiModelOption[] = [];
+    for (const id of ids) {
+      options.push({ id: id, label: id });
+    }
+    this.aiModelOptions = options;
+    this.modelsHint = hint;
+    this.modelsStale = stale;
+  }
+
+  /** 上次刷新时刻的 HH:MM（坏值原样显示，不给假时间）。 */
+  private shortTime(iso: string): string {
+    const parsed: Date = new Date(iso);
+    if (Number.isNaN(parsed.getTime())) {
+      return iso;
+    }
+    const hh: number = parsed.getHours();
+    const mm: number = parsed.getMinutes();
+    return `${hh < 10 ? '0' : ''}${hh}:${mm < 10 ? '0' : ''}${mm}`;
+  }
+
+  /** 失败类型的短中文标签（详细原因由 result.message 给）。 */
+  private modelsKindLabel(kind: AiModelsKind): string {
+    if (kind === 'timeout') {
+      return '超时';
+    }
+    if (kind === 'unauthorized') {
+      return '密钥无效';
+    }
+    if (kind === 'forbidden') {
+      return '无权限';
+    }
+    if (kind === 'malformed') {
+      return '数据格式错误';
+    }
+    if (kind === 'empty') {
+      return '空列表';
+    }
+    if (kind === 'config' || kind === 'network') {
+      return '网络或地址';
+    }
+    return '请求失败';
+  }
+
+  /** 页面打开 / 换源时恢复该源的上次成功列表；没有缓存就用预设。 */
+  private async restoreModelsCache(): Promise<void> {
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const map = await settingsStore.loadAiModelsCache(context);
+      const entry: AiModelsCacheEntry | undefined = map[this.aiProviderId];
+      if (this.disposed) {
+        return;
+      }
+      if (entry !== undefined && entry.ids.length > 0) {
+        this.applyFetchedIds(
+          entry.ids,
+          `上次刷新 ${this.shortTime(entry.fetchedAt)} · 共 ${entry.ids.length} 个模型（离线可用）`,
+          false
+        );
+      } else {
+        this.applyPresetOptions();
+      }
+    } catch (error) {
+      if (!this.disposed) {
+        this.applyPresetOptions();
+      }
+    }
+  }
+
+  /** 当前下拉的选项：已拉取列表 + 保存但不在列表里的「自定义 / 未知」条目。 */
+  private modelOptions(): AiModelOption[] {
+    const ids: string[] = [];
+    for (const item of this.aiModelOptions) {
+      ids.push(item.id);
+    }
+    const merged: string[] = mergeModelIds(ids, this.aiModel);
+    const options: AiModelOption[] = [];
+    for (const id of merged) {
+      let label: string = customModelLabel(id);
+      for (const item of this.aiModelOptions) {
+        if (item.id === id) {
+          label = item.label;
+          break;
+        }
+      }
+      options.push({ id: id, label: label });
+    }
+    return options;
+  }
+
+  /** 「刷新模型列表」：显式动作，失败只改提示、不动已缓存列表；不打印 key。 */
+  private async refreshModels(): Promise<void> {
+    if (this.modelsBusy) {
+      return;
+    }
+    const providerId: string = findProvider(this.aiProviderId).id;
+    if (!supportsModelsList(providerId)) {
+      this.modelsHint = '该服务不支持在线获取模型列表，继续使用预设列表';
+      return;
+    }
+    if (providerId === CUSTOM_PROVIDER_ID && this.aiBaseURL.trim().length === 0) {
+      this.modelsStale = true;
+      this.modelsHint = '自定义服务需先填写接口地址，才能刷新模型列表（继续使用上次缓存）';
+      return;
+    }
+    this.modelsBusy = true;
+    this.modelsHint = '正在获取模型列表…';
+    try {
+      const baseURL: string = providerId === CUSTOM_PROVIDER_ID ? this.aiBaseURL : '';
+      // key 只作为参数传给请求头构造，绝不写进提示 / 日志。
+      const result = await fetchModelsOnline(providerId, baseURL, this.aiKey);
+      if (this.disposed) {
+        return;
+      }
+      if (result.kind === 'ok' && result.models.length > 0) {
+        const context = getContext(this) as common.UIAbilityContext;
+        const entry = await settingsStore.saveAiModelsCache(providerId, result.models, nowIso(), context);
+        if (this.disposed) {
+          return;
+        }
+        const at: string = entry === null ? nowIso() : entry.fetchedAt;
+        this.applyFetchedIds(
+          result.models,
+          `已从服务商刷新 ${result.models.length} 个模型 · ${this.shortTime(at)}`,
+          false
+        );
+      } else {
+        // 失败 / 空列表：一个选项都不删，只标注缓存已过期。
+        this.modelsStale = true;
+        this.modelsHint = `刷新失败（${this.modelsKindLabel(result.kind)}）：${result.message}；继续使用上次缓存，可能已过期`;
+      }
+    } catch (error) {
+      if (this.disposed) {
+        return;
+      }
+      this.modelsStale = true;
+      this.modelsHint = `刷新失败：${describeError(error)}；继续使用上次缓存，可能已过期`;
+    } finally {
+      if (!this.disposed) {
+        this.modelsBusy = false;
+      }
+    }
   }
 
   // ------------------------------------------------------------------ 保存（本页唯一主操作）
@@ -187,6 +365,8 @@ struct SettingsApi {
       this.aiModel = defaultModelOf(preset.id);
     }
     this.panel = PANEL_NONE;
+    // 换源后列表跟着换：优先该源上次成功缓存，没有则回落预设（不联网）。
+    this.restoreModelsCache();
   }
 
   private pickModel(id: string): void {
@@ -540,7 +720,7 @@ struct SettingsApi {
         )
       } else {
         ForEach(
-          modelsOf(this.aiProviderId),
+          this.modelOptions(),
           (item: AiModelOption) => {
             Row({ space: SPACING.sm }) {
               Text(item.label)
@@ -604,6 +784,9 @@ struct SettingsApi {
                 providerLabel: this.provider().label,
                 providerKeyHint: this.provider().keyHint,
                 modelLabel: this.modelLabel(),
+                modelsHint: this.modelsHint,
+                modelsStale: this.modelsStale,
+                modelsBusy: this.modelsBusy,
                 customProvider: this.isCustomProvider(),
                 primarySourceLabel: this.primarySourceLabel(),
                 fallbackEnabled: this.aiFallbackEnabled,
@@ -615,6 +798,9 @@ struct SettingsApi {
                 },
                 onOpenModelPanel: (): void => {
                   this.panel = PANEL_MODEL;
+                },
+                onRefreshModels: (): void => {
+                  this.refreshModels();
                 },
                 onChangeAiKey: (value: string): void => {
                   this.aiKey = value;
