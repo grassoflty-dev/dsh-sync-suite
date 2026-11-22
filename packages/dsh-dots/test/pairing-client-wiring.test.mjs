@@ -477,6 +477,9 @@ test('W13：审计环有界 + 入站钩子经 RPC 只回脱敏条目', async () 
 
 const PLAINTEXT_COPY = '当前为明文 HTTP，仅建议在 Tailscale 下使用；加密传输模块随后'
 const RECOMMENDED_COPY = '推荐：Tailscale（已加密）'
+// mod-remote-tls-termination：加密说明由 transports.tls 数据驱动，不按方式名推断。
+const ENCRYPTED_COPY = '已加密（自签名证书，按配对指纹校验）'
+const ENCRYPTED_COPY_EN = 'Encrypted (self-signed certificate, verified against the pairing fingerprint)'
 
 test('W14：LAN / IPv6 渲染明文 HTTP 警告；用户切换方式即出现', async () => {
   const { mount } = await renderReal()
@@ -498,21 +501,22 @@ test('W14：LAN / IPv6 渲染明文 HTTP 警告；用户切换方式即出现', 
   assert.ok(dataText(ipv6.mount.tree, 'remote-transport-honesty').includes(PLAINTEXT_COPY), 'IPv6 也必须显示同一句明文警告')
 })
 
-test('W15：Tailscale 标为推荐 / 已加密，且不显示明文警告', async () => {
+test('W15：tls=true 的 Tailscale 显示数据驱动的加密说明，且不显示明文警告', async () => {
   const { mount } = await renderReal({
     routes: {
       pairingTransports: () => ({
         ok: true,
         data: {
-          selected: 'tailscale', selectedHost: '100.64.0.2', overrideUnavailable: false,
+          tls: true, selected: 'tailscale', selectedHost: '100.64.0.2', overrideUnavailable: false,
           candidates, reasonLines
         }
       })
     }
   })
   const honesty = dataText(mount.tree, 'remote-transport-honesty')
-  assert.ok(honesty.includes(RECOMMENDED_COPY), `Tailscale 必须显示：${RECOMMENDED_COPY}`)
-  assert.equal(honesty.includes(PLAINTEXT_COPY), false, 'Tailscale 在加密隧道内，不显示明文警告')
+  assert.ok(honesty.includes(ENCRYPTED_COPY), `tls=true 必须显示：${ENCRYPTED_COPY}`)
+  assert.equal(honesty.includes(PLAINTEXT_COPY), false, 'tls=true 时不显示明文警告')
+  assert.equal(honesty.includes(RECOMMENDED_COPY), false, '加密说明来自数据，不按方式名承诺')
 })
 
 test('W16：面板文案三处字典都没有通道安全 / MITM 承诺', () => {
@@ -528,6 +532,119 @@ test('W16：面板文案三处字典都没有通道安全 / MITM 承诺', () => 
   for (const source of sources) {
     assert.equal(source.includes(PLAINTEXT_COPY) || source.includes('Plain HTTP right now'), true)
   }
+})
+
+/* ------------------------------------------------------------------ */
+/* 客户端诚实性 / stopped 状态（TLS 车道规格：数据驱动，不按方式名）      */
+/* ------------------------------------------------------------------ */
+
+test('H1：transports.tls === true ⇒ 加密说明；任意方式名都不渲染明文警告', async () => {
+  for (const selected of ['lan', 'ipv6', 'tailscale']) {
+    const { mount } = await renderReal({
+      routes: {
+        pairingTransports: () => ({
+          ok: true,
+          data: {
+            tls: true, selected, selectedHost: '192.168.1.6', overrideUnavailable: false,
+            candidates, reasonLines
+          }
+        })
+      }
+    })
+    const honesty = dataText(mount.tree, 'remote-transport-honesty')
+    assert.equal(honesty, ENCRYPTED_COPY, `${selected} + tls=true 必须只显示加密说明`)
+    assert.equal(honesty.includes(PLAINTEXT_COPY), false, `${selected} + tls=true 不得显示明文警告`)
+  }
+})
+
+test('H2：tls=false / tls 缺省 + lan|ipv6 ⇒ 逐字明文警告（不放宽原句）', async () => {
+  for (const tls of [false, undefined]) {
+    for (const selected of ['lan', 'ipv6']) {
+      const { mount } = await renderReal({
+        routes: {
+          pairingTransports: () => ({
+            ok: true,
+            data: { tls, selected, selectedHost: '192.168.1.6', overrideUnavailable: false, candidates, reasonLines }
+          })
+        }
+      })
+      const honesty = dataText(mount.tree, 'remote-transport-honesty')
+      assert.equal(honesty, PLAINTEXT_COPY, `${selected} + tls=${String(tls)} 必须逐字显示原明文警告`)
+      assert.equal(honesty.includes(ENCRYPTED_COPY), false, '未确认加密时不得显示加密说明')
+    }
+  }
+})
+
+test('H3：transports 尚未 resolve ⇒ fail-closed 明文警告，绝不提前显示加密说明', async () => {
+  const { mount, calls } = await renderReal({
+    routes: { pairingTransports: () => new Promise(() => {}) }
+  })
+  assert.ok(calls.some((c) => c.action === 'pairingTransports'), '仍须发出 transports 请求')
+  const honesty = dataText(mount.tree, 'remote-transport-honesty')
+  assert.equal(honesty, PLAINTEXT_COPY, 'transports 未落地前按二维码实际传输方式给明文警告')
+  assert.equal(honesty.includes(ENCRYPTED_COPY), false, 'transports 未落地前绝不显示加密说明')
+})
+
+test('H4：轮换 → 停止 ⇒ 状态是「已停止接受连接」，不再被 rotated 文案遮住', async () => {
+  const { mount } = await renderReal()
+  await click(mount.tree, zh['lean.remote.generate'])
+  assert.ok(dataText(mount.tree, 'remote-status').includes(zh['lean.remote.rotated']), '轮换后先出现 rotated 文案')
+  await click(mount.tree, zh['lean.remote.stop'])
+  const status = dataText(mount.tree, 'remote-status')
+  assert.equal(status, zh['lean.remote.stopped'], 'running === false 必须先于 rotated 判定')
+  assert.equal(status.includes(zh['lean.remote.rotated']), false, '停止后不得残留轮换文案')
+})
+
+test('H5：轮换 → 切换传输 ⇒ rotated 旗标清零，不再遮蔽真实状态', async () => {
+  const { mount, calls } = await renderReal()
+  await click(mount.tree, zh['lean.remote.generate'])
+  assert.ok(dataText(mount.tree, 'remote-status').includes(zh['lean.remote.rotated']))
+  const select = nodesOf(mount.tree).filter((n) => n.type === 'select')[0]
+  select.props.onChange({ target: { value: 'lan' } })
+  await settle()
+  assert.ok(calls.some((c) => c.action === 'pairingTransports' && c.transport === 'lan'), '切换必须下传覆盖')
+  const status = dataText(mount.tree, 'remote-status')
+  assert.equal(status.includes(zh['lean.remote.rotated']), false, 'onChange 开始处必须 setRotated(false)')
+  assert.equal(status, zh['lean.remote.announce.pending'], '真实状态必须重新浮现')
+})
+
+test('H6：轮换 → 停止 → 切换传输 ⇒ 已停止状态仍不被遮住', async () => {
+  const { mount } = await renderReal()
+  await click(mount.tree, zh['lean.remote.generate'])
+  await click(mount.tree, zh['lean.remote.stop'])
+  const select = nodesOf(mount.tree).filter((n) => n.type === 'select')[0]
+  select.props.onChange({ target: { value: 'lan' } })
+  await settle()
+  const status = dataText(mount.tree, 'remote-status')
+  assert.equal(status, zh['lean.remote.stopped'], '后续传输变化也不能掩盖停止状态')
+  assert.equal(status.includes(zh['lean.remote.rotated']), false)
+})
+
+test('H7：单向 kill switch —— 清单与字典里都没有任何「重新开始接受」控件', async () => {
+  const { mount } = await renderReal()
+  const remote = nodesOf(mount.tree).filter((n) => n.props && n.props.id === 'dots-remote')[0]
+  const remoteNodes = []
+  walk(remote.props.children, (n) => remoteNodes.push(n))
+  const buttons = remoteNodes.filter((n) => n.type === 'button').map((n) => textOf(n.props.children))
+  assert.deepEqual(buttons, [
+    zh['lean.remote.qr.show'], zh['lean.remote.copy'], zh['lean.remote.generate'],
+    zh['lean.remote.selfcheck'], zh['lean.remote.stop']
+  ], '按钮清单仍只有五个，停止是终态')
+  const banned = ['重新开始接受', '重新接受', '恢复接受', '再次接受', 'resume listening', 'restart listening', 'start listening']
+  const sources = [JSON.stringify(mount.tree), readFileSync(path.join(pkgDir, 'src', 'client.js'), 'utf8'), zhSrc(), enSrc()]
+  for (const source of sources) {
+    for (const term of banned) {
+      assert.equal(source.includes(term), false, `kill switch 必须保持单向，不得出现「${term}」`)
+    }
+  }
+})
+
+test('H8：加密说明逐字存在于三处字典（zh.json / en.json / client 内置）', () => {
+  const client = readFileSync(path.join(pkgDir, 'src', 'client.js'), 'utf8')
+  assert.equal(client.includes(ENCRYPTED_COPY), true, 'client 内置 zh 缺少加密说明')
+  assert.equal(client.includes(ENCRYPTED_COPY_EN), true, 'client 内置 en 缺少加密说明')
+  assert.equal(zhSrc().includes(ENCRYPTED_COPY), true, 'zh.json 缺少加密说明')
+  assert.equal(enSrc().includes(ENCRYPTED_COPY_EN), true, 'en.json 缺少 encrypted copy')
 })
 
 function zhSrc() { return readFileSync(path.join(pkgDir, 'locale', 'zh.json'), 'utf8') }

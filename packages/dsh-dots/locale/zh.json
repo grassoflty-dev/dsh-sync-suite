@@ -280,6 +280,9 @@
 
   "lean.repo.url": "仓库地址",
   "lean.repo.token": "访问令牌",
+  "lean.sync.login": "登录名",
+  "lean.sync.login.inferred": "登录名：{name}（由仓库地址推断）",
+  "lean.sync.login.required": "Gitee 的私人令牌只能当密码，需要你的登录名；通常就是仓库地址里的 owner",
   "lean.missing.url": "仓库地址",
   "lean.missing.token": "访问令牌",
   "lean.actions.save": "保存",
@@ -309,6 +312,7 @@
   "lean.remote.transport.fallback": "所选方式不可用，已回落到自动选择",
   "lean.remote.transport.recommended": "推荐：Tailscale（已加密）",
   "lean.remote.transport.plaintext": "当前为明文 HTTP，仅建议在 Tailscale 下使用；加密传输模块随后",
+  "lean.remote.transport.encrypted": "已加密（自签名证书，按配对指纹校验）",
   "lean.remote.unavailable": "不可用",
   "lean.remote.port.auto": "自动端口：{port}",
   "lean.remote.qr.show": "显示二维码",

@@ -280,6 +280,9 @@
 
   "lean.repo.url": "Repository URL",
   "lean.repo.token": "Access token",
+  "lean.sync.login": "Login name",
+  "lean.sync.login.inferred": "Login name: {name} (inferred from the repository URL)",
+  "lean.sync.login.required": "A Gitee private token can only be used as the password; your login name is required - usually the owner in the repository URL.",
   "lean.missing.url": "repository URL",
   "lean.missing.token": "access token",
   "lean.actions.save": "Save",
@@ -309,6 +312,7 @@
   "lean.remote.transport.fallback": "Selected mode unavailable; fell back to auto-selection",
   "lean.remote.transport.recommended": "Recommended: Tailscale (encrypted)",
   "lean.remote.transport.plaintext": "Plain HTTP right now; only recommended under Tailscale; encrypted transport module to follow",
+  "lean.remote.transport.encrypted": "Encrypted (self-signed certificate, verified against the pairing fingerprint)",
   "lean.remote.unavailable": "unavailable",
   "lean.remote.port.auto": "Auto port: {port}",
   "lean.remote.qr.show": "Show QR",

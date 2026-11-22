@@ -340,6 +340,10 @@ window.__ModuleLoader__.load({
       // mod-plugin-lean-panel：精简面板专用文案（复用 App 的语义与字面，不造第二套说法）。
       "lean.repo.url": "仓库地址",
       "lean.repo.token": "访问令牌",
+      // mod-plugin-git-username：登录名只读派生行 + 鉴权失败后才出现的可编辑字段。
+      "lean.sync.login": "登录名",
+      "lean.sync.login.inferred": "登录名：{name}（由仓库地址推断）",
+      "lean.sync.login.required": "Gitee 的私人令牌只能当密码，需要你的登录名；通常就是仓库地址里的 owner",
       "lean.missing.url": "仓库地址",
       "lean.missing.token": "访问令牌",
       "lean.actions.save": "保存",
@@ -371,6 +375,7 @@ window.__ModuleLoader__.load({
       // 传输诚实：TLS 落地前只讲事实，不做任何通道安全承诺。
       "lean.remote.transport.recommended": "推荐：Tailscale（已加密）",
       "lean.remote.transport.plaintext": "当前为明文 HTTP，仅建议在 Tailscale 下使用；加密传输模块随后",
+      "lean.remote.transport.encrypted": "已加密（自签名证书，按配对指纹校验）",
       "lean.remote.unavailable": "不可用",
       "lean.remote.port.auto": "自动端口：{port}",
       "lean.remote.qr.show": "显示二维码",
@@ -684,6 +689,10 @@ window.__ModuleLoader__.load({
       // mod-plugin-lean-panel: lean-panel copy (app semantics, no second wording scheme).
       "lean.repo.url": "Repository URL",
       "lean.repo.token": "Access token",
+      // mod-plugin-git-username: read-only derived login + auth-failure-only editable field.
+      "lean.sync.login": "Login name",
+      "lean.sync.login.inferred": "Login name: {name} (inferred from the repository URL)",
+      "lean.sync.login.required": "A Gitee private token can only be used as the password; your login name is required - usually the owner in the repository URL.",
       "lean.missing.url": "repository URL",
       "lean.missing.token": "access token",
       "lean.actions.save": "Save",
@@ -715,6 +724,7 @@ window.__ModuleLoader__.load({
       // Transport honesty: state facts only; no channel-security promise until TLS lands.
       "lean.remote.transport.recommended": "Recommended: Tailscale (encrypted)",
       "lean.remote.transport.plaintext": "Plain HTTP right now; only recommended under Tailscale; encrypted transport module to follow",
+      "lean.remote.transport.encrypted": "Encrypted (self-signed certificate, verified against the pairing fingerprint)",
       "lean.remote.unavailable": "unavailable",
       "lean.remote.port.auto": "Auto port: {port}",
       "lean.remote.qr.show": "Show QR",
@@ -2037,12 +2047,8 @@ window.__ModuleLoader__.load({
           next.platform = inferred
           setField('platform', inferred)
         }
-        // Gitee 的 HTTPS 认证是「登录名 + 私人令牌作密码」，不能沿用 GitHub 的 x-access-token。
-        if (next.authMode === 'https' && next.platform === 'gitee' && next.username.trim() === '') {
-          setNotice('')
-          setError({ code: 'E_VALIDATION', message: tr('error.giteeUsername') })
-          return
-        }
+        // Gitee 登录名只由宿主推断/裁决（host 的 E_VALIDATION / E_AUTH 才是事实来源）；
+        // 浏览器半侧不再凭 URL 自己猜一个 E_VALIDATION 提前 return，否则 saveSettings 永远走不到。
         runTask('save', async function () {
           const result = await rpcCall('saveSettings', { settings: next, token: token })
           if (!alive.current) return
@@ -4188,6 +4194,55 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 登录名只读派生（mod-plugin-git-username）。浏览器半侧是单文件 bundle、不能 import
+     * host 的 TS，所以这里保留一份**纯展示**镜像；规则与 `engine/gitUsername.ts::inferGitUsername`
+     * 逐字一致，并由 `test/git-username.test.mjs` 的 G01 对拍表钉住，防止两边漂移。
+     *
+     * 只认 Gitee 主机：GitHub 永远发 `x-access-token`，把 owner 显示成登录名会误导用户。
+     * 推不出来返回空串——此时不渲染派生行，鉴权失败才出现可编辑字段。
+     */
+    function leanInferLogin(repoUrl) {
+      const url = typeof repoUrl === 'string' ? repoUrl.trim() : ''
+      if (url === '') return ''
+      let host = ''
+      let path = ''
+      const scp = /^[A-Za-z0-9._-]+@([^:/\\]+):(.*)$/.exec(url)
+      if (scp !== null) {
+        host = scp[1].toLowerCase()
+        path = scp[2]
+      } else {
+        const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]*)(\/[^?#]*)?/.exec(url)
+        if (scheme !== null) {
+          let authority = scheme[1]
+          const at = authority.lastIndexOf('@')
+          if (at >= 0) authority = authority.slice(at + 1)
+          const colon = authority.indexOf(':')
+          if (colon >= 0 && authority.indexOf(']') < 0) authority = authority.slice(0, colon)
+          host = authority.toLowerCase()
+          path = scheme[2] || ''
+        } else {
+          const bare = /^([A-Za-z0-9.-]+\.[A-Za-z]{2,})(\/[^?#]*)?$/.exec(url)
+          if (bare === null) return ''
+          host = bare[1].toLowerCase()
+          path = bare[2] || ''
+        }
+      }
+      if (!(host === 'gitee.com' || host.endsWith('.gitee.com'))) return ''
+      const segments = path.split('/').map(function (segment) { return segment.trim() }).filter(function (segment) { return segment !== '' })
+      if (segments.length < 2) return ''
+      const owner = segments[0] || ''
+      return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(owner) ? owner : ''
+    }
+
+    /** 鉴权失败（401/403 或 E_AUTH）才展开登录名字段；其它失败不动。 */
+    function leanIsAuthFailure(result) {
+      if (!result || result.ok !== false) return false
+      const error = result.error && typeof result.error === 'object' ? result.error : {}
+      if (error.code === 'E_AUTH') return true
+      return /\b(?:401|403)\b/.test(asText(error.message))
+    }
+
+    /**
      * 把 host 的两份权威返回体归一成状态行的唯一输入。
      *
      * 关键教训（review M2）：`SyncSettings`（settings.json 的持久化形状）**没有** hasToken。
@@ -4245,6 +4300,9 @@ window.__ModuleLoader__.load({
       )
       const [busy, setBusy] = React.useState('')
       const [failure, setFailure] = React.useState('')
+      // mod-plugin-git-username：登录名默认不出现；只有 E_AUTH / 401 / 403 才展开。
+      const [needLogin, setNeedLogin] = React.useState(false)
+      const [loginName, setLoginName] = React.useState('')
 
       React.useEffect(function () {
         if (seedState !== null) return function () {}
@@ -4255,11 +4313,28 @@ window.__ModuleLoader__.load({
           if (result.data && result.data.settings) {
             setRepoUrl(asText(result.data.settings.repoUrl))
             setHasToken(result.data.settings.hasToken === true)
+            // 手填过的登录名只来自本机 settings.username（本地鉴权配置，不进仓库）。
+            setLoginName(asText(result.data.settings.username))
           }
         })
         return function () { stopped = true }
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [])
+
+      /**
+       * 登录名失焦即写本机 settings.json（只写 username，令牌/配对串/仓库都不碰）。
+       * 这样一旦字段因 401 出现，用户输入的值在刷新页面后仍在——「显示过就持久」。
+       */
+      async function persistLogin(value) {
+        const next = typeof value === 'string' ? value.trim() : ''
+        setLoginName(next)
+        if (!needLogin) return
+        const result = await rpcCall('saveSettings', {
+          settings: { repoUrl: repoUrl, branch: 'main', username: next },
+          token: undefined
+        })
+        if (!result.ok) setFailure(localizeError(tr, result.error).message)
+      }
 
       async function doSave() {
         if (busy) return
@@ -4267,11 +4342,14 @@ window.__ModuleLoader__.load({
         setFailure('')
         try {
           // 分支固定 main；设备标识 / 平台由 host 归一时推导，界面永不询问。
+          const settings = { repoUrl: repoUrl, branch: 'main' }
+          if (loginName !== '') settings.username = loginName
           const result = await rpcCall('saveSettings', {
-            settings: { repoUrl: repoUrl, branch: 'main' },
+            settings: settings,
             token: token === '' ? undefined : token
           })
           if (!result.ok) {
+            if (leanIsAuthFailure(result)) setNeedLogin(true)
             setFailure(localizeError(tr, result.error).message)
             return
           }
@@ -4289,6 +4367,8 @@ window.__ModuleLoader__.load({
             setHasToken(result.data.hasToken === true)
           }
           setToken('')
+          // 宿主已接受本次鉴权配置：条件字段收起，回到只读派生行。
+          setNeedLogin(false)
         } finally {
           setBusy('')
         }
@@ -4301,9 +4381,12 @@ window.__ModuleLoader__.load({
         try {
           const result = await rpcCall('testConnection', {})
           if (!result.ok) {
+            if (leanIsAuthFailure(result)) setNeedLogin(true)
             setFailure(localizeError(tr, result.error).message)
             return
           }
+          // 鉴权成功 → 收起可编辑字段；值仍在本机 settings.username 里（不再打扰用户）。
+          setNeedLogin(false)
           // 测试连接只是探测，绝不是同步：不写 lastSyncAt，不伪造「已同步」。
           const fresh = await rpcCall('getState', {})
           if (fresh.ok) setState(fresh.data)
@@ -4314,6 +4397,7 @@ window.__ModuleLoader__.load({
 
       const view = leanStateView(state, hasToken)
       const line = leanStatusText(tr, view.settings, view.status, view.tokenPresent, busy, failure)
+      const inferred = leanInferLogin(repoUrl)
 
       return h(
         'div',
@@ -4338,6 +4422,30 @@ window.__ModuleLoader__.load({
             onChange: function (value) { setToken(value) }
           })
         ),
+        // 只读派生行：让用户看到实际会发给 Gitee 的登录名（不是新增常驻输入框）。
+        inferred !== '' && !needLogin
+          ? h('div', { role: 'note', 'data-lean': 'sync-login-derived', style: S.hint },
+              tr('lean.sync.login.inferred', { name: inferred }))
+          : null,
+        // 只有 401/403 才展开；失焦即落本机 settings.username，刷新后仍在。
+        needLogin
+          ? h(
+              'div',
+              { 'data-lean': 'sync-login-field' },
+              h('div', { role: 'note', 'data-lean': 'sync-login-hint', style: S.hint },
+                tr('lean.sync.login.required')),
+              h(
+                Field,
+                { label: tr('lean.sync.login') },
+                h(Input, {
+                  value: loginName,
+                  disabled: Boolean(busy),
+                  onChange: function (value) { setLoginName(value) },
+                  onBlur: persistLogin
+                })
+              )
+            )
+          : null,
         h('div', { role: 'status', 'data-lean': 'sync-status', style: S.hint }, line),
         h(
           'div',
@@ -4523,6 +4631,8 @@ window.__ModuleLoader__.load({
             setFailure(localizeError(tr, result.error).message)
             return
           }
+          // 停止是终态：先清掉轮换提示，后续状态行才不会被 masked。
+          setRotated(false)
           setRunning(false)
           const state = await rpcCall('remoteGetState', {})
           if (state.ok && state.data && state.data.status) setRunning(state.data.status.running === true)
@@ -4535,8 +4645,9 @@ window.__ModuleLoader__.load({
       const candidates = transports && transports.candidates && typeof transports.candidates === 'object' ? transports.candidates : {}
       // 手动覆盖不可用 → 回落自动选中，下拉也必须显示回落后的真实方式，绝不留在死选项上。
       const modeValue = fallback && selected !== '' ? selected : (override !== '' ? override : selected)
-      // 传输诚实：这条警告跟着"实际用于二维码的传输方式"走，用户一切方式就立刻看到。
-      const effectiveTransport = override !== '' ? override : selected
+      // 传输诚实：这条说明跟着"实际用于二维码的传输方式"走；transports 还没落地时
+      // 退回 provision 的 view.transport（二维码此刻用的就是它），fail-closed 先讲明文事实。
+      const effectiveTransport = override !== '' ? override : (selected !== '' ? selected : (view && typeof view.transport === 'string' ? view.transport : ''))
       const probeLevel = probe && typeof probe === 'object' ? asText(probe.level) : ''
       const probeLine = probe && typeof probe === 'object'
         ? asText(probe.verdict) || asText(probe.message) || ''
@@ -4544,8 +4655,8 @@ window.__ModuleLoader__.load({
       const probeLabel = probeLevel ? tr('remote.probe.' + probeLevel) : ''
       const statusLine = failure
         ? failure
-        : rotated ? tr('lean.remote.rotated')
-          : running === false ? tr('lean.remote.stopped')
+        : running === false ? tr('lean.remote.stopped')
+          : rotated ? tr('lean.remote.rotated')
             : fallback ? tr('lean.remote.transport.fallback')
               : republish ? tr('lean.remote.announce.pending')
                 : selected === '' ? tr('lean.remote.transport.none')
@@ -4586,6 +4697,8 @@ window.__ModuleLoader__.load({
             ],
             onChange: function (value) {
               runTask('transport', async function () {
+                // 切换方式后旧的"已重新生成"提示立即失效，不许继续遮住真实状态。
+                setRotated(false)
                 const next = value === 'auto' ? '' : value
                 const data = await refreshTransports(next)
                 if (!data) return
@@ -4604,8 +4717,8 @@ window.__ModuleLoader__.load({
         h('div', { 'data-lean': 'remote-transport', style: S.hint },
           selected !== '' ? tr('lean.remote.transport.selected', { mode: selected }) : tr('lean.remote.transport.none')
         ),
-        effectiveTransport === 'tailscale'
-          ? h('div', { 'data-lean': 'remote-transport-honesty', style: S.hint }, tr('lean.remote.transport.recommended'))
+        transports && transports.tls === true
+          ? h('div', { 'data-lean': 'remote-transport-honesty', style: S.hint }, tr('lean.remote.transport.encrypted'))
           : (effectiveTransport === 'lan' || effectiveTransport === 'ipv6')
             ? h('div', { 'data-lean': 'remote-transport-honesty', style: S.hint }, tr('lean.remote.transport.plaintext'))
             : null,
@@ -4677,6 +4790,8 @@ window.__ModuleLoader__.load({
     // 内部测试接缝：精简组件供清单守卫单独挂载；旧面板仅作 dormant 代码保留。
     DotsPanel.LeanSyncGroup = LeanSyncGroup
     DotsPanel.LeanRemoteGroup = LeanRemoteGroup
+    // 纯展示推断的测试接缝：G01 用它逐条对拍 engine/gitUsername.ts（防止两副本漂移）。
+    DotsPanel.leanInferLogin = leanInferLogin
     DotsPanel.SettingsPanel = SettingsPanel
     DotsPanel.RemotePanel = RemotePanel
 
