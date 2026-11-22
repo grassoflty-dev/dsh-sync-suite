@@ -529,6 +529,59 @@ export function createRpcService(options = {}) {
     async function remoteDetectLan() {
         return { candidates: requireRemote().detectLan() };
     }
+    /**
+     * 采用 provisioning 已生成的令牌并同步令牌门；返回体只有 ok，token 不进 RPC 响应。
+     */
+    async function remoteAdoptToken(payload) {
+        const remote = requireRemote();
+        if (typeof remote.adoptToken !== 'function')
+            throw new SyncError('E_INTERNAL', '令牌同步接缝未装配');
+        const token = asString(payload.token);
+        const result = remote.adoptToken(token);
+        if (!result.ok)
+            throw new SyncError('E_VALIDATION', '配对令牌格式不合法');
+        return { ok: true };
+    }
+    /* ------------------------------------------------------------------ */
+    /* mod-plugin-pairing：一机一码配对                                     */
+    /*                                                                    */
+    /* 硬纪律：`pairingProvision` / `pairingRotate*` / `pairingTransports`   */
+    /* 只返回脱敏视图；**只有**显式 `pairingShow` 才返回规范载荷 + 二维码。  */
+    /* ------------------------------------------------------------------ */
+    function requirePairing() {
+        const pairing = options.pairing;
+        if (pairing === undefined)
+            throw new SyncError('E_INTERNAL', '配对服务未挂载');
+        return pairing;
+    }
+    /** 内部完整状态（含 token / 私钥）绝不跨这个边界；重发信息只给 key / reason / port。 */
+    function pairingViewOf(result) {
+        return {
+            view: result.view,
+            changed: result.changed,
+            republish: result.republish === null ? null : {
+                key: result.republish.key,
+                reason: result.republish.reason,
+                previousPort: result.republish.previousPort,
+                port: result.republish.port,
+            },
+        };
+    }
+    async function pairingProvision() {
+        return pairingViewOf(await requirePairing().provision());
+    }
+    async function pairingShow() {
+        return await requirePairing().show();
+    }
+    async function pairingRotateToken() {
+        return pairingViewOf(await requirePairing().rotateToken());
+    }
+    async function pairingRotateCert() {
+        return pairingViewOf(await requirePairing().rotateCert());
+    }
+    async function pairingTransports() {
+        return await requirePairing().transports();
+    }
     /* ------------------------------------------------------------------ */
     /* 云端对话模式 P1：会话导出（chats/ 共享命名空间）                      */
     /*                                                                    */
@@ -858,6 +911,19 @@ export function createRpcService(options = {}) {
                     return ok(await enqueue(() => remoteShowLink(payload)));
                 case 'remoteDetectLan':
                     return ok(await enqueue(remoteDetectLan));
+                case 'remoteAdoptToken':
+                    return ok(await enqueue(() => remoteAdoptToken(payload)));
+                // ---- mod-plugin-pairing：自动配置只读视图 + 显式二维码出口 ----
+                case 'pairingProvision':
+                    return ok(await enqueue(pairingProvision));
+                case 'pairingShow':
+                    return ok(await enqueue(pairingShow));
+                case 'pairingRotateToken':
+                    return ok(await enqueue(pairingRotateToken));
+                case 'pairingRotateCert':
+                    return ok(await enqueue(pairingRotateCert));
+                case 'pairingTransports':
+                    return ok(await enqueue(pairingTransports));
                 // ---- 云端对话模式 P1：会话导出（chats/ 共享命名空间，与同步动作同一条串行队列） ----
                 case 'chatExportStatus':
                     return ok(await enqueue(chatExportStatus));

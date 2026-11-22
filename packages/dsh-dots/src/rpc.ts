@@ -55,6 +55,8 @@ import type { RemoteInstance } from './remote/instances.js'
 import { localSessionEvents, localSessionInfo, localSessionList } from './remote/localRead.js'
 import { projectInstanceList, projectReadResult, type RemoteReadAction } from './remote/projection.js'
 import { mapRemoteCode, remoteToolError, REMOTE_TOOL_ERROR_CODES } from './remote/toolErrors.js'
+// mod-plugin-pairing：RPC 只依赖配对服务的结构类型，不 import 证书 / QR / 监听实现。
+import type { PairingProvisionResult, PairingServiceLike } from './remote/pairingProvision.js'
 
 /** 注入的远端响应头（只需 get，便于测试塞假实现）。 */
 export interface RemoteFetchHeadersLike {
@@ -121,6 +123,11 @@ export interface RpcServiceOptions {
    * HTTP 走全局 fetch（与 `remote/service.ts` 同一套，不新建 fetch stack）。
    */
   remoteTools?: RemoteToolsOptions
+  /**
+   * mod-plugin-pairing 服务（可选）。未注入时所有 `pairing*` action 一律 fail-closed，
+   * 返回 `E_INTERNAL 配对服务未挂载`，绝不返回空 payload 让 UI 画出假二维码。
+   */
+  pairing?: PairingServiceLike
 }
 
 export interface RpcService {
@@ -691,6 +698,69 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
     return { candidates: requireRemote().detectLan() }
   }
 
+  /**
+   * 采用 provisioning 已生成的令牌并同步令牌门；返回体只有 ok，token 不进 RPC 响应。
+   */
+  async function remoteAdoptToken(payload: Record<string, unknown>): Promise<{ ok: boolean }> {
+    const remote = requireRemote()
+    if (typeof remote.adoptToken !== 'function') throw new SyncError('E_INTERNAL', '令牌同步接缝未装配')
+    const token = asString(payload.token)
+    const result = remote.adoptToken(token)
+    if (!result.ok) throw new SyncError('E_VALIDATION', '配对令牌格式不合法')
+    return { ok: true }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* mod-plugin-pairing：一机一码配对                                     */
+  /*                                                                    */
+  /* 硬纪律：`pairingProvision` / `pairingRotate*` / `pairingTransports`   */
+  /* 只返回脱敏视图；**只有**显式 `pairingShow` 才返回规范载荷 + 二维码。  */
+  /* ------------------------------------------------------------------ */
+
+  function requirePairing(): PairingServiceLike {
+    const pairing = options.pairing
+    if (pairing === undefined) throw new SyncError('E_INTERNAL', '配对服务未挂载')
+    return pairing
+  }
+
+  /** 内部完整状态（含 token / 私钥）绝不跨这个边界；重发信息只给 key / reason / port。 */
+  function pairingViewOf(result: PairingProvisionResult): {
+    view: PairingProvisionResult['view']
+    changed: PairingProvisionResult['changed']
+    republish: { key: string; reason: string; previousPort: number; port: number } | null
+  } {
+    return {
+      view: result.view,
+      changed: result.changed,
+      republish: result.republish === null ? null : {
+        key: result.republish.key,
+        reason: result.republish.reason,
+        previousPort: result.republish.previousPort,
+        port: result.republish.port,
+      },
+    }
+  }
+
+  async function pairingProvision(): Promise<ReturnType<typeof pairingViewOf>> {
+    return pairingViewOf(await requirePairing().provision())
+  }
+
+  async function pairingShow(): Promise<Awaited<ReturnType<PairingServiceLike['show']>>> {
+    return await requirePairing().show()
+  }
+
+  async function pairingRotateToken(): Promise<ReturnType<typeof pairingViewOf>> {
+    return pairingViewOf(await requirePairing().rotateToken())
+  }
+
+  async function pairingRotateCert(): Promise<ReturnType<typeof pairingViewOf>> {
+    return pairingViewOf(await requirePairing().rotateCert())
+  }
+
+  async function pairingTransports(): Promise<Awaited<ReturnType<PairingServiceLike['transports']>>> {
+    return await requirePairing().transports()
+  }
+
   /* ------------------------------------------------------------------ */
   /* 云端对话模式 P1：会话导出（chats/ 共享命名空间）                      */
   /*                                                                    */
@@ -1039,6 +1109,19 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
           return ok(await enqueue(() => remoteShowLink(payload)))
         case 'remoteDetectLan':
           return ok(await enqueue(remoteDetectLan))
+        case 'remoteAdoptToken':
+          return ok(await enqueue(() => remoteAdoptToken(payload)))
+        // ---- mod-plugin-pairing：自动配置只读视图 + 显式二维码出口 ----
+        case 'pairingProvision':
+          return ok(await enqueue(pairingProvision))
+        case 'pairingShow':
+          return ok(await enqueue(pairingShow))
+        case 'pairingRotateToken':
+          return ok(await enqueue(pairingRotateToken))
+        case 'pairingRotateCert':
+          return ok(await enqueue(pairingRotateCert))
+        case 'pairingTransports':
+          return ok(await enqueue(pairingTransports))
         // ---- 云端对话模式 P1：会话导出（chats/ 共享命名空间，与同步动作同一条串行队列） ----
         case 'chatExportStatus':
           return ok(await enqueue(chatExportStatus))

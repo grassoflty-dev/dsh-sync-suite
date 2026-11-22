@@ -15,6 +15,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { statePaths } from '../engine/paths.js'
+import type { PairingCertificate } from './pairingTls.js'
 import type { RemoteSettings } from './types.js'
 
 /** 令牌记录：明文只在这一层与 `auth` 内部流转，永不进 RPC 状态响应。 */
@@ -27,6 +28,18 @@ export interface StoredToken {
 export interface RemoteStoreOptions {
   /** 覆盖 `~`（测试用）；语义同 `engine/paths.ts` 的 `homeDir`。 */
   homeDir?: string
+}
+
+/**
+ * 公告已发布的端口（mod-plugin-pairing 的不变量）：
+ * **被记录的端口必须是已发布的端口**，否则下次 run() 必须重发。
+ * 与 remote.json::port 分开持久化，才能修好「重发成功但写盘失败 / 写盘成功但重发失败」两个窗口。
+ */
+export interface PairingAnnouncementState {
+  v: 1
+  announcedPort: number | null
+  announceRef: string
+  key: string
 }
 
 function ensureDir(dir: string): void {
@@ -74,11 +87,17 @@ export class RemoteStore {
   readonly configFile: string
   /** `~/.dsh/dots/remote-token.json` */
   readonly tokenFile: string
+  /** `~/.dsh/dots/remote-pairing-cert.json`（mod-plugin-pairing：自签证书 + 私钥，0600） */
+  readonly certFile: string
+  /** `~/.dsh/dots/remote-pairing-state.json`（公告已发布端口，0600） */
+  readonly pairingStateFile: string
 
   constructor(options: RemoteStoreOptions = {}) {
     const root = statePaths(options.homeDir).root
     this.configFile = path.join(root, 'remote.json')
     this.tokenFile = path.join(root, 'remote-token.json')
+    this.certFile = path.join(root, 'remote-pairing-cert.json')
+    this.pairingStateFile = path.join(root, 'remote-pairing-state.json')
   }
 
   /** 原始配置（未归一）；文件缺失或损坏 → null（调用方回落默认值）。 */
@@ -114,5 +133,60 @@ export class RemoteStore {
     } catch {
       /* 删除失败不应抛给调用方；下次读取会因为字段缺失返回 null */
     }
+  }
+
+  /**
+   * 读取配对证书；文件缺失 / 损坏 / 指纹字段非法 → null（由 provisioning 自动生成）。
+   * 私钥只在这个对象里流转，绝不进 RPC 状态视图。
+   */
+  readCert(): PairingCertificate | null {
+    const record = asRecord(readJson(this.certFile))
+    if (record === null) return null
+    const { certPem, keyPem, fingerprint, createdAt } = record
+    if (typeof certPem !== 'string' || typeof keyPem !== 'string' ||
+        typeof fingerprint !== 'string' || !/^[0-9A-F]{2}(:[0-9A-F]{2}){31}$/.test(fingerprint)) return null
+    if (typeof createdAt !== 'string' || createdAt === '') return null
+    return { certPem, keyPem, fingerprint, createdAt }
+  }
+
+  /** 原子写 + 0600；字段顺序固定，便于字节级幂等核对。 */
+  writeCert(record: PairingCertificate): void {
+    writeFilePrivate(this.certFile, JSON.stringify({
+      certPem: record.certPem,
+      keyPem: record.keyPem,
+      fingerprint: record.fingerprint,
+      createdAt: record.createdAt,
+    }, null, 2) + '\n')
+  }
+
+  clearCert(): void {
+    try {
+      if (existsSync(this.certFile)) unlinkSync(this.certFile)
+    } catch {
+      /* 同 clearToken：删除失败不改变调用方语义 */
+    }
+  }
+
+  /** 读"公告已发布端口"；缺失 / 坏字节 → null（视为从未发布，下次 run 必须重发）。 */
+  readPairingAnnouncement(): PairingAnnouncementState | null {
+    const record = asRecord(readJson(this.pairingStateFile))
+    if (record === null || record.v !== 1) return null
+    const announcedPort = record.announcedPort
+    if (announcedPort !== null && (
+      typeof announcedPort !== 'number' || !Number.isInteger(announcedPort) ||
+      announcedPort < 1 || announcedPort > 65535
+    )) return null
+    if (typeof record.announceRef !== 'string' || typeof record.key !== 'string') return null
+    return { v: 1, announcedPort, announceRef: record.announceRef, key: record.key }
+  }
+
+  /** 仅在 re-publish 钩子成功后写；原子 + 0600。 */
+  writePairingAnnouncement(state: PairingAnnouncementState): void {
+    writeFilePrivate(this.pairingStateFile, JSON.stringify({
+      v: 1,
+      announcedPort: state.announcedPort,
+      announceRef: state.announceRef,
+      key: state.key,
+    }, null, 2) + '\n')
   }
 }

@@ -220,6 +220,11 @@ export interface RemoteServiceLike {
   start(): Promise<RemoteStatus>
   stop(): Promise<RemoteStatus>
   rotateToken(): Promise<RemoteStatus>
+  /**
+   * mod-plugin-pairing 可选接缝：让磁盘上已生成的配对令牌与内存令牌门同步。
+   * 返回值只有 `{ok}`，**绝不回显 token**；未装配时 RPC 侧 fail-closed。
+   */
+  adoptToken?(token: string): { ok: boolean }
   probe(mode?: RemoteAccessMode): Promise<RemoteProbeResult>
   showLink(mode?: RemoteAccessMode): Promise<RemoteLink>
   detectLan(): LanCandidate[]

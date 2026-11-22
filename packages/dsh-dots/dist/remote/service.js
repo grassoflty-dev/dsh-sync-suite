@@ -406,6 +406,18 @@ export function createRemoteService(options = {}) {
             gate.setToken(token);
         return status();
     }
+    /**
+     * mod-plugin-pairing：采用 provisioning 已写入 `remote-token.json` 的令牌并同步内存门。
+     * 只在结构合法时写盘；返回体只有 ok，绝不回显 token（token hygiene）。
+     */
+    function adoptToken(token) {
+        if (typeof token !== 'string' || !/^[A-Za-z0-9+/=_-]{32,512}$/.test(token))
+            return { ok: false };
+        store.writeToken({ token, createdAt: now().toISOString() });
+        if (gate !== null && typeof gate.setToken === 'function')
+            gate.setToken(token);
+        return { ok: true };
+    }
     async function probe(mode) {
         const settings = readSettings();
         const target = mode ?? settings.mode;
@@ -460,7 +472,7 @@ export function createRemoteService(options = {}) {
     async function dispose() {
         await stop().catch(() => undefined);
     }
-    return { getState, saveSettings, start, stop, rotateToken, probe, showLink, detectLan, dispose, paths: { configFile: store.configFile, tokenFile: store.tokenFile } };
+    return { getState, saveSettings, start, stop, rotateToken, adoptToken, probe, showLink, detectLan, dispose, paths: { configFile: store.configFile, tokenFile: store.tokenFile } };
 }
 /** 默认令牌长度（字节）——与 `auth.ts` 的 `crypto.randomBytes(32)` 对齐。 */
 export const REMOTE_TOKEN_BYTES = 32;
