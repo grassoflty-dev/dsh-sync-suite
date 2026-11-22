@@ -2049,3 +2049,120 @@ WARNING: [sign-hap] WARNING -AllowLegacyV1Key: using LEAKED v1 signing key (comp
 
 > **本构建包含四个模块**：`mod-instances-drop-local`、`mod-ai-summarize-label`、`mod-sync-silent-autoinit`、
 > `mod-sync-status-persist`；安装证据只证明「装上了并启动」，第 1–7 项要等用户实测后回填 PASS / FAILED / BLOCKED。
+
+### 15.20 配置持久化与接线落真：1000006 构建 / 签名 / 装机 / 配置存活哈希证明 + 十二项用户复验待回填（2026-11-22, planner-b7；append-only, 不改写 §15.1–§15.19）
+
+> 本节紧接 §15.19 之后**追加**，不改写 §15.1–§15.19 任何一行。所有数字均由 Designer 实测；
+> 本次**只验证到「装上并启动 + 配置存活哈希证明」为止**，未做任何用户交互实测；十二项用户复验结论一律留空，
+> 后续回填 PASS / FAILED / BLOCKED / unverified，不据本节宣称功能通过。
+> 应用名**仍为 `DSH-Dots`（未改名，改名已取消）**；本构建**只新增配置持久化与接线**。
+
+**提交 / 被测树（1000006 = mod-config-persistence + mod-config-persistence-wiring）**
+
+- 被测源码 = `mod-config-persistence` + `mod-config-persistence-wiring`，提交为 **`572e5df`**；
+  文档回填提交 **`1093058`**，构建时 HEAD 为 **`1093058`**。
+- 叠加在**已装机的 1000005**（= `mod-instances-drop-local` + `mod-ai-summarize-label` +
+  `mod-sync-silent-autoinit` + `mod-sync-status-persist`）以及更早各层之上。
+- `versionCode` 由 **1000005** 自增到 **1000006**（`apps/arkui-schedule/AppScope/app.json5:5`，已提交）。
+- 应用名**不变：`DSH-Dots`**（改名已取消）。
+
+**干净构建 1000006**
+
+构建日志 `apps/arkui-schedule/.build-logs/build-20261122-123941.log`（开始 2026-11-22 12:39:41）：
+
+```
+42 tasks in total: 42 executed, 0 up-to-date
+Finished :entry:default@CompileArkTS... after 47 s 586 ms
+PackageHap... after 6 s 10 ms
+BUILD SUCCESSFUL in 1 min 2 s 520 ms
+Build completed successfully
+```
+
+控制台尾 `.tmp/build-1000006.out` → `✓ 产物验收通过` + `[overlay] applied=false`
+（这两行**只在控制台出现，从不进入 `.build-logs`**）。
+
+未签名 HAP **5,244,443 B**，SHA-256 `93f8deb44440f33fe6438218a3801f2c4e00599a0b4cf1ecefbd11866b62cf44`；
+HAP 内的 `module.json` 含 `"versionCode": 1000006`（**打包产物级证据，不只是源码**）。
+
+`ets/modules.abc` **3,014,284 B**，SHA-256 `da85c5ca58e290f19829748cc9ff66f7cda7bea9a779291de34622408f1d0fa5`
+—— 相对 ai-models-fetch 构建的 2,988,100 B **+26,184 B**；名称级命中：`configStore`、`configSchema`、
+`migrateOnce`、`schemaVersionOf`、`needsRewrite`、`config.schema`、`envelopeWritable`、`aiModelsCache`
+—— 即配置访问器已被编进 App（此前处于休眠状态）。
+
+**签名**
+
+- v2 材料仍不齐，本次以**已泄露的 v1 密钥**签名（显式 `-AllowLegacyV1Key`）。警告原文如下
+  （控制台抓取时发生换行，按源行完整引用）：
+
+```
+WARNING: [sign-hap] WARNING -AllowLegacyV1Key: using LEAKED v1 signing key (compromised private key) - reproduce-only, never ship or publish with this key
+```
+
+- **仅本地复现，绝不用于分发/上架**；发布仍需 AGC v2 `.cer` + `.p7b`（P0 阻塞）。
+- 已签名 HAP `dist-harmony/arkui-schedule-1000006-signed.hap` **5,305,249 B**，SHA-256
+  `7f4d650efcc1ca5928e013964393c3f6a636fb31cdab38df318e3f4dcc31764e`，签名时间
+  **2026-11-22 12:41:12.594**；`hap-sign-tool verify-app` → `verify: Verify success` / `verify-app success`。
+
+**装机 + 证明（传输方式很重要，如实记录）**
+
+- 装机时从 `hdc list targets` 读到的目标 = **`192.168.1.11:33023`**（无线，`TCP Connected`）。
+  早前 USB 序列 `6MFBB25C27205131` 为 `USB Offline`；旧的 `192.168.1.7:33023` 仍为 `Offline`
+  —— 两者都**不得**当作当前目标。
+- `hdc -t 192.168.1.11:33023 install -r <signed>` → `[Info]App install path:… msg:install bundle successfully.` / `AppMod finish`。
+- 应用级字段来自 `.tmp/prove-install-v2.ps1`（`bm dump -n com.itwill.schedule`，锚定最浅的
+  `"vendor": "itwill"` 行 L484 → `versionCode` L485、`updateTime` L454；嵌套的 `versionCode: 0` 块与
+  `minCompatibleVersionCode` 均**不是**应用版本）：
+  - 基线（`.tmp/baseline-pre-1000006.json`）：`versionCode` **1000005**，`updateTime` **1795270924603**
+    = 2026-11-21 22:22:04.603。
+  - 装机后：`versionCode` **1000006**，`updateTime` **1795323249326** = 2026-11-22 12:54:09.326。
+
+| 判据 | 结果 | 证据 |
+| --- | --- | --- |
+| a) versionCode | **PASS**（1000005→1000006） | 应用级字段，前后两份 dump |
+| b) updateTime 改变 | **PASS** | 1795270924603 → 1795323249326 |
+| c) updateTime 增长 | **PASS** | 同上，时间前进 |
+
+**OVERALL: PASS (exit 0)**。`installTime` 仍**不是**见证；装机 HAP 的内容哈希路线仍被拒
+（`Permission denied`），见 `docs/RUNBOOK.md` §7.1。
+
+**配置存活证明（1000005 → 1000006 标记测试）**
+
+方法（只取哈希、从不打印内容）：`force-stop` → 装机前快照 → `install -r` → 装机后快照（不启动）→
+启动一次 → 第三次快照。文件位于
+`/data/app/el2/100/base/com.itwill.schedule/haps/entry/preferences`。
+
+- 装机前（已 force-stop）= 装机后，三者**逐字节相同**：
+  - `schedule_settings` **2,478 B** `92d4d2e5ee1f4ba1733946e09750e4bcb5cee13c50f23f8e200e42173d395391`；
+  - `git_sync_extras` **195 B** `a83f24786f12b521dc5771eba699d3f225009e85f31bc6fdd3062bdbc8f5b781`；
+  - `handwriting` **128 B** `bb13978094b2ce2eb6b3cb5a5eb7f86066b70c66103082dc7e8edd85544e2c92`。
+  - ⇒ **升级本身没有碰配置**。
+- 启动一次后：`schedule_settings` 2,478 → **4,879 B**（`ca5b54ff…6543`），
+  `git_sync_extras` 195 → **379 B**（`43971c71…be22`），`handwriting` 不变。
+- **增长是预期而非丢失**：每个配置键名现在恰好出现**两次**（原有扁平键 + 新 `config.schema`
+  信封内的副本），`config.schema` 在每个 store 中出现一次，且**没有任何值 token 丢失**：
+  `schedule_settings` 中 20/20、`git_sync_extras` 中 1/1 个类值 token 在启动后仍存在。
+  +2,401 B / +184 B 的增长即升级后首次启动时的**一次性信封写入**。
+- 诚实说明：生产 `load()` 仍读**扁平键**而非信封（评审发现）—— 因此当前的存活依赖于未变的扁平键，
+  信封带来的是迁移余量/取证能力，而**不是**已接线的读取路径。
+
+**用户复验清单（未实测，结论一律留空待回填）**
+
+> 名称仍是 `DSH-Dots`（未改名）；本构建只新增配置持久化与接线；**任何一项都不预先标 PASS**，等用户实测后回填。
+
+| 组 | 编号 | 复验项 | 结论 |
+| --- | --- | --- | --- |
+| 1 同步 | ① | 设置 → 保存后状态行**不得**显示「已同步」（保存不产生状态跃迁） | 待用户 |
+| 1 同步 | ② | 重启后显示真实的 `已同步 · HH:MM`（原时间），不出现「失败：未知错误」/「刚刚」 | 待用户 |
+| 1 同步 | ③ | 查看状态 / 测试连接在未克隆时**自动初始化**并报真实远端状态，全程无「尚未初始化 / 先执行「拉取」/ 首次克隆」 | 待用户 |
+| 1 同步 | ④ | 全新空远端仓库首跑：新建一条记录、**不做任何手动操作** → 自动建初始提交并推送 → `已同步` | 待用户 |
+| 2 实例与公告 | ⑤ | 远程实例列表**没有本机行**，空列表 + 「添加实例」是正常首跑 | 待用户 |
+| 2 实例与公告 | ⑥ | dots 面板只读（授权行 + 禁用的「发指令（命令工具未授予，指令确认闸尚未接线）」） | 待用户 |
+| 2 实例与公告 | ⑦ | 失败实例行两步首配：点「首次配对：确认信任该公告」→ 再点「确认信任该公告」才生效，四种提示按 kind 显示（成功中性无按钮 / 不可信红色 + 手动确认 / 首配中性 + 确认信任 / 无公告中性无按钮）；无真实公告时该项标 `unverified` | 待用户 |
+| 3 dots 面板 | ⑧ | 列表真实（点行进只读详情），无占位/假行 | 待用户 |
+| 4 AI | ⑨ | 模型下拉能「刷新模型列表」并显示服务商返回的模型；失败/离线仍可用缓存并标「已过期」；已下线模型显示为「自定义 / 未知：<id>」仍可选 | 待用户 |
+| 4 AI | ⑩ | 发一次 AI 请求返回 200（或指名 provider+model 的 typed 错误），不再是 400 | 待用户 |
+| 5 配置持久化 | ⑪ | 升级到 1000006 后，设置里的仓库地址 / 令牌 / AI 配置 / 实例仍**原样存在**（本次升级已由哈希证明未丢，需用户目视确认） | 待用户 |
+| 6 竖屏下拉 | ⑫ | 竖屏日程列表下拉刷新可用 | 待用户 |
+
+> **本构建只新增配置持久化与接线**：`mod-config-persistence` + `mod-config-persistence-wiring`；
+> 安装与哈希证据只证明「装上了、版本前进、配置未丢」，第 ①–⑫ 项要等用户实测后回填 PASS / FAILED / BLOCKED / unverified。
