@@ -272,3 +272,90 @@ describe('P7 UI 与源码形状（静态守卫）', () => {
       '手动配对不得产生网关 / 隧道方式');
   });
 });
+
+// ------------------------------------------------------------------ P8 更新路径 id 稳定性
+
+describe('P8 配对更新保留实例 id（公告 pin 的键不能被换掉）', () => {
+  /**
+   * 签名公告 pin 表的接缝：复刻 `services/remoteAnnounceStore.ets` 的 setPin/getPin 语义 ——
+   * pin 以**实例 id**（`inst-<hex16>`，而不是 URL / 端口 / instanceId）为键。纯内存镜像，
+   * 不依赖 @kit.CryptoArchitectureKit / PersistentStorage，Node 单测可直接断言 pin 是否仍解析。
+   */
+  function announcePinSeam() {
+    const pins = {};
+    return {
+      setPin(id, key) { pins[id] = key; },
+      getPin(id) { return Object.prototype.hasOwnProperty.call(pins, id) ? pins[id] : ''; }
+    };
+  }
+
+  test('P8-1 同 instanceId + 同指纹更新：id 不变、能力集按该 id 派生、公告 pin 仍解析', () => {
+    const first = P.addPairedInstance([], json());
+    assert.equal(first.ok, true, JSON.stringify(first));
+    const oldId = first.items[0].id;
+    const announceKey = 'a1'.repeat(32);
+    const pins = announcePinSeam();
+    pins.setPin(oldId, announceKey);
+    assert.equal(pins.getPin(oldId), announceKey, '前置：公告 pin 以原实例 id 为键');
+
+    const updated = P.addPairedInstance(first.items, json({
+      host: '192.168.1.8', port: 45001, token: 'ZyXwVuTsRqPoNmLkJiHgFeDcBa098765'
+    }));
+    assert.equal(updated.ok, true, JSON.stringify(updated));
+    assert.equal(updated.action, 'updated');
+    assert.equal(updated.items.length, 1, '只更新一行，不新增记录');
+    const row = updated.items[0];
+    assert.equal(row.id, oldId, '配对更新不得按新 URL 重算实例 id');
+    assert.deepEqual(row.capabilities, I.deriveCapabilities(oldId), '能力集必须由保留的 id 派生');
+    assert.equal(pins.getPin(row.id), announceKey,
+      '公告 pin 仍用更新行的 id 解析，不会在读侧变成「机器换了身份」');
+    assert.equal(row.url, 'http://192.168.1.8:45001', '地址仍随载荷更新');
+    assert.equal(row.token, 'ZyXwVuTsRqPoNmLkJiHgFeDcBa098765', '令牌仍随载荷更新');
+    assert.equal(row.tlsFingerprint, first.items[0].tlsFingerprint, '证书 TOFU pin 未改写');
+  });
+
+  test('P8-2 新 instanceId 才重新派生 id，绝不复用旧行的 id', () => {
+    const first = P.addPairedInstance([], json());
+    const second = P.addPairedInstance(first.items, json({
+      instanceId: 'new-pc', host: '192.168.1.9', port: 45002
+    }));
+    assert.equal(second.ok, true, JSON.stringify(second));
+    assert.equal(second.action, 'added');
+    assert.equal(second.items.length, 2, '新实例必须新增一行，而不是覆盖旧实例');
+    const added = second.items.find((item) => item.pairingInstanceId === 'new-pc');
+    assert.ok(added, '新增行必须带新 instanceId');
+    assert.equal(added.id, I.instanceIdFromUrl('http://192.168.1.9:45002'),
+      '新增路径仍按新 URL 派生 id');
+    assert.notEqual(added.id, first.items[0].id, '新实例不得复用旧 id');
+  });
+
+  test('P8-3 同 instanceId + 不同指纹仍逐字拒绝，零写入', () => {
+    const first = P.addPairedInstance([], json());
+    const updated = P.addPairedInstance(first.items, json({ host: '192.168.1.8', port: 45001 }));
+    assert.equal(updated.ok, true);
+    const before = JSON.stringify(updated.items);
+    const conflict = P.addPairedInstance(updated.items, json({
+      tlsFingerprint: FP_B, host: '192.168.1.7', port: 45000
+    }));
+    assert.equal(conflict.ok, false);
+    assert.equal(conflict.code, 'E_PAIRING_FINGERPRINT_MISMATCH');
+    assert.equal(conflict.reason, P.PAIRING_FINGERPRINT_MISMATCH_WORDING);
+    assert.deepEqual(conflict.items, [], '拒绝路径不产出任何新表');
+    assert.equal(JSON.stringify(updated.items), before, '旧行的 id / pin / 地址逐字不变');
+  });
+
+  test('P8-4 源码形状：更新分支用 existing.id，只有新增分支用 instanceIdFromUrl', () => {
+    const model = src('model/pairingPayload.ts');
+    const updateAt = model.indexOf('if (existingIndex >= 0) {');
+    const createAt = model.indexOf('const created: DsInstance = {');
+    assert.ok(updateAt >= 0 && createAt > updateAt, '定位更新分支失败');
+    const updateBranch = model.slice(updateAt, createAt);
+    assert.match(updateBranch, /id:\s*existing\.id\s*,/, '更新行必须写 existing.id');
+    assert.match(updateBranch, /capabilities:\s*deriveCapabilities\(existing\.id\)/,
+      '能力集必须从 existing.id 派生');
+    assert.doesNotMatch(updateBranch, /\bid:\s*id\b/, '更新行不得写刚从 URL 派生的 id');
+    assert.doesNotMatch(updateBranch, /instanceIdFromUrl\s*\(/, '更新分支不得重算实例 id');
+    assert.match(model.slice(0, updateAt), /const id:\s*string = instanceIdFromUrl\(check\.url\)/,
+      '新增路径仍从 URL 派生 id');
+  });
+});

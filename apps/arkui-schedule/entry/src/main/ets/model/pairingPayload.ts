@@ -544,13 +544,15 @@ export function addPairedInstance(list: DsInstance[], text: string): PairingAddR
       return addFail('E_PAIRING_FINGERPRINT_MISMATCH', PAIRING_FINGERPRINT_MISMATCH_WORDING);
     }
     const updated: DsInstance = {
-      id: id,
+      // 配对更新（同 instanceId + 同指纹）必须保留既有 id：签名公告的 pin 以实例 id 为键，
+      // 按新 URL 重算会让 pin 变成孤儿，读侧误判成「机器换了身份」。只有新增路径才派生新 id。
+      id: existing.id,
       name: existing.name,
       url: check.url,
       mode: modeForTransport(payload.transport),
       token: payload.token,
       reachable: existing.reachable,
-      capabilities: deriveCapabilities(id),
+      capabilities: deriveCapabilities(existing.id),
       pairingInstanceId: payload.instanceId,
       tlsFingerprint: existing.tlsFingerprint === undefined ? '' : existing.tlsFingerprint
     };
