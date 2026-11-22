@@ -22,6 +22,10 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import { statePaths } from '../dist/engine/paths.js'
 import { defaultSettings, SettingsStore } from '../dist/engine/settings.js'
+import { buildRecordsText, FRESH_SCHEMA_TEXT } from '../dist/timeline/index.js'
+import { NodeTimelineFs } from '../dist/timeline/write.js'
+import { GitRepoV2Port } from '../dist/sync/gitPort.js'
+import { NodeOutboxPort } from '../dist/sync/outbox.js'
 import { registerScheduleTools } from '../dist/schedule/tools.js'
 import {
   DOTS_DEFAULT_DAYS,
@@ -76,6 +80,13 @@ async function writeDay(repoDir, deviceId, dateKey, lines) {
   await writeFile(path.join(dir, `${dateKey}.jsonl`), text === '' ? '' : `${text}\n`, 'utf8')
 }
 
+/** v2 日文件：`timeline/<date>/records.json`，字节由共享序列化器产出（不是测试自造 JSONL）。 */
+async function writeV2Day(repoDir, dateKey, records) {
+  const dir = path.join(repoDir, 'timeline', dateKey)
+  await mkdir(dir, { recursive: true })
+  await writeFile(path.join(dir, 'records.json'), buildRecordsText(dateKey, records), 'utf8')
+}
+
 /** `YYYY-MM-DD`（本地日历；独立于被测实现重算，避免自证）。 */
 function dateKeyOf(date) {
   const month = `${date.getMonth() + 1}`.padStart(2, '0')
@@ -88,27 +99,41 @@ async function git(cwd, args) {
   return stdout
 }
 
-/** 真仓库：bare 远端 + 一份 seed 提交（两天数据，跨 pc-a / pad-1）。 */
+/**
+ * 真仓库：bare 远端 + 一份 v2 seed 提交（两天数据，共享 timeline/**，无设备命名空间）。
+ * `done` 故意与 closed_at 相反：证明 dsh_dots 的未完成判定只看 closed_at。
+ */
+function v2rec(overrides) {
+  return {
+    id: 'r', ts: `${DATE}T09:00:00+08:00`, title: '标题', body: '', author: '我', done: false,
+    media: [], ai_processed: false, opened_at: `${DATE}T09:00:00+08:00`, ...overrides,
+  }
+}
+
 async function setupRepo(t) {
   const root = await tempDir(t, 'gcs-dots-git-')
   const bare = path.join(root, 'remote.git')
   await git(root, ['init', '--bare', '-b', 'main', bare])
   const seed = path.join(root, 'seed')
   await git(root, ['clone', '--quiet', bare, seed])
-  await writeDay(seed, 'pc-a', DATE, [
-    record({ id: 'pc-1', ts: `${DATE}T09:00:00+08:00`, title: 'PC 未完成', done: false }),
-    record({ id: 'pc-2', ts: `${DATE}T10:00:00+08:00`, title: 'PC 已完成', done: true }),
+  await mkdir(path.join(seed, 'timeline'), { recursive: true })
+  await writeFile(path.join(seed, 'timeline', 'schema.json'), FRESH_SCHEMA_TEXT, 'utf8')
+  await writeV2Day(seed, DATE, [
+    // done:true 但没有 closed_at → v2 未完成
+    v2rec({ id: 'pc-1', ts: `${DATE}T09:00:00+08:00`, title: 'PC 未完成', done: true }),
+    // done:false 但有 closed_at → v2 已完成
+    v2rec({ id: 'pc-2', ts: `${DATE}T10:00:00+08:00`, title: 'PC 已完成', done: false, closed_at: `${DATE}T10:30:00+08:00` }),
+    v2rec({ id: 'pad-1', ts: `${DATE}T08:00:00+08:00`, title: '平板未完成', done: true }),
   ])
-  await writeDay(seed, 'pad-1', DATE, [
-    record({ id: 'pad-1', ts: `${DATE}T08:00:00+08:00`, title: '平板未完成', done: false }),
-  ])
-  await writeDay(seed, 'pad-1', '2026-11-14', [
-    record({ id: 'pad-2', ts: '2026-11-14T20:00:00+08:00', title: '平板昨天的已完成', done: true }),
+  await writeV2Day(seed, '2026-11-14', [
+    v2rec({ id: 'pad-2', ts: '2026-11-14T20:00:00+08:00', title: '平板昨天的已完成', done: false, closed_at: '2026-11-14T20:30:00+08:00' }),
   ])
   await git(seed, ['add', '-A'])
-  await git(seed, ['commit', '--quiet', '-m', 'seed: dots fixtures'])
+  await git(seed, ['commit', '--quiet', '-m', 'seed: v2 dots fixtures'])
   await git(seed, ['push', '--quiet', 'origin', 'HEAD:main'])
-  return { root, bare }
+  const workDir = path.join(root, 'work-v2')
+  await git(root, ['clone', '--quiet', bare, workDir])
+  return { root, bare, workDir }
 }
 
 /** 递归检查：每个 object 节点必须显式声明 additionalProperties（宿主注册时的硬要求）。 */
@@ -128,7 +153,7 @@ function assertSealedObjects(node, label) {
 }
 
 /** 用临时 home 造工具注册表；返回已注册的工具与 ctx。 */
-function registerTools(paths, ownDeviceId) {
+function registerTools(paths, ownDeviceId, ports) {
   const store = new SettingsStore(paths, { allowLocalRepo: true })
   const settings = defaultSettings()
   store.writeSettings({ ...settings, repoUrl: '', deviceId: ownDeviceId })
@@ -146,7 +171,8 @@ function registerTools(paths, ownDeviceId) {
       effect()
     },
   }
-  const names = registerScheduleTools(ctx, { paths, allowLocalRepo: true, now: NOW })
+  const options = { paths, allowLocalRepo: true, now: NOW, ...(ports !== undefined ? { v2Ports: ports } : {}) }
+  const names = registerScheduleTools(ctx, options)
   return { registered, ctx, names, store }
 }
 
@@ -422,10 +448,18 @@ test('aggregateDots：文件系统异常 → E_DOTS_IO（可读错误码，不�
 /* 工具层（真实仓库）                                                          */
 /* -------------------------------------------------------------------------- */
 
-test('工具层：dsh_dots 注册、days 夹取、跨设备快照字段齐全（真实仓库，只读）', async (t) => {
-  const { root, bare } = await setupRepo(t)
+test('工具层：dsh_dots 注册、days 夹取、共享 v2 时间线快照字段齐全（真实仓库，只读）', async (t) => {
+  const { root, bare, workDir } = await setupRepo(t)
   const paths = statePaths(path.join(root, 'home'))
-  const { registered, ctx, store } = registerTools(paths, 'pc-a')
+  const v2git = new GitRepoV2Port({
+    dir: workDir, repoUrl: bare, branch: 'main', authMode: 'https', platform: 'custom', allowLocalRepo: true,
+  })
+  t.after(async () => { await v2git.dispose() })
+  const ports = {
+    repoDir: workDir, fs: new NodeTimelineFs(workDir), git: v2git,
+    outbox: new NodeOutboxPort({ filePath: path.join(root, 'outbox.json') }),
+  }
+  const { registered, ctx, store } = registerTools(paths, 'pc-a', ports)
   assert.deepEqual(
     registered.map((tool) => tool.name),
     ['schedule_list', 'schedule_add', 'schedule_summary', 'dsh_dots'],
@@ -439,7 +473,7 @@ test('工具层：dsh_dots 注册、days 夹取、跨设备快照字段齐全（
     assertSealedObjects(schema, 'dsh_dots')
   }
   assert.equal(dotsTool.parameters.properties.days.type, 'integer')
-  assert.match(dotsTool.description, /跨设备聚合/)
+  assert.match(dotsTool.description, /共享 v2 时间线聚合/)
   assert.match(dotsTool.description, /最近 N 天/)
 
   const settings = store.readSettings()

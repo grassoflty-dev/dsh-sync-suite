@@ -1,10 +1,10 @@
 # DSH 插件（packages/dsh-dots）现状与缺口（2026-11-21 审计）
 > 除另标外 `src/x.ts:N` = `packages/dsh-dots/src/x.ts:N`；测试文件实盘 31 个（任务书写 29，按实盘列）。
 ## 1 已有能力（真实存在，非桩）
-- tool 面：`schedule_list` → `src/schedule/tools.ts:147-204` → 真实 → bridge.list 读日程摘要，只读。
-- tool 面：`schedule_add` → `src/schedule/tools.ts:207-258` → 真实 → bridge.add 追加 v1 JSONL + pull/commit/push，写。
-- tool 面：`schedule_summary` → `src/schedule/tools.ts:261-321` → 真实 → v1 记录拼 AI 载荷/prompt。
-- tool 面：`dsh_dots` → `src/schedule/tools.ts:324-411` → 真实 → 跨设备聚合 + DSH 状态，只读。
+- tool 面：`schedule_list` → `src/schedule/tools.ts:159` → `src/schedule/v2Bridge.ts:226,200` → 读共享 v2 `timeline/<date>/records.json` + deleted/restore 账本；未完成只看 `closed_at`，同 id 折叠/同 ts 字节序走共享读侧；v1 `devices/**` 忽略，只读不 pull/rebase。
+- tool 面：`schedule_add` → `src/schedule/tools.ts:218` → `src/schedule/v2Bridge.ts:282` → 规范行进仓库外 outbox + `runV2Cycle`（schema 门禁、固定 main、无 rebase/force、push 失败停放），落盘 `timeline/<date>/records.json`。
+- tool 面：`schedule_summary` → `src/schedule/tools.ts:274` → `src/schedule/v2Bridge.ts:239` → v2 可见记录拼 AI 载荷/prompt（text 优先 body、为空退 ocr_text）。
+- tool 面：`dsh_dots` → `src/schedule/tools.ts:336` → `src/schedule/dots.ts:544,615` → 共享 v2 时间线跨天聚合 + DSH 状态，只读；v1 设备目录不参与。
 - tool 面：`schedule_view` → 本包未注册（`src/schedule/tools.ts:413-421` 仅 4 个）；DSH 本体另有同名工具，见 §2；注册入口 `src/schedule/tools.ts:429-445`、`src/index.ts:81-104,167-172`；`cordis.patch.yml:4-6` 只插插件行，不管工具。
 - 数据面：`src/schedule/paths.ts:54-56` `devices/${assertDeviceId(deviceId)}/schedules/${assertDateKey(date)}.jsonl`；`src/schedule/dots.ts:290` 同形；`src/schedule/bridge.ts:263-288,350-365` 写/枚举 `devices/**`；`src/schedule/jsonl.ts:66-99,151-157` 编解码。
 - 远程面：`src/rpc.ts:677-730` 共 22 action（读 getState/preview*/remoteGetState/chatExportStatus…；写 push/apply/rollback/remote*/chatExport*）；访问状态机 `src/remote/service.ts:170-531`，反代 `src/remote/listener.ts:698`、`src/remote/routes.ts:145`，令牌门 `src/remote/auth.ts:203`；无 `src/remote/rpc.ts`。
@@ -12,14 +12,15 @@
 - 云端面：`src/chats/readSessions.ts:34,165-209` 读本机 `<.dsh>/sessions/**/session.v4.jsonl.zstd`；`src/chats/exportChats.ts:465-487,399-411` 写仓库 `chats/<id>/{session.jsonl,meta.json}` + `chats/index.jsonl`（仅 5 字段，:52）。
 ## 2 缺口（按模块）
 - `schedule_view` 在 DSH 本体注册（`app.asar:dsh/node_modules/@deepseek-ai/dsh-tool-schedule/lib/index.js:594-595`，`ctx.tools.register(defineTool({name:"schedule_view"...}))`），但属不同域（Host 定时任务/reminder，参数 `id`，基于 `ctx.schedule`，:595-600；同包还注册 `schedule_list`/`create`/`edit`，:518,561,613，与插件同名工具有碰撞风险）；全仓（`packages/**`、`cordis.patch.yml`、`docs/*.md`、README）无注册亦无承诺（仅本文件提及），非"缺失工具"，无需删文案。
-- `mod-plugin-git-store`：v1→v2 是重写非重构：`src/schedule/paths.ts:54-56`、`src/schedule/dots.ts:290`、`src/schedule/bridge.ts:263-288` 全写 `devices/**`；v2 唯一路径 `docs/DATA-CONTRACT-v2.md:13,17-33,46-48`（`timeline/<date>/records.json` + 账本 + `timeline/schema.json`），App 已 v2-only（`apps/arkui-schedule/entry/src/main/ets/model/timeline.ts:272-274`）；缺 canonicalRecordLine、assertWritable/schema 门槛、outbox/union/replay、三本账本与原子替换（契约 :198-205,287-305）。
+- `mod-plugin-git-store` / `mod-plugin-tools-v2`：**工具面已闭合（待 Lead 提交；未装机 / 待 reload 验证）**。读侧已重连共享 v2（`src/schedule/v2Bridge.ts:200,226`、`src/schedule/dots.ts:544,615`），写侧走 `src/schedule/v2Bridge.ts:282` → `runV2Cycle`（schema 门槛 / 固定 main / 无 rebase·force / push 失败 outbox 停放），字节只经 `src/timeline/records.ts` 的 `canonicalRecordLine` / `buildRecordsText` / `conflictsLine`；v1 `src/schedule/bridge.ts` 原样保留，只供自由函数与历史测试使用。余项：`chats/` 导出仍是下一模块，真实主机 reload/GUI `unverified`。
 - `mod-plugin-remote-tools`：`instanceList`/`sessionList`/`sessionCreate`/`sessionInfo`/`sessionPrompt`/`sessionEvents`/`sessionLease*`/`grant*` 全缺（`src/rpc.ts:677-730` 无，全包 grep 无）；设计均标「新增」`docs/REMOTE-INSTANCES.md:102-111`、`docs/CLOUD-CHAT-AND-DOTS.md:156-166`；无可吊销 per-tool grant（App 侧已有 `apps/arkui-schedule/entry/src/main/ets/model/instanceGrant.ts:12-16,32-43`），无命令确认卡。
 - `mod-plugin-cloud-chat`：无 dots 会话存储；只做「本机会话→chats 导出」（`src/chats/exportChats.ts:240-333,449-512`），`lease:null` 写死（:327）；`readChatIndex` 仅供状态（:346-391），无消费 `chats/` 生成 dots 会话；index 缺 `kind`/`instanceId`（:52 vs `docs/CLOUD-CHAT-AND-DOTS.md:67-86`）；App 读同一文件 `apps/arkui-schedule/entry/src/main/ets/services/chatStore.ets:2,141-177`。
 ## 3 交叉一致性风险（与 App 侧 v2 契约）
 - 键序/字段：插件 `id,ts,title,body,ocr_text,author,done,attachments,ai_structured,ai_processed,ocr_time`（`src/schedule/jsonl.ts:66-89`）≠ App `id,ts,title,body,author,done,media,ocr_text,ai_structured,ai_processed,ocr_time,opened_at,closed_at`（`apps/arkui-schedule/entry/src/main/ets/model/timeline.ts:137-140,239-253`）；`attachments`↔`media`、缺 opened_at/closed_at；须插件改。
 - 转义/尾换行：两侧均 `JSON.stringify`（`src/schedule/jsonl.ts:98` / `timeline.ts:252`）→同键序下转义一致；但插件是「一行一对象 + `\n`」JSONL（`jsonl.ts:98,151-157`），v2 是「整文件 JSON 对象、records 元素各占一行、末尾恰好一个 `\n`」（契约 :46,50-61）；容器须插件改。
 - open/折叠：插件按 `done` 分未完成（`src/schedule/dots.ts:186-187`）、foldById 同 ts 稳定保序（`src/schedule/jsonl.ts:166-187`）；v2 未完成 iff `closed_at` 缺省、不信 `done`/`open`（`timeline.ts:768-777`、契约 :123-124），同 ts 取规范行 UTF-8 字节序较大者并写 `conflicts.jsonl`（`timeline.ts:555-580`、契约 :99-100）；插件须改。
-- 门禁/路径：插件 `pullRebase`（`src/schedule/bridge.ts:268`）与 `settings.branch`（:423）违背 v2 fetch+union 与固定 main（契约 :198-205,305）；无仓库外 outbox（契约 :214-215）；工作副本 `~/.dsh/dots/work/<repoHash>`（`src/engine/paths.ts:257`、`src/schedule/bridge.ts:390-392`）与 App `git-repo/` 非同一目录。
+- 门禁/路径：插件 `pullRebase`（`src/schedule/bridge.ts:268`）与 `settings.branch`（:423）违背 v2 fetch+union 与固定 main（契约 :198-205,305）；无仓库外 outbox（契约 :214-215）；工作副本 `~/.dsh/dots/work/<repoHash>`（`src/engine/paths.ts:257`、`src/schedule/bridge.ts:390-392`）与 App `git-repo/` 非同一目录。**（mod-plugin-tools-v2 订正）上述 v1 路径仅指原样保留的 `src/schedule/bridge.ts` 自由函数；四个工具已改走 `src/schedule/v2Bridge.ts` 的共享 clone + v2 门禁，不再命中这些风险。**
+- **v1 文件忽略规则（mod-plugin-tools-v2 绑定条件 6）**：`devices/<deviceId>/schedules/<date>.jsonl` 在四个工具与 `dsh_dots` 的读侧一律**忽略、不迁移、不删除**；仓库同时存在 v1 与 v2 时只读 `timeline/**`（`test/plugin-tools-v2.test.mjs:T03/T08` 用 v1 诱饵证明）。v1 bridge 保持原样，不因本模块改写其字节。
 ## 4 原开放问题（已结论化）
 - 5 项问题已于 2026-11-21 由用户全部拍板并绑定，决定与实现后果见 §6；本节不再保持开放。
 ## 5 测试面（31 文件；单次运行 tests=454 / pass=453 / fail=0 / skipped=1，skip 因本机代理环境变量）
@@ -37,3 +38,12 @@
 - ⑤`kind`/`instanceId` 由共享序列化器写（`docs/CLOUD-CHAT-AND-DOTS.md:67-86`）：导出端停止硬编码 `lease:null` 与 5 字段索引行（`src/chats/exportChats.ts:52,327,399-411`），改调共享序列化器。
 - `schedule_view` 是 DSH 内置工具（见 §2），非插件工具，不在上述写权范围。
 - 解禁：git-store 写侧与 cloud-chat 现可开工；remote-tools 保持只读，直到命令确认闸存在（现闸只守 apply/rollback：`test/confirm-gate.test.mjs:33-56`）。
+
+## 7 `mod-plugin-repo-root`（2026-11-22，PC 自持 clone 改为默认）
+- **起因**：原「App `git-repo/` 是唯一工作副本」假设不成立——用户规则是「平板不支持原生 DSH 运行，所有 DSH 都是远程实例」，PC 插件永远看不到平板 `<filesDir>/git-repo`。因此 `schedule_add` 过去只有靠 `DSH_DOTS_APP_FILES_DIR` 指向任意本地目录才能跑；该共享 clone 模型是泄漏进来的便利，不是设计意图。
+- **默认根**：`~/.dsh/dots/repos/<repoHash>`，仓库以 `git-repo` 目录名落在其内 ⇒ 完整路径 `~/.dsh/dots/repos/<repoHash>/git-repo`。`<repoHash>` 与 legacy `~/.dsh/dots/work/<repoHash>` **同一个函数**：`src/engine/paths.ts` 的 `repoHash(repoUrl)` = `sha256(repoUrl.trim()).hex.slice(0,16)`；新旧根是兄弟目录，**绝不复用 work/**。`resolveV2RepoDir` 仍是「工作根 + 目录名 = repoDir」的唯一决策点（`src/sync/repoPath.ts`）。
+- **env 优先级（显式有序，`src/sync/repoRoot.ts:resolveV2RepoRoot`）**：① `DSH_DOTS_REPO_ROOT`（语义「override the v2 work root」，胜出）→ ② `DSH_DOTS_APP_FILES_DIR`（**已废弃别名** `deprecated alias`，同效果、仍可用，存量配置不必立刻改）→ ③ 默认根。每次解析产出**一行**「选中哪个根 + 为什么」的文本（`env override: DSH_DOTS_REPO_ROOT` / `deprecated alias: DSH_DOTS_APP_FILES_DIR` / `default`）：插件源码不写 stdout，只在注入宿主 logger 时交它输出；无论有无 logger，该行都随 `RepoRootResolution.logLine` / `V2RuntimeStatus.repoRootLogLine` 结构化保留（凭据卫生守卫 `credentialHygiene.test.mjs:177` 禁止插件源码 `console.*`）。新代码用 `repoRootOverride` / `sharedRepoRoot` 两个诚实名字。
+- **错误**：旧 `E_NO_APP_FILES_DIR` 已从源码与 dist 中**彻底删除**（有默认值就没有「忘了配」状态）；根无法创建/写入（权限 / 磁盘 / 路径被文件占用）时抛 typed `E_REPO_ROOT_UNAVAILABLE`，文案含**具体路径 + 下一步**（检查父目录权限与磁盘空间，或改设 `DSH_DOTS_REPO_ROOT`）。没有保留任何旧 fail-closed 分支。
+- **迁移无二义**：`migrateIfNeeded` 只在 legacy `work/<repoHash>` 存在**且**新 `repos/<repoHash>` 不存在时调用底层迁移；其余情况零 IO、零搬运（两副本都合法）。迁移先只读核账，发现未推提交即 `E_LEGACY_UNPUSHED`（不动任何文件），干净则**先整目录备份**（`<legacy>.dsh-backup`）再移动并写标记；第二次运行幂等 no-op。`test/repo-root.test.mjs:R04` 用记录 IO 钉住「全新默认根 move 次数 = 0（backup / writeMarker 也为 0）」。
+- **两副本拓扑不变式**（PC 副本与平板副本都合法）：不 rebase、不强制推送、不改写任一方历史；fetch 后按日做并集（union）而非快进覆盖；push 被拒只把意图停在仓库外 outbox 并抛 typed 错，绝不报成功；同一 id 同一 ts 的裁决与 App 完全一致（较晚 ts 静默胜，同 ts 取规范行 UTF-8 字节较大者，败者写 `conflicts.jsonl`）。**运行时保证不在文本扫描**：权威保护是 `src/sync/gitPort.ts` 的 `buildSafePushArgs()`（固定 push argv，拒绝 `-f` / `--force` / `--force-with-lease` / `--force-if-includes` / `+refspec` / `--delete` / `push.force=` 等附加输入）与 `assertSafeGitArgs()`（子命令 allowlist + 危险参数拒绝），由 `test/repo-root.test.mjs:R10`（真实 `pushMain` 经注入 runner 捕获 argv + 九种 hostile 输入表）和 `R11`（`reset` / `rebase` / `pull` / `merge` / `fetch --prune --force` / `branch -D` / `update-ref` 全拒，`status` / `add` / `commit` / `push` 放行）在运行时证明。`test/plugin-tools-v2.test.mjs:T10` / `T10b` 的源码文本扫描只是 **heuristic（纵深防御，不是保证）**；T10b 的正/负对照只说明这些拼写会命中，绝不把它当安全边界。
+- **未验证**：插件未装机 / 未做 live reload，用户机器上首次 `schedule_add` 的真实 clone/commit/push 结果 `unverified`（只有本地 git 契约与注入端口测试证据）。

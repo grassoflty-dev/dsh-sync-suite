@@ -19,6 +19,10 @@ import { promisify } from 'node:util'
 import { GitRepo } from '../dist/engine/git.js'
 import { statePaths } from '../dist/engine/paths.js'
 import { defaultSettings, SettingsStore } from '../dist/engine/settings.js'
+import { buildRecordsText, canonicalRecordLine, FRESH_SCHEMA_TEXT, parseTimelineDay } from '../dist/timeline/index.js'
+import { NodeTimelineFs } from '../dist/timeline/write.js'
+import { GitRepoV2Port } from '../dist/sync/gitPort.js'
+import { NodeOutboxPort } from '../dist/sync/outbox.js'
 import { ScheduleBridge, addSchedule, listSchedule, summarySchedule } from '../dist/schedule/bridge.js'
 import { registerScheduleTools } from '../dist/schedule/tools.js'
 import { appendRecord, encodeRecord, parseJsonl } from '../dist/schedule/jsonl.js'
@@ -92,6 +96,40 @@ async function setup(t) {
     await rm(root, { recursive: true, force: true }).catch(() => {})
   })
   return { root, bare, pad }
+}
+
+/** 一条 v2 记录（缺 closed_at 即未完成；done 故意与 closed_at 相反以证明读侧口径）。 */
+function v2rec(overrides = {}) {
+  return {
+    id: 'v2-1', ts: `${DATE}T09:30:00+08:00`, title: 'v2 未完成', body: '', author: '我', done: false,
+    media: [], ai_processed: false, opened_at: `${DATE}T09:30:00+08:00`, ...overrides,
+  }
+}
+
+/** 真 v2 仓库：bare + 一天 seed（两条：未完成 / 已完成）+ 工具侧工作副本。 */
+async function setupV2(t) {
+  const root = await mkdtemp(path.join(tmpdir(), 'gcs-tools-v2-'))
+  const bare = path.join(root, 'remote.git')
+  await git(root, ['init', '--bare', '-b', 'main', bare])
+  const seed = path.join(root, 'seed')
+  await git(root, ['clone', '--quiet', bare, seed])
+  await mkdir(path.join(seed, 'timeline', DATE), { recursive: true })
+  await writeFile(path.join(seed, 'timeline', 'schema.json'), FRESH_SCHEMA_TEXT, 'utf8')
+  await writeFile(
+    path.join(seed, 'timeline', DATE, 'records.json'),
+    buildRecordsText(DATE, [
+      v2rec({ id: 'pad-row-1', title: 'v2 未完成', done: false }),
+      v2rec({ id: 'pad-row-2', ts: `${DATE}T14:00:00+08:00`, title: 'v2 已完成', done: false, closed_at: `${DATE}T15:20:00+08:00` }),
+    ]),
+    'utf8',
+  )
+  await git(seed, ['add', '-A'])
+  await git(seed, ['commit', '--quiet', '-m', 'seed: v2 tools fixtures'])
+  await git(seed, ['push', '--quiet', 'origin', 'HEAD:main'])
+  const workDir = path.join(root, 'work-v2')
+  await git(root, ['clone', '--quiet', bare, workDir])
+  t.after(async () => { await rm(root, { recursive: true, force: true }).catch(() => {}) })
+  return { root, bare, workDir }
 }
 
 function repoFor(dir, bare) {
@@ -369,8 +407,8 @@ test('token 不出现在任何返回值、错误消息、仓库文件与 AI 请�
   await repo.dispose()
 })
 
-test('工具层：schedule_add / schedule_list / schedule_summary 经设置读到同一个仓库', async (t) => {
-  const { root, bare } = await setup(t)
+test('工具层：schedule_add / schedule_list / schedule_summary 经设置读写同一份共享 v2 时间线', async (t) => {
+  const { root, bare, workDir } = await setupV2(t)
   const homeDir = path.join(root, 'home')
   const paths = statePaths(homeDir)
   const settings = defaultSettings()
@@ -384,6 +422,16 @@ test('工具层：schedule_add / schedule_list / schedule_summary 经设置读�
     deviceId: 'pc-a',
   })
   store.writeToken(TOKEN)
+
+  const git = new GitRepoV2Port({
+    dir: workDir, repoUrl: bare, branch: 'main', authMode: 'https', platform: 'custom',
+    token: TOKEN, allowLocalRepo: true,
+  })
+  t.after(async () => { await git.dispose() })
+  const ports = {
+    repoDir: workDir, fs: new NodeTimelineFs(workDir), git,
+    outbox: new NodeOutboxPort({ filePath: path.join(root, 'outbox.json') }),
+  }
 
   const registered = []
   const ctx = {
@@ -399,7 +447,7 @@ test('工具层：schedule_add / schedule_list / schedule_summary 经设置读�
       effect()
     },
   }
-  const names = registerScheduleTools(ctx, { paths, allowLocalRepo: true, now: NOW })
+  const names = registerScheduleTools(ctx, { paths, allowLocalRepo: true, now: NOW, v2Ports: ports })
   assert.deepEqual(names, ['schedule_list', 'schedule_add', 'schedule_summary', 'dsh_dots'])
   assert.deepEqual(
     registered.map((tool) => tool.name),
@@ -420,10 +468,22 @@ test('工具层：schedule_add / schedule_list / schedule_summary 经设置读�
   }
   assert.deepEqual(addTool.parameters.required, ['title'], 'title 是必填参数')
 
-  // 省略 date → 用注入的"今天"（2026-11-15），命中平板同一天的文件
+  // 省略 date → 用注入的"今天"（2026-11-15），写入 timeline/<date>/records.json
   const added = await addTool.execute({ title: '工具新建', body: '来自 schedule_add' })
-  assert.equal(added.path, `devices/pc-a/schedules/${DATE}.jsonl`)
+  assert.equal(added.path, `timeline/${DATE}/records.json`, 'v2 不再写 devices/**')
   assert.equal(added.pushed, true)
+  assert.match(added.commit, /^[0-9a-f]{40}$/)
+  assert.equal(added.rebased, false, 'v2 永不 rebase')
+  // 容器 + 字节：整份文件必须等于共享序列化器的 buildRecordsText 输出
+  const text = await readFile(path.join(workDir, 'timeline', DATE, 'records.json'), 'utf8')
+  const parsed = parseTimelineDay(text, DATE)
+  const mine = parsed.day.allRecords.find((r) => r.id === added.id)
+  assert.deepEqual(mine, {
+    id: added.id, ts: added.ts, title: '工具新建', body: '来自 schedule_add', author: '我',
+    done: false, media: [], ai_processed: false, opened_at: added.ts,
+  })
+  assert.ok(text.includes(canonicalRecordLine(mine)), '写入行逐字节等于 canonicalRecordLine')
+  assert.equal(text, buildRecordsText(DATE, parsed.day.allRecords), '容器逐字节等于 buildRecordsText')
   const addRendered = addTool.output.render({}, added)[0]
   assert.equal(addRendered.type, 'text')
   assert.ok(addRendered.text.includes('已新建日程'))
@@ -431,13 +491,14 @@ test('工具层：schedule_add / schedule_list / schedule_summary 经设置读�
 
   const listed = await listTool.execute({ deviceId: 'all' })
   assert.equal(listed.date, DATE)
-  assert.equal(listed.records.length, 3, '平板 2 条 + 工具新建 1 条')
+  assert.equal(listed.records.length, 3, '共享时间线 2 条 seed + 工具新建 1 条')
+  assert.deepEqual(listed.records.filter((r) => r.done).map((r) => r.id), ['pad-row-2'], 'done 由 closed_at 派生')
   const rendered = listTool.output.render({}, listed)[0]
   assert.equal(rendered.type, 'text')
   assert.ok(rendered.text.includes('工具新建'))
 
   const summarized = await summaryTool.execute({})
-  assert.equal(summarized.count, 1, '默认只看本机：只有工具新建那一条')
+  assert.equal(summarized.count, 3, 'v2 只有共享时间线：汇总当天全部可见记录')
   assert.equal(summarized.summary, '', '没有 AI 密钥时 summary 是空串')
   assert.match(summarized.aiNote, /未配置 AI 密钥/)
   assert.ok(summaryTool.output.render({}, summarized)[0].text.includes('提示词'))

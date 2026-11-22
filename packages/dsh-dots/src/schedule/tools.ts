@@ -14,16 +14,18 @@ import type { StatePaths } from '../engine/paths.js'
 import type { SyncSettings } from '../engine/types.js'
 import { SyncError, errorMessage } from '../engine/errors.js'
 import { formatClock } from './clock.js'
-import { ALL_DEVICES, withScheduleBridge } from './bridge.js'
-import type {
-  ListSchedulesResult,
-  ScheduleAiOptions,
-  ScheduleBridge,
-  ScheduleWorkspaceOptions,
-} from './bridge.js'
-import { clampDays, dotsSnapshotFromBridge, emptyDotsSnapshot } from './dots.js'
+import type { ScheduleAiOptions } from './bridge.js'
+import { V2ScheduleBridge, withV2ScheduleBridge } from './v2Bridge.js'
+import type { V2ListSchedulesResult, V2SchedulePorts } from './v2Bridge.js'
+import { clampDays, dotsSnapshotFromV2, emptyDotsSnapshot } from './dots.js'
 import type { DotsDshProbe, DotsSnapshot } from './dots.js'
 import type { AddScheduleResult, SummaryResult } from './types.js'
+
+/**
+ * 「全部设备」选择器。v2 只有一份共享时间线（无设备命名空间），此值仍被接受以兼容既有入参，
+ * 含义退化为「读共享 timeline/**」。
+ */
+const ALL_DEVICES = 'all'
 
 /** 工具定义（与 `ctx.tools.register` 接受的形状一致）。 */
 export interface ScheduleToolDefinition {
@@ -61,6 +63,12 @@ export interface ScheduleToolOptions {
    * 将来把 DSH 的 `sessions` 服务接进来时，从这里注入即可，不用改工具定义。
    */
   dsh?: DotsDshProbe
+  /** App filesDir（v2 唯一 clone `<appFilesDir>/git-repo`）；缺省读 DSH_DOTS_APP_FILES_DIR。 */
+  appFilesDir?: string
+  /** 显式覆盖工作副本目录（集成测试用；不新建第二份 clone）。 */
+  repoDir?: string
+  /** 整体覆盖 v2 端口（fs/git/outbox/repoDir）；测试与宿主显式注入用。 */
+  v2Ports?: V2SchedulePorts
 }
 
 function text(value: unknown): Array<{ type: 'text'; text: string }> {
@@ -82,23 +90,27 @@ function readToolSettings(options: ScheduleToolOptions): { settings: SyncSetting
   return { settings: store.readSettings(), token: store.readToken() }
 }
 
-/** 把工具选项翻译成 `ScheduleBridge` 的工作区选项（只带显式给过的字段）。 */
-function workspaceOptions(options: ScheduleToolOptions): ScheduleWorkspaceOptions {
-  return {
-    paths: options.paths,
-    ...(options.allowLocalRepo === true ? { allowLocalRepo: true } : {}),
-    ...(options.now !== undefined ? { now: options.now } : {}),
-    ...(options.networkTimeoutMs !== undefined ? { networkTimeoutMs: options.networkTimeoutMs } : {}),
-    ...(options.ai !== undefined ? { ai: options.ai } : {}),
-  }
-}
-
+/** 把工具选项翻译成 v2 工作区选项（只带显式给过的字段）。 */
 async function withBridgeForTool<T>(
   options: ScheduleToolOptions,
-  task: (bridge: ScheduleBridge, today: string) => Promise<T>,
+  task: (bridge: V2ScheduleBridge, today: string) => Promise<T>,
 ): Promise<T> {
   const { settings, token } = readToolSettings(options)
-  return withScheduleBridge(workspaceOptions(options), settings, token, async (bridge) => task(bridge, bridge.today()))
+  return withV2ScheduleBridge(
+    {
+      paths: options.paths,
+      settings,
+      token,
+      ...(options.allowLocalRepo === true ? { allowLocalRepo: true } : {}),
+      ...(options.now !== undefined ? { now: options.now } : {}),
+      ...(options.networkTimeoutMs !== undefined ? { networkTimeoutMs: options.networkTimeoutMs } : {}),
+      ...(options.ai !== undefined ? { ai: options.ai } : {}),
+      ...(options.appFilesDir !== undefined ? { appFilesDir: options.appFilesDir } : {}),
+      ...(options.repoDir !== undefined ? { repoDir: options.repoDir } : {}),
+      ...(options.v2Ports !== undefined ? { ports: options.v2Ports } : {}),
+    },
+    async (bridge) => await task(bridge, bridge.today()),
+  )
 }
 
 /**
@@ -148,14 +160,14 @@ function scheduleListTool(options: ScheduleToolOptions): ScheduleToolDefinition 
   return {
     name: 'schedule_list',
     description:
-      '列出某天的日程（跨设备按 id 折叠，同一 id 取较晚的记录）。默认今天、只看本机设备；' +
-      `deviceId 传 "${ALL_DEVICES}" 可看仓库里所有设备的日程（含平板手写录入的记录）。` +
-      '只读：会先尽力从远端拉取最新提交，拉取失败时返回本地副本并给出 note。',
+      '列出某天的日程（读共享 v2 时间线 timeline/<date>/records.json；同 id 按较晚 ts、同 ts 按规范字节序折叠，' +
+      '删除/撤销按账本优先级过滤，未完成只看 closed_at）。默认今天；deviceId 入参保留兼容但 v2 只有一份共享时间线，' +
+      '传任何值都读同一份数据。只读：不 pull、不 rebase，读本地共享工作副本并在 note 中说明。',
     parameters: {
       type: 'object',
       properties: {
         date: { type: 'string', description: '日期 YYYY-MM-DD（设备本地日期）；省略表示今天' },
-        deviceId: { type: 'string', description: `设备目录名，或 "${ALL_DEVICES}"（全部设备）；省略表示本机` },
+        deviceId: { type: 'string', description: `兼容保留：v2 只有一份共享时间线，传 "${ALL_DEVICES}" 或任何设备名结果相同` },
       },
     },
     output: {
@@ -188,16 +200,15 @@ function scheduleListTool(options: ScheduleToolOptions): ScheduleToolDefinition 
           },
         },
       },
-      render: (_args, value) => text(renderList(value as ListSchedulesResult)),
+      render: (_args, value) => text(renderList(value as V2ListSchedulesResult)),
     },
     timeoutMs: 60_000,
     async execute(rawArgs) {
       const args = argsRecord(rawArgs)
       const date = argsString(args, 'date')
-      const deviceId = argsString(args, 'deviceId')
       return withBridgeForTool(options, async (bridge, today) => {
         const day = date === '' ? today : date
-        return bridge.list(deviceId === '' ? bridge.deviceId : deviceId, day)
+        return bridge.list('', day)
       })
     },
   }
@@ -208,8 +219,10 @@ function scheduleAddTool(options: ScheduleToolOptions): ScheduleToolDefinition {
   return {
     name: 'schedule_add',
     description:
-      '在本机设备目录下新建一条日程（追加一行 JSONL，不重写历史行），然后提交并推送到同一个 Git 仓库，' +
-      '平板打开 App 同步后即可看到。写入前先 pull --rebase，遇到冲突会中止并报错（不会覆盖任何一方的记录）。',
+      '在共享 v2 时间线新建一条日程：规范行进入仓库外 outbox，经同步周期做 schema 门禁（缺标记幂等创建 schemaVersion:2、' +
+      '未知版本 typed 拒绝且零写入）、固定 main、无 rebase / 无 force、union 后提交并推送；' +
+      'push 失败只停放意图并报 typed 错误，绝不报成功。落盘路径 timeline/<date>/records.json，' +
+      '平板与 DSH 读同一份时间线。',
     parameters: {
       type: 'object',
       properties: {
@@ -262,14 +275,14 @@ function scheduleSummaryTool(options: ScheduleToolOptions): ScheduleToolDefiniti
   return {
     name: 'schedule_summary',
     description:
-      '把某天的日程记录拼成 AI 载荷与提示词（与平板 App 的每日汇总同一契约：只取当天记录、' +
-      'text 优先取 body、为空退回 ocr_text）。配置了 AI 密钥时直接返回模型摘要；未配置时返回 payload 与 prompt，' +
-      '调用方可以自己完成汇总。',
+      '把某天共享 v2 时间线的记录拼成 AI 载荷与提示词（只取当天 records.json 的可见记录、' +
+      'text 优先取 body、为空退回 ocr_text）。deviceId 入参保留兼容但只读同一份时间线。' +
+      '配置了 AI 密钥时直接返回模型摘要；未配置时返回 payload 与 prompt，调用方可以自己完成汇总。',
     parameters: {
       type: 'object',
       properties: {
         date: { type: 'string', description: '日期 YYYY-MM-DD（设备本地日期）；省略表示今天' },
-        deviceId: { type: 'string', description: `设备目录名，或 "${ALL_DEVICES}"；省略表示本机` },
+        deviceId: { type: 'string', description: `兼容保留：v2 只有一份共享时间线，传 "${ALL_DEVICES}" 或任何设备名结果相同` },
       },
     },
     output: {
@@ -309,10 +322,9 @@ function scheduleSummaryTool(options: ScheduleToolOptions): ScheduleToolDefiniti
     async execute(rawArgs) {
       const args = argsRecord(rawArgs)
       const date = argsString(args, 'date')
-      const deviceId = argsString(args, 'deviceId')
       return withBridgeForTool(options, async (bridge, today) => {
         const day = date === '' ? today : date
-        const result = await bridge.summary(deviceId === '' ? bridge.deviceId : deviceId, day)
+        const result = await bridge.summary('', day)
         // 工具返回值里 `summary: ''` 表示没有 AI 正文（原因见 aiNote），schema 里保持 string。
         return { ...result, summary: result.summary ?? '' }
       })
@@ -325,10 +337,10 @@ function dshDotsTool(options: ScheduleToolOptions): ScheduleToolDefinition {
   return {
     name: 'dsh_dots',
     description:
-      '给手机端「DSH-dots」的一次性快照：**跨设备聚合**仓库里「最近 N 天（默认 7，夹到 1..90）」的日程——' +
-      '每天的总数 / 未完成 / 已完成，以及最多 3 条「未完成优先、按时间倒序、去重」的标题；' +
+      '给手机端「DSH-dots」的一次性快照：从共享 v2 时间线聚合「最近 N 天（默认 7，夹到 1..90）」的日程——' +
+      '每天的总数 / 未完成 / 已完成（未完成只看 closed_at），以及最多 3 条「未完成优先、按时间倒序、去重」的标题；' +
       '同时给出本机 DSH 状态（只填能证明的字段：数据通道 mode、版本 version；会话级字段在拿不到证据时不填，' +
-      'reachable=false 表示"没有会话证据"而不是"DSH 挂了"）。只读：不写仓库、不提交、不推送。',
+      'reachable=false 表示"没有会话证据"而不是"DSH 挂了"）。只读：不写仓库、不提交、不推送；v1 devices/** 不参与。',
     parameters: {
       type: 'object',
       properties: {
@@ -399,12 +411,25 @@ function dshDotsTool(options: ScheduleToolOptions): ScheduleToolDefinition {
           note: '尚未配置仓库地址：日程为空数组（不是错误），配置后即可聚合跨设备日程',
         })
       }
-      return withScheduleBridge(workspaceOptions(options), settings, token, async (bridge) =>
-        dotsSnapshotFromBridge(bridge, {
-          days,
+      return withV2ScheduleBridge(
+        {
+          paths: options.paths,
+          settings,
+          token,
+          ...(options.allowLocalRepo === true ? { allowLocalRepo: true } : {}),
           ...(options.now !== undefined ? { now: options.now } : {}),
-          ...(options.dsh !== undefined ? { dsh: options.dsh } : {}),
-        }),
+          ...(options.networkTimeoutMs !== undefined ? { networkTimeoutMs: options.networkTimeoutMs } : {}),
+          ...(options.ai !== undefined ? { ai: options.ai } : {}),
+          ...(options.appFilesDir !== undefined ? { appFilesDir: options.appFilesDir } : {}),
+          ...(options.repoDir !== undefined ? { repoDir: options.repoDir } : {}),
+          ...(options.v2Ports !== undefined ? { ports: options.v2Ports } : {}),
+        },
+        async (bridge) =>
+          dotsSnapshotFromV2(bridge.ports, bridge.deviceId, {
+            days,
+            ...(options.now !== undefined ? { now: options.now } : {}),
+            ...(options.dsh !== undefined ? { dsh: options.dsh } : {}),
+          }),
       )
     },
   }
@@ -448,7 +473,7 @@ export function registerScheduleTools(ctx: ScheduleToolHostContext, options: Sch
 /* 渲染（模型看到的是这些文本）                                                 */
 /* -------------------------------------------------------------------------- */
 
-function renderList(result: ListSchedulesResult): string {
+function renderList(result: V2ListSchedulesResult): string {
   const lines: string[] = []
   const devices = result.deviceIds.length > 0 ? result.deviceIds.join(', ') : '（无）'
   lines.push(`${result.date} · ${result.records.length} 条 · 设备：${devices}`)
@@ -472,7 +497,7 @@ function renderAdd(result: AddScheduleResult): string {
   return [
     `已新建日程：${result.date} · ${result.id}`,
     `路径：${result.path}`,
-    `提交：${result.commit === '' ? '（无变更）' : result.commit.slice(0, 12)}${result.rebased ? '（已 rebase）' : ''}`,
+    `提交：${result.commit === '' ? '（无变更）' : result.commit.slice(0, 12)}`,
     `推送：${result.pushed ? '已推送' : '无需推送'}`,
   ].join('\n')
 }

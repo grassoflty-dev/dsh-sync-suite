@@ -25,6 +25,8 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { SyncError, errorMessage } from '../engine/errors.js';
 import { detectDshVersion } from '../engine/paths.js';
+import { parseLedger, parseTimelineDay, visibleRecords } from '../timeline/records.js';
+import { timelineDeletedPath, timelineRecordsPath, timelineRestorePath } from '../timeline/paths.js';
 import { localDateKey, nowIso } from './clock.js';
 import { foldById, parseJsonl, recordDateKey } from './jsonl.js';
 import { DEVICE_ID_RE } from './paths.js';
@@ -314,4 +316,90 @@ export function emptyDotsSnapshot(options) {
         }),
         note,
     };
+}
+/** v2 记录 → 摘要输入：`done` 由 closed_at 派生（不信记录的 done 字段），其余字段原样。 */
+function v2RecordLike(record) {
+    const closed = record.closed_at;
+    const open = closed === undefined || closed === null || (typeof closed === 'string' && closed.trim().length === 0);
+    const out = {
+        id: record.id,
+        ts: record.ts,
+        title: typeof record.title === 'string' ? record.title : '',
+        body: typeof record.body === 'string' ? record.body : '',
+        author: typeof record.author === 'string' ? record.author : '',
+        done: !open,
+        ai_processed: record.ai_processed === true,
+    };
+    if (typeof record.ocr_text === 'string')
+        out.ocr_text = record.ocr_text;
+    if (typeof record.ai_structured === 'string')
+        out.ai_structured = record.ai_structured;
+    if (typeof record.ocr_time === 'string')
+        out.ocr_time = record.ocr_time;
+    return out;
+}
+/**
+ * 跨天聚合共享 v2 时间线：`timeline/<date>/records.json` + deleted/restore 账本。
+ *
+ * 只读；v1 `devices/**` 不读、不迁移、不删除。同 id 折叠 / 同 ts 字节序裁决由
+ * `parseTimelineDay` 完成，删除/撤销优先级由 `visibleRecords` 完成（与 App 同一套纯函数）。
+ */
+export async function aggregateDotsV2(ports, deviceId, options = {}) {
+    const now = options.now ?? (() => new Date());
+    const dateKeys = recentDateKeys(now(), clampDays(options.days));
+    const digests = [];
+    const skippedDetails = [];
+    let skipped = 0;
+    for (const dateKey of dateKeys) {
+        const read = async (rel) => {
+            try {
+                return (await ports.fs.read(rel)) ?? '';
+            }
+            catch (error) {
+                throw new SyncError('E_DOTS_IO', `读取 v2 时间线失败：${rel}（${errorMessage(error)}）`, { path: rel });
+            }
+        };
+        const parsed = parseTimelineDay(await read(timelineRecordsPath(dateKey)), dateKey);
+        const deletions = parseLedger(await read(timelineDeletedPath(dateKey))).entries;
+        const restores = parseLedger(await read(timelineRestorePath(dateKey))).entries;
+        for (const error of parsed.errors) {
+            skipped += 1;
+            if (skippedDetails.length < DOTS_SKIPPED_DETAIL_LIMIT) {
+                skippedDetails.push(`${timelineRecordsPath(dateKey)}:${error.line} ${error.message}`);
+            }
+        }
+        const visible = visibleRecords(parsed.day ?? { date: dateKey, open: [], allRecords: [] }, deletions, restores);
+        const digest = digestDay(dateKey, visible.map(v2RecordLike));
+        if (digest !== null)
+            digests.push(digest);
+    }
+    const totals = { days: digests.length, records: 0, open: 0, done: 0, skipped };
+    for (const digest of digests) {
+        totals.records += digest.total;
+        totals.open += digest.open;
+        totals.done += digest.done;
+    }
+    return { generatedAt: nowIso(now()), deviceId, days: digests, totals, skippedDetails };
+}
+/** 用 v2 端口造一份快照（不碰 git 写命令，只读）。 */
+export async function collectDotsSnapshotV2(ports, deviceId, options = {}) {
+    const aggregate = await aggregateDotsV2(ports, deviceId, options);
+    const dsh = options.dsh !== undefined
+        ? sanitizeProbedStatus(await options.dsh({ gitBridge: true, deviceId: aggregate.deviceId }))
+        : buildDshStatus({ gitBridge: true, version: options.version ?? detectDshVersion() });
+    const snapshot = {
+        v: DOTS_SNAPSHOT_VERSION,
+        generatedAt: aggregate.generatedAt,
+        deviceId: aggregate.deviceId,
+        days: aggregate.days,
+        totals: aggregate.totals,
+        dsh,
+    };
+    if (options.note !== undefined && options.note !== '')
+        snapshot.note = options.note;
+    return snapshot;
+}
+/** 工具入口：共享 v2 端口 → 快照。只读，不调用 git 的写命令。 */
+export async function dotsSnapshotFromV2(ports, deviceId, options = {}) {
+    return await collectDotsSnapshotV2(ports, deviceId, options);
 }
