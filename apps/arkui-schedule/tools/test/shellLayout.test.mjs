@@ -56,8 +56,9 @@ const PANES = [
   { name: 'CloudChatPane', file: 'CloudChatPane.ets', constant: 'SHELL_SECTION_CLOUD_CHAT' }
 ];
 /**
- * 剩余的「即将迁入」占位。mod-shell-instances-pane 与 mod-shell-cloud-chat-pane 已把
- * InstancesPane / CloudChatPane 换成真 body，日程更早就是真 body，因此占位只剩 dots 一个。
+ * 历史命名：SCAFFOLDS 现在只含 dots 面板，且只用它仍保留的两项契约——
+ * 「禁用主操作 + typed 原因」与「空态标题」。mod-shell-dots-pane 已把正文换成真只读列表，
+ * 因此这里不再表示「即将迁入」占位（另三面早已是真 body）。
  */
 const SCAFFOLDS = [
   { name: 'DotsPane', file: 'DotsPane.ets', label: 'dots', action: '新建对话', reason: 'REASON_DOTS', empty: '还没有 dots 对话' }
@@ -268,13 +269,20 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.match(RAIL, /const RAIL_COMPACT_WIDTH: number = 72;/, '抽屉窄轨 72vp');
   });
 
-  test('L-11 唯一占位有带标签的禁用页头；日程 / 远程 / 云端用真页头', () => {
+  // mod-shell-dots-pane（old→new，收紧）：旧断言只要求 dots 有一个禁用动作 + 任意原因；
+  // 现在逐字钉住今天成立的 typed 原因，且禁止禁用输入框复活（正文已是真列表）。
+  test('L-11 dots 面板有带标签的页头 + typed 禁用动作；日程 / 远程 / 云端用真页头', () => {
     for (const { name, label, action, reason } of SCAFFOLDS) {
       const body = paneBody(name);
+      const source = PANE_SOURCE.get(name);
       assert.match(body, new RegExp(`Text\\('${label}'\\)`), `${name} 必须有「${label}」分段标签`);
       const actionSlot = 'Text(`' + action + '（${' + reason + '}）`)';
       assert.ok(body.includes(actionSlot), `${name} 的动作槽必须显示「${action}（原因）」`);
-      assert.match(body, /\.enabled\(false\)/, `${name} 的占位动作必须禁用（无假入口）`);
+      assert.match(body, /\.enabled\(false\)/, `${name} 的「新建对话」动作必须禁用（无假入口）`);
+      assert.match(source, /const REASON_DOTS: string = 'dots 指令尚未接线';/,
+        `${name} 的禁用原因必须是今天成立的 typed 原因`);
+      assert.equal(/TextInput\(|输入给 dots 的指令…/.test(source), false,
+        `${name} 不得保留禁用输入框 / 假发送入口`);
     }
     // mod-shell-cloud-chat-pane（old→new，收紧）：云端页头只留标题，禁用动作 /「即将迁入」绝迹。
     const cloud = PANE_SOURCE.get('CloudChatPane');
@@ -306,22 +314,39 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       '远程面板不得残留占位原因 / 说明');
   });
 
-  test('L-12 dots 占位：禁用输入框 + 字面原因「dots 尚未接线」', () => {
+  // mod-shell-dots-pane（old→new，收紧，id L-12 不变）：旧断言钉禁用输入框 + 旧字面原因，
+  // 两者都已随真列表移除。新真值 = typed 原因 + 空态短下一步 + 真实 ForEach 行 + 无假入口。
+  test('L-12 dots 面板落真：typed 禁用原因 + 空态短下一步 + 真实列表 + 无禁用输入框', () => {
     const source = PANE_SOURCE.get('DotsPane');
-    assert.match(source, /const REASON_DOTS: string = 'dots 尚未接线';/, '必须逐字保留禁用原因');
+    const raw = PANE_RAW.get('DotsPane');
     const body = paneBody('DotsPane');
-    assert.match(body, /TextInput\(\{ placeholder: '输入给 dots 的指令…' \}\)/, 'dots 占位要有输入框');
-    assert.match(body, /\.enabled\(false\)/, '该输入框必须禁用');
-    assert.match(body, /Text\(REASON_DOTS\)/, '原因必须可见');
-    assert.match(body, /还没有 dots 对话/, 'dots 空聊天气态文案');
+    assert.equal(/dots 尚未接线|输入给 dots 的指令…/.test(source), false,
+      '旧 scaffold 原因与输入框文案必须绝迹');
+    assert.match(source, /const REASON_DOTS: string = 'dots 指令尚未接线';/, '逐字保留新的 typed 禁用原因');
+    assert.match(body, /Text\(`新建对话（\$\{REASON_DOTS\}）`\)/, '禁用原因必须可见');
+    assert.match(body, /\.enabled\(false\)/, '「新建对话」动作必须禁用');
+    assert.equal(/TextInput\(|placeholder: '输入给 dots 的指令…'/.test(body), false,
+      '发指令尚未接线，不得有输入框假入口');
+    assert.match(source, /还没有 dots 对话/, 'dots 空态标题保留');
+    assert.match(source, /const DOTS_NEXT_STEP: string = '先在设置里同步一次仓库';/, '空态下一步逐字保留');
+    assert.match(source, /Text\(DOTS_NEXT_STEP\)/, '空态下一步必须渲染');
+    assert.match(source, /ForEach\(\s*this\.chats/, '真实会话列表通过 ForEach 渲染');
+    assert.match(source, /chatSummaryLine\(item\)/, '行摘要走纯模型');
+    assert.equal((source.match(/\.enabled\(false\)/g) ?? []).length, 1, '只有一处禁用动作');
+    assert.equal(/pushUrl\(\{\s*url:\s*'pages\/(Chats|Home|Settings)'/.test(raw), false,
+      '不得 push 跨节页 / 设置根页');
   });
 
-  test('L-13 唯一占位不渲染假记录行；日程 / 远程 / 云端面板必须渲染真行', () => {
+  // mod-shell-dots-pane（old→new，收紧）：旧断言把 `ForEach(` 当假行一刀切禁掉；
+  // dots 落真后必须有 ForEach(this.chats)，故改成「禁假行构造器 + 正向钉真实数据源」。
+  test('L-13 dots 与云端不渲染假记录行；四个面板都必须渲染真行', () => {
     for (const { name } of SCAFFOLDS) {
       const body = paneBody(name);
-      for (const fake of ['ForEach(', 'RecordRow(', 'Checkbox(', '示例', 'Lorem', '假数据']) {
+      for (const fake of ['RecordRow(', 'Checkbox(', '示例', 'Lorem', '假数据', 'ForEach([', 'ForEach({']) {
         assert.equal(body.includes(fake), false, `${name} 不得出现假行标记「${fake}」`);
       }
+      assert.match(PANE_SOURCE.get(name), /ForEach\(\s*this\.chats/, `${name} 必须 ForEach 真实会话数组`);
+      assert.match(PANE_SOURCE.get(name), /chatSummaryLine\(item\)/, `${name} 行摘要必须走纯模型`);
     }
     // mod-shell-cloud-chat-pane（old→new，收紧）：旧「只剩云端一句说明」改为「四面板全绝迹 + 真行在」。
     const explanatory = [...PANE_SOURCE.values()].flatMap((source) =>
@@ -452,7 +477,7 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       '远程 DSH（只读）：页头不得有跨节导航到云端对话');
     assert.match(configRegions(instancesRaw).join('\n'), /Text\('添加实例'\)/,
       '远程 DSH（设置模式）：添加实例');
-    assert.match(PANE_SOURCE.get('DotsPane'), /新建对话/, 'dots：新建对话');
+    assert.match(PANE_SOURCE.get('DotsPane'), /新建对话/, 'dots：新建对话（禁用并携带 typed 原因）');
     // mod-shell-cloud-chat-pane（old→new，收紧）：云端面板已落真列表，禁用「新建对话」绝迹。
     assert.equal(/新建对话/.test(PANE_SOURCE.get('CloudChatPane')), false,
       '云端对话：禁用主操作绝迹');
@@ -498,6 +523,32 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.match(cloud, /@Prop active: boolean = true;/, 'active prop 不变');
     assert.match(cloud, /\.visibility\(this\.active \? Visibility\.Visible : Visibility\.Hidden\)/,
       'Visible/Hidden 保活不变');
+    assert.match(raw, /router\.pushUrl\(\{ url: 'pages\/ChatDetail', params: params \}\)/, '只 push 只读详情');
+    assert.equal(/pushUrl/.test(body), false, '渲染树无跨节跳转');
+  });
+
+  // mod-shell-dots-pane（新增正向守卫）：dots 面板与云端同款四态 / 数据链 / props / 保活 / 只读路由。
+  test('L-23 dots 面板落真：复用 chatStore/chatList、四态、只读详情、单一 aboutToAppear', () => {
+    const dots = PANE_SOURCE.get('DotsPane');
+    const raw = PANE_RAW.get('DotsPane');
+    const body = paneBody('DotsPane');
+    for (const token of [
+      'chatStore.prepare(', 'chatStore.listChats()', 'ChatListResult', 'filterByKind(', 'sortChats(',
+      'chatSummaryLine(item)', 'ForEach(', 'LoadingState(', 'ErrorState(', 'Text(DOTS_NEXT_STEP)'
+    ]) {
+      assert.ok(raw.includes(token), `dots 面板必须拥有 ${token}`);
+    }
+    assert.equal(/JSON\.parse\(|readTextSync\(|syncController|pullNow|TextInput\(|pages\/Settings/.test(dots), false,
+      'dots 面板不得自建解析 / RPC / 配置 / 输入框');
+    assert.match(dots, /@Prop deepLinkId: string = '';/, '深链 prop 不变');
+    assert.match(dots, /@Prop active: boolean = true;/, 'active prop 不变');
+    assert.match(dots, /\.visibility\(this\.active \? Visibility\.Visible : Visibility\.Hidden\)/, 'Hidden 保活不变');
+    assert.match(body, /^\s*Scroll\(\) \{/, 'dots 面板自带唯一 Scroll（竖屏 / 横屏共用）');
+    assert.equal((dots.match(/aboutToAppear\(/g) ?? []).length, 1, '只读一次：只有一个 aboutToAppear');
+    assert.equal(/onPageShow\(/.test(dots), false, '无 onPageShow');
+    for (const token of ['this.LoadingHint()', 'this.EmptyChats()', 'this.ErrorBlock()', 'this.ChatList()']) {
+      assert.ok(body.includes(token), `必须渲染 ${token}`);
+    }
     assert.match(raw, /router\.pushUrl\(\{ url: 'pages\/ChatDetail', params: params \}\)/, '只 push 只读详情');
     assert.equal(/pushUrl/.test(body), false, '渲染树无跨节跳转');
   });

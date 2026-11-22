@@ -279,8 +279,9 @@ describe('结构断言：@State 至少被读一次 / issue 必须有渲染落点
     assert.ok(files.has('main/ets/pages/SettingsExportImport.ets'), '必须扫到数据真页面 SettingsExportImport.ets');
     assert.ok(files.has('main/ets/pages/SettingsApi.ets'), '必须扫到 API 真页面 SettingsApi.ets（AI @State 的死状态检查不能漏）');
     assert.ok(fields.length > 100, `@State 总数 ${fields.length} 明显偏少`);
-    // S3：四个面板下沉到 pages/panes/，必须全部进扫描文件集（三个占位只有 @Prop，
-    // 不产生 @State 字段，所以要直接查 componentFiles() 而不是查 fields）。
+    // S3：四个面板下沉到 pages/panes/，必须全部进扫描文件集（旧三占位只有 @Prop；
+    // mod-shell-cloud-chat-pane / mod-shell-dots-pane 落真后 CloudChatPane 与 DotsPane 也产生 @State，
+    // 它们的死状态同样受上方 unreadStateFields 检查；这里仍直接查 componentFiles() 以保证覆盖面）。
     const scanned = new Set(componentFiles().map((file) => relToEts(file)));
     for (const pane of ['SchedulePane', 'InstancesPane', 'CloudChatPane', 'DotsPane']) {
       assert.ok(scanned.has(`main/ets/pages/panes/${pane}.ets`), `必须扫到面板 ${pane}.ets`);
@@ -390,5 +391,37 @@ describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
     assert.match(RAIL_CODE, /this\.SettingsRow\(\)/, '唯一 UI 入口是 rail 页脚齿轮');
     assert.equal((HOME_CODE.match(/onOpenSettings: \(\): void => \{\s*\n\s*this\.openSettings\(\);/g) ?? []).length, 2,
       '宽屏常驻轨与 compact 抽屉轨都必须把齿轮事件接到 openSettings');
+  });
+
+  // mod-shell-dots-pane（新增正向守卫）：scaffold 只有两个 @Prop；落真后三个 @State 必须在渲染树里
+  // 真被读到（chats→ForEach、errorText→条件+ErrorState.why、loading→条件），且对外契约一字未改。
+  test('SG-S7 dots 面板落真：三个 @State 都有渲染落点，props / 保活 / 单一 aboutToAppear 不变', () => {
+    const file = PANE_FILES.find((path) => path.endsWith('DotsPane.ets'));
+    const code = stripComments(readFileSync(file, 'utf8'));
+    const fields = collectStateFields(componentFiles()).filter((item) =>
+      item.file.endsWith('pages/panes/DotsPane.ets'));
+    assert.deepEqual(fields.map((item) => item.field).sort(), ['chats', 'errorText', 'loading'],
+      'dots 面板必须恰好声明这三个 @State（不多不少）');
+    for (const field of ['chats', 'errorText', 'loading']) {
+      assert.ok(fieldUsage(code, field).reads > 0, `@State ${field} 必须被渲染树读到（不是死状态）`);
+    }
+    // chats / errorText 还必须是「作为值」的真落点；loading 是纯分支标志，读在条件里即成立。
+    for (const field of ['chats', 'errorText']) {
+      assert.equal(hasRenderSite(code, field), true, `@State ${field} 必须在 build()/@Builder 里有值落点`);
+    }
+    assert.match(code, /@Prop deepLinkId: string = '';/, '深链 prop 原样保留');
+    assert.match(code, /@Prop active: boolean = true;/, 'active prop 原样保留');
+    assert.match(code, /\.visibility\(this\.active \? Visibility\.Visible : Visibility\.Hidden\)/,
+      'Hidden 保活接线保留');
+    assert.equal((code.match(/aboutToAppear\(/g) ?? []).length, 1, '只读一次：只有一个 aboutToAppear');
+    assert.equal(/onPageShow\(/.test(code), false, '无 onPageShow');
+    const at = HOME_CODE.indexOf('DotsPane({');
+    assert.ok(at >= 0, 'Home 必须装配 DotsPane');
+    assert.deepEqual([...passedKeys(HOME_CODE.slice(at), 'DotsPane')].sort(), ['active', 'deepLinkId'],
+      '装配 props 双向齐全（少传 = 保活/深链断线）');
+    assert.match(code, /ForEach\(\s*this\.chats/, '真实会话数组必须经 ForEach 渲染');
+    assert.match(code, /router\.pushUrl\(\{ url: 'pages\/ChatDetail', params: params \}\)/, '只 push 只读详情');
+    assert.equal(/pushUrl\(\{\s*url:\s*'pages\/(Chats|Home|Settings)'/.test(code), false,
+      '不得 push 跨节页 / 设置根页');
   });
 });

@@ -39,7 +39,9 @@ const INDEX_ETS_CODE = INDEX_ETS
 // S4：外壳真值来源（新首页 = Home + ShellRail）。
 const HOME = readFileSync(join(etsDir, 'pages', 'Home.ets'), 'utf8');
 const PANE_DIR = join(etsDir, 'pages', 'panes');
-// mod-shell-instances-pane：远程 DSH 已是真 body，剩余占位只 dots / 云端对话两个。
+// mod-shell-instances-pane / mod-shell-cloud-chat-pane / mod-shell-dots-pane：四个面板都已落真只读正文。
+// SCAFFOLD_PANES 是历史数组名，保留只为固定 PANE_CODES 的下标：[0]=DotsPane、[1]=CloudChatPane；
+// 云端面板断言一字未动，dots 的 scaffold 断言逐条 retarget 为「真列表 + typed 禁用原因」。
 const SCAFFOLD_PANES = ['DotsPane.ets', 'CloudChatPane.ets']
   .map((name) => readFileSync(join(PANE_DIR, name), 'utf8'));
 const INSTANCES_SOURCE = readFileSync(join(PANE_DIR, 'InstancesPane.ets'), 'utf8');
@@ -176,13 +178,17 @@ describe('日程面板契约（S3 已迁入 SchedulePane.ets）：AI 汇总图�
 //   · 「✨ AI 汇总 / headerActionOne / onHeaderSummaryAction 绝迹」→ H-3：同样这些标识在外壳里绝迹；
 //   · 「首页无 tab / 汇总 / 列表重逻辑」→ H-4：Home 不复制 今日/未完成、summaryStore、RecordList —— 它们留在日程面板契约里。
 describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作', () => {
-  test('H-1 外壳页头标题 = 分段标签，唯一占位有带标签页头、日程 / 远程 / 云端用真页头', () => {
-    // 旧 PaneHeader builder 随 S3 抽壳落到占位文件里；mod-shell-instances-pane 与
-    // mod-shell-cloud-chat-pane 后只剩 dots 一个占位，其余三面改为「真页头」正向断言（不是删除）。
+  test('H-1 外壳页头标题 = 分段标签，dots 面板有带标签页头 + typed 禁用原因，另三面用真页头', () => {
+    // 旧 PaneHeader builder 随 S3 抽壳落到占位文件里；instances / cloud-chat / dots 三模块后四个面板都落真。
+    // old→new（收紧，非删除）：旧断言只要求「有一个 REASON_ 常量」，现在逐字钉住今天成立的 typed 原因
+    // 与其渲染点；正文已换成 chatStore+chatList 真列表（见新增 H-5）。
     const labels = ['dots'];
     labels.forEach((label, index) => {
       assert.match(PANE_CODES[index], new RegExp(`Text\\('${label}'\\)`), `缺少「${label}」分段标签`);
-      assert.match(PANE_CODES[index], /REASON_[A-Z]+/, `${label} 页头必须写出禁用原因`);
+      assert.match(PANE_CODES[index], /const REASON_DOTS: string = 'dots 指令尚未接线';/,
+        `${label} 页头必须写出今天成立的 typed 禁用原因`);
+      assert.match(PANE_CODES[index], /新建对话（\$\{REASON_DOTS\}）/,
+        `${label} 禁用动作必须显示「新建对话（原因）」`);
     });
     // mod-shell-cloud-chat-pane（old→new，收紧）：云端标题仍在，禁用原因 / 占位文案绝迹。
     assert.match(PANE_CODES[1], /Text\('云端对话'\)/, '云端面板页头仍有分段标题');
@@ -202,7 +208,7 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
     assert.match(RAIL, /label: '云端对话'/);
   });
 
-  test('H-2 设置出口唯一 + 四面板 pushUrl 正向清单：dots 0 / 日程 2 / 远程 2 / 云端 1（只到只读详情），且无跨节页', () => {
+  test('H-2 设置出口唯一 + 四面板 pushUrl 正向清单：dots 1 / 日程 2 / 远程 2 / 云端 1（只到只读详情），且无跨节页', () => {
     // 旧 headerActionTwo: '⚙ 设置' 的唯一出口属性 → 现在由 rail 齿轮 + 父页 openSettings 承担。
     assert.match(RAIL, /const SETTINGS_GLYPH: string = '⚙';/);
     assert.match(RAIL, /SettingsRow\(\) \{/, '齿轮行 builder 必须在 rail 里');
@@ -222,13 +228,17 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
       assert.equal(/headerActionTwo|onHeaderActionTwo|⚙ 设置|private openSettings/.test(text), false,
         `${file} 不得含有设置动作（唯一出口 = rail 齿轮）`);
     }
-    // 面板动作槽随 S3 抽壳搬进占位文件；远程 DSH 迁真后 4 → 3，mod-shell-cloud-chat-pane
-    // 再落真后 3 → 2（只剩 dots 动作槽 + dots 禁用输入框）。
+    // 面板动作槽随 S3 抽壳搬进占位文件；远程 DSH 迁真后 4 → 3，mod-shell-cloud-chat-pane 后 3 → 2。
+    // mod-shell-dots-pane（old→new，收紧）：dots 正文落真只读列表后，禁用输入框随 scaffold 删除，
+    // 只剩「新建对话」一处禁用动作（2 → 1），且逐字禁止任何输入框 / 发送假入口复活。
     const disabled = PANE_CODES.flatMap((code) => code.match(/\.enabled\(false\)/g) ?? []);
-    assert.equal(disabled.length, 2, '只剩 dots 动作槽 + 输入框各一处禁用；云端无禁用假入口');
+    assert.equal(disabled.length, 1, '只剩 dots「新建对话」动作一处禁用；云端无禁用假入口');
+    assert.equal(/TextInput\(|输入给 dots 的指令…|发送按钮/.test(PANE_CODES[0]), false,
+      'dots 面板已落真只读列表，不得保留禁用输入框 / 发送假入口（发指令属 mod-dots-readonly）');
     for (const [index, code] of PANE_CODES.entries()) {
       if (index === 0) {
-        assert.match(code, /\.enabled\(false\)/, 'dots 的主动作必须禁用（无假入口）');
+        assert.match(code, /Text\(`新建对话（\$\{REASON_DOTS\}）`\)[\s\S]{0,400}\.enabled\(false\)/,
+          'dots 的「新建对话」动作必须禁用并写出 typed 原因（无假入口）');
       } else {
         assert.equal(/\.enabled\(false\)/.test(code), false, '云端面板已落真，不得有禁用假入口');
       }
@@ -240,10 +250,11 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
     // blanket ban，云端落真后必须放行 pages/ChatDetail。这里不用「只禁三个目标」的宽松版收尾，
     // 而是补一张**逐面板正向清单**：次数 + 字面目标 + 非字面目标三项同时逐字钉住当前真值，
     // 任何面板多出第二处 pushUrl 或改了目标都会红；上面的跨节页 / 设置根页禁令原样保留。
-    // 真值来自当前源码：dots 0；日程 2（pages/Edit、pages/Detail）；
-    // 远程 2（动态 routeToRemote() 与 ROUTE_INSTANCES）；云端 1（pages/ChatDetail）。
+    // 真值来自当前源码：dots 1（只读详情，old→new：scaffold 0 → 真实列表 1）；
+    // 日程 2（pages/Edit、pages/Detail）；远程 2（动态 routeToRemote() 与 ROUTE_INSTANCES）；
+    // 云端 1（pages/ChatDetail）。其余三面板的清单逐字不动。
     const pushInventory = [
-      { name: 'DotsPane.ets', source: PANE_CODES[0], count: 0, literal: [], dynamic: [] },
+      { name: 'DotsPane.ets', source: PANE_CODES[0], count: 1, literal: ['pages/ChatDetail'], dynamic: [] },
       { name: 'SchedulePane.ets', source: code, count: 2, literal: ['pages/Edit', 'pages/Detail'], dynamic: [] },
       { name: 'InstancesPane.ets', source: INSTANCES_CODE, count: 2, literal: [],
         dynamic: ['routeToRemote()', 'ROUTE_INSTANCES'] },
@@ -263,8 +274,12 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
     assert.equal(/\.enabled\(false\)/.test(INSTANCES_CODE), false, '远程 DSH 主操作不再禁用');
     assert.equal(/pushUrl\(\{\s*url: 'pages\/Home'/.test(INSTANCES_CODE), false,
       '远程面板不得 pushUrl 到外壳页切段');
-    assert.match(PANE_CODES[0], /TextInput\(\{ placeholder: '输入给 dots 的指令…' \}\)[\s\S]{0,300}\.enabled\(false\)/,
-      'dots 输入框必须禁用（无假入口）');
+    // old→new（收紧）：旧断言钉「禁用输入框」；新真值是无输入框 —— 发指令尚未接线，
+    // 面板只保留一个带 typed 原因的禁用「新建对话」动作，绝不渲染假的输入 / 发送入口。
+    assert.equal(/TextInput\(|placeholder: '输入给 dots 的指令…'|pages\/Chats|pages\/Home/.test(PANE_CODES[0]), false,
+      'dots 面板不得有禁用输入框、假发送入口或跨节页跳转');
+    assert.match(PANE_CODES[0], /Text\(`新建对话（\$\{REASON_DOTS\}）`\)/,
+      'dots 的禁用动作必须仍在并携带 typed 原因');
   });
 
   test('H-3 旧页头 AI 图标标识在外壳里绝迹（负向断言不删，换锚点）', () => {
@@ -284,5 +299,20 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
     assert.equal(/headerActionTwo|onHeaderActionTwo/.test(code), false, '日程面板页头不得有设置动作');
     assert.match(source, /this\.SummaryCard\(\)/);
     assert.match(source, /AiPanel\(\) \{/);
+  });
+
+  // mod-shell-dots-pane（新增正向守卫）：dots 页头所在面板已是真列表，且没有假行 / 跨节导航。
+  test('H-5 dots 面板是真只读列表：ForEach(this.chats) + chatStore/chatList + 无假行', () => {
+    const dots = PANE_CODES[0];
+    assert.match(dots, /ForEach\(\s*this\.chats/, 'dots 面板必须 ForEach 真实会话数组');
+    assert.match(dots, /chatSummaryLine\(item\)/, '行摘要必须走纯模型，不是手写假文案');
+    for (const token of ['chatStore.prepare(', 'chatStore.listChats()', 'filterByKind(', 'sortChats(',
+      "PANE_KIND: ChatKind = 'dots'", 'ChatListResult']) {
+      assert.ok(dots.includes(token), `dots 面板必须复用 ${token}`);
+    }
+    for (const fake of ['RecordRow(', 'Checkbox(', '示例', 'Lorem', '假数据']) {
+      assert.equal(dots.includes(fake), false, `dots 面板不得出现假行标记「${fake}」`);
+    }
+    assert.equal(/JSON\.parse\(|readTextSync\(/.test(dots), false, '不得自行解析 JSON / 读文件');
   });
 });

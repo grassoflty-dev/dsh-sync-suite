@@ -40,7 +40,8 @@ const EDITOR_VIEW = readFileSync(new URL('../../entry/src/main/ets/components/Re
 const HOME = readFileSync(new URL('../../entry/src/main/ets/pages/Home.ets', import.meta.url), 'utf8')
 const SHELL_RAIL = readFileSync(new URL('../../entry/src/main/ets/components/shell/ShellRail.ets', import.meta.url), 'utf8')
 // S3：占位页头动作搬进各自文件，不再是 Home 的 @Builder。
-// mod-shell-instances-pane：远程 DSH 已迁真 body，剩余占位只 dots / 云端对话两个。
+// mod-shell-instances-pane / mod-shell-cloud-chat-pane / mod-shell-dots-pane：四面板全部落真；
+// 数组保留两个下标 [0]=DotsPane、[1]=CloudChatPane，云端断言一字未动，dots 断言逐条 retarget。
 const PANE_CODES = ['DotsPane.ets', 'CloudChatPane.ets'].map((name) =>
   stripComments(readFileSync(new URL(`../../entry/src/main/ets/pages/panes/${name}`, import.meta.url), 'utf8')))
 const INSTANCES_CODE = stripComments(readFileSync(
@@ -504,13 +505,16 @@ test('U-S1 外壳断点与 Index / PageLayout 同源：onAreaChange + resolveBre
   assert.equal(resolveBreakpoint(600, false), 'medium')
 })
 
-test('U-S2 外壳页头标题是分段标签；日程 pane 的相对日期标题契约仍在（不删旧断言）', () => {
-  // 旧 PaneHeader 四行调用随 S3 拆成：占位各自带标签页头 + 日程面板的真 PageLayout 页头。
-  // mod-shell-instances-pane 后远程 DSH 改为真页头正向断言（不是删除）。
+test('U-S2 外壳页头标题是分段标签；dots 保留 typed 禁用原因，日程 pane 相对日期契约仍在', () => {
+  // 旧 PaneHeader 四行调用随 S3 拆成：面板各自带标签页头 + 日程面板的真 PageLayout 页头。
+  // mod-shell-dots-pane（old→new，收紧）：旧断言只要求任意 REASON_ 常量，现在逐字钉住
+  // 今天成立的 typed 原因（发指令尚未接线），并要求禁用动作把它显示出来。
   const labels = ['dots']
   labels.forEach((label, index) => {
     assert.match(PANE_CODES[index], new RegExp(`Text\\('${label}'\\)`), `缺少分段标签「${label}」`)
-    assert.match(PANE_CODES[index], /REASON_[A-Z]+/, `「${label}」必须写出禁用原因`)
+    assert.match(PANE_CODES[index], /const REASON_DOTS: string = 'dots 指令尚未接线';/,
+      `「${label}」必须写出今天成立的 typed 禁用原因`)
+    assert.match(PANE_CODES[index], /新建对话（\$\{REASON_DOTS\}）/, `「${label}」禁用动作必须显示原因`)
   })
   // mod-shell-cloud-chat-pane（old→new，收紧）：云端标题仍在，禁用原因 / 占位文案绝迹。
   assert.match(PANE_CODES[1], /Text\('云端对话'\)/, '云端面板页头仍有分段标题')
@@ -554,8 +558,12 @@ test('U-S4 外壳只有一个设置出口：rail 齿轮 + 父页 openSettings，
   // 旧断言只数 Home 一处；新断言正向钉「外壳 + 四面板恰好一处，且位于 Home.ets」。
   assert.deepEqual(settingsPushFiles(), ['Home.ets'],
     '正向断言：Settings push 恰好一处、位于 Home.ets（rail 齿轮 → Home.openSettings）')
+  // mod-shell-dots-pane（old→new，收紧）：dots 正文落真后禁用输入框删除，禁用点 2 → 1；
+  // 仍逐字钉住「唯一禁用动作 = 新建对话 + typed 原因」，并禁止任何输入框 / 发送假入口复活。
   const disabled = PANE_CODES.flatMap((code) => code.match(/\.enabled\(false\)/g) ?? [])
-  assert.equal(disabled.length, 2, '只剩 dots 动作槽 + 输入框禁用（云端落真后 3→2）')
+  assert.equal(disabled.length, 1, '只剩 dots「新建对话」一处禁用（正文落真后 2→1）')
+  assert.equal(/TextInput\(|输入给 dots 的指令…|发送按钮/.test(PANE_CODES[0]), false,
+    'dots 面板无禁用输入框 / 假发送入口（发指令属 mod-dots-readonly）')
   assert.equal(/\.enabled\(false\)/.test(INSTANCES_CODE), false, '远程 DSH 主操作不再禁用')
   assert.equal(/\.enabled\(false\)/.test(PANE_CODES[1]), false, '云端面板落真后无禁用假入口')
   // 旧断言「Index 页头唯一动作 ⚙ 设置」→ 新断言：日程面板页头无设置动作（去重）。
@@ -631,4 +639,26 @@ test('U-S6 四面板页头无跨节导航：云端对话等分段只从 ShellRai
   // 唯一换段入口在外壳。
   assert.match(stripComments(HOME), /private selectSection\(section: ShellSection\)/)
   assert.match(stripComments(SHELL_RAIL), /onSelect: \(section: ShellSection\) => void/)
+})
+
+// mod-shell-dots-pane（新增正向守卫）：dots 分段落真后仍走同一套令牌 / 保活 / 唯一设置出口。
+test('U-S7 dots 面板是真列表：同款 chatStore/chatList 数据链 + ForEach 真行 + 令牌化 + 保活', () => {
+  const dots = PANE_CODES[0]
+  for (const token of ['chatStore.prepare(', 'chatStore.listChats()', 'filterByKind(',
+    "PANE_KIND: ChatKind = 'dots'", 'sortChats(', 'chatSummaryLine(item)', 'ForEach(\n        this.chats']) {
+    assert.ok(dots.includes(token), `dots 面板必须复用 ${token}`)
+  }
+  for (const fake of ['RecordRow(', 'Checkbox(', '示例', 'Lorem', '假数据', 'ForEach([', 'ForEach({']) {
+    assert.equal(dots.includes(fake), false, `dots 面板不得出现假行「${fake}」`)
+  }
+  for (const token of ['DIVIDER', 'FONT', 'LINE_HEIGHT', 'SPACING', 'TOUCH_MIN']) {
+    assert.match(dots, new RegExp(`\\b${token}\\b`), `dots 面板必须引用令牌 ${token}`)
+  }
+  assert.equal(/(?:#[0-9A-Fa-f]{3,8}|Color\.[A-Z]|rgba?\()/.test(dots), false, 'dots 面板不得写裸色值')
+  assert.match(dots, /@Prop deepLinkId: string = '';/, '深链 prop 不变')
+  assert.match(dots, /@Prop active: boolean = true;/, 'active prop 不变')
+  assert.match(dots, /\.visibility\(this\.active \? Visibility\.Visible : Visibility\.Hidden\)/, 'Hidden 保活不变')
+  assert.equal((dots.match(/aboutToAppear\(/g) ?? []).length, 1, '只读一次：只有一个 aboutToAppear')
+  assert.equal(/onPageShow\(/.test(dots), false, '无 onPageShow')
+  assert.deepEqual(settingsPushFiles(), ['Home.ets'], 'U-S4 不削弱：dots 面板不新增设置出口')
 })
