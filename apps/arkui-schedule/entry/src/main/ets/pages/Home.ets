@@ -34,8 +34,16 @@
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
+import { webview } from '@kit.ArkWeb';
 import { globalRefreshCoordinator, isRepoBlockedStatus } from '../model/homeGlobalRefresh';
 import type { RefreshCycleResult } from '../model/homeGlobalRefresh';
+import { isRepoConfigured } from '../model/repoConfigured';
+import type { RepoConfigInput } from '../model/repoConfigured';
+import { homeStartupSync, BRIDGE_NOT_READY_REASON } from '../model/homeStartupSync';
+import { GitBridgeHost } from '../components/GitBridgeHost';
+import { syncController } from '../services/syncController';
+import { settingsStore } from '../services/settingsStore';
+import type { ScheduleSettings } from '../services/settingsStore';
 import { bindBridgeRunner } from '../services/gitRunner';
 import { syncProtocolStore } from '../services/syncProtocolStore';
 import type { CycleResult } from '../services/syncProtocolStore';
@@ -62,6 +70,9 @@ import { InstancesPane } from './panes/InstancesPane';
 import { CloudChatPane } from './panes/CloudChatPane';
 
 // ---------------------------------------------------------------- 外壳页面
+
+/** 隐藏桥宿主的 1vp 尺寸：具名常量，避免把布局高度写死在源码里（U-S9 纪律）。 */
+const BRIDGE_HOST_SIZE: number = 1;
 
 /** 路由 `section` 参数的严格归一：未知值一律回落 dots（id 真值来自 S1）。 */
 function parseSection(value: string | undefined): ShellSection {
@@ -157,6 +168,40 @@ struct Home {
         this.statusRefreshTick = this.statusRefreshTick + 1;
       }
     });
+
+    // mod-home-startup-sync：真入口页冷启动自动同步（Legacy fallback pages/Index 的老接线
+    // 在 Home 上补齐）。这里只登记钩子并提出一次请求；桥未就绪时由 GitBridgeHost.onReady
+    // 兑现，绝不静默丢弃。重复 onPageShow / 重渲染不会再来第二个周期。
+    const abilityContext: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+    homeStartupSync.configure({
+      isBridgeReady: (): boolean => syncController.isReady(),
+      isConfigured: async (): Promise<boolean> => {
+        try {
+          const settings: ScheduleSettings = await settingsStore.load(abilityContext);
+          const input: RepoConfigInput = {
+            repoUrl: settings.repoUrl,
+            token: settings.token,
+            authMode: settings.authMode
+          };
+          // 与设置页 / 周期共用唯一已配置判据；隐私阻断不等于未配置，照样进周期由门禁拒推。
+          return isRepoConfigured(input);
+        } catch {
+          // 冷读失败 = 没有可证明的配置 ⇒ 零周期、零状态写入、零 toast。
+          return false;
+        }
+      },
+      // 唯一周期入口就是单飞协调器；Home 里没有第二处 runConfiguredCycle 调用。
+      runOnce: async (): Promise<void> => {
+        await globalRefreshCoordinator.runOnce();
+      },
+      reportFailure: (reason: string): void => {
+        // 唯一失败面：既有状态行（SyncStatusRow）；不弹 toast、不写第二份错误文案。
+        syncStatusStore.setFailed(reason);
+        this.statusRefreshTick = this.statusRefreshTick + 1;
+      }
+    });
+    homeStartupSync.request();
+
     try {
       const params = router.getParams() as Record<string, string>;
       if (params !== undefined && params !== null) {
@@ -181,6 +226,35 @@ struct Home {
    */
   onPageShow(): void {
     this.scheduleShowTick = this.scheduleShowTick + 1;
+    // 冷启动请求只在进程第一次生效；这里再调也不会多跑一个周期（无定时器 / 无轮询）。
+    homeStartupSync.request();
+  }
+
+  /**
+   * 隐藏桥就绪：沿用 `pages/Index.ets` 的 proven 顺序——GitBridgeHost 先交出控制器，
+   * `syncController.ensureStarted()` 把内核建好，再消费一次性启动请求。
+   *
+   * 未就绪不是静默跳过：ensureStarted 抛错 / 完成后 isReady() 仍为 false 都写一条 typed
+   * 原因到唯一状态行；不弹 toast、不重试、不建第二把闸。
+   */
+  private async onBridgeReady(controller: webview.WebviewController): Promise<void> {
+    try {
+      await syncController.ensureStarted(controller);
+    } catch {
+      homeStartupSync.onBridgeFail(BRIDGE_NOT_READY_REASON);
+      return;
+    }
+    if (syncController.isReady()) {
+      homeStartupSync.onBridgeReady();
+    } else {
+      homeStartupSync.onBridgeFail(BRIDGE_NOT_READY_REASON);
+    }
+  }
+
+  /** 桥加载失败：记住原因供下拉周期给出可读文案，并把启动失败落到状态行。 */
+  private onBridgeFail(message: string): void {
+    syncController.markBridgeFailed(message);
+    homeStartupSync.onBridgeFail(BRIDGE_NOT_READY_REASON);
   }
 
   /**
@@ -354,6 +428,21 @@ struct Home {
         })
           .visibility(this.drawerOpen ? Visibility.Visible : Visibility.None)
       }
+      // 同步/附件 zip 的隐藏桥（与 proven `pages/Index.ets` 同一份 GitBridgeHost + ensureStarted）：
+      // 1×1、全透明、不参与交互；就绪回调先建内核，再放行上面登记的冷启动请求。
+      GitBridgeHost({
+        onReady: (controller: webview.WebviewController) => {
+          this.onBridgeReady(controller);
+        },
+        onFail: (message: string) => {
+          this.onBridgeFail(message);
+        }
+      })
+        .width(BRIDGE_HOST_SIZE)
+        .height(BRIDGE_HOST_SIZE)
+        .opacity(0)
+        .position({ x: 0, y: 0 })
+        .hitTestBehavior(HitTestMode.None)
     }
     .width('100%')
     .height('100%')
