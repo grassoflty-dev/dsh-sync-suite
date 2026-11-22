@@ -152,6 +152,104 @@ function makeFakeReact() {
   }
 }
 
+/** r2：有状态 React 桩，供 merged-panel 测试走真实 RPC 链路（无 seedLink 种子）。 */
+function makeStatefulReact() {
+  const Fragment = Symbol('Fragment')
+  const react = {
+    Fragment,
+    createElement(type, props, ...children) {
+      const next = Object.assign({}, props)
+      const kids = flatten(children, [])
+      if (kids.length === 1) next.children = kids[0]
+      else if (kids.length > 1) next.children = kids
+      // 立即展开函数组件，让 hooks / useEffect 在 render() 内登记（真实 React 语义）。
+      if (typeof type === 'function') return type(next)
+      return { type, props: next }
+    },
+    useState(init) { return activeLeanMount.useState(init) },
+    useRef(value) { return activeLeanMount.useRef(value) },
+    useEffect(fn) { activeLeanMount.useEffect(fn) },
+    useMemo(fn) { return fn() },
+    useCallback(fn) { return fn },
+    Children: { toArray(value) { return flatten(Array.isArray(value) ? value : [value], []) } }
+  }
+  return react
+}
+
+let activeLeanMount = null
+function mountLean(Panel, props) {
+  const hooks = []
+  let cursor = 0
+  let pendingEffects = []
+  let rendering = false
+  let tree = null
+  function render() {
+    cursor = 0
+    pendingEffects = []
+    rendering = true
+    tree = Panel(props)
+    rendering = false
+    const effects = pendingEffects
+    pendingEffects = []
+    for (const effect of effects) effect()
+    return tree
+  }
+  const mount = {
+    useState(init) {
+      const index = cursor++
+      if (hooks[index] === undefined) hooks[index] = { value: typeof init === 'function' ? init() : init }
+      const hook = hooks[index]
+      return [hook.value, function (next) {
+        const value = typeof next === 'function' ? next(hook.value) : next
+        if (value === hook.value) return
+        hook.value = value
+        if (!rendering) render()
+      }]
+    },
+    useRef(value) {
+      const index = cursor++
+      if (hooks[index] === undefined) hooks[index] = { current: value }
+      return hooks[index]
+    },
+    useEffect(fn) {
+      const index = cursor++
+      if (hooks[index] === undefined) { hooks[index] = { ran: true }; pendingEffects.push(fn) }
+    },
+    render,
+    get tree() { return tree }
+  }
+  return mount
+}
+
+let leanLoadedPromise = null
+async function loadLeanPanel() {
+  if (!leanLoadedPromise) {
+    leanLoadedPromise = (async () => {
+      let captured = null
+      globalThis.window = { __ModuleLoader__: { load(cfg) { captured = cfg } } }
+      await import(pathToFileURL(clientDist).href + '?lean-r2=' + Date.now())
+      assert.ok(captured, 'client.js 必须调用 window.__ModuleLoader__.load')
+      const mod = captured.factory((id) => {
+        if (id === 'react') return makeStatefulReact()
+        throw new Error(`unexpected require: ${id}`)
+      })
+      let Panel = null
+      const ctx = {
+        effect(fn) { const d = fn(); return typeof d === 'function' ? d : function () {} },
+        locale: { register() { return function () {} }, bind() { return function (key) { return key } } },
+        slots: {
+          inject(name, cb) { assert.equal(name, 'settings.section'); cb(); return function () {} },
+          register(options, component) { Panel = component; return function () {} }
+        }
+      }
+      mod.apply(ctx)
+      assert.ok(Panel, '必须注册 settings.section')
+      return Panel
+    })()
+  }
+  return leanLoadedPromise
+}
+
 let loadedPromise = null
 
 async function loadClient() {
@@ -786,17 +884,28 @@ test('RemotePanel：令牌字段出现在 lan/ipv6/tailscale/uu（manual 没有�
 /* 5) 通过合并后的单页（不是第二个 section）证明远程控件仍在                     */
 /* -------------------------------------------------------------------------- */
 
-test('merged panel：远程组的二维码/自检/状态/令牌控件仍在同一页内可达', async () => {
-  const { mod } = await loadClient()
-  const sections = renderSections(mod)
-  assert.equal(sections.length, 1, '只有一个 settings.section')
-  // 直接挂唯一的合并面板，不绕过它去挂 RemotePanel。
-  const tree = sections[0].component({
+test('merged panel：精简远程组的二维码/自检/状态/令牌控件仍在同一页内可达（11 例保留 + 本例 retarget，无 seedLink）', async () => {
+  const Panel = await loadLeanPanel()
+  const calls = []
+  // r2：真实宿主只传 { t, close }；二维码 / 自检结果必须靠 RPC 自己拿。
+  globalThis.fetch = async function (url, options) {
+    const body = JSON.parse(options.body)
+    calls.push(body.action)
+    const data = body.action === 'remoteShowLink'
+      ? fakeLink()
+      : body.action === 'remoteProbe'
+        ? fakeProbe()
+        : fakeState()
+    return { status: 200, async text() { return JSON.stringify({ ok: true, data }) } }
+  }
+  activeLeanMount = mountLean(Panel, {
     t: (key) => (typeof zh[key] === 'string' ? zh[key] : key),
-    close() {},
-    seedState: fakeState(),
-    seedLink: fakeLink()
+    close() {}
   })
+  activeLeanMount.render()
+  for (let i = 0; i < 12; i += 1) await new Promise((resolve) => setTimeout(resolve, 5))
+  const tree = activeLeanMount.tree
+  assert.ok(calls.includes('remoteShowLink'), '真实面板必须自己调用 remoteShowLink')
   const group = groupOf(tree, 'dots-remote')
   const groupNodes = []
   walk(group.props.children, (node) => groupNodes.push(node))
@@ -804,7 +913,17 @@ test('merged panel：远程组的二维码/自检/状态/令牌控件仍在同�
   assert.equal(group.props.open, true, '远程组默认展开，控件首屏可达')
   assert.equal(groupNodes.filter((node) => node.type === 'svg').length, 1, '二维码必须仍由单页渲染')
   assert.equal(groupNodes.filter((node) => node.type === 'select').length, 1, '访问方式下拉仍在')
-  assert.equal(groupNodes.filter((node) => node.type === 'button').length, 9, '远程 9 个按钮全部保留')
+  assert.deepEqual(
+    groupNodes.filter((node) => node.type === 'select')[0].props.children.map((o) => o.props.value),
+    ['lan', 'tailscale', 'ipv6'],
+    '访问方式只有 局域网 / Tailscale / IPv6'
+  )
+  // retarget：原「远程 9 个按钮 / 4 个输入（含允许开关与监听地址）」→ 精简 3 按钮 / 2 输入。
+  assert.deepEqual(
+    groupNodes.filter((node) => node.type === 'button').map((node) => textOf(node.props.children)),
+    ['生成', '复制', '自检'],
+    '远程组只剩 生成 / 复制 / 自检'
+  )
   const inputs = groupNodes.filter((node) => node.type === 'input')
   assert.deepEqual(
     {
@@ -813,20 +932,26 @@ test('merged panel：远程组的二维码/自检/状态/令牌控件仍在同�
       password: inputs.filter((node) => node.props.type === 'password').length,
       checkbox: inputs.filter((node) => node.props.type === 'checkbox').length
     },
-    { text: 1, number: 1, password: 1, checkbox: 1 },
-    '监听地址 / 端口 / 令牌 / 允许开关四个输入仍在'
+    { text: 0, number: 1, password: 1, checkbox: 0 },
+    '只留端口(number) + 访问令牌(password)；监听地址与允许开关入口已删'
   )
+  const svgs = groupNodes.filter((node) => node.type === 'svg')
+  assert.equal(svgs[0].props['aria-label'], zh['lean.remote.qr'])
 
   const text = textOf(group)
   for (const expected of [
     '远程控制', // 页内分组标题
-    '运行中', '绑定地址', '被拒次数', '最近错误', // 状态
-    '需先准备', '图形化端口映射', // 访问方式前置说明
-    '通过', '注意', '失败', '无法自证', // 自检四档
-    '扫码打开', '用平板扫这个码', // 二维码
-    'rt_••••••••' // 打码令牌
+    '访问方式', '端口', '访问令牌', // 精简三字段
+    '生成', '复制', '自检', // 保留的动作
+    '注意', // 自检结果用既有 remote.probe.warn 文案（fakeState 的 probe.level=warn）
+    '部分可用：本机能绑上，平板可达未证实' // 自检结论仍是同一份真实数据
   ]) {
     assert.ok(text.includes(expected), `合并后远程组缺少「${expected}」`)
   }
+  // 被删的运行时状态 / 前置说明 / 操作步骤段落全部退场（旧正向断言改为负向守卫）。
+  for (const dead of ['运行中', '绑定地址', '被拒次数', '最近错误', '需先准备', '图形化端口映射', '怎么做', '用平板扫这个码']) {
+    assert.equal(text.includes(dead), false, `已删入口「${dead}」不得在精简远程组复现`)
+  }
+  assert.equal(groupNodes.filter((node) => node.type === 'p').length, 0, '不得有步骤说明段落')
   assert.equal(text.includes(TOKEN_PLAIN), false, '合并后仍不得出现令牌明文')
 })

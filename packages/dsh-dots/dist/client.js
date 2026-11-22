@@ -3,22 +3,16 @@
  *
  * Registers exactly ONE settings section (Settings → DSH-dots):
  *   slot `settings.section`, id `dots`, order 70, locale NS `dots`.
- *   Inside that single view the two capability groups are stacked on one page:
- *     「配置同步」(repository / scope / status / actions) then
- *     「远程控制」(listen address / access mode / token / self-check / QR).
+ *   The page contains exactly two stacked groups and nothing else (mod-plugin-lean-panel):
+ *     「配置同步」: 仓库地址 / 访问令牌 / 一行状态 / 保存 / 测试连接
+ *     「远程控制」: 访问方式 / 端口 / 访问令牌（生成 + 复制）/ 自检 / 二维码
  *
- * Contents:
- *   - repository form: platform / repoUrl / authMode / deviceId / branch / token
- *   - sync scope: config / providers / plugins / mcp (all enabled by default)
- *   - status badges: reachable (tri-state: reachable / unreachable-after-last-probe / not probed),
- *     branch, local commits, remote commit, pending upload/download (— when no upstream ref),
- *     conflict, latest commit (sha + message + time), last sync, local-read error
- *   - actions: save / test / push / preview / apply / refresh (all disabled while one is pending)
- *   - preview: grouped per source device, per-entry diff (monospace, collapsible, max-height),
- *     adopt-remote vs keep-local toggle, `manual` entries default unchecked
- *   - plugin manifest MERGE-only plan (install / keep / skip / noDowngrade)
- *   - pre-write snapshots with two-step rollback confirmation
- *   - inline errors (code + message), including "preview expired, re-preview" hints
+ * 精简口径（用户定版）：高级控件（同步范围复选框、平台 / 认证方式 / 设备标识 /
+ * 分支、预览 / 应用 / 回滚 / 快照、插件清单 MERGE 计划、逐步说明段落）**入口已删除**，
+ * 不是藏进开关。引擎能力零删除，这些功能在 UI 层 dormant（清单见 docs/MODULES.md §2）。
+ * 状态行只有一条：已同步 · HH:MM / 失败：<原因> / 未配置：缺少<字段> /
+ * 已配置（可见性阻断，禁止推送）/ 尚未同步 / 同步中…（沿用 App 语义）。
+ * 旧 SettingsPanel / RemotePanel 组件保留为 dormant 代码，不再挂到任何页面。
  *
  * Transport: same-origin POST /dsh-dots/rpc
  *   request  `{ action, ...payload }`
@@ -341,7 +335,33 @@ window.__ModuleLoader__.load({
       "rollback.snapshot": "快照 {id}",
       "rollback.reason": "原因：{reason}",
       "rollback.createdAt": "创建于 {time}",
-      "remote.notice.probed": "自检完成。"
+      "remote.notice.probed": "自检完成。",
+
+      // mod-plugin-lean-panel：精简面板专用文案（复用 App 的语义与字面，不造第二套说法）。
+      "lean.repo.url": "仓库地址",
+      "lean.repo.token": "访问令牌",
+      "lean.missing.url": "仓库地址",
+      "lean.missing.token": "访问令牌",
+      "lean.actions.save": "保存",
+      "lean.actions.test": "测试连接",
+      "lean.status.synced": "已同步 · {time}",
+      "lean.status.syncing": "同步中…",
+      "lean.status.failed": "失败：{reason}",
+      "lean.status.unconfigured": "未配置：缺少{missing}",
+      "lean.status.blocked": "已配置（可见性阻断，禁止推送）",
+      "lean.status.never": "尚未同步",
+      "lean.remote.mode": "访问方式",
+      "lean.remote.port": "端口",
+      "lean.remote.token": "访问令牌",
+      "lean.remote.generate": "生成",
+      "lean.remote.copy": "复制",
+      "lean.remote.selfcheck": "自检",
+      "lean.remote.qr": "二维码",
+      "lean.remote.mode.unselected": "尚未选择访问方式",
+      "lean.remote.probe.never": "尚未自检；点「自检」确认这台机器到底能不能被访问。",
+      "lean.mode.lan": "局域网",
+      "lean.mode.tailscale": "Tailscale",
+      "lean.mode.ipv6": "IPv6"
     }
 
     const en = {
@@ -640,7 +660,33 @@ window.__ModuleLoader__.load({
       "rollback.snapshot": "Snapshot {id}",
       "rollback.reason": "Reason: {reason}",
       "rollback.createdAt": "Created {time}",
-      "remote.notice.probed": "Check finished."
+      "remote.notice.probed": "Check finished.",
+
+      // mod-plugin-lean-panel: lean-panel copy (app semantics, no second wording scheme).
+      "lean.repo.url": "Repository URL",
+      "lean.repo.token": "Access token",
+      "lean.missing.url": "repository URL",
+      "lean.missing.token": "access token",
+      "lean.actions.save": "Save",
+      "lean.actions.test": "Test connection",
+      "lean.status.synced": "Synced · {time}",
+      "lean.status.syncing": "Syncing…",
+      "lean.status.failed": "Failed: {reason}",
+      "lean.status.unconfigured": "Not configured: missing {missing}",
+      "lean.status.blocked": "Configured (visibility blocked, push forbidden)",
+      "lean.status.never": "Never synced",
+      "lean.remote.mode": "Access mode",
+      "lean.remote.port": "Port",
+      "lean.remote.token": "Access token",
+      "lean.remote.generate": "Generate",
+      "lean.remote.copy": "Copy",
+      "lean.remote.selfcheck": "Self-check",
+      "lean.remote.qr": "QR code",
+      "lean.remote.mode.unselected": "No access mode selected yet",
+      "lean.remote.probe.never": "No check yet; click Self-check to see whether this machine is actually reachable.",
+      "lean.mode.lan": "LAN",
+      "lean.mode.tailscale": "Tailscale",
+      "lean.mode.ipv6": "IPv6"
     }
 
     const DICTS = { zh: zh, en: en }
@@ -1479,7 +1525,8 @@ window.__ModuleLoader__.load({
 
     function Input(props) {
       return h('input', {
-        type: props.type === 'password' ? 'password' : 'text',
+        // mod-plugin-lean-panel：端口需要原生 number 输入（旧远程面板一直用 number）。
+        type: props.type === 'password' || props.type === 'number' ? props.type : 'text',
         value: props.value === undefined || props.value === null ? '' : String(props.value),
         placeholder: asText(props.placeholder),
         disabled: Boolean(props.disabled),
@@ -1488,6 +1535,10 @@ window.__ModuleLoader__.load({
         onChange: function (event) {
           if (typeof props.onChange === 'function') props.onChange(event.target.value)
         },
+        // mod-plugin-lean-panel r2：远程令牌输入失焦即落盘（精简面板无独立保存按钮）。
+        onBlur: typeof props.onBlur === 'function'
+          ? function (event) { props.onBlur(event.target.value) }
+          : undefined,
         style: Object.assign({}, S.input, props.disabled ? S.inputDisabled : null)
       })
     }
@@ -4074,6 +4125,443 @@ window.__ModuleLoader__.load({
     }
 
     // ------------------------------------------------------------------
+    // mod-plugin-lean-panel：面板只保留两字段 + 两动作；远程只保留方式 / 端口 /
+    // 令牌 / 自检 / 二维码。功能的引擎实现一字未删，只是不再有 UI 入口（UI-dormant）。
+    // 这里**不**复用旧 SettingsPanel / RemotePanel：它们整块退出页面，避免任何
+    // 「藏进折叠 / 高级开关」的复活路径。旧组件仅作为 dormant 代码留在文件后段。
+    // ------------------------------------------------------------------
+    /** 把 ISO 时间折成 App 同款 `HH:MM`（本地时钟），没有可信时刻就返回空串。 */
+    function fmtClock(value) {
+      if (typeof value !== 'string' || value === '') return ''
+      try {
+        const d = new Date(value)
+        if (isNaN(d.getTime())) return value.slice(0, 16)
+        const hh = String(d.getHours()).padStart(2, '0')
+        const mm = String(d.getMinutes()).padStart(2, '0')
+        return hh + ':' + mm
+      } catch (e) {
+        return String(value).slice(0, 16)
+      }
+    }
+
+    /**
+     * 把 host 的两份权威返回体归一成状态行的唯一输入。
+     *
+     * 关键教训（review M2）：`SyncSettings`（settings.json 的持久化形状）**没有** hasToken。
+     * `getState` 把 `hasToken` 挂在 settings 视图上，`saveSettings` 把它挂在顶层。
+     * 所以这里显式读这两个**真实存在**的位置，绝不从持久化字段里臆造「令牌已保存」或
+     * 「令牌缺失」；`status`（含 blocked / lastSyncAt）原样透传，保存动作无权清空它。
+     */
+    function leanStateView(state, knownTokenPresent) {
+      const data = state && typeof state === 'object' ? state : {}
+      const settings = data.settings && typeof data.settings === 'object' ? data.settings : {}
+      const status = data.status && typeof data.status === 'object' ? data.status : {}
+      const tokenPresent =
+        settings.hasToken === true || data.hasToken === true || knownTokenPresent === true
+      return { settings: settings, status: status, tokenPresent: tokenPresent }
+    }
+
+    /**
+     * 唯一状态行：复用 App 的语义与字面——
+     *   `已同步 · HH:MM` / `失败：<原因>` / `未配置：缺少<字段>` /
+     *   `已配置（可见性阻断，禁止推送）` / `尚未同步` / `同步中…`。
+     * 不新增第二套措辞，也不把「保存成功」冒充「已同步」。
+     * `tokenPresent` 必须来自 leanStateView 的权威归一（不读不存在的持久化字段）。
+     */
+    function leanStatusText(translate, settings, status, tokenPresent, busy, failure) {
+      const cfg = settings && typeof settings === 'object' ? settings : {}
+      const st = status && typeof status === 'object' ? status : {}
+      if (busy === 'save' || busy === 'test' || busy === 'probe') return translate('lean.status.syncing')
+      const missing = []
+      if (asText(cfg.repoUrl).trim() === '') missing.push(translate('lean.missing.url'))
+      if (tokenPresent !== true) missing.push(translate('lean.missing.token'))
+      if (missing.length) return translate('lean.status.unconfigured', { missing: missing.join('、') })
+      // 隐私闸是「已配置但不能推」的独立问题：宿主给出 blocked 标记时照 App 原句显示。
+      if (st.visibilityBlocked === true || st.privacyBlocked === true || st.repoBlocked === true) {
+        return translate('lean.status.blocked')
+      }
+      const errText =
+        asText(failure) ||
+        (typeof st.error === 'string' ? st.error : asText(st.error && st.error.message))
+      if (errText) return translate('lean.status.failed', { reason: errText })
+      if (st.lastSyncAt) return translate('lean.status.synced', { time: fmtClock(st.lastSyncAt) })
+      return translate('lean.status.never')
+    }
+
+    /** 配置同步组：仓库地址 + 访问令牌 + 一行状态 + 保存 / 测试连接。 */
+    function LeanSyncGroup(props) {
+      const tr = makeT(props)
+      const seedState = props && props.seedState && typeof props.seedState === 'object' ? props.seedState : null
+      const [state, setState] = React.useState(seedState)
+      const [repoUrl, setRepoUrl] = React.useState(
+        seedState && seedState.settings ? asText(seedState.settings.repoUrl) : ''
+      )
+      const [token, setToken] = React.useState('')
+      const [hasToken, setHasToken] = React.useState(
+        seedState && seedState.settings ? seedState.settings.hasToken === true : false
+      )
+      const [busy, setBusy] = React.useState('')
+      const [failure, setFailure] = React.useState('')
+
+      React.useEffect(function () {
+        if (seedState !== null) return function () {}
+        let stopped = false
+        Promise.resolve(rpcCall('getState', {})).then(function (result) {
+          if (stopped || !result.ok) return
+          setState(result.data)
+          if (result.data && result.data.settings) {
+            setRepoUrl(asText(result.data.settings.repoUrl))
+            setHasToken(result.data.settings.hasToken === true)
+          }
+        })
+        return function () { stopped = true }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [])
+
+      async function doSave() {
+        if (busy) return
+        setBusy('save')
+        setFailure('')
+        try {
+          // 分支固定 main；设备标识 / 平台由 host 归一时推导，界面永不询问。
+          const result = await rpcCall('saveSettings', {
+            settings: { repoUrl: repoUrl, branch: 'main' },
+            token: token === '' ? undefined : token
+          })
+          if (!result.ok) {
+            setFailure(localizeError(tr, result.error).message)
+            return
+          }
+          if (result.data) {
+            // review M2：saveSettings 只回 {settings, hasToken}，没有 status。
+            // 合并进旧 state 而不是整体替换，保住隐私闸 blocked 与真实的 lastSyncAt；
+            // 令牌存在性只认 host 返回的权威 hasToken（顶层），不从 settings 里猜。
+            setState(function (prev) {
+              const base = prev && typeof prev === 'object' ? prev : {}
+              return Object.assign({}, base, {
+                settings: result.data.settings,
+                status: base.status || {}
+              })
+            })
+            setHasToken(result.data.hasToken === true)
+          }
+          setToken('')
+        } finally {
+          setBusy('')
+        }
+      }
+
+      async function doTest() {
+        if (busy) return
+        setBusy('test')
+        setFailure('')
+        try {
+          const result = await rpcCall('testConnection', {})
+          if (!result.ok) {
+            setFailure(localizeError(tr, result.error).message)
+            return
+          }
+          // 测试连接只是探测，绝不是同步：不写 lastSyncAt，不伪造「已同步」。
+          const fresh = await rpcCall('getState', {})
+          if (fresh.ok) setState(fresh.data)
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const view = leanStateView(state, hasToken)
+      const line = leanStatusText(tr, view.settings, view.status, view.tokenPresent, busy, failure)
+
+      return h(
+        'div',
+        { style: S.groupBody },
+        h(
+          Field,
+          { label: tr('lean.repo.url') },
+          h(Input, {
+            value: repoUrl,
+            disabled: Boolean(busy),
+            onChange: function (value) { setRepoUrl(value) }
+          })
+        ),
+        h(
+          Field,
+          { label: tr('lean.repo.token') },
+          h(Input, {
+            type: 'password',
+            value: token,
+            autoComplete: 'new-password',
+            disabled: Boolean(busy),
+            onChange: function (value) { setToken(value) }
+          })
+        ),
+        h('div', { role: 'status', 'data-lean': 'sync-status', style: S.hint }, line),
+        h(
+          'div',
+          { style: S.row },
+          h(Btn, {
+            label: tr('lean.actions.save'),
+            primary: true,
+            disabled: Boolean(busy),
+            onClick: doSave
+          }),
+          h(Btn, {
+            label: tr('lean.actions.test'),
+            disabled: Boolean(busy),
+            onClick: doTest
+          })
+        )
+      )
+    }
+
+    /**
+     * 远程控制组：访问方式 + 端口 + 令牌（生成 / 复制）+ 自检 + 二维码。
+     *
+     * review M1 修正：**没有 seedLink 测试接缝**。二维码链接只能由真实 RPC
+     * `remoteShowLink` 取得——它在宿主传入的真实 props（只有 t / close）下于首次挂载时
+     * 取一次，换方式 / 生成令牌 / 复制时再取。令牌输入在失焦时经 `remoteSaveSettings`
+     * 落盘，`生成` 走 `remoteRotateToken`，`复制` 复制 RPC 返回的**真实含令牌地址**
+     * （明文只进剪贴板，永不进 DOM）。因此三个控件在真实面板里都是活的。
+     */
+    function LeanRemoteGroup(props) {
+      const tr = makeT(props)
+      const seedState = props && props.seedState && typeof props.seedState === 'object' ? props.seedState : null
+      const seedSettings = seedState && seedState.settings && typeof seedState.settings === 'object' ? seedState.settings : {}
+      const [state, setState] = React.useState(seedState)
+      // r2-d1：不在本地默认 lan；方式只能来自 host，没拿到就是未选择（中性态）。
+      const [mode, setMode] = React.useState(asText(seedSettings.mode))
+      const [port, setPort] = React.useState(typeof seedSettings.port === 'number' ? seedSettings.port : 0)
+      const [token, setToken] = React.useState('')
+      const [link, setLink] = React.useState(null)
+      const [probe, setProbe] = React.useState(seedState && seedState.status ? seedState.status.probe : null)
+      const [busy, setBusy] = React.useState('')
+      const [failure, setFailure] = React.useState('')
+      const booted = React.useRef(false)
+
+      /** 唯一的链接来源：remoteShowLink 的返回体（含 token 与二维码矩阵）。 */
+      async function loadLink(currentMode) {
+        const shown = await rpcCall('remoteShowLink', { mode: currentMode })
+        if (!shown.ok) {
+          setFailure(localizeError(tr, shown.error).message)
+          return false
+        }
+        if (!shown.data || typeof shown.data.url !== 'string' || !shown.data.qr) {
+          setFailure({ code: 'E_BAD_RESPONSE', message: tr('error.badResponse') })
+          return false
+        }
+        setLink(shown.data)
+        return true
+      }
+
+      React.useEffect(function () {
+        if (booted.current) return function () {}
+        booted.current = true
+        let stopped = false
+        Promise.resolve((async function () {
+          let hostMode = asText(seedSettings.mode)
+          if (seedState === null) {
+            const result = await rpcCall('remoteGetState', {})
+            if (stopped || !result.ok) return
+            setState(result.data)
+            if (result.data && result.data.settings) {
+              const s = result.data.settings
+              // r2-d1：mode 只认 host 的真实值，缺失就留空，绝不用 lan 顶替。
+              hostMode = asText(s.mode)
+              setMode(hostMode)
+              setPort(typeof s.port === 'number' ? s.port : 0)
+            }
+            if (result.data && result.data.status && result.data.status.probe) setProbe(result.data.status.probe)
+          }
+          // r2-d1：没有权威方式就不请求链接（否则会画出错误的 LAN 二维码）。
+          if (hostMode === '') return
+          // 真实面板必须自己拿到链接；没有任何 props 可以提供二维码。
+          await loadLink(hostMode)
+        })()).catch(function () { /* rpcCall 不抛；这里只兜住意外 */ })
+        return function () { stopped = true }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [])
+
+      async function runTask(key, task) {
+        if (busy) return
+        setBusy(key)
+        setFailure('')
+        try {
+          await task()
+        } finally {
+          setBusy('')
+        }
+      }
+
+      /**
+       * 令牌 / 方式 / 端口的真实写入口：用户真的编辑了才保存（精简面板不单列保存按钮）。
+       * r2-d2：`nextMode` 显式传入时才用它；方式切换必须在 loadLink(newMode) 成功后才
+       * 落盘，绝不把旧的闭包 mode 写回去。
+       */
+      async function persist(nextToken, nextMode) {
+        const settings = { mode: nextMode === undefined ? mode : nextMode, port: port }
+        if (nextToken !== '') settings.token = nextToken
+        const result = await rpcCall('remoteSaveSettings', { settings: settings })
+        if (!result.ok) {
+          setFailure(localizeError(tr, result.error).message)
+          return false
+        }
+        if (result.data) {
+          setState(function (prev) {
+            const base = prev && typeof prev === 'object' ? prev : {}
+            return Object.assign({}, base, {
+              settings: result.data.settings || base.settings,
+              status: result.data.status || base.status || {},
+              modes: result.data.modes || base.modes
+            })
+          })
+          if (result.data.status && result.data.status.probe) setProbe(result.data.status.probe)
+        }
+        setToken('')
+        return true
+      }
+
+      function doSelfCheck() {
+        runTask('probe', async function () {
+          // 先把用户刚填的令牌 / 方式 / 端口落盘，自检才针对真实配置。
+          if (!(await persist(token))) return
+          const result = await rpcCall('remoteProbe', { mode: mode })
+          if (!result.ok) {
+            setFailure(localizeError(tr, result.error).message)
+            return
+          }
+          if (result.data) setProbe(result.data)
+        })
+      }
+
+      function doGenerate() {
+        runTask('rotate', async function () {
+          const result = await rpcCall('remoteRotateToken', {})
+          if (!result.ok) {
+            setFailure(localizeError(tr, result.error).message)
+            return
+          }
+          if (result.data) setState(function (prev) {
+            return Object.assign({}, prev && typeof prev === 'object' ? prev : {}, { status: result.data })
+          })
+          setToken('')
+          // 旧二维码立即失效：用轮换后的令牌重新取链接，保证二维码永远可见。
+          await loadLink(mode)
+        })
+      }
+
+      function doCopy() {
+        runTask('copy', async function () {
+          let url = link && typeof link.url === 'string' ? link.url : ''
+          if (url === '') {
+            if (!(await loadLink(mode))) return
+            url = link && typeof link.url === 'string' ? link.url : ''
+          }
+          if (url === '') return
+          try {
+            const clip = typeof navigator === 'undefined' ? null : navigator.clipboard
+            if (clip && typeof clip.writeText === 'function') {
+              const pending = clip.writeText(url)
+              if (pending && typeof pending.catch === 'function') pending.catch(function () {})
+            }
+          } catch (e) {
+            /* 静默失败：绝不把含令牌的地址降级渲染进 DOM。 */
+          }
+        })
+      }
+
+      const qr = link && link.qr && typeof link.qr === 'object' ? link.qr : null
+      const probeLevel = probe && typeof probe === 'object' ? asText(probe.level) : ''
+      const probeLine = probe && typeof probe === 'object'
+        ? asText(probe.verdict) || asText(probe.message) || ''
+        : ''
+      const probeLabel = probeLevel ? tr('remote.probe.' + probeLevel) : ''
+      const status = (state && state.status) || {}
+      const statusLine = mode === ''
+        ? tr('lean.remote.mode.unselected')
+        : failure
+        ? failure
+        : status.visibilityBlocked === true || status.privacyBlocked === true || status.repoBlocked === true
+          ? tr('lean.status.blocked')
+          : probeLevel
+            ? (probeLabel ? probeLabel + ' · ' : '') + probeLine
+            : tr('lean.remote.probe.never')
+
+      return h(
+        'div',
+        { style: S.groupBody },
+        h(
+          Field,
+          { label: tr('lean.remote.mode') },
+          h(Select, {
+            value: mode,
+            disabled: Boolean(busy),
+            options: [
+              { value: 'lan', label: tr('lean.mode.lan') },
+              { value: 'tailscale', label: tr('lean.mode.tailscale') },
+              { value: 'ipv6', label: tr('lean.mode.ipv6') }
+            ],
+            onChange: function (value) {
+              setMode(value)
+              // r2-d2：切方式只先取新链接；取成功后才把**新**方式落盘，绝不保存旧 mode。
+              runTask('link', async function () {
+                if (await loadLink(value)) await persist('', value)
+              })
+            }
+          })
+        ),
+        h(
+          Field,
+          { label: tr('lean.remote.port') },
+          h(Input, {
+            type: 'number',
+            value: String(port),
+            disabled: Boolean(busy),
+            onChange: function (value) {
+              const digits = String(value).replace(/[^0-9]/g, '')
+              const n = digits === '' ? 0 : Number(digits)
+              setPort(isFinite(n) && n > 0 ? Math.min(65535, Math.floor(n)) : 0)
+            },
+            // r2-d2：只有用户真的编辑了端口才落盘；不碰方式。
+            onBlur: function () {
+              runTask('save', async function () { await persist(token); await loadLink(mode) })
+            }
+          })
+        ),
+        h(
+          Field,
+          { label: tr('lean.remote.token') },
+          h(Input, {
+            type: 'password',
+            value: token,
+            autoComplete: 'new-password',
+            disabled: Boolean(busy),
+            onChange: function (value) { setToken(value) },
+            onBlur: function () {
+              runTask('save', async function () { await persist(token); await loadLink(mode) })
+            }
+          })
+        ),
+        h(
+          'div',
+          { style: S.row },
+          h(Btn, { label: tr('lean.remote.generate'), disabled: Boolean(busy), onClick: doGenerate }),
+          h(Btn, { label: tr('lean.remote.copy'), disabled: Boolean(busy), onClick: doCopy })
+        ),
+        h(
+          'div',
+          { role: 'status', 'data-lean': 'remote-status', style: S.hint },
+          statusLine
+        ),
+        h(
+          'div',
+          { style: S.row },
+          h(Btn, { label: tr('lean.remote.selfcheck'), disabled: Boolean(busy), onClick: doSelfCheck })
+        ),
+        h(QrMatrix, { qr: qr, label: tr('lean.remote.qr') })
+      )
+    }
+
+    // ------------------------------------------------------------------
     // 单一条目 DSH-dots：两组能力在同一页内纵向堆叠（不是 tab，不是第二个视图）。
     // 折叠只是页内的空间管理：默认都展开，控件始终属于同一个 settings.section。
     // `dots-remote` 只保留为远程分组的内部 id，不再注册 settings.section。
@@ -4083,22 +4571,23 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { style: S.root },
-        h('h2', { style: S.panelTitle }, tr('panel.title')),
         h(
           'details',
           { id: 'dots', open: true, style: S.group },
           h('summary', { style: S.groupSummary }, tr('group.sync')),
-          h('div', { style: S.groupBody }, h(SettingsPanel, props))
+          h(LeanSyncGroup, props)
         ),
         h(
           'details',
           { id: 'dots-remote', open: true, style: S.group },
           h('summary', { style: S.groupSummary }, tr('group.remote')),
-          h('div', { style: S.groupBody }, h(RemotePanel, props))
+          h(LeanRemoteGroup, props)
         )
       )
     }
-    // 内部测试接缝：两个原有面板仍以原样渲染，测试可单独挂载它们做控件回归。
+    // 内部测试接缝：精简组件供清单守卫单独挂载；旧面板仅作 dormant 代码保留。
+    DotsPanel.LeanSyncGroup = LeanSyncGroup
+    DotsPanel.LeanRemoteGroup = LeanRemoteGroup
     DotsPanel.SettingsPanel = SettingsPanel
     DotsPanel.RemotePanel = RemotePanel
 

@@ -280,7 +280,7 @@ test('卡片字段默认值与 host settings 定义一致（平台/认证/分支
   )
 })
 
-test('merged panel：同步组仍在同一个面板里渲染全部仓库/范围/状态/动作控件', async () => {
+test('merged panel：同步组精简为地址/令牌/状态/两动作（旧断言 retarget，旧能力 UI-dormant）', async () => {
   const { mod } = await loadClient()
   const { tree, registered } = renderPanel(mod)
   assert.equal(registered.length, 1, '只允许一个 settings.section')
@@ -289,16 +289,28 @@ test('merged panel：同步组仍在同一个面板里渲染全部仓库/范围/
   assert.ok(textOf(group.props.children).includes('T:group.sync'), '页内分组标题必须取 group.sync（配置同步）')
 
   const { counts, labels, buttonLabels, inputs } = collect(group.props.children)
-  assert.equal(counts.select, 2, '平台与认证方式两个下拉框仍在')
-  assert.equal(counts.input, 9, '5 个文本/密码输入 + 4 个 scope 勾选框仍在')
-  assert.equal(inputs.filter((p) => p.type === 'checkbox').length, 4)
-  assert.equal(inputs.filter((p) => p.type === 'password').length, 1)
-  assert.ok(counts.button >= 8, `同步按钮至少 8 个，实际 ${counts.button}`)
-  for (const key of ['repo.platform', 'repo.auth', 'repo.url', 'scope.config', 'scope.mcp']) {
+  // retarget：原「2 个下拉 / 9 个输入 / 4 个复选框 / ≥8 按钮」改为精简面板的精确上限。
+  assert.equal(counts.select || 0, 0, '同步组不再有平台 / 认证方式下拉')
+  assert.equal(counts.input, 2, '同步组只有仓库地址 + 访问令牌两个输入')
+  assert.deepEqual(inputs.map((p) => p.type), ['text', 'password'])
+  assert.equal(inputs.filter((p) => p.type === 'checkbox').length, 0, '同步范围复选框已删除入口')
+  assert.deepEqual(buttonLabels, ['T:lean.actions.save', 'T:lean.actions.test'], '只剩 保存 / 测试连接')
+
+  for (const key of ['lean.repo.url', 'lean.repo.token']) {
     assert.ok(labels.some((label) => label.includes(`T:${key}`)), `合并后缺少字段 ${key}`)
   }
-  for (const key of ['repo.save', 'actions.test', 'actions.push', 'actions.preview', 'actions.apply']) {
-    assert.ok(buttonLabels.some((label) => label.includes(`T:${key}`)), `合并后缺少按钮 ${key}`)
+  const statusNodes = []
+  walk(group.props.children, (node) => {
+    if (node.props && node.props['data-lean'] === 'sync-status') statusNodes.push(node)
+  })
+  assert.equal(statusNodes.length, 1, '合并后同步组只有一条状态行')
+
+  // 被删控件一个都不许回来（旧断言逐项 retarget 成负向守卫，不是删掉）。
+  // 本桩的 t 返回 T:<key>，所以用「标签 + 按钮 + 输入类型」做精确判据。
+  const rendered = labels.concat(buttonLabels).join('|')
+  for (const dead of ['T:scope.', 'T:repo.platform', 'T:repo.auth', 'T:repo.branch', 'T:repo.device',
+    'T:actions.preview', 'T:actions.apply', 'T:actions.rollbackLatest', 'T:plugins.', 'T:snapshots.']) {
+    assert.equal(rendered.includes(dead), false, `已删除入口「${dead}」不得复现`)
   }
   // 远程组必须和同步组同处一个面板，而不是另一个 section。
   assert.ok(groupOf(tree, 'dots-remote'), '远程控制分组必须在同一个单页内')
