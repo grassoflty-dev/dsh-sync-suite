@@ -175,6 +175,32 @@ inside git's output.
   reported in the notice bar**; `gitlab.com` becomes "Custom". An explicit Gitee/Custom choice is
   never overridden.
 
+### 4.5 Save-time repository precheck (fail closed)
+
+`saveSettings` performs one authenticated vendor-API read **before** touching `settings.json` or
+`credentials.json`:
+
+- Gitee `GET https://gitee.com/api/v5/repos/{owner}/{repo}` with `Authorization: token <token>`;
+- GitHub `GET https://api.github.com/repos/{owner}/{repo}` with `Authorization: Bearer <token>`;
+- any other host is refused without sending a request (`E_REPO_HOST_UNSUPPORTED`). We never assume
+  an unverifiable repository is private.
+
+Only an explicit `private: true` passes. The typed codes and the Chinese messages are a byte-for-byte
+mirror of the app's `model/repoVisibility.ts`; `test-vectors/repo-visibility/` (SHA256SUMS pinned) is
+the shared source of truth: `E_REPO_AUTH` (401/403), `E_REPO_NOT_FOUND` (404), `E_REPO_PUBLIC`
+(`private:false`), `E_REPO_BAD_RESPONSE` (missing/non-boolean `private`, HTML, malformed body),
+`E_REPO_HOST_UNSUPPORTED`, and `E_REPO_VISIBILITY_UNKNOWN` (network error/timeout/5xx).
+
+**Fail closed is intentional.** If the vendor API is unreachable the save is refused with
+`E_REPO_VISIBILITY_UNKNOWN` and a retry-able Chinese message. Nothing is half-configured: on any
+failure `settings.json` and `credentials.json` stay byte-identical, no clone directory is created,
+and the typed code is recorded in `state.json` so `getState().status.repoBlockCode` never claims a
+broken repository is healthy. A later clone failure (rotated/revoked token) updates the same code and
+cleans up its quarantine directory, leaving neither `.git` nor `.git.clone-failed-*`. Only
+`allowLocalRepo` (integration-test-only escape hatch for local bare repositories, which have no
+vendor API) skips this gate. The token is only ever placed in the `Authorization` header — never in a
+URL, error body, log line, or state dump.
+
 ## 5. Restore flow (fail-closed, four layers)
 
 ```

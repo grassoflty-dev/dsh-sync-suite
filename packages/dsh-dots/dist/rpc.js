@@ -14,6 +14,9 @@ import { collectLocal, isFileInScope, pluginsOf, serializeManifest, SYNC_FILE_NA
 import { diffFiles, diffText } from './engine/diff.js';
 import { SyncError, errorMessage, isSyncError, toRpcError } from './engine/errors.js';
 import { GitRepo } from './engine/git.js';
+// mod-plugin-repo-precheck：保存前门禁。码 / 中文文案与 App 的 model/repoVisibility.ts 镜像一致，
+// 不 import apps/**；失败时 typed 码同时进 RPC 错误体与 state.json 的 status.repoBlockCode。
+import { E_REPO_AUTH, E_REPO_VISIBILITY_UNKNOWN, createFetchTransport, fetchRepoVisibility, repoPrecheckError, repoTargetFromUrl, } from './remote/repoVisibility.js';
 import { detectDshVersion, repoHash, resolveProfileDir, statePaths } from './engine/paths.js';
 import { PreviewCache, buildPreview, fileDiffOfPreview, settingsFingerprint } from './engine/preview.js';
 import { applySelected, previewRollback, rollbackSnapshot } from './engine/restore.js';
@@ -61,6 +64,8 @@ export function createRpcService(options = {}) {
     const grants = options.remoteTools?.grants ?? new GrantStore({ homeDir: options.homeDir, now });
     const remoteFetch = options.remoteTools?.fetch ??
         ((url, init) => fetch(url, init));
+    const precheckTransport = createFetchTransport(options.repoPrecheckFetch ??
+        ((url, init) => fetch(url, init)));
     let queue = Promise.resolve();
     let disposed = false;
     function enqueue(task) {
@@ -74,7 +79,30 @@ export function createRpcService(options = {}) {
             throw new SyncError('E_VALIDATION', '尚未配置仓库地址');
         return settings;
     }
-    async function withRepo(settings, task) {
+    /**
+     * 把网络 / clone 失败收敛成 App 同词汇的 typed 码；本地工具缺失（git-missing）不算仓库阻断。
+     * 只返回码字符串，不带出任何错误正文（正文可能含远端回显的凭据）。
+     */
+    function repoCodeOfError(error) {
+        if (!isSyncError(error))
+            return null;
+        if (error.code.startsWith('E_REPO_'))
+            return error.code;
+        if (error.code === 'E_AUTH')
+            return E_REPO_AUTH;
+        if (error.code !== 'E_GIT')
+            return null;
+        const details = error.details;
+        if (details !== null && typeof details === 'object') {
+            const record = details;
+            if (record.reason === 'git-missing')
+                return null;
+        }
+        // 网络失败 / 超时 / clone 403 之外的一切 git 失败都按「无法确认」处理：
+        // 绝不因为读不到远端就假装配置仍然健康。
+        return E_REPO_VISIBILITY_UNKNOWN;
+    }
+    async function withRepo(settings, task, options2 = {}) {
         const token = store.readToken();
         const repo = new GitRepo({
             dir: workDirOf(settings),
@@ -88,7 +116,30 @@ export function createRpcService(options = {}) {
             ...(options.networkTimeoutMs !== undefined ? { networkTimeoutMs: options.networkTimeoutMs } : {}),
         });
         try {
-            return await task(repo, token);
+            const result = await task(repo, token);
+            if (options2.recordRepoError !== false) {
+                try {
+                    stateStore.writeRepoError(null);
+                }
+                catch {
+                    /* state.json 只是 UI 事实，写失败不影响同步结果 */
+                }
+            }
+            return result;
+        }
+        catch (error) {
+            if (options2.recordRepoError !== false) {
+                const code = repoCodeOfError(error);
+                if (code !== null) {
+                    try {
+                        stateStore.writeRepoError(code);
+                    }
+                    catch {
+                        /* state.json 写失败不改变本次失败本身 */
+                    }
+                }
+            }
+            throw error;
         }
         finally {
             await repo.dispose();
@@ -159,6 +210,7 @@ export function createRpcService(options = {}) {
             remotePending: null,
             conflict: false,
             lastSyncAt: stateStore.readLastSyncAt(),
+            repoBlockCode: stateStore.readRepoError(),
         };
         const snapshotList = snapshots.list();
         if (settings.repoUrl === '') {
@@ -181,7 +233,7 @@ export function createRpcService(options = {}) {
                 status.remotePending = local.behind;
                 // 只有"双方各有对方没有的提交"才算分叉冲突；单纯落后（可直接快进/自动 rebase）不是冲突。
                 status.conflict = local.ahead !== null && local.behind !== null && local.ahead > 0 && local.behind > 0;
-            });
+            }, { recordRepoError: false });
         }
         catch (error) {
             // 只有本地读取失败（工作副本损坏、git 不可用等）才进 error。
@@ -202,9 +254,31 @@ export function createRpcService(options = {}) {
         const previous = store.readSettings();
         const next = normalizeSettings(payload.settings, previous, { allowLocalRepo: options.allowLocalRepo === true });
         const token = resolveToken(payload.token, store.readToken());
+        // mod-plugin-repo-precheck：门禁**先于任何落盘**。只认显式 private:true 且令牌有读权限。
+        // 任何 typed 失败都在这里短路：settings.json / credentials.json 一字不动，更不会走到 clone。
+        // fail-closed 是刻意的：vendor API 不可达 → E_REPO_VISIBILITY_UNKNOWN（可重试中文文案），拒绝保存。
+        // allowLocalRepo 是集成测试专用逃生口（本地裸仓库没有 vendor API，跳过门禁）。
+        if (next.repoUrl !== '' && options.allowLocalRepo !== true) {
+            const decision = await fetchRepoVisibility(repoTargetFromUrl(next.repoUrl), token ?? '', precheckTransport);
+            if (!decision.ok) {
+                try {
+                    stateStore.writeRepoError(decision.code);
+                }
+                catch {
+                    /* state.json 只是 UI 事实，写失败不改变拒绝本身 */
+                }
+                throw repoPrecheckError(decision);
+            }
+        }
         // 先把两个值都校验完再落盘，避免 settings 已写、token 校验失败留下半套配置。
         store.writeSettings(next);
         store.writeToken(token);
+        try {
+            stateStore.writeRepoError(null);
+        }
+        catch {
+            /* state.json 写失败不影响保存设置 */
+        }
         if (next.repoUrl !== previous.repoUrl) {
             // 换了仓库地址：上一次探测结果不再代表当前目标，回到"未探测"三态。
             try {
@@ -422,6 +496,7 @@ export function createRpcService(options = {}) {
      * 把 entry 级差异转成文件级 `DiffSummary`。**不写预览缓存、不写 state.json、不建快照。**
      */
     async function previewDiffRemote(settings, sourceDevice) {
+        // 只读差异：失败也不写 state.json（与 rollbackPreview / previewDiffLocal 同纪律）。
         return await withRepo(settings, async (repo) => {
             const collected = collectLocal({
                 profileDir,
@@ -451,7 +526,7 @@ export function createRpcService(options = {}) {
             };
             const diff = fileDiffOfPreview(filtered);
             return { sourceDevice, local: false, summary: diff.summary, hunks: diff.hunks, truncated: diff.truncated };
-        });
+        }, { recordRepoError: false });
     }
     /** `previewDiff`：`sourceDevice` 缺省（或等于本机 deviceId）→ 本机；否则按远端设备比对。 */
     async function previewDiff(payload) {

@@ -286,6 +286,11 @@ export interface LocalState {
    * `getState` 只回读这个值，自己绝不联网。
    */
   reachable?: boolean | null
+  /**
+   * 最近一次仓库配置 / clone 失败的 typed 码（与 App 同词汇：E_REPO_*）。
+   * null = 没有已知阻断；成功保存或成功同步后清空。只存码与固定文案，绝不存 token / URL。
+   */
+  repoError?: string | null
 }
 
 function normalizeReachable(value: unknown): boolean | null {
@@ -314,10 +319,11 @@ export class LocalStateStore {
 
   read(): LocalState {
     const stored = asRecord(readJsonFile(this.paths.stateFile))
-    if (stored === null) return { lastSyncAt: null, reachable: null }
+    if (stored === null) return { lastSyncAt: null, reachable: null, repoError: null }
     return {
       lastSyncAt: normalizeIsoTime(stored.lastSyncAt),
       reachable: normalizeReachable(stored.reachable),
+      repoError: typeof stored.repoError === 'string' && stored.repoError !== '' ? stored.repoError : null,
     }
   }
 
@@ -339,6 +345,16 @@ export class LocalStateStore {
   /** 记录最近一次网络探测结果；null 表示"未探测"（例如刚换了仓库地址）。 */
   writeReachable(value: boolean | null): void {
     const state: LocalState = { ...this.read(), reachable: value }
+    writeFilePrivate(this.paths.stateFile, JSON.stringify(state, null, 2) + '\n')
+  }
+
+  /** 最近一次仓库阻断的 typed 码；null 清除。getState 从这里取，自己绝不联网。 */
+  readRepoError(): string | null {
+    return this.read().repoError ?? null
+  }
+
+  writeRepoError(code: string | null): void {
+    const state: LocalState = { ...this.read(), repoError: code }
     writeFilePrivate(this.paths.stateFile, JSON.stringify(state, null, 2) + '\n')
   }
 }

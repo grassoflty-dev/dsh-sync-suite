@@ -11,7 +11,7 @@
  */
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { SyncError } from './errors.js'
@@ -54,6 +54,55 @@ interface RunOptions {
  * 离线或仓库无响应时不能把设置页/推送挂死：超时后 kill 子进程并报 E_GIT（含"超时"字样）。
  */
 export const NETWORK_TIMEOUT_MS = 8000
+
+/**
+ * git 鉴权环境的**唯一构造点**（mod-plugin-git-auth-env）。
+ *
+ * 所有出网 git 子进程（clone / ls-remote / fetch / push / pull 相关）都必须从这里取 env，
+ * 调用方一律不得自行拼 `GIT_ASKPASS` / `GIT_TERMINAL_PROMPT`。
+ * token 只以环境变量交给临时 askpass 脚本，绝不进 argv、配置或日志；
+ * `GIT_TERMINAL_PROMPT=0` 让缺 askpass 时快速失败，而不是弹 tty 对话框。
+ */
+export interface GitAuthEnvConfig {
+  authMode: 'https' | 'ssh'
+  repoUrl: string
+  /** 已解析好的 askpass 用户名（Gitee 登录名 / GitHub x-access-token）。 */
+  username: string
+  token: string | null
+  /** 临时 askpass 脚本路径（https + token + https 仓库时必填）。 */
+  askpassPath?: string | null
+  /** askpass 调用计数文件（提示文本缺失时区分用户名 / 口令）。 */
+  askpassCounter?: string | null
+  /** 调用方额外注入的环境（例如测试里的假 git 控制变量）。 */
+  extraEnv?: NodeJS.ProcessEnv
+}
+
+/** 是否需要走临时 askpass：仅 https 仓库 + https 模式 + 有 token。 */
+export function usesGitAskpass(config: Pick<GitAuthEnvConfig, 'authMode' | 'repoUrl' | 'token'>): boolean {
+  return config.authMode === 'https' && config.token !== null && /^https:\/\//i.test(config.repoUrl)
+}
+
+/**
+ * 构造一条 git 子进程的环境。返回值是可直接交给 execFile 的完整 env；
+ * 同一配置多次调用得到逐字节相同的结果（clone / fetch / push 因此完全一致）。
+ */
+export function gitAuthEnv(config: GitAuthEnvConfig): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...config.extraEnv,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_MERGE_AUTOEDIT: 'no',
+  }
+  if (usesGitAskpass(config)) {
+    env.GIT_ASKPASS = config.askpassPath ?? undefined
+    env.DSH_GIT_SYNC_TOKEN = config.token ?? undefined
+    env.DSH_GIT_SYNC_USER = config.username
+    env.DSH_GIT_SYNC_NODE = process.execPath
+    env.DSH_GIT_SYNC_ASKPASS_COUNTER = config.askpassCounter ?? undefined
+    env.SSH_ASKPASS_REQUIRE = 'never'
+  }
+  return env
+}
 
 /** 临时提交身份，避免要求用户配置全局 user.name。 */
 const IDENTITY_ARGS = ['-c', 'user.name=dsh-dots', '-c', 'user.email=sync@localhost']
@@ -273,7 +322,7 @@ export class GitRepo {
   }
 
   private usesAskpass(): boolean {
-    return this.authMode === 'https' && this.token !== null && /^https:\/\//i.test(this.repoUrl)
+    return usesGitAskpass({ authMode: this.authMode, repoUrl: this.repoUrl, token: this.token })
   }
 
   /** 把可能出现在文本里的 token / 用户名 / URL 凭据抹掉，保证错误消息可安全上报。 */
@@ -295,28 +344,26 @@ export class GitRepo {
     this.askpassCounter = files.counter
   }
 
-  private async buildEnv(): Promise<NodeJS.ProcessEnv> {
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      ...this.extraEnv,
-      GIT_TERMINAL_PROMPT: '0',
-      GIT_MERGE_AUTOEDIT: 'no',
-    }
+  /**
+   * 本实例的鉴权环境。所有 git 命令（含 v2 端口的 push）都从这里取 env，
+   * 构造细节只在 `gitAuthEnv()` 一份。公开给 sync/gitPort.ts 复用。
+   */
+  async buildEnv(): Promise<NodeJS.ProcessEnv> {
+    if (this.usesAskpass()) await this.ensureAskpass()
     // Gitee 的 HTTPS 规则是「用户名（登录名）+ 私人令牌作密码」；x-access-token 只适用于
     // GitHub PAT。登录名优先手填 / DSH_DOTS_GIT_USERNAME，否则按仓库地址推断 owner；
     // 只有 Gitee 且两者都拿不到时才报可读错误（规则只在 gitUsername.ts 一份）。
     const askpassUser =
       this.authMode === 'https' ? resolveAskpassUser(this.platform, this.username, this.repoUrl) : ''
-    if (this.usesAskpass()) {
-      await this.ensureAskpass()
-      env.GIT_ASKPASS = this.askpassPath ?? undefined
-      env.DSH_GIT_SYNC_TOKEN = this.token ?? undefined
-      env.DSH_GIT_SYNC_USER = askpassUser
-      env.DSH_GIT_SYNC_NODE = process.execPath
-      env.DSH_GIT_SYNC_ASKPASS_COUNTER = this.askpassCounter ?? undefined
-      env.SSH_ASKPASS_REQUIRE = 'never'
-    }
-    return env
+    return gitAuthEnv({
+      authMode: this.authMode,
+      repoUrl: this.repoUrl,
+      username: askpassUser,
+      token: this.token,
+      askpassPath: this.askpassPath,
+      askpassCounter: this.askpassCounter,
+      extraEnv: this.extraEnv,
+    })
   }
 
   private failure(args: string[], result: RunResult, network = false): SyncError {
@@ -424,18 +471,37 @@ export class GitRepo {
       await this.configureRepo()
       return { cloned: false }
     }
-    await mkdir(path.dirname(this.dir), { recursive: true })
     const parent = path.dirname(this.dir)
-    const cloneArgs = ['clone', '--quiet', this.repoUrl, this.dir]
-    const cloned = await this.run(cloneArgs, { allowFailure: true, network: true, cwd: parent })
-    if (cloned.code !== 0) throw this.failure(cloneArgs, cloned, true)
-    await this.configureRepo()
-    // clone 时的 checkout 受全局 core.autocrlf 影响，可能把 LF 改成 CRLF；
-    // 关掉转换后按索引重写一遍，保证工作树字节 == blob 字节（否则会把别人的设备文件改脏）。
-    await this.run(['reset', '--hard'], { allowFailure: true })
-    await this.ensureRemote()
-    await this.ensureBranch()
-    return { cloned: true }
+    await mkdir(parent, { recursive: true })
+    // 首次 clone 走隔离目录：git 失败时它自己往往留下半个目录 / 半个 .git。
+    // 只有 clone 成功且后续初始化全部成功，才原子改名为最终工作副本。
+    // 任何失败都在 finally 里清掉隔离目录，并且（若已改名）清掉最终目录——
+    // 绝不留 `.git`，也不留 `.git.clone-failed-*`（测试直接断言这两个不变式）。
+    const quarantine = path.join(
+      parent,
+      `.git.clone-failed-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    )
+    let installed = false
+    try {
+      const cloneArgs = ['clone', '--quiet', this.repoUrl, quarantine]
+      const cloned = await this.run(cloneArgs, { allowFailure: true, network: true, cwd: parent })
+      if (cloned.code !== 0) throw this.failure(cloneArgs, cloned, true)
+      if (existsSync(this.dir)) await rm(this.dir, { recursive: true, force: true })
+      await rename(quarantine, this.dir)
+      installed = true
+      await this.configureRepo()
+      // clone 时的 checkout 受全局 core.autocrlf 影响，可能把 LF 改成 CRLF；
+      // 关掉转换后按索引重写一遍，保证工作树字节 == blob 字节（否则会把别人的设备文件改脏）。
+      await this.run(['reset', '--hard'], { allowFailure: true })
+      await this.ensureRemote()
+      await this.ensureBranch()
+      return { cloned: true }
+    } catch (error) {
+      if (installed) await rm(this.dir, { recursive: true, force: true }).catch(() => undefined)
+      throw error
+    } finally {
+      await rm(quarantine, { recursive: true, force: true }).catch(() => undefined)
+    }
   }
 
   async headSha(): Promise<string> {

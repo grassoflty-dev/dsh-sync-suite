@@ -288,10 +288,11 @@ export class LocalStateStore {
     read() {
         const stored = asRecord(readJsonFile(this.paths.stateFile));
         if (stored === null)
-            return { lastSyncAt: null, reachable: null };
+            return { lastSyncAt: null, reachable: null, repoError: null };
         return {
             lastSyncAt: normalizeIsoTime(stored.lastSyncAt),
             reachable: normalizeReachable(stored.reachable),
+            repoError: typeof stored.repoError === 'string' && stored.repoError !== '' ? stored.repoError : null,
         };
     }
     readLastSyncAt() {
@@ -310,6 +311,14 @@ export class LocalStateStore {
     /** 记录最近一次网络探测结果；null 表示"未探测"（例如刚换了仓库地址）。 */
     writeReachable(value) {
         const state = { ...this.read(), reachable: value };
+        writeFilePrivate(this.paths.stateFile, JSON.stringify(state, null, 2) + '\n');
+    }
+    /** 最近一次仓库阻断的 typed 码；null 清除。getState 从这里取，自己绝不联网。 */
+    readRepoError() {
+        return this.read().repoError ?? null;
+    }
+    writeRepoError(code) {
+        const state = { ...this.read(), repoError: code };
         writeFilePrivate(this.paths.stateFile, JSON.stringify(state, null, 2) + '\n');
     }
 }

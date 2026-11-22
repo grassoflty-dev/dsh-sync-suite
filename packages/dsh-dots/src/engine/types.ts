@@ -98,6 +98,12 @@ export interface SyncStatus {
   lastSyncAt: string | null
   /** 只填本地读取错误（工作副本损坏等）；网络不可达不算错误。 */
   error?: string
+  /**
+   * 最近一次仓库门禁 / clone 失败的 typed 码（E_REPO_*，与 App 同词汇）；
+   * null = 没有已知阻断。由 state.json 持久化，getState 只读不联网。
+   * 「已配置仓库」不等于「可用仓库」：这个字段专门戳破那种假健康状态。
+   */
+  repoBlockCode?: string | null
 }
 
 /** getState 的 settings 额外带 hasToken（BRIEF §2.4）。 */

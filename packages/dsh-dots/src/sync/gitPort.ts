@@ -19,10 +19,14 @@ interface RunResult {
   stderr: string
 }
 
-/** 统一执行器：execFile，不拼 shell、不拼 token。 */
-function run(cwd: string, args: string[]): Promise<RunResult> {
+/**
+ * 底层执行器：execFile，不拼 shell、不拼 token。
+ * env 由调用方从 `GitRepo.buildEnv()`（`gitAuthEnv()` 的唯一构造点）传入，
+ * 本函数绝不自行构造环境——这是 push 鉴权不再丢失的关键。
+ */
+function execGit(cwd: string, args: string[], env: NodeJS.ProcessEnv): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd, windowsHide: true, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 },
+    execFile('git', args, { cwd, windowsHide: true, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, env },
       (error, stdout, stderr) => {
         if (error !== null && (error as NodeJS.ErrnoException).code === 'ENOENT') {
           reject(new SyncError('E_GIT', '找不到 git 可执行文件，请先安装 git 并加入 PATH'))
@@ -81,24 +85,34 @@ export function buildSafePushArgs(args: PushArgs, extra: readonly string[] = [])
 }
 
 export interface GitRepoV2PortOptions extends GitRepoOptions {
-  /** 注入执行器（仅测试）：拿到的一定是通过 assertSafeGitArgs 的 argv。 */
-  runner?: (cwd: string, args: string[]) => Promise<RunResult>
+  /** 注入执行器（仅测试）：拿到的一定是通过 assertSafeGitArgs 的 argv，含同一份鉴权 env。 */
+  runner?: (cwd: string, args: string[], env: NodeJS.ProcessEnv) => Promise<RunResult>
 }
 
 export class GitRepoV2Port implements V2GitPort {
   private readonly repo: GitRepo
-  private readonly runner: (cwd: string, args: string[]) => Promise<RunResult>
+  private readonly runner: ((cwd: string, args: string[], env: NodeJS.ProcessEnv) => Promise<RunResult>) | null
 
   constructor(options: GitRepoV2PortOptions) {
     // v2 固定 main：这里只固定 config 值，不执行任何改分支命令。
     this.repo = new GitRepo({ ...options, branch: 'main' })
-    this.runner = options.runner ?? run
+    this.runner = options.runner ?? null
+  }
+
+  /**
+   * 所有 git 子进程的统一入口：env 只来自 `GitRepo.buildEnv()` → `gitAuthEnv()`。
+   * 与 clone / fetch 共用同一份构造逻辑，保证 push 不再丢失 askpass / 用户名 / 禁提示设置。
+   */
+  private async run(cwd: string, args: string[]): Promise<RunResult> {
+    const env = await this.repo.buildEnv()
+    if (this.runner !== null) return await this.runner(cwd, args, env)
+    return await execGit(cwd, args, env)
   }
 
   /** 每条命令都过 argv 守卫；identity 的 -c 由 commit() 单独拼，不经此口。 */
   private async git(args: string[], allowFailure = false): Promise<RunResult> {
     assertSafeGitArgs(args)
-    const result = await this.runner(this.repo.dir, args)
+    const result = await this.run(this.repo.dir, args)
     if (result.code !== 0 && !allowFailure) {
       throw new SyncError('E_GIT', `git ${args[0] ?? ''} 失败：${(result.stderr || result.stdout).trim().slice(0, 300)}`)
     }
@@ -185,16 +199,41 @@ export class GitRepoV2Port implements V2GitPort {
     // 两个 -m：第一段 subject，第二段 body；尾注落在 body，不会被 App 的 `-m subject` 误造。
     const args = [...COMMIT_IDENTITY, 'commit', '--quiet', '--no-gpg-sign', '-m', message]
     if (typeof body === 'string' && body !== '') args.push('-m', body)
-    await run(this.repo.dir, args).then((result) => {
+    await this.run(this.repo.dir, args).then((result) => {
       if (result.code !== 0) {
         throw new SyncError('E_GIT', `git commit 失败：${(result.stderr || result.stdout).trim().slice(0, 300)}`)
       }
     })
   }
 
+  /** push 失败的稳定原因分类：只输出白名单短语，绝不回显 git stderr / askpass 正文 / token。 */
+  private pushFailure(text: string): SyncError {
+    let reason: 'auth-prompt' | 'non-fast-forward' | 'network' | 'git-failed' = 'git-failed'
+    if (/User cancelled dialog|\/dev\/tty|could not read (Username|Password)|terminal prompts disabled|Authentication failed|prompt script|askpass/i.test(text)) {
+      reason = 'auth-prompt'
+    } else if (/non-fast-forward|\[rejected\]|fetch first|stale info|failed to push some refs/i.test(text)) {
+      reason = 'non-fast-forward'
+    } else if (/Could not resolve host|timed? ?out|unable to access|network|connection/i.test(text)) {
+      reason = 'network'
+    }
+    const message = {
+      'auth-prompt': '推送失败：HTTPS 鉴权无法通过（git 已禁用交互提示，askpass／用户名或令牌不可用）；请检查鉴权配置后重试',
+      'non-fast-forward': '推送失败：远端分支已前进，下一次同步会做有界重试',
+      network: '推送失败：网络不可达或远端响应超时，请稍后重试',
+      'git-failed': '推送失败：git 拒绝了本次推送，请检查远端状态后重试',
+    }[reason]
+    return new SyncError('E_PUSH_REJECTED', message, { reason })
+  }
+
   async pushMain(args: PushArgs): Promise<void> {
     // 唯一 push 构造口：固定 argv，无强制参数、无 refspec 改写、无远端删除。
-    await this.git(buildSafePushArgs(args))
+    const pushArgs = buildSafePushArgs(args)
+    try {
+      await this.git(pushArgs)
+    } catch (error) {
+      // typed 错误 + 固定文案：原文可能含 tty 对话框堆栈、askpass 正文甚至 token，一律不带出。
+      throw this.pushFailure(error instanceof Error ? error.message : String(error))
+    }
   }
 
   async dispose(): Promise<void> {
