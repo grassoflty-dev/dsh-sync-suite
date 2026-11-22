@@ -162,3 +162,7 @@ node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json 
 **已采用的替代证明（1000004 实测）**：`bm dump -n <bundle>` 取**应用级** `versionCode`——以最浅的 `"vendor": "itwill"` 行作锚，`versionCode` 在紧随其后、缩进相同的一行——再取 `updateTime`；**装机前先抓一份基线**，`install -r` 后再抓一份对照。PASS = `versionCode` 等于预期值**且** `updateTime` 发生变化/增长。不要用 `installTime`（陈旧，`install -r` 不推进；实测两侧同为 `1794720327159`），也不要用嵌套/模块的 `versionCode` 块（0/空）。逐行哈希与完整判据见 `docs/VERIFICATION.md` §15.18。
 
 **操作要点**：每次需要可证明的装机，先自增 `AppScope/app.json5` 的 `versionCode` 再构建；`dist-harmony/` 必须在 `sign-hap.ps1` 运行前就存在，否则报 `11017002 Write zip file failed`；若 `signing/pass.txt` 已打不开 keystore，用 `signing/README.md` 记载的值经 `-StorePass`/`-KeyPass` 传入，**不要打印口令**。
+
+### 7.2 设备传输：每次会话重新读 `hdc list targets`
+
+设备可能以**无线（TCP target，例如 `192.168.1.7:33023`）或 USB 串口**接入，同一台平板在两次会话之间可能换传输方式、换端口或只连 USB；因此**每次会话开始都先跑 `hdc list targets` 读当次真实 target**，此后所有 `hdc -t <serial> …` 都沿用这一次的读数，不沿用上次会话的 IP / 串口。此前有一个周期因为默认 `192.168.1.7:33023` 而整轮丢失。**当前串口 `6MFBB25C27205131` 只是示例，不是常量**：无线在线时 target 形如 `192.168.x.x:port`，USB 在线时是设备序列号，两者都会变，以当次 `hdc list targets` 输出为准。

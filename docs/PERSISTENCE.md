@@ -49,6 +49,30 @@
 - **版本标记无**（风险 2）；**rawfile/ 或仅仓库写入无缺陷**（风险 4）；**改名兼容路径无**（风险 3）。
 - **aboutToAppear 写默认覆盖：未发现**。各页均 init→load→apply（EntryAbility.ets:93-105；SettingsHost.ets:251-268；SettingsSync.ets:150-168；SettingsApi.ets:124-133；Settings.ets:64-84）。唯一在 aboutToAppear 的写入是 `instanceStore.ensureSeeded`（InstancesPane.ets:120-138），但内容相等则不写（instanceStore.ets:117-124）。次级风险：`gitExtrasStore.save()` 先置 cache 后写盘（syncController.ets:135 vs 137），且 `load()` 失败返回 defaults 而不置 cache（:107-110），IO 失败后用户保存可能以默认值写回——边界情况，未确认是否可触发。
 
+## 升级存活的取证方法（case 1：1000005 → 1000006）
+
+> **只取哈希、绝不打印文件内容**：`schedule_settings` / `git_sync_extras` 里有 token 与 AI key。任何一步都不得 `cat`、`hdc file recv` 明文回传或把内容贴进报告；差异只作为**事实**记录，不作为「失败」判定。设备 target 每次会话从 `hdc list targets` 重读（无线 / USB 都可能，见 `docs/RUNBOOK.md` §7.2）。
+
+固定顺序（每次跨版本边界都照此取证）：
+
+1. **升级前快照**：对三份配置文件取 SHA-256 与字节数（沙箱精确路径当次从设备列目录确认；只留哈希，不回传内容）。
+2. **`install -r`** 安装新版本（`versionCode` 1000006）。
+3. **强制停止 App**：`hdc -t <serial> shell am force-stop com.itwill.schedule`。不先杀进程就取第二份快照，内存未落盘会被伪造成「配置丢失」。
+4. **第二份快照**：对同样三份文件再取哈希，与步骤 1 逐项比对。
+5. **只启动一次**：`hdc -t <serial> shell "aa start -a EntryAbility -b com.itwill.schedule"`，再取**第三份快照**。
+
+判定：任一步哈希不同，都按事实写明「发生在 install 后 / 首次启动后」并记录前后值，不写成「失败」；只有能定位到哪一步改动才进一步分诊。三份文件指 preferences `schedule_settings`、`git_sync_extras` 与 `handwriting`。
+
+**case 1 基线（已装机 `1000005` 实测，verbatim）**：
+
+| 文件 | 字节 | SHA-256 |
+| --- | --- | --- |
+| `schedule_settings` | 2,478 B | `92d4d2e5ee1f4ba1733946e09750e4bcb5cee13c50f23f8e200e42173d395391` |
+| `git_sync_extras` | 195 B | `a83f24786f12b521dc5771eba699d3f225009e85f31bc6fdd3062bdbc8f5b781` |
+| `handwriting` | 128 B | `bb13978094b2ce2eb6b3cb5a5eb7f86066b70c66103082dc7e8edd85544e2c92` |
+
+> `mod-ai-models-fetch` 的 `aiModelsCache` 是 `schedule_settings` 里的独立键，不进整表 `load()` / `save()`；其跨版本存活同样按上表三份哈希中的 `schedule_settings` 一项取证（`mod-config-persistence` 本轮只追加方法，不接线 store）。
+
 ## 未确认（需何证据）
 
 preferences 在沙箱内的精确文件名、PersistentStorage 底层 preferences 文件名、sync-quarantine 目录写入行：需真机列沙箱目录（`hdc file recv` 在 undebuggable 镜像被拒，signing/README.md:96）；此三项均为静态不可定，不影响「升级保留」结论（均在 App 数据目录内）。

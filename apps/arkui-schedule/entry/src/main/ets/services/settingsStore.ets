@@ -44,6 +44,11 @@ import { REMOTE_MODE_LAN, normalizeRemoteMode, normalizeRemotePort } from '../mo
 import { normalizeThemeMode } from '../model/theme';
 import { normalizeFingerprint } from '../model/deviceIdentity';
 import { normalizeUuid } from '../model/deviceRegistry';
+// mod-config-persistence-wiring：版本信封接线（本文件只做 IO 编排，判定全在 configSchema 纯层）。
+import { CONFIG_ENVELOPE_KEY, encodeEnvelope } from '../model/configSchema';
+import type { ConfigValue } from '../model/configSchema';
+import { createConfigStore } from './configStore';
+import type { ConfigStoreSpec } from './configStore';
 
 /** 设备标识默认值：首次启动即 `phone-a`，可在设置页修改。 */
 export const DEFAULT_DEVICE_ID: string = 'phone-a';
@@ -294,6 +299,111 @@ const KEY_LAST_SYNC_ACTION: string = 'lastSyncAction';
  */
 const KEY_AI_MODELS_CACHE: string = 'aiModelsCache';
 
+/**
+ * 真实配置规格（mod-config-persistence-wiring）：当前名 = 本 store 名；仓库历史上从未改过
+ * `schedule_settings`，故 legacyNames 为空数组——不臆造旧名，但旧名链机制由纯层测试照常覆盖。
+ * legacyKeys 列全整表键；`aiModelsCache` 故意不在其中：它是 mod-ai-models-fetch 的独立键，
+ * 表单保存不得把它并进信封、更不得顺手清掉。
+ */
+export const SETTINGS_CONFIG_SPEC: ConfigStoreSpec = {
+  name: PREFERENCES_NAME,
+  legacyNames: [],
+  legacyKeys: [
+    KEY_DEVICE_ID,
+    KEY_DEVICE_FINGERPRINT,
+    KEY_DEVICE_UUID,
+    KEY_DEVICE_ID_AUTO,
+    KEY_REPO_URL,
+    KEY_TOKEN,
+    KEY_AI_KEY,
+    KEY_AI_PROVIDER_ID,
+    KEY_AI_MODEL,
+    KEY_AI_BASE_URL,
+    KEY_AI_TEMPERATURE,
+    KEY_AI_MAX_TOKENS,
+    KEY_AI_TIMEOUT_MS,
+    KEY_AI_RETRIES,
+    KEY_AI_FALLBACK_PROVIDER_ID,
+    KEY_AI_FALLBACK_MODEL,
+    KEY_AI_FALLBACK_BASE_URL,
+    KEY_AI_FALLBACK_KEY,
+    KEY_AI_FALLBACK_ENABLED,
+    KEY_AI_FALLBACK_MAX_ATTEMPTS,
+    KEY_AI_FALLBACK_ORDER,
+    KEY_AUTHOR,
+    KEY_GIT_PLATFORM,
+    KEY_GIT_USERNAME,
+    KEY_AUTH_MODE,
+    KEY_PEN_ONLY_INPUT,
+    KEY_THEME_MODE,
+    KEY_REMOTE_URL,
+    KEY_REMOTE_MODE,
+    KEY_REMOTE_LAN_ADDRESS,
+    KEY_REMOTE_PORT,
+    KEY_REMOTE_TAILSCALE_HOST,
+    KEY_REMOTE_CLOUDFLARE_HOST,
+    KEY_REMOTE_IPV6_ADDRESS,
+    KEY_REMOTE_MANUAL_URL,
+    KEY_REMOTE_TOKEN,
+    KEY_REMOTE_LAST_OK,
+    KEY_LAST_SYNC_AT,
+    KEY_LAST_SYNC_ERROR,
+    KEY_LAST_SYNC_ACTION
+  ]
+};
+
+/** 版本访问器实例：与 settingsStore 共用一份 spec；不内置任何别的 store 名。 */
+const configStore = createConfigStore(SETTINGS_CONFIG_SPEC);
+
+/**
+ * 把整表设置编码成 v1 信封（write-through 的写侧）：一次编码 + 一个保留键 put，
+ * 与扁平键共用调用方那一次 flush。未知额外键不在这里产生；`aiModelsCache` 绝不进表。
+ */
+function settingsEnvelopeBytes(next: ScheduleSettings): string {
+  const values: Record<string, ConfigValue> = {};
+  values[KEY_DEVICE_ID] = next.deviceId;
+  values[KEY_DEVICE_FINGERPRINT] = next.deviceFingerprint;
+  values[KEY_DEVICE_UUID] = next.deviceUuid;
+  values[KEY_DEVICE_ID_AUTO] = next.deviceIdAuto;
+  values[KEY_REPO_URL] = next.repoUrl;
+  values[KEY_TOKEN] = next.token;
+  values[KEY_AI_KEY] = next.aiKey;
+  values[KEY_AI_PROVIDER_ID] = next.aiProviderId;
+  values[KEY_AI_MODEL] = next.aiModel;
+  values[KEY_AI_BASE_URL] = next.aiBaseURL;
+  values[KEY_AI_TEMPERATURE] = next.aiTemperature;
+  values[KEY_AI_MAX_TOKENS] = next.aiMaxTokens;
+  values[KEY_AI_TIMEOUT_MS] = next.aiTimeoutMs;
+  values[KEY_AI_RETRIES] = next.aiRetries;
+  values[KEY_AI_FALLBACK_PROVIDER_ID] = next.aiFallbackProviderId;
+  values[KEY_AI_FALLBACK_MODEL] = next.aiFallbackModel;
+  values[KEY_AI_FALLBACK_BASE_URL] = next.aiFallbackBaseURL;
+  values[KEY_AI_FALLBACK_KEY] = next.aiFallbackKey;
+  values[KEY_AI_FALLBACK_ENABLED] = next.aiFallbackEnabled;
+  values[KEY_AI_FALLBACK_MAX_ATTEMPTS] = next.aiFallbackMaxAttempts;
+  values[KEY_AI_FALLBACK_ORDER] = next.aiFallbackOrder;
+  values[KEY_AUTHOR] = next.author;
+  values[KEY_GIT_PLATFORM] = next.gitPlatform;
+  values[KEY_GIT_USERNAME] = next.gitUsername;
+  values[KEY_AUTH_MODE] = next.authMode;
+  values[KEY_PEN_ONLY_INPUT] = next.penOnlyInput;
+  values[KEY_THEME_MODE] = next.themeMode;
+  values[KEY_REMOTE_URL] = next.remoteUrl;
+  values[KEY_REMOTE_MODE] = next.remoteMode;
+  values[KEY_REMOTE_LAN_ADDRESS] = next.remoteLanAddress;
+  values[KEY_REMOTE_PORT] = next.remotePort;
+  values[KEY_REMOTE_TAILSCALE_HOST] = next.remoteTailscaleHost;
+  values[KEY_REMOTE_CLOUDFLARE_HOST] = next.remoteCloudflareHost;
+  values[KEY_REMOTE_IPV6_ADDRESS] = next.remoteIpv6Address;
+  values[KEY_REMOTE_MANUAL_URL] = next.remoteManualUrl;
+  values[KEY_REMOTE_TOKEN] = next.remoteToken;
+  values[KEY_REMOTE_LAST_OK] = next.remoteLastOk;
+  values[KEY_LAST_SYNC_AT] = next.lastSyncAt;
+  values[KEY_LAST_SYNC_ERROR] = next.lastSyncError;
+  values[KEY_LAST_SYNC_ACTION] = next.lastSyncAction;
+  return encodeEnvelope(values);
+}
+
 /** 规范化设备标识：非法值回退默认，避免写出非法目录名。 */
 export function normalizeDeviceId(value: string): string {
   const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -361,6 +471,11 @@ function readBoolean(value: preferences.ValueType, fallback: boolean): boolean {
 export class SettingsStore {
   private prefs: preferences.Preferences | null = null;
   private cache: ScheduleSettings | null = null;
+  /**
+   * 信封是否可写：一次性重写判「refuse」（未知版本 / 坏字节 / 存储不可用）时为 false。
+   * 此后保存只走老扁平键，绝不覆盖未知字节；应用仍从老路径读，用户无感、原字节不动。
+   */
+  private envelopeWritable: boolean = true;
 
   /** 初始化（幂等）：必须在使用 load/save 之前调用一次。 */
   async init(context: object): Promise<void> {
@@ -368,6 +483,16 @@ export class SettingsStore {
       return;
     }
     const abilityContext = context as common.UIAbilityContext;
+    // 首次加载前先跑一次性重写（至多一次 put + flush；第二次运行必为 no-write）。
+    // 防御：即便适配层回归为抛错 / reject，也只降级为「留在老路径、不重写、不崩」——
+    // 吞掉任何异常后照常打开 prefs 让首屏按老扁平键读取；写穿闸门关掉，后续保存不碰原字节。
+    // 只在 init 里调用一次，绝不在每次 load/save 里重试（不会造成重写循环）。
+    try {
+      const outcome = await configStore.migrateOnce(abilityContext);
+      this.envelopeWritable = outcome.decision.kind !== 'refuse';
+    } catch {
+      this.envelopeWritable = false;
+    }
     this.prefs = await preferences.getPreferences(abilityContext, { name: PREFERENCES_NAME });
   }
 
@@ -724,6 +849,11 @@ export class SettingsStore {
     await prefs.put(KEY_LAST_SYNC_AT, next.lastSyncAt);
     await prefs.put(KEY_LAST_SYNC_ERROR, next.lastSyncError);
     await prefs.put(KEY_LAST_SYNC_ACTION, next.lastSyncAction);
+    // 写穿：信封是版本真值，保存必须同步更新；一次编码 + 一个键 put，复用同一次 flush。
+    // refuse 态（未知版本 / 坏字节）整段跳过，原字节逐字节保留。
+    if (this.envelopeWritable) {
+      await prefs.put(CONFIG_ENVELOPE_KEY, settingsEnvelopeBytes(next));
+    }
     await prefs.flush();
     this.cache = next;
     return next;
@@ -788,6 +918,10 @@ export class SettingsStore {
     await prefs.put(KEY_LAST_SYNC_AT, next.lastSyncAt);
     await prefs.put(KEY_LAST_SYNC_ERROR, next.lastSyncError);
     await prefs.put(KEY_LAST_SYNC_ACTION, next.lastSyncAction);
+    // 同步状态回写同样写穿信封：sync 状态住在信封里，漏写就会让新实例读到陈旧值。
+    if (this.envelopeWritable) {
+      await prefs.put(CONFIG_ENVELOPE_KEY, settingsEnvelopeBytes(next));
+    }
     await prefs.flush();
     this.cache = next;
     return next;

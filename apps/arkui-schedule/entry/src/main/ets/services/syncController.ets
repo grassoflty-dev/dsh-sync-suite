@@ -27,6 +27,11 @@ import { BRIDGE_NOT_READY_MESSAGE, PullGate } from '../model/syncGuard';
 import type { PullGateDecision } from '../model/syncGuard';
 import { DEFAULT_BRANCH, normalizeBranchName } from '../model/syncError';
 import { normalizeGitPlatform } from '../model/gitAuth';
+// mod-config-persistence-wiring：版本信封接线（判定全在 configSchema 纯层，这里只编排 IO）。
+import { CONFIG_ENVELOPE_KEY, encodeEnvelope } from '../model/configSchema';
+import type { ConfigValue } from '../model/configSchema';
+import { createConfigStore } from './configStore';
+import type { ConfigStoreSpec } from './configStore';
 
 /** 两次自动 pull 之间的最小间隔（回前台节流）：60 秒。 */
 const STARTUP_THROTTLE_MS: number = 60 * 1000;
@@ -55,6 +60,29 @@ const KEY_BRANCH: string = 'branch';
 const KEY_PLATFORM: string = 'platform';
 const KEY_PLATFORM_TOUCHED: string = 'platformTouched';
 
+/**
+ * 真实配置规格（mod-config-persistence-wiring）：当前名 = 本 store 名；仓库历史上从未改过
+ * `git_sync_extras`，故 legacyNames 为空数组（不臆造旧名；旧名链机制由纯层测试覆盖）。
+ * 三个旧扁平键全部登记；这里没有 AI 模型缓存之类独立键需要排除。
+ */
+export const GIT_EXTRAS_CONFIG_SPEC: ConfigStoreSpec = {
+  name: EXTRAS_PREFS_NAME,
+  legacyNames: [],
+  legacyKeys: [KEY_BRANCH, KEY_PLATFORM, KEY_PLATFORM_TOUCHED]
+};
+
+/** 版本访问器实例：一次性重写只在 init 里跑一次，后续保存由本文件写穿同一信封。 */
+const configStore = createConfigStore(GIT_EXTRAS_CONFIG_SPEC);
+
+/** 把整表扩展设置编码成 v1 信封：一次编码 + 一个键 put，复用调用方那一次 flush。 */
+function extrasEnvelopeBytes(next: GitSyncExtras): string {
+  const values: Record<string, ConfigValue> = {};
+  values[KEY_BRANCH] = next.branch;
+  values[KEY_PLATFORM] = next.platform;
+  values[KEY_PLATFORM_TOUCHED] = next.platformTouched;
+  return encodeEnvelope(values);
+}
+
 function readString(value: preferences.ValueType, fallback: string): string {
   return typeof value === 'string' ? value : fallback;
 }
@@ -73,6 +101,8 @@ function defaultExtras(): GitSyncExtras {
 export class GitExtrasStore {
   private prefs: preferences.Preferences | null = null;
   private cache: GitSyncExtras | null = null;
+  /** 拒绝态（未知版本 / 坏字节 / 存储不可用）下只走老扁平键，不碰原信封字节。 */
+  private envelopeWritable: boolean = true;
 
   /** 初始化（幂等）：拿不到 context 时由 `load()` 自己 `getContext()`。 */
   async init(context: object): Promise<void> {
@@ -80,6 +110,15 @@ export class GitExtrasStore {
       return;
     }
     const abilityContext: common.UIAbilityContext = context as common.UIAbilityContext;
+    // 首次加载前先跑一次性重写（至多一次 put + flush；第二次运行必为 no-write）。
+    // 防御：适配层若抛错 / reject，一律降级为「留在老路径、不重写、不崩」；照常打开
+    // prefs 让同步主流程按老扁平键读取，写穿闸门关掉。只在 init 调一次，不在每次读里重试。
+    try {
+      const outcome = await configStore.migrateOnce(abilityContext);
+      this.envelopeWritable = outcome.decision.kind !== 'refuse';
+    } catch {
+      this.envelopeWritable = false;
+    }
     this.prefs = await preferences.getPreferences(abilityContext, { name: EXTRAS_PREFS_NAME });
   }
 
@@ -138,6 +177,11 @@ export class GitExtrasStore {
       await prefs.put(KEY_BRANCH, next.branch);
       await prefs.put(KEY_PLATFORM, next.platform);
       await prefs.put(KEY_PLATFORM_TOUCHED, next.platformTouched);
+      // 写穿：信封是版本真值，扩展设置保存必须同步更新；一次编码 + 一个键 put，复用同一次 flush。
+      // refuse 态整段跳过，原字节逐字节保留；写盘失败仍由下面的 catch 兜住，不阻断同步。
+      if (this.envelopeWritable) {
+        await prefs.put(CONFIG_ENVELOPE_KEY, extrasEnvelopeBytes(next));
+      }
       await prefs.flush();
     } catch (error) {
       // 写盘失败不阻断同步：内存缓存已更新，本次会话内仍然生效
