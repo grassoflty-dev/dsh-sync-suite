@@ -454,6 +454,13 @@ function probeFailureOutcome(text: string, outbox: OutboxEntry[]): CycleOutcome 
 }
 
 /**
+ * 单日读取端口：`remote=false` 时只读本地工作副本，不碰 origin/main。
+ * mod-empty-remote-unborn-head：空远端尚未建立 origin/main 跟踪引用，
+ * `showMain`/`readBlob` 会在 `resolveRef('origin/main')` 抛 NotFound；引导阶段必须走 local-only。
+ */
+export type DayReader = (date: string, remote?: boolean) => Promise<DayRead>;
+
+/**
  * 首跑引导（E_REMOTE_EMPTY 状态）：为**完全为空**的远端建第一个 main 提交。
  *
  * 门禁例外说明（唯一一处）：§11 门禁要求 `HEAD == origin/main`，但空远端上 origin/main 根本不存在，
@@ -467,7 +474,7 @@ function probeFailureOutcome(text: string, outbox: OutboxEntry[]): CycleOutcome 
 async function bootstrapEmptyRemote(
   port: GitPort,
   days: string[],
-  readDay: (date: string) => Promise<DayRead>,
+  readDay: DayReader,
   outbox: OutboxEntry[],
   now: Date,
   write?: WritePort
@@ -508,9 +515,12 @@ async function bootstrapEmptyRemote(
 
   // 阶段 1：远端为空 → 无并发冲突可能。用既有 unionDay + WritePort 把本地记录与 outbox 意图落盘，
   // 这些字节随后一起进入初始提交（「via existing writer/commit path」）。
+  // mod-empty-remote-unborn-head：这里**绝不能**读 origin/main —— 空远端没有该引用，
+  // showMain/readBlob 的 resolveRef 会抛「Could not find origin/main」并在写/commit 之前逃逸，
+  // 使引导虽然已被选中却永远落不了地。远端文本按空串处理（union 的 remote 侧本就是空）。
   const derived: string[] = [];
   for (const date of days) {
-    const read: DayRead = await readDay(date);
+    const read: DayRead = await readDay(date, false);
     const corrupt: string = dayIntegrityError(date, read.remote, read.local);
     if (corrupt.length > 0) {
       await persistOutbox(write, outbox);
@@ -620,7 +630,7 @@ async function bootstrapEmptyRemote(
 export async function runCyclePure(
   port: GitPort,
   days: string[],
-  readDay: (date: string) => Promise<DayRead>,
+  readDay: DayReader,
   outbox: OutboxEntry[],
   now: Date,
   write?: WritePort,
@@ -696,8 +706,9 @@ export async function runCyclePure(
     let attemptAdded: number = 0;
 
     // 步骤 4：逐日 union（阶段一）+ 意图重放（阶段二，复用 syncProtocol.unionDay）。
+    // 普通周期在 fetch 之后运行，origin/main 已存在，这里必须读远端（remote=true 缺省）。
     for (const date of days) {
-      const read: DayRead = await readDay(date);
+      const read: DayRead = await readDay(date, true);
       // P1-4：union 前先查两侧文件完整性；坏文件绝不「当作空日」被本地覆盖。
       const corrupt: string = dayIntegrityError(date, read.remote, read.local);
       if (corrupt.length > 0) {

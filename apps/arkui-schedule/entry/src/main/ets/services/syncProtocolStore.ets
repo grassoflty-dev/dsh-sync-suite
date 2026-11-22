@@ -364,14 +364,21 @@ export class SyncProtocolStore {
       parkedDays.push(entry.date);
     }
     const days: string[] = this.mergeDates(this.localDates(), remoteDays.concat(parkedDays));
-    const readDay = async (date: string): Promise<DayRead> => {
+    /**
+     * mod-empty-remote-unborn-head：引导阶段 remote=false。空远端上 origin/main 还不存在，
+     * showMain → v2Git('readBlob') → resolveRef('origin/main') 会抛 NotFound
+     * （设备上的「远端仓库为空，或分支/引用不存在：Could not find origin/main」）；
+     * 此时只读本地工作副本，远端文本按空串交给 unionDay，等初始提交 + push + fetch 之后
+     * 普通周期再读远端。remote 缺省 true，普通周期语义一字不改。
+     */
+    const readDay = async (date: string, remote: boolean = true): Promise<DayRead> => {
       const read: DayRead = {
-        remote: await port.showMain(`timeline/${date}/records.json`),
+        remote: remote ? await port.showMain(`timeline/${date}/records.json`) : '',
         local: this.readText(this.recordsPath(date)),
         deleted: this.readText(this.timelineFilePath(date, DELETED_FILE_NAME)),
         restore: this.readText(this.timelineFilePath(date, RESTORE_FILE_NAME)),
-        remoteDeleted: await port.showMain(`timeline/${date}/${DELETED_FILE_NAME}`),
-        remoteRestore: await port.showMain(`timeline/${date}/${RESTORE_FILE_NAME}`)
+        remoteDeleted: remote ? await port.showMain(`timeline/${date}/${DELETED_FILE_NAME}`) : '',
+        remoteRestore: remote ? await port.showMain(`timeline/${date}/${RESTORE_FILE_NAME}`) : ''
       };
       return read;
     };

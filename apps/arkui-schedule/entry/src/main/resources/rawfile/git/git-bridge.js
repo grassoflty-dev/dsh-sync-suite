@@ -1622,8 +1622,28 @@
     if (serverRefs.length === 0) {
       return { empty: true, heads: [], names: [] };
     }
-    var heads = serverRefHeadNames(serverRefs);
-    var names = serverRefDisplayNames(serverRefs);
+    // mod-empty-remote-unborn-head：空仓库的 advertisement 可能带一个未出生的 HEAD 符号项
+    // （oid 全零 / name=HEAD / EOF 收尾），它不是真实引用，不能被当成「远端已有引用」而挡住引导。
+    // 只认真正的 refs/** 且 oid 非全零的条目；这是判空前的纯过滤，不改变三类决策语义。
+    var realRefs = [];
+    for (var r = 0; r < serverRefs.length; r++) {
+      var entry = serverRefs[r];
+      var raw = entry && typeof entry.ref === 'string'
+        ? entry.ref : (typeof entry === 'string' ? entry : '');
+      if (raw.indexOf('refs/') !== 0 || raw === 'HEAD' || /^EOF\b/i.test(raw)) {
+        continue;
+      }
+      var oid = entry && typeof entry.oid === 'string' ? entry.oid : '';
+      if (/^0{40}$/.test(oid)) {
+        continue; // 全零 = 未出生引用
+      }
+      realRefs.push(entry);
+    }
+    if (realRefs.length === 0) {
+      return { empty: true, heads: [], names: [] };
+    }
+    var heads = serverRefHeadNames(realRefs);
+    var names = serverRefDisplayNames(realRefs);
     // getRemoteInfo 只在已确认非空时用于**补充分支名**；即使它抛错或形状异常也不影响决策。
     try {
       var info = await git.getRemoteInfo({ http: session.http, url: url, onAuth: makeOnAuth(config) });
