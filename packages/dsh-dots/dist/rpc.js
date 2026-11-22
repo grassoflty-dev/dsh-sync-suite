@@ -554,6 +554,19 @@ export function createRpcService(options = {}) {
             throw new SyncError('E_INTERNAL', '配对服务未挂载');
         return pairing;
     }
+    /** 面板手动覆盖的方式：只认三个具体值或 'auto'；其余一律当自动（不猜、不给死地址）。 */
+    function asPairingOverride(payload) {
+        switch (payload.transport) {
+            case 'tailscale':
+            case 'lan':
+            case 'ipv6':
+                return payload.transport;
+            case 'auto':
+                return 'auto';
+            default:
+                return undefined;
+        }
+    }
     /** 内部完整状态（含 token / 私钥）绝不跨这个边界；重发信息只给 key / reason / port。 */
     function pairingViewOf(result) {
         return {
@@ -567,20 +580,24 @@ export function createRpcService(options = {}) {
             },
         };
     }
-    async function pairingProvision() {
-        return pairingViewOf(await requirePairing().provision());
+    async function pairingProvision(payload) {
+        return pairingViewOf(await requirePairing().provision(asPairingOverride(payload)));
     }
-    async function pairingShow() {
-        return await requirePairing().show();
+    async function pairingShow(payload) {
+        return await requirePairing().show(asPairingOverride(payload));
     }
-    async function pairingRotateToken() {
-        return pairingViewOf(await requirePairing().rotateToken());
+    async function pairingRotateToken(payload) {
+        return pairingViewOf(await requirePairing().rotateToken(asPairingOverride(payload)));
     }
-    async function pairingRotateCert() {
-        return pairingViewOf(await requirePairing().rotateCert());
+    async function pairingRotateCert(payload) {
+        return pairingViewOf(await requirePairing().rotateCert(asPairingOverride(payload)));
     }
-    async function pairingTransports() {
-        return await requirePairing().transports();
+    async function pairingTransports(payload) {
+        return await requirePairing().transports(asPairingOverride(payload));
+    }
+    /** 只有脱敏的 {at, peer}；不回地址、token 或 URL。 */
+    async function pairingConnections() {
+        return await requirePairing().connections();
     }
     /* ------------------------------------------------------------------ */
     /* 云端对话模式 P1：会话导出（chats/ 共享命名空间）                      */
@@ -915,15 +932,17 @@ export function createRpcService(options = {}) {
                     return ok(await enqueue(() => remoteAdoptToken(payload)));
                 // ---- mod-plugin-pairing：自动配置只读视图 + 显式二维码出口 ----
                 case 'pairingProvision':
-                    return ok(await enqueue(pairingProvision));
+                    return ok(await enqueue(() => pairingProvision(payload)));
                 case 'pairingShow':
-                    return ok(await enqueue(pairingShow));
+                    return ok(await enqueue(() => pairingShow(payload)));
                 case 'pairingRotateToken':
-                    return ok(await enqueue(pairingRotateToken));
+                    return ok(await enqueue(() => pairingRotateToken(payload)));
                 case 'pairingRotateCert':
-                    return ok(await enqueue(pairingRotateCert));
+                    return ok(await enqueue(() => pairingRotateCert(payload)));
                 case 'pairingTransports':
-                    return ok(await enqueue(pairingTransports));
+                    return ok(await enqueue(() => pairingTransports(payload)));
+                case 'pairingConnections':
+                    return ok(await enqueue(pairingConnections));
                 // ---- 云端对话模式 P1：会话导出（chats/ 共享命名空间，与同步动作同一条串行队列） ----
                 case 'chatExportStatus':
                     return ok(await enqueue(chatExportStatus));

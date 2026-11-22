@@ -336,6 +336,7 @@ export function createRemoteService(options = {}) {
                     bindAddress: bind.address,
                     upstream: { baseUrl: `http://127.0.0.1:${String(port)}` },
                     authorize: authorizer,
+                    ...(options.onConnect === undefined ? {} : { onConnect: options.onConnect }),
                 });
             }
             catch (error) {

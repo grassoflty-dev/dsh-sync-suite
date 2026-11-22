@@ -28,6 +28,8 @@ export interface RemoteModuleOptions {
   connection?: { authenticatedUrl?(baseUrl: string): string }
   /** DSH webServer 服务：读 `port` / `protocol`。 */
   webServer?: { port?: number; protocol?: string }
+  /** 入站连接审计钩子（由插件装配层接到配对服务的脱敏环）。 */
+  onConnect?: (info: { at: string; remoteAddress: string }) => void
   now?: () => Date
 }
 
@@ -88,6 +90,7 @@ export function createRemoteModule(options: RemoteModuleOptions = {}): RemoteMod
       runProbe(mode, settings, { dshPort: deps.dshPort, listenerAddress: deps.listenerAddress }),
     generateToken: () => generateToken(32),
     sessionCookieName: SESSION_COOKIE_NAME,
+    ...(options.onConnect === undefined ? {} : { onConnect: options.onConnect }),
     ...(options.now === undefined ? {} : { now: options.now }),
   })
 

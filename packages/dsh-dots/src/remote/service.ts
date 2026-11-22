@@ -47,6 +47,8 @@ export interface RemoteListenerStartOptions {
   bindAddress: string
   upstream: { baseUrl: string; headers?: Record<string, string> | (() => Record<string, string>) }
   authorize?: (input: RemoteAuthorizeInput) => RemoteAuthorizeResult
+  /** 入站连接审计钩子（由装配层接到配对服务的脱敏环）。 */
+  onConnect?: (info: { at: string; remoteAddress: string }) => void
 }
 
 export interface RemoteServiceOptions {
@@ -68,6 +70,8 @@ export interface RemoteServiceOptions {
   generateToken?: () => string
   /** 会话 cookie 名（默认 `dsh-remote-session`；与 `auth.ts` 的规范名保持一致由 index.ts 传）。 */
   sessionCookieName?: string
+  /** 入站连接审计钩子（装配层传入，只交 IP + 时刻）。 */
+  onConnect?: (info: { at: string; remoteAddress: string }) => void
   /** 上游身份后台刷新间隔（毫秒，默认 6 小时）。 */
   upstreamRefreshMs?: number
   now?: () => Date
@@ -408,6 +412,7 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
           bindAddress: bind.address,
           upstream: { baseUrl: `http://127.0.0.1:${String(port)}` },
           authorize: authorizer,
+          ...(options.onConnect === undefined ? {} : { onConnect: options.onConnect }),
         })
       } catch (error) {
         runtime.lastError = { code: 'E_LISTEN_FAILED', message: `监听启动失败：${safeMessage(error)}` }

@@ -18,6 +18,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createRemoteModule } from './remote/index.js'
 import type { RemoteModule } from './remote/index.js'
+import { createPairingService } from './remote/pairingProvision.js'
 import { createHttpHandler, createRpcService } from './rpc.js'
 import type { ConnectionLike, RpcService } from './rpc.js'
 import { registerScheduleTools } from './schedule/tools.js'
@@ -106,14 +107,35 @@ function mountScheduleTools(ctx: HostContext, options: ScheduleToolOptions): voi
 }
 
 export function apply(ctx: HostContext, config: PluginConfig = {}): void {
-  // 远程访问域：**独立的失败面**——装配失败只是没有远程访问，配置同步/日程工具照常。
+  // 配对服务先建：远程监听的入站连接要记进它的脱敏审计环；
+  // provisioning 新生成的令牌经 onTokenChanged 同步给远程门（全程进程内，token 不进 RPC / DOM / 日志）。
   let remote: RemoteModule | null = null
+  const pairing = createPairingService({
+    homeDir: config.homeDir,
+    onTokenChanged: (event) => {
+      const active = remote
+      if (active === null) return
+      try {
+        active.service.adoptToken?.(event.token)
+      } catch {
+        /* 门还没就绪时下一次 provision 会再发；关键信息不写控制台（凭据卫生） */
+      }
+    },
+  })
+  // 远程访问域：**独立的失败面**——装配失败只是没有远程访问，配置同步/日程工具照常。
   if (config.remoteAccess !== false) {
     try {
       remote = createRemoteModule({
         homeDir: config.homeDir,
         ...(ctx.connection === undefined ? {} : { connection: ctx.connection }),
         webServer: ctx.webServer,
+        onConnect: (info) => {
+          try {
+            pairing.recordConnection(info.remoteAddress, info.at)
+          } catch {
+            /* 审计失败绝不影响监听 */
+          }
+        },
       })
     } catch {
       remote = null
@@ -125,6 +147,7 @@ export function apply(ctx: HostContext, config: PluginConfig = {}): void {
     profileDir: config.profileDir,
     dshVersion: config.dshVersion,
     allowLocalRepo: config.allowLocalRepo === true,
+    pairing,
     ...(remote === null ? {} : { remote: remote.service }),
   })
   const handler = createHttpHandler(service, ctx.connection)

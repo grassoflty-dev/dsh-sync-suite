@@ -68,6 +68,7 @@ export function createRemoteModule(options = {}) {
         runProbe: (mode, settings, deps) => runProbe(mode, settings, { dshPort: deps.dshPort, listenerAddress: deps.listenerAddress }),
         generateToken: () => generateToken(32),
         sessionCookieName: SESSION_COOKIE_NAME,
+        ...(options.onConnect === undefined ? {} : { onConnect: options.onConnect }),
         ...(options.now === undefined ? {} : { now: options.now }),
     });
     return { service, paths: { configFile: store.configFile, tokenFile: store.tokenFile } };

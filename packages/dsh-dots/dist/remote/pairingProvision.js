@@ -10,6 +10,7 @@
  * 轮换是**显式动作**：新令牌写盘 + 回调通知令牌门 + 触发公告同键重发，旧载荷立刻失效。
  */
 import { createServer } from 'node:net';
+import { createPairingAudit, } from './pairingAudit.js';
 // engine/settings.ts 的纯默认值函数：没有 I/O、没有第二套 deviceId 词表，仅为复用同一实例 id。
 import { defaultDeviceId } from '../engine/settings.js';
 import { defaultRemoteSettings, normalizeRemoteSettings } from './accessMode.js';
@@ -102,6 +103,12 @@ export function createPairingProvisioner(options = {}) {
         const base = defaultRemoteSettings();
         const settings = raw === null ? base : normalizeRemoteSettings(raw, base);
         const chosen = await choosePort(settings.port, preferred, free);
+        // 接线 TODO 7a：没有真正接上公告钩子时，"已公告"标记不能凭空宣称已发布。
+        // 每次 run（面板 attach 必经）先清标记 → 下面必然产出一次 forced republish；
+        // 只有 onRepublish 真的 resolve 才在末尾写回 announcedPort。
+        const canAnnounce = options.onRepublish !== undefined;
+        if (!canAnnounce)
+            store.clearPairingAnnouncement();
         const announcedPort = store.readPairingAnnouncement()?.announcedPort ?? null;
         // 2) 令牌 / 证书：存在即复用；只在缺失时自动生成（不静默轮换）。
         const existingToken = store.readToken();
@@ -166,15 +173,18 @@ export function createPairingProvisioner(options = {}) {
                 text,
             };
             republish = event;
-            if (options.onRepublish !== undefined)
+            if (canAnnounce) {
                 await options.onRepublish(event);
-            // 钩子 resolve 之后才标记"已发布"；若它抛错，标记不动，下次 run 重发同一 key。
-            store.writePairingAnnouncement({
-                v: 1,
-                announcedPort: chosen.port,
-                announceRef: state.announceRef,
-                key: event.key,
-            });
+                // 钩子 resolve 之后才标记"已发布"；若它抛错，标记不动，下次 run 重发同一 key。
+                store.writePairingAnnouncement({
+                    v: 1,
+                    announcedPort: chosen.port,
+                    announceRef: state.announceRef,
+                    key: event.key,
+                });
+            }
+            // 无钩子时标记已被清成 announcedPort:null，下次 run 仍会 forced republish，
+            // 绝不留下"没有证据却说已公告"的假状态。
         }
         // 5) 最后写盘：不变量 = 被记录的端口要么已发布，要么下次 run 由 marker 重发修复。
         if (chosen.changed)
@@ -206,16 +216,18 @@ export function createPairingProvisioner(options = {}) {
     };
 }
 /**
- * 装配层：把 provisioning + QR 编码拼成 RPC 可用的 `PairingServiceLike`。
+ * 装配层：把 provisioning + QR 编码 + 脱敏审计拼成 RPC 可用的 `PairingServiceLike`。
  * `show()` 之外没有任何出口返回 token 或完整载荷。
  */
 export function createPairingService(options = {}) {
-    const provisioner = createPairingProvisioner(options);
     const seam = options.interfaceSeam ?? defaultInterfaceSeam;
+    const audit = createPairingAudit();
+    const asOverride = (override) => override === undefined || override === 'auto' ? options.transport : override;
+    const provisionerFor = (override) => createPairingProvisioner({ ...options, transport: asOverride(override) });
     return {
-        provision: () => provisioner.provision(),
-        async show() {
-            const result = await provisioner.provision();
+        provision: (override) => provisionerFor(override).provision(),
+        async show(override) {
+            const result = await provisionerFor(override).provision();
             try {
                 return { payload: result.payload, text: result.text, qr: encodeQr(result.text, 'M') };
             }
@@ -224,11 +236,13 @@ export function createPairingService(options = {}) {
                 throw new PairingError('E_PAIRING_MALFORMED', '配对串过长，无法生成二维码');
             }
         },
-        rotateToken: () => provisioner.rotateToken(),
-        rotateCert: () => provisioner.rotateCert(),
-        async transports() {
-            const selection = selectPairingTransport(seam, { override: options.transport });
+        rotateToken: (override) => provisionerFor(override).rotateToken(),
+        rotateCert: (override) => provisionerFor(override).rotateCert(),
+        async transports(override) {
+            const selection = selectPairingTransport(seam, { override: asOverride(override) ?? 'auto' });
             return { ...selection, reasonLines: transportReasonLines(selection) };
         },
+        async connections() { return audit.list(); },
+        recordConnection(remoteAddress, at) { audit.record(remoteAddress, at); },
     };
 }

@@ -179,6 +179,25 @@ const REMOTE_LINK = {
   note: ''
 }
 
+/** pairing-client：qr / 复制串只由显式 pairingShow 给出；token 明文不进 DOM。 */
+const PAIR_VIEW = {
+  v: 1, instanceId: 'gwl-pc', transport: 'lan', host: '192.168.1.6', port: 44996,
+  tlsFingerprint: 'AA:BB', announceRef: '', token: 'present'
+}
+const PAIR_TEXT = 'DSHDOTS1|1|gwl-pc|lan|192.168.1.6|44996|' + REMOTE_TOKEN + '|AA:BB||00000000'
+const PAIR_REASONS = [
+  'Tailscale：平板需加入同一 tailnet', '局域网：同一 Wi-Fi',
+  'IPv6：本机需有 IPv6，部分运营商屏蔽入站',
+  '局域网也需要端口和令牌：二维码里已经带好，不用手输；令牌阻止同一网络里的其他人控制这台 DSH。'
+]
+function pairCandidates(overrides = {}) {
+  return Object.assign({
+    tailscale: { kind: 'tailscale', available: false, reason: PAIR_REASONS[0], host: '' },
+    lan: { kind: 'lan', available: true, reason: PAIR_REASONS[1], host: '192.168.1.6' },
+    ipv6: { kind: 'ipv6', available: false, reason: PAIR_REASONS[2], host: '' }
+  }, overrides)
+}
+
 /** 权威 getState 视图：hasToken 挂在 settings 上；status 带 blocked / lastSyncAt。 */
 function stateData(overrides = {}) {
   return {
@@ -190,7 +209,8 @@ function stateData(overrides = {}) {
       {
         lastSyncAt: '2026-01-01T08:30:00+08:00',
         probe: { level: 'ok', verdict: '连通性自检通过', checks: [] },
-        visibilityBlocked: false
+        visibilityBlocked: false,
+        running: true
       },
       overrides.status || {}
     ),
@@ -216,6 +236,25 @@ function makeFetch(overrides = {}) {
     remoteSaveSettings: (body) => ({ ok: true, data: stateData(overrides.state || { body }) }),
     remoteRotateToken: (body) => ({ ok: true, data: ({ mode: 'lan', probe: null, body }) }),
     remoteProbe: () => ({ ok: true, data: { level: 'ok', verdict: '自检通过', checks: [] } }),
+    pairingProvision: () => ({
+      ok: true,
+      data: { view: PAIR_VIEW, changed: { port: false, token: false, cert: false }, republish: null }
+    }),
+    pairingTransports: (body) => ({
+      ok: true,
+      data: {
+        selected: 'lan', selectedHost: '192.168.1.6',
+        overrideUnavailable: body.transport === 'ipv6',
+        candidates: pairCandidates(), reasonLines: PAIR_REASONS
+      }
+    }),
+    pairingConnections: () => ({ ok: true, data: [] }),
+    pairingShow: () => ({ ok: true, data: { payload: '{}', text: PAIR_TEXT, qr: REMOTE_LINK.qr } }),
+    pairingRotateToken: () => ({
+      ok: true,
+      data: { view: PAIR_VIEW, changed: { port: false, token: true, cert: false }, republish: { key: 'pairing:gwl-pc', reason: 'token-rotated', previousPort: 44996, port: 44996 } }
+    }),
+    remoteStop: () => ({ ok: true, data: { running: false } }),
     testConnection: () => ({ ok: true, data: { reachable: true } })
   }, overrides.routes || {})
   globalThis.fetch = async function (url, options) {
@@ -283,117 +322,127 @@ test('清单：恰好 2 个组（dots / dots-remote），默认展开，无第�
   assert.equal(nodes.filter((node) => node.type === 'summary').length, 2, '只有两个组标题')
 })
 
-test('清单：控件恰好 5 个 = 4 input + 1 select（逐项列名，消除 5-vs-6 矛盾）', async () => {
+test('清单：pairing-client 后恰好 2 input + 1 select（远程组没有端口 / 令牌输入）', async () => {
   const { nodes } = await renderReal()
   const inputs = nodes.filter((node) => node.type === 'input')
   const selects = nodes.filter((node) => node.type === 'select')
 
   assert.deepEqual(
     inputs.map((node) => node.props.type),
-    ['text', 'password', 'number', 'password'],
-    '4 个 input 依次是：仓库地址(text) / 同步令牌(password) / 端口(number) / 远程令牌(password)'
+    ['text', 'password'],
+    '只剩同步组的仓库地址(text) / 同步令牌(password)；远程组的端口 / 令牌输入已删'
   )
-  assert.equal(selects.length, 1, '唯一 select 是「访问方式」')
+  assert.equal(selects.length, 1, '唯一 select 是「方式（自动选中，可覆盖）」')
   assert.deepEqual(
     selects[0].props.children.map((option) => option.props.value),
-    ['lan', 'tailscale', 'ipv6'],
-    '访问方式只有 局域网 / Tailscale / IPv6 三项'
+    ['auto', 'tailscale', 'lan', 'ipv6'],
+    '自动 + 三项传输；不可选项灰掉而不是消失'
   )
-  assert.equal(inputs.length + selects.length, 5, '规范写「五个控件 / 6 inputs/selects」，实现实数是 5')
+  assert.equal(inputs.filter((node) => node.props.type === 'number').length, 0, '端口输入不得复活')
   assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 0, '同步范围复选框不得复活')
 })
 
-test('清单：按钮恰好 5 个 = 3 动作 + 远程令牌的 2 个按钮式 affordance', async () => {
+test('清单：按钮恰好 7 个 = 同步 2 + 远程 5（显示二维码 / 复制 / 重新生成 / 自检 / 停止接受）', async () => {
   const { nodes } = await renderReal()
   const labels = nodes.filter((node) => node.type === 'button').map((node) => textOf(node.props.children))
   assert.deepEqual(
     labels,
-    ['保存', '测试连接', '生成', '复制', '自检'],
-    '3 个动作：保存 / 测试连接 / 自检；远程令牌上的 生成 / 复制 保留为 button，已显式计入'
+    ['保存', '测试连接', '显示二维码', '复制配对串', '重新生成', '自检', '停止接受连接'],
+    '远程组只多出二维码 / 复制 / 重新生成 / 自检 / 停止接受，没有端口 / 令牌输入'
   )
-  assert.equal(labels.length, 5, '按钮总数 = 3 + 2（生成 / 复制按按钮计）')
+  assert.equal(labels.length, 7)
 })
 
-test('M1：真实 props（无 seedLink）下二维码由 remoteShowLink 产生，恰好 1 个', async () => {
-  const { nodes, calls } = await renderReal()
-  assert.ok(calls.some((c) => c.action === 'remoteShowLink'), '真实面板必须自己调用 remoteShowLink')
-  const svgs = nodes.filter((node) => node.type === 'svg')
-  assert.equal(svgs.length, 1, '真实面板必须画出且只画一张二维码（不接受测试种子）')
+test('M1：真实 props（无 seedLink）下二维码由显式 pairingShow 产生，恰好 1 个', async () => {
+  const { mount, calls } = await renderReal()
+  assert.equal(calls.some((c) => c.action === 'pairingShow'), false, '挂载不得触碰 pairingShow')
+  assert.equal(nodesOf(mount.tree).filter((node) => node.type === 'svg').length, 0, '未点显示前无二维码')
+  await button(nodesOf(mount.tree), '显示二维码').props.onClick()
+  await settle()
+  assert.ok(calls.some((c) => c.action === 'pairingShow'), '显示二维码必须调用 pairingShow')
+  const svgs = nodesOf(mount.tree).filter((node) => node.type === 'svg')
+  assert.equal(svgs.length, 1, '恰好一张二维码（不接受测试种子）')
   assert.equal(svgs[0].props.role, 'img')
   assert.equal(svgs[0].props['aria-label'], zh['lean.remote.qr'])
-  // 令牌明文只进 RPC / 剪贴板，绝不进渲染树。
-  assert.equal(JSON.stringify(nodes).includes(REMOTE_TOKEN), false, '二维码树里不得含令牌明文')
+  assert.equal(JSON.stringify(svgs).includes(REMOTE_TOKEN), false, '二维码树里不得含令牌明文')
 })
 
-test('M1：复制按钮真的复制 RPC 返回的含令牌地址（不是空操作）', async () => {
+test('M1：复制按钮只写 pairingShow 的紧凑配对串（不是空操作、不是 URL）', async () => {
   const { mount, calls } = await renderReal()
   const before = copied.length
-  const copy = button(nodesOf(mount.tree), '复制')
+  const copy = button(nodesOf(mount.tree), '复制配对串')
   await copy.props.onClick()
   await settle()
-  assert.equal(copied.length, before + 1, '点「复制」必须写一次剪贴板')
-  assert.equal(copied[copied.length - 1], REMOTE_LINK.url, '复制的必须是真实链接（含真实令牌）')
-  assert.ok(calls.some((c) => c.action === 'remoteShowLink'))
+  assert.equal(copied.length, before + 1, '点「复制配对串」必须写一次剪贴板')
+  assert.equal(copied[copied.length - 1], PAIR_TEXT, '复制的必须是引擎的 DSHDOTS1|… 串')
+  assert.ok(calls.some((c) => c.action === 'pairingShow'))
 })
 
-test('M1：远程令牌输入失焦后经 remoteSaveSettings 落盘，生成走 remoteRotateToken', async () => {
+test('M1：重新生成走 pairingRotateToken，轮换后重新取二维码并提示重新配对', async () => {
   const { mount, calls } = await renderReal()
-  let password = nodesOf(mount.tree).filter((node) => node.type === 'input' && node.props.type === 'password')[1]
-  password.props.onChange({ target: { value: 'rt_pasted_token_1234' } })
+  await button(nodesOf(mount.tree), '重新生成').props.onClick()
   await settle()
-  password = nodesOf(mount.tree).filter((node) => node.type === 'input' && node.props.type === 'password')[1]
-  password.props.onBlur({ target: { value: 'rt_pasted_token_1234' } })
-  await settle()
-  assert.ok(
-    calls.some((c) => c.action === 'remoteSaveSettings' && c.settings.token === 'rt_pasted_token_1234'),
-    '令牌输入必须被真实保存，不能只写 React state'
-  )
-  await button(nodesOf(mount.tree), '生成').props.onClick()
-  await settle()
-  assert.ok(calls.some((c) => c.action === 'remoteRotateToken'), '「生成」必须轮换令牌')
-  assert.ok(calls.filter((c) => c.action === 'remoteShowLink').length >= 2, '轮换后必须重新取二维码')
+  assert.ok(calls.some((c) => c.action === 'pairingRotateToken'), '「重新生成」必须调用轮换 RPC')
+  assert.ok(calls.filter((c) => c.action === 'pairingShow').length >= 1, '轮换后必须重新取二维码')
+  assert.ok(textOf(mount.tree).includes('旧二维码与旧令牌立即失效'), '必须显示重新配对后果')
 })
 
-test('d1：挂载时按 host 的 tailscale 取链接，绝不先按 lan 取一次', async () => {
-  const { calls, nodes } = await renderReal({ state: { settings: { mode: 'tailscale' } } })
-  const linkCalls = calls.filter((c) => c.action === 'remoteShowLink').map((c) => c.mode)
-  assert.deepEqual(linkCalls, ['tailscale'], '首屏二维码必须用 host 的 tailscale，而不是硬编码 lan')
-  assert.equal(linkCalls.includes('lan'), false, '不得出现任何 lan 链接请求')
-  const select = nodes.filter((node) => node.type === 'select')[0]
-  assert.equal(select.props.value, 'tailscale', '下拉初值也必须是 host 的方式')
-})
-
-test('d1：host 还没有方式时保持中性态，不请求链接也不默认 lan', async () => {
+test('d1：挂载走 automatic 选路（transport=auto），下拉显示引擎选中的 tailscale', async () => {
   const { calls, nodes } = await renderReal({
-    state: { settings: { mode: '' } },
-    routes: { remoteShowLink: () => ({ ok: true, data: REMOTE_LINK }) }
-  })
-  assert.equal(calls.some((c) => c.action === 'remoteShowLink'), false, '没有权威方式时不得猜测 lan')
-  assert.equal(statusLine(nodes, 'remote-status'), zh['lean.remote.mode.unselected'])
-  assert.equal(nodes.filter((node) => node.type === 'svg').length, 0, '没有方式就不该画出误导性的二维码')
-})
-
-test('d2：切换方式不按旧 mode 落盘；先取新链接，再把新 mode 写回', async () => {
-  const { mount, calls } = await renderReal({
     routes: {
-      remoteSaveSettings: (body) => ({
+      pairingTransports: () => ({
         ok: true,
-        data: stateData({ settings: Object.assign({ hasToken: true, mode: 'lan', port: 0 }, body.settings) })
+        data: {
+          selected: 'tailscale', selectedHost: '100.64.0.2', overrideUnavailable: false,
+          candidates: pairCandidates(), reasonLines: PAIR_REASONS
+        }
       })
     }
   })
+  assert.deepEqual(
+    calls.filter((c) => c.action === 'pairingTransports').map((c) => c.transport),
+    ['auto'],
+    '挂载必须走自动选路，不得硬编码 lan'
+  )
+  assert.equal(calls.some((c) => c.action === 'pairingShow'), false, '挂载不得取二维码')
+  const select = nodes.filter((node) => node.type === 'select')[0]
+  assert.equal(select.props.value, 'tailscale', '下拉初值就是引擎自动选中的方式')
+})
+
+test('d1：没有任何可用方式 → 明确显示未检测到网络，不画误导性二维码', async () => {
+  const { calls, nodes } = await renderReal({
+    routes: {
+      pairingTransports: () => ({
+        ok: true,
+        data: {
+          selected: null, selectedHost: '', overrideUnavailable: false,
+          candidates: pairCandidates({
+            tailscale: { kind: 'tailscale', available: false, reason: PAIR_REASONS[0], host: '' },
+            lan: { kind: 'lan', available: false, reason: PAIR_REASONS[1], host: '' },
+            ipv6: { kind: 'ipv6', available: false, reason: PAIR_REASONS[2], host: '' }
+          }),
+          reasonLines: PAIR_REASONS
+        }
+      })
+    }
+  })
+  assert.equal(calls.some((c) => c.action === 'pairingShow'), false)
+  assert.ok(textOf(nodes).includes(zh['lean.remote.transport.none']))
+  assert.equal(nodes.filter((node) => node.type === 'svg').length, 0)
+})
+
+test('d2：手动覆盖不可用 → 回落自动并明说；下拉回到真实选中方式', async () => {
+  const { mount, calls } = await renderReal()
   const callStart = calls.length
   const select = nodesOf(mount.tree).filter((node) => node.type === 'select')[0]
   select.props.onChange({ target: { value: 'ipv6' } })
   await settle()
   const after = calls.slice(callStart)
-  const saves = after.filter((c) => c.action === 'remoteSaveSettings')
-  assert.equal(saves.some((c) => c.settings.mode === 'lan'), false, '切方式绝不能把旧的 lan 写回去')
-  const linkIdx = after.findIndex((c) => c.action === 'remoteShowLink' && c.mode === 'ipv6')
-  const saveIdx = after.findIndex((c) => c.action === 'remoteSaveSettings' && c.settings.mode === 'ipv6')
-  assert.ok(linkIdx >= 0, '必须先按新方式取链接')
-  assert.ok(saveIdx >= 0, '取到新链接后才保存新方式')
-  assert.ok(linkIdx < saveIdx, '顺序：loadLink(newMode) → persist(newMode)，不能反过来')
+  const transportCalls = after.filter((c) => c.action === 'pairingTransports')
+  assert.ok(transportCalls.some((c) => c.transport === 'ipv6'), '覆盖值必须下传引擎')
+  assert.ok(statusLine(nodesOf(mount.tree), 'remote-status').includes(zh['lean.remote.transport.fallback']))
+  assert.equal(nodesOf(mount.tree).filter((node) => node.type === 'select')[0].props.value, 'lan')
+  assert.equal(after.some((c) => c.action === 'remoteSaveSettings'), false, '精简面板不再写端口 / 令牌设置')
 })
 
 test('清单：状态行是唯一状态面，用 App 语义（已同步 · HH:MM）', async () => {

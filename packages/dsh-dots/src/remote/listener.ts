@@ -119,6 +119,11 @@ export interface RemoteListenerOptions {
   rewriteRedirects?: boolean
   /** 诊断日志（**不要**在这里塞 token；本文件写日志前还会再脱敏一次）。 */
   log?: (message: string) => void
+  /**
+   * 入站连接钩子（mod-plugin-pairing-client 的脱敏审计）：每个新 socket 触发一次。
+   * 这里只交原始 IP（调用方负责脱敏）；token / 请求行 / 端口一律不传。
+   */
+  onConnect?: (info: { at: string; remoteAddress: string }) => void
 }
 
 /** 监听句柄。`port`/`address` 是**实际**绑定值（`port: 0` 时尤其重要）。 */
@@ -1043,6 +1048,14 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
     total += 1
     sockets.add(socket)
     enableNoDelay(socket)
+    // 审计钩子：只交脱敏所需的原始 IP + 时刻；任何 token / 请求内容都不经此路。
+    if (options.onConnect !== undefined) {
+      try {
+        options.onConnect({ at: new Date().toISOString(), remoteAddress: normalizeIp(socket.remoteAddress) })
+      } catch {
+        /* 审计失败绝不影响监听本身 */
+      }
+    }
     socket.on('close', () => {
       sockets.delete(socket)
     })

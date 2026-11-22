@@ -56,7 +56,11 @@ import { localSessionEvents, localSessionInfo, localSessionList } from './remote
 import { projectInstanceList, projectReadResult, type RemoteReadAction } from './remote/projection.js'
 import { mapRemoteCode, remoteToolError, REMOTE_TOOL_ERROR_CODES } from './remote/toolErrors.js'
 // mod-plugin-pairing：RPC 只依赖配对服务的结构类型，不 import 证书 / QR / 监听实现。
-import type { PairingProvisionResult, PairingServiceLike } from './remote/pairingProvision.js'
+import type {
+  PairingOverride,
+  PairingProvisionResult,
+  PairingServiceLike,
+} from './remote/pairingProvision.js'
 
 /** 注入的远端响应头（只需 get，便于测试塞假实现）。 */
 export interface RemoteFetchHeadersLike {
@@ -723,6 +727,20 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
     return pairing
   }
 
+  /** 面板手动覆盖的方式：只认三个具体值或 'auto'；其余一律当自动（不猜、不给死地址）。 */
+  function asPairingOverride(payload: Record<string, unknown>): PairingOverride {
+    switch (payload.transport) {
+      case 'tailscale':
+      case 'lan':
+      case 'ipv6':
+        return payload.transport
+      case 'auto':
+        return 'auto'
+      default:
+        return undefined
+    }
+  }
+
   /** 内部完整状态（含 token / 私钥）绝不跨这个边界；重发信息只给 key / reason / port。 */
   function pairingViewOf(result: PairingProvisionResult): {
     view: PairingProvisionResult['view']
@@ -741,24 +759,29 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
     }
   }
 
-  async function pairingProvision(): Promise<ReturnType<typeof pairingViewOf>> {
-    return pairingViewOf(await requirePairing().provision())
+  async function pairingProvision(payload: Record<string, unknown>): Promise<ReturnType<typeof pairingViewOf>> {
+    return pairingViewOf(await requirePairing().provision(asPairingOverride(payload)))
   }
 
-  async function pairingShow(): Promise<Awaited<ReturnType<PairingServiceLike['show']>>> {
-    return await requirePairing().show()
+  async function pairingShow(payload: Record<string, unknown>): Promise<Awaited<ReturnType<PairingServiceLike['show']>>> {
+    return await requirePairing().show(asPairingOverride(payload))
   }
 
-  async function pairingRotateToken(): Promise<ReturnType<typeof pairingViewOf>> {
-    return pairingViewOf(await requirePairing().rotateToken())
+  async function pairingRotateToken(payload: Record<string, unknown>): Promise<ReturnType<typeof pairingViewOf>> {
+    return pairingViewOf(await requirePairing().rotateToken(asPairingOverride(payload)))
   }
 
-  async function pairingRotateCert(): Promise<ReturnType<typeof pairingViewOf>> {
-    return pairingViewOf(await requirePairing().rotateCert())
+  async function pairingRotateCert(payload: Record<string, unknown>): Promise<ReturnType<typeof pairingViewOf>> {
+    return pairingViewOf(await requirePairing().rotateCert(asPairingOverride(payload)))
   }
 
-  async function pairingTransports(): Promise<Awaited<ReturnType<PairingServiceLike['transports']>>> {
-    return await requirePairing().transports()
+  async function pairingTransports(payload: Record<string, unknown>): Promise<Awaited<ReturnType<PairingServiceLike['transports']>>> {
+    return await requirePairing().transports(asPairingOverride(payload))
+  }
+
+  /** 只有脱敏的 {at, peer}；不回地址、token 或 URL。 */
+  async function pairingConnections(): Promise<Awaited<ReturnType<PairingServiceLike['connections']>>> {
+    return await requirePairing().connections()
   }
 
   /* ------------------------------------------------------------------ */
@@ -1113,15 +1136,17 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
           return ok(await enqueue(() => remoteAdoptToken(payload)))
         // ---- mod-plugin-pairing：自动配置只读视图 + 显式二维码出口 ----
         case 'pairingProvision':
-          return ok(await enqueue(pairingProvision))
+          return ok(await enqueue(() => pairingProvision(payload)))
         case 'pairingShow':
-          return ok(await enqueue(pairingShow))
+          return ok(await enqueue(() => pairingShow(payload)))
         case 'pairingRotateToken':
-          return ok(await enqueue(pairingRotateToken))
+          return ok(await enqueue(() => pairingRotateToken(payload)))
         case 'pairingRotateCert':
-          return ok(await enqueue(pairingRotateCert))
+          return ok(await enqueue(() => pairingRotateCert(payload)))
         case 'pairingTransports':
-          return ok(await enqueue(pairingTransports))
+          return ok(await enqueue(() => pairingTransports(payload)))
+        case 'pairingConnections':
+          return ok(await enqueue(pairingConnections))
         // ---- 云端对话模式 P1：会话导出（chats/ 共享命名空间，与同步动作同一条串行队列） ----
         case 'chatExportStatus':
           return ok(await enqueue(chatExportStatus))

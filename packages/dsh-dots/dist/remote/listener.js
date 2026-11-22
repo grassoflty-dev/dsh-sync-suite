@@ -903,6 +903,15 @@ export async function startRemoteListener(options) {
         total += 1;
         sockets.add(socket);
         enableNoDelay(socket);
+        // 审计钩子：只交脱敏所需的原始 IP + 时刻；任何 token / 请求内容都不经此路。
+        if (options.onConnect !== undefined) {
+            try {
+                options.onConnect({ at: new Date().toISOString(), remoteAddress: normalizeIp(socket.remoteAddress) });
+            }
+            catch {
+                /* 审计失败绝不影响监听本身 */
+            }
+        }
         socket.on('close', () => {
             sockets.delete(socket);
         });

@@ -162,4 +162,16 @@ export class RemoteStore {
             key: state.key,
         }, null, 2) + '\n');
     }
+    /**
+     * 清掉"已公告"标记（接线 TODO 7a）：没有真正接上公告钩子时，标记绝不能宣称已发布。
+     * 写成 `announcedPort: null` 而不是删文件——read 端把它等同"从未发布"，下次 run 强制重发。
+     */
+    clearPairingAnnouncement() {
+        writeFilePrivate(this.pairingStateFile, JSON.stringify({
+            v: 1,
+            announcedPort: null,
+            announceRef: '',
+            key: '',
+        }, null, 2) + '\n');
+    }
 }

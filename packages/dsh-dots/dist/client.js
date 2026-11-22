@@ -353,15 +353,34 @@ window.__ModuleLoader__.load({
       "lean.remote.mode": "访问方式",
       "lean.remote.port": "端口",
       "lean.remote.token": "访问令牌",
-      "lean.remote.generate": "生成",
-      "lean.remote.copy": "复制",
+      "lean.remote.generate": "重新生成",
+      "lean.remote.copy": "复制配对串",
       "lean.remote.selfcheck": "自检",
       "lean.remote.qr": "二维码",
       "lean.remote.mode.unselected": "尚未选择访问方式",
       "lean.remote.probe.never": "尚未自检；点「自检」确认这台机器到底能不能被访问。",
       "lean.mode.lan": "局域网",
       "lean.mode.tailscale": "Tailscale",
-      "lean.mode.ipv6": "IPv6"
+      "lean.mode.ipv6": "IPv6",
+      // mod-plugin-pairing-client：自动选路 / 显式二维码 / 轮换后果 / 脱敏审计 / 停止接受。
+      "lean.remote.mode.hint": "方式（自动选中，可覆盖）",
+      "lean.remote.mode.auto": "自动选择（推荐）",
+      "lean.remote.transport.selected": "自动选中：{mode}",
+      "lean.remote.transport.none": "未检测到可用网络：请先连同一 Wi-Fi，或登录 Tailscale 让平板加入同一 tailnet",
+      "lean.remote.transport.fallback": "所选方式不可用，已回落到自动选择",
+      // 传输诚实：TLS 落地前只讲事实，不做任何通道安全承诺。
+      "lean.remote.transport.recommended": "推荐：Tailscale（已加密）",
+      "lean.remote.transport.plaintext": "当前为明文 HTTP，仅建议在 Tailscale 下使用；加密传输模块随后",
+      "lean.remote.unavailable": "不可用",
+      "lean.remote.port.auto": "自动端口：{port}",
+      "lean.remote.qr.show": "显示二维码",
+      "lean.remote.rotated": "已重新生成：旧二维码与旧令牌立即失效，平板必须重新扫码配对。",
+      "lean.remote.announce.pending": "待公告（未接公告钩子，每次打开都会请求重发）",
+      "lean.remote.announce.none": "暂无待公告变更",
+      "lean.remote.audit.title": "谁连进来过",
+      "lean.remote.audit.empty": "暂无入站连接记录",
+      "lean.remote.stop": "停止接受连接",
+      "lean.remote.stopped": "已停止接受连接"
     }
 
     const en = {
@@ -678,15 +697,34 @@ window.__ModuleLoader__.load({
       "lean.remote.mode": "Access mode",
       "lean.remote.port": "Port",
       "lean.remote.token": "Access token",
-      "lean.remote.generate": "Generate",
-      "lean.remote.copy": "Copy",
+      "lean.remote.generate": "Regenerate",
+      "lean.remote.copy": "Copy pairing text",
       "lean.remote.selfcheck": "Self-check",
       "lean.remote.qr": "QR code",
       "lean.remote.mode.unselected": "No access mode selected yet",
       "lean.remote.probe.never": "No check yet; click Self-check to see whether this machine is actually reachable.",
       "lean.mode.lan": "LAN",
       "lean.mode.tailscale": "Tailscale",
-      "lean.mode.ipv6": "IPv6"
+      "lean.mode.ipv6": "IPv6",
+      // mod-plugin-pairing-client: auto transport / explicit QR / rotation consequence / redacted audit / stop.
+      "lean.remote.mode.hint": "Mode (auto-selected, overridable)",
+      "lean.remote.mode.auto": "Auto (recommended)",
+      "lean.remote.transport.selected": "Auto-selected: {mode}",
+      "lean.remote.transport.none": "No available network: join the same Wi-Fi, or sign in to Tailscale so the tablet joins the same tailnet",
+      "lean.remote.transport.fallback": "Selected mode unavailable; fell back to auto-selection",
+      // Transport honesty: state facts only; no channel-security promise until TLS lands.
+      "lean.remote.transport.recommended": "Recommended: Tailscale (encrypted)",
+      "lean.remote.transport.plaintext": "Plain HTTP right now; only recommended under Tailscale; encrypted transport module to follow",
+      "lean.remote.unavailable": "unavailable",
+      "lean.remote.port.auto": "Auto port: {port}",
+      "lean.remote.qr.show": "Show QR",
+      "lean.remote.rotated": "Regenerated: the old QR and token stop working now; the tablet must pair again.",
+      "lean.remote.announce.pending": "Awaiting announce (no hook wired; a republish is requested on every open)",
+      "lean.remote.announce.none": "No pending announce changes",
+      "lean.remote.audit.title": "Who connected",
+      "lean.remote.audit.empty": "No incoming connections recorded",
+      "lean.remote.stop": "Stop accepting connections",
+      "lean.remote.stopped": "Stopped accepting connections"
     }
 
     const DICTS = { zh: zh, en: en }
@@ -1557,7 +1595,12 @@ window.__ModuleLoader__.load({
         },
         options.map(function (opt) {
           const o = opt || {}
-          return h('option', { key: String(o.value), value: String(o.value) }, asText(o.label))
+          // 不可用的传输方式要显式灰掉（不能静默消失）；其它 Select 不传 disabled 时保持原样。
+          return h('option', {
+            key: String(o.value),
+            value: String(o.value),
+            disabled: o.disabled === true
+          }, asText(o.label))
         })
       )
     }
@@ -4315,42 +4358,59 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 远程控制组：访问方式 + 端口 + 令牌（生成 / 复制）+ 自检 + 二维码。
+     * 远程控制组（mod-plugin-pairing-client）：自动选路 + 可覆盖 + 原因行；
+     * 二维码 / 复制串只由显式 `pairingShow` 取得（qr 只进 QrMatrix，text 只进剪贴板）；
+     * 重新生成 = 显式轮换 + 新二维码 + 重新配对提示；谁连进来过 = 脱敏审计；
+     * 停止接受连接 = 关闭监听并显示已停止。
      *
-     * review M1 修正：**没有 seedLink 测试接缝**。二维码链接只能由真实 RPC
-     * `remoteShowLink` 取得——它在宿主传入的真实 props（只有 t / close）下于首次挂载时
-     * 取一次，换方式 / 生成令牌 / 复制时再取。令牌输入在失焦时经 `remoteSaveSettings`
-     * 落盘，`生成` 走 `remoteRotateToken`，`复制` 复制 RPC 返回的**真实含令牌地址**
-     * （明文只进剪贴板，永不进 DOM）。因此三个控件在真实面板里都是活的。
+     * 硬纪律：挂载只调 pairingProvision / pairingTransports / pairingConnections /
+     * remoteGetState，**绝不**调 pairingShow（bearer secret 出口）、**绝不**写剪贴板、
+     * **绝不**渲染端口 / 令牌输入框（端口只读展示，令牌只有 `present` 状态）。
      */
     function LeanRemoteGroup(props) {
       const tr = makeT(props)
-      const seedState = props && props.seedState && typeof props.seedState === 'object' ? props.seedState : null
-      const seedSettings = seedState && seedState.settings && typeof seedState.settings === 'object' ? seedState.settings : {}
-      const [state, setState] = React.useState(seedState)
-      // r2-d1：不在本地默认 lan；方式只能来自 host，没拿到就是未选择（中性态）。
-      const [mode, setMode] = React.useState(asText(seedSettings.mode))
-      const [port, setPort] = React.useState(typeof seedSettings.port === 'number' ? seedSettings.port : 0)
-      const [token, setToken] = React.useState('')
-      const [link, setLink] = React.useState(null)
-      const [probe, setProbe] = React.useState(seedState && seedState.status ? seedState.status.probe : null)
+      const [view, setView] = React.useState(null)
+      const [transports, setTransports] = React.useState(null)
+      const [override, setOverride] = React.useState('')
+      const [fallback, setFallback] = React.useState(false)
+      // shown 只留 qr 矩阵：pairingShow 的 payload / text 绝不进 state / DOM / 日志。
+      const [shown, setShown] = React.useState(null)
+      const [audit, setAudit] = React.useState([])
+      const [running, setRunning] = React.useState(null)
+      const [probe, setProbe] = React.useState(null)
+      const [republish, setRepublish] = React.useState(null)
+      const [rotated, setRotated] = React.useState(false)
       const [busy, setBusy] = React.useState('')
       const [failure, setFailure] = React.useState('')
       const booted = React.useRef(false)
 
-      /** 唯一的链接来源：remoteShowLink 的返回体（含 token 与二维码矩阵）。 */
-      async function loadLink(currentMode) {
-        const shown = await rpcCall('remoteShowLink', { mode: currentMode })
-        if (!shown.ok) {
-          setFailure(localizeError(tr, shown.error).message)
+      function activeOverride() { return override === '' ? 'auto' : override }
+
+      async function refreshProvision(which) {
+        const result = await rpcCall('pairingProvision', { transport: which === '' ? 'auto' : which })
+        if (!result.ok) {
+          setFailure(localizeError(tr, result.error).message)
           return false
         }
-        if (!shown.data || typeof shown.data.url !== 'string' || !shown.data.qr) {
-          setFailure({ code: 'E_BAD_RESPONSE', message: tr('error.badResponse') })
-          return false
+        if (result.data) {
+          setView(result.data.view)
+          setRepublish(result.data.republish || null)
         }
-        setLink(shown.data)
         return true
+      }
+
+      async function refreshTransports(which) {
+        const result = await rpcCall('pairingTransports', { transport: which === '' ? 'auto' : which })
+        if (!result.ok) {
+          setFailure(localizeError(tr, result.error).message)
+          return null
+        }
+        const data = result.data || null
+        if (data) {
+          setTransports(data)
+          setFallback(data.overrideUnavailable === true)
+        }
+        return data
       }
 
       React.useEffect(function () {
@@ -4358,24 +4418,22 @@ window.__ModuleLoader__.load({
         booted.current = true
         let stopped = false
         Promise.resolve((async function () {
-          let hostMode = asText(seedSettings.mode)
-          if (seedState === null) {
-            const result = await rpcCall('remoteGetState', {})
-            if (stopped || !result.ok) return
-            setState(result.data)
-            if (result.data && result.data.settings) {
-              const s = result.data.settings
-              // r2-d1：mode 只认 host 的真实值，缺失就留空，绝不用 lan 顶替。
-              hostMode = asText(s.mode)
-              setMode(hostMode)
-              setPort(typeof s.port === 'number' ? s.port : 0)
-            }
-            if (result.data && result.data.status && result.data.status.probe) setProbe(result.data.status.probe)
-          }
-          // r2-d1：没有权威方式就不请求链接（否则会画出错误的 LAN 二维码）。
-          if (hostMode === '') return
-          // 真实面板必须自己拿到链接；没有任何 props 可以提供二维码。
-          await loadLink(hostMode)
+          // 真实宿主 props（只有 t / close）：四个只读入口各取一次，没有任何种子接缝。
+          await Promise.all([
+            refreshProvision(''),
+            refreshTransports(''),
+            (async function () {
+              const result = await rpcCall('pairingConnections', {})
+              if (!stopped && result.ok && Array.isArray(result.data)) setAudit(result.data)
+            })(),
+            (async function () {
+              const result = await rpcCall('remoteGetState', {})
+              if (!stopped && result.ok && result.data && result.data.status) {
+                setRunning(result.data.status.running === true)
+                if (result.data.status.probe) setProbe(result.data.status.probe)
+              }
+            })(),
+          ])
         })()).catch(function () { /* rpcCall 不抛；这里只兜住意外 */ })
         return function () { stopped = true }
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4385,46 +4443,71 @@ window.__ModuleLoader__.load({
         if (busy) return
         setBusy(key)
         setFailure('')
-        try {
-          await task()
-        } finally {
-          setBusy('')
-        }
+        try { await task() } finally { setBusy('') }
       }
 
-      /**
-       * 令牌 / 方式 / 端口的真实写入口：用户真的编辑了才保存（精简面板不单列保存按钮）。
-       * r2-d2：`nextMode` 显式传入时才用它；方式切换必须在 loadLink(newMode) 成功后才
-       * 落盘，绝不把旧的闭包 mode 写回去。
-       */
-      async function persist(nextToken, nextMode) {
-        const settings = { mode: nextMode === undefined ? mode : nextMode, port: port }
-        if (nextToken !== '') settings.token = nextToken
-        const result = await rpcCall('remoteSaveSettings', { settings: settings })
+      /** 显式动作：pairingShow 是唯一 secret 出口；state 只留 qr，payload / text 不落地。 */
+      async function fetchQr(which) {
+        const result = await rpcCall('pairingShow', { transport: which === '' ? 'auto' : which })
         if (!result.ok) {
           setFailure(localizeError(tr, result.error).message)
-          return false
+          return null
         }
-        if (result.data) {
-          setState(function (prev) {
-            const base = prev && typeof prev === 'object' ? prev : {}
-            return Object.assign({}, base, {
-              settings: result.data.settings || base.settings,
-              status: result.data.status || base.status || {},
-              modes: result.data.modes || base.modes
-            })
-          })
-          if (result.data.status && result.data.status.probe) setProbe(result.data.status.probe)
+        const data = result.data
+        if (!data || !data.qr || typeof data.qr !== 'object') {
+          setFailure({ code: 'E_BAD_RESPONSE', message: tr('error.badResponse') })
+          return null
         }
-        setToken('')
-        return true
+        setShown({ qr: data.qr })
+        return data
+      }
+
+      function doShow() {
+        runTask('qr', async function () { await fetchQr(activeOverride()) })
+      }
+
+      /** 显式复制：现取现写，只写紧凑配对串；挂载路径永不调用，DOM 永不出现 secret。 */
+      function doCopy() {
+        runTask('copy', async function () {
+          const data = await fetchQr(activeOverride())
+          if (data === null) return
+          if (typeof data.text !== 'string') {
+            setFailure({ code: 'E_BAD_RESPONSE', message: tr('error.badResponse') })
+            return
+          }
+          try {
+            const clip = typeof navigator === 'undefined' ? null : navigator.clipboard
+            if (clip && typeof clip.writeText === 'function') {
+              const pending = clip.writeText(data.text)
+              if (pending && typeof pending.catch === 'function') pending.catch(function () {})
+            }
+          } catch (e) {
+            /* 静默失败：绝不把配对串降级渲染进 DOM */
+          }
+        })
+      }
+
+      function doGenerate() {
+        runTask('rotate', async function () {
+          const result = await rpcCall('pairingRotateToken', { transport: activeOverride() })
+          if (!result.ok) {
+            setFailure(localizeError(tr, result.error).message)
+            return
+          }
+          if (result.data) {
+            setView(result.data.view)
+            setRepublish(result.data.republish || null)
+          }
+          // 后果：旧二维码与旧令牌立即失效，平板必须重新扫码配对。
+          setRotated(true)
+          await fetchQr(activeOverride())
+        })
       }
 
       function doSelfCheck() {
         runTask('probe', async function () {
-          // 先把用户刚填的令牌 / 方式 / 端口落盘，自检才针对真实配置。
-          if (!(await persist(token))) return
-          const result = await rpcCall('remoteProbe', { mode: mode })
+          const mode = view && typeof view.transport === 'string' ? view.transport : undefined
+          const result = await rpcCall('remoteProbe', mode === undefined ? {} : { mode: mode })
           if (!result.ok) {
             setFailure(localizeError(tr, result.error).message)
             return
@@ -4433,129 +4516,135 @@ window.__ModuleLoader__.load({
         })
       }
 
-      function doGenerate() {
-        runTask('rotate', async function () {
-          const result = await rpcCall('remoteRotateToken', {})
+      function doStop() {
+        runTask('stop', async function () {
+          const result = await rpcCall('remoteStop', {})
           if (!result.ok) {
             setFailure(localizeError(tr, result.error).message)
             return
           }
-          if (result.data) setState(function (prev) {
-            return Object.assign({}, prev && typeof prev === 'object' ? prev : {}, { status: result.data })
-          })
-          setToken('')
-          // 旧二维码立即失效：用轮换后的令牌重新取链接，保证二维码永远可见。
-          await loadLink(mode)
+          setRunning(false)
+          const state = await rpcCall('remoteGetState', {})
+          if (state.ok && state.data && state.data.status) setRunning(state.data.status.running === true)
         })
       }
 
-      function doCopy() {
-        runTask('copy', async function () {
-          let url = link && typeof link.url === 'string' ? link.url : ''
-          if (url === '') {
-            if (!(await loadLink(mode))) return
-            url = link && typeof link.url === 'string' ? link.url : ''
-          }
-          if (url === '') return
-          try {
-            const clip = typeof navigator === 'undefined' ? null : navigator.clipboard
-            if (clip && typeof clip.writeText === 'function') {
-              const pending = clip.writeText(url)
-              if (pending && typeof pending.catch === 'function') pending.catch(function () {})
-            }
-          } catch (e) {
-            /* 静默失败：绝不把含令牌的地址降级渲染进 DOM。 */
-          }
-        })
-      }
-
-      const qr = link && link.qr && typeof link.qr === 'object' ? link.qr : null
+      const qr = shown && shown.qr && typeof shown.qr === 'object' ? shown.qr : null
+      const selected = transports && typeof transports.selected === 'string' ? transports.selected : ''
+      const reasonLines = transports && Array.isArray(transports.reasonLines) ? transports.reasonLines : []
+      const candidates = transports && transports.candidates && typeof transports.candidates === 'object' ? transports.candidates : {}
+      // 手动覆盖不可用 → 回落自动选中，下拉也必须显示回落后的真实方式，绝不留在死选项上。
+      const modeValue = fallback && selected !== '' ? selected : (override !== '' ? override : selected)
+      // 传输诚实：这条警告跟着"实际用于二维码的传输方式"走，用户一切方式就立刻看到。
+      const effectiveTransport = override !== '' ? override : selected
       const probeLevel = probe && typeof probe === 'object' ? asText(probe.level) : ''
       const probeLine = probe && typeof probe === 'object'
         ? asText(probe.verdict) || asText(probe.message) || ''
         : ''
       const probeLabel = probeLevel ? tr('remote.probe.' + probeLevel) : ''
-      const status = (state && state.status) || {}
-      const statusLine = mode === ''
-        ? tr('lean.remote.mode.unselected')
-        : failure
+      const statusLine = failure
         ? failure
-        : status.visibilityBlocked === true || status.privacyBlocked === true || status.repoBlocked === true
-          ? tr('lean.status.blocked')
-          : probeLevel
-            ? (probeLabel ? probeLabel + ' · ' : '') + probeLine
-            : tr('lean.remote.probe.never')
+        : rotated ? tr('lean.remote.rotated')
+          : running === false ? tr('lean.remote.stopped')
+            : fallback ? tr('lean.remote.transport.fallback')
+              : republish ? tr('lean.remote.announce.pending')
+                : selected === '' ? tr('lean.remote.transport.none')
+                  : probeLevel ? (probeLabel ? probeLabel + ' · ' : '') + probeLine
+                    : tr('lean.remote.probe.never')
+      const portLine = view && typeof view.port === 'number' && view.port > 0
+        ? tr('lean.remote.port.auto', { port: String(view.port) })
+        : ''
+      // 没有公告钩子时引擎清掉标记并强制重发；这里只报"待公告"，绝不冒充"已公告端口 X"。
+      const announceLine = republish
+        ? tr('lean.remote.announce.pending')
+        : tr('lean.remote.announce.none')
+
+      function optionOf(kind, key) {
+        const candidate = candidates[kind]
+        const unavailable = !!(candidate && candidate.available === false)
+        return {
+          value: kind,
+          label: tr(key) + (unavailable ? ' · ' + tr('lean.remote.unavailable') : ''),
+          disabled: unavailable
+        }
+      }
 
       return h(
         'div',
         { style: S.groupBody },
         h(
           Field,
-          { label: tr('lean.remote.mode') },
+          { label: tr('lean.remote.mode.hint') },
           h(Select, {
-            value: mode,
+            value: modeValue,
             disabled: Boolean(busy),
             options: [
-              { value: 'lan', label: tr('lean.mode.lan') },
-              { value: 'tailscale', label: tr('lean.mode.tailscale') },
-              { value: 'ipv6', label: tr('lean.mode.ipv6') }
+              { value: 'auto', label: tr('lean.remote.mode.auto') },
+              optionOf('tailscale', 'lean.mode.tailscale'),
+              optionOf('lan', 'lean.mode.lan'),
+              optionOf('ipv6', 'lean.mode.ipv6')
             ],
             onChange: function (value) {
-              setMode(value)
-              // r2-d2：切方式只先取新链接；取成功后才把**新**方式落盘，绝不保存旧 mode。
-              runTask('link', async function () {
-                if (await loadLink(value)) await persist('', value)
+              runTask('transport', async function () {
+                const next = value === 'auto' ? '' : value
+                const data = await refreshTransports(next)
+                if (!data) return
+                if (data.overrideUnavailable === true) {
+                  // 覆盖项不可用 → 明说回落，并用自动选中的真实方式继续，不给死地址。
+                  setOverride('')
+                  await refreshProvision('')
+                } else {
+                  setOverride(next)
+                  await refreshProvision(next)
+                }
               })
             }
           })
         ),
-        h(
-          Field,
-          { label: tr('lean.remote.port') },
-          h(Input, {
-            type: 'number',
-            value: String(port),
-            disabled: Boolean(busy),
-            onChange: function (value) {
-              const digits = String(value).replace(/[^0-9]/g, '')
-              const n = digits === '' ? 0 : Number(digits)
-              setPort(isFinite(n) && n > 0 ? Math.min(65535, Math.floor(n)) : 0)
-            },
-            // r2-d2：只有用户真的编辑了端口才落盘；不碰方式。
-            onBlur: function () {
-              runTask('save', async function () { await persist(token); await loadLink(mode) })
-            }
-          })
+        h('div', { 'data-lean': 'remote-transport', style: S.hint },
+          selected !== '' ? tr('lean.remote.transport.selected', { mode: selected }) : tr('lean.remote.transport.none')
         ),
+        effectiveTransport === 'tailscale'
+          ? h('div', { 'data-lean': 'remote-transport-honesty', style: S.hint }, tr('lean.remote.transport.recommended'))
+          : (effectiveTransport === 'lan' || effectiveTransport === 'ipv6')
+            ? h('div', { 'data-lean': 'remote-transport-honesty', style: S.hint }, tr('lean.remote.transport.plaintext'))
+            : null,
+        reasonLines.map(function (line, i) {
+          return h('div', { key: 'reason' + i, 'data-lean': 'remote-reason', style: S.hint }, line)
+        }),
+        portLine ? h('div', { 'data-lean': 'remote-port', style: S.hint }, portLine) : null,
         h(
-          Field,
-          { label: tr('lean.remote.token') },
-          h(Input, {
-            type: 'password',
-            value: token,
-            autoComplete: 'new-password',
-            disabled: Boolean(busy),
-            onChange: function (value) { setToken(value) },
-            onBlur: function () {
-              runTask('save', async function () { await persist(token); await loadLink(mode) })
-            }
-          })
+          'div',
+          { style: S.row },
+          h(Btn, { label: tr('lean.remote.qr.show'), disabled: Boolean(busy), onClick: doShow }),
+          h(Btn, { label: tr('lean.remote.copy'), disabled: Boolean(busy), onClick: doCopy })
         ),
         h(
           'div',
           { style: S.row },
           h(Btn, { label: tr('lean.remote.generate'), disabled: Boolean(busy), onClick: doGenerate }),
-          h(Btn, { label: tr('lean.remote.copy'), disabled: Boolean(busy), onClick: doCopy })
-        ),
-        h(
-          'div',
-          { role: 'status', 'data-lean': 'remote-status', style: S.hint },
-          statusLine
+          h(Btn, { label: tr('lean.remote.selfcheck'), disabled: Boolean(busy), onClick: doSelfCheck })
         ),
         h(
           'div',
           { style: S.row },
-          h(Btn, { label: tr('lean.remote.selfcheck'), disabled: Boolean(busy), onClick: doSelfCheck })
+          h(Btn, {
+            label: tr('lean.remote.stop'),
+            disabled: Boolean(busy) || running === false,
+            danger: true,
+            onClick: doStop
+          })
+        ),
+        h('div', { role: 'status', 'data-lean': 'remote-status', style: S.hint }, statusLine),
+        h('div', { 'data-lean': 'remote-announce', style: S.hint }, announceLine),
+        h('div', { 'data-lean': 'remote-audit', style: S.hint },
+          h('div', { style: S.groupSummary }, tr('lean.remote.audit.title')),
+          audit.length === 0
+            ? h('div', { style: S.hint }, tr('lean.remote.audit.empty'))
+            : audit.map(function (entry, i) {
+                return h('div', { key: 'audit' + i, style: S.hint },
+                  fmtClock(entry.at) + ' · ' + asText(entry.peer))
+              })
         ),
         h(QrMatrix, { qr: qr, label: tr('lean.remote.qr') })
       )

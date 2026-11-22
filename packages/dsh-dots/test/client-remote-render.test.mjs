@@ -884,10 +884,10 @@ test('RemotePanel：令牌字段出现在 lan/ipv6/tailscale/uu（manual 没有�
 /* 5) 通过合并后的单页（不是第二个 section）证明远程控件仍在                     */
 /* -------------------------------------------------------------------------- */
 
-test('merged panel：精简远程组的二维码/自检/状态/令牌控件仍在同一页内可达（11 例保留 + 本例 retarget，无 seedLink）', async () => {
+test('merged panel：pairing-client 接线后远程组仍在同一页内可达（retarget：无端口 / 令牌输入）', async () => {
   const Panel = await loadLeanPanel()
   const calls = []
-  // r2：真实宿主只传 { t, close }；二维码 / 自检结果必须靠 RPC 自己拿。
+  // 真实宿主只传 { t, close }；二维码 / 自检结果必须靠 RPC 自己拿。
   globalThis.fetch = async function (url, options) {
     const body = JSON.parse(options.body)
     calls.push(body.action)
@@ -895,7 +895,32 @@ test('merged panel：精简远程组的二维码/自检/状态/令牌控件仍�
       ? fakeLink()
       : body.action === 'remoteProbe'
         ? fakeProbe()
-        : fakeState()
+        : body.action === 'pairingProvision'
+          ? {
+              view: { v: 1, instanceId: 'gwl-pc', transport: 'lan', host: '192.168.1.6', port: 44996, tlsFingerprint: 'AA:BB', announceRef: '', token: 'present' },
+              changed: { port: false, token: false, cert: false }, republish: null
+            }
+          : body.action === 'pairingTransports'
+            ? {
+                selected: 'lan', selectedHost: '192.168.1.6', overrideUnavailable: false,
+                candidates: {
+                  tailscale: { kind: 'tailscale', available: false, reason: 'Tailscale：平板需加入同一 tailnet', host: '' },
+                  lan: { kind: 'lan', available: true, reason: '局域网：同一 Wi-Fi', host: '192.168.1.6' },
+                  ipv6: { kind: 'ipv6', available: false, reason: 'IPv6：本机需有 IPv6，部分运营商屏蔽入站', host: '' }
+                },
+                reasonLines: [
+                  'Tailscale：平板需加入同一 tailnet', '局域网：同一 Wi-Fi',
+                  'IPv6：本机需有 IPv6，部分运营商屏蔽入站',
+                  '局域网也需要端口和令牌：二维码里已经带好，不用手输；令牌阻止同一网络里的其他人控制这台 DSH。'
+                ]
+              }
+            : body.action === 'pairingConnections'
+              ? []
+              : body.action === 'pairingShow'
+                ? { payload: '{}', text: 'DSHDOTS1|...', qr: fakeLink().qr }
+                : body.action === 'remoteGetState'
+                  ? fakeState()
+                  : fakeState()
     return { status: 200, async text() { return JSON.stringify({ ok: true, data }) } }
   }
   activeLeanMount = mountLean(Panel, {
@@ -905,24 +930,25 @@ test('merged panel：精简远程组的二维码/自检/状态/令牌控件仍�
   activeLeanMount.render()
   for (let i = 0; i < 12; i += 1) await new Promise((resolve) => setTimeout(resolve, 5))
   const tree = activeLeanMount.tree
-  assert.ok(calls.includes('remoteShowLink'), '真实面板必须自己调用 remoteShowLink')
+  assert.ok(calls.includes('pairingProvision'), '真实面板必须自己调用 pairingProvision')
+  assert.ok(calls.includes('pairingTransports'), '真实面板必须自己调用 pairingTransports')
+  assert.equal(calls.includes('pairingShow'), false, '挂载不得触碰 pairingShow')
   const group = groupOf(tree, 'dots-remote')
   const groupNodes = []
   walk(group.props.children, (node) => groupNodes.push(node))
 
   assert.equal(group.props.open, true, '远程组默认展开，控件首屏可达')
-  assert.equal(groupNodes.filter((node) => node.type === 'svg').length, 1, '二维码必须仍由单页渲染')
-  assert.equal(groupNodes.filter((node) => node.type === 'select').length, 1, '访问方式下拉仍在')
+  assert.equal(groupNodes.filter((node) => node.type === 'svg').length, 0, '未显式显示前没有二维码')
+  assert.equal(groupNodes.filter((node) => node.type === 'select').length, 1, '方式下拉仍在')
   assert.deepEqual(
     groupNodes.filter((node) => node.type === 'select')[0].props.children.map((o) => o.props.value),
-    ['lan', 'tailscale', 'ipv6'],
-    '访问方式只有 局域网 / Tailscale / IPv6'
+    ['auto', 'tailscale', 'lan', 'ipv6'],
+    '自动 + 三项传输，不可选项灰掉'
   )
-  // retarget：原「远程 9 个按钮 / 4 个输入（含允许开关与监听地址）」→ 精简 3 按钮 / 2 输入。
   assert.deepEqual(
     groupNodes.filter((node) => node.type === 'button').map((node) => textOf(node.props.children)),
-    ['生成', '复制', '自检'],
-    '远程组只剩 生成 / 复制 / 自检'
+    ['显示二维码', '复制配对串', '重新生成', '自检', '停止接受连接'],
+    '远程组只有 二维码 / 复制 / 重新生成 / 自检 / 停止接受'
   )
   const inputs = groupNodes.filter((node) => node.type === 'input')
   assert.deepEqual(
@@ -932,23 +958,21 @@ test('merged panel：精简远程组的二维码/自检/状态/令牌控件仍�
       password: inputs.filter((node) => node.props.type === 'password').length,
       checkbox: inputs.filter((node) => node.props.type === 'checkbox').length
     },
-    { text: 0, number: 1, password: 1, checkbox: 0 },
-    '只留端口(number) + 访问令牌(password)；监听地址与允许开关入口已删'
+    { text: 0, number: 0, password: 0, checkbox: 0 },
+    '端口 / 令牌输入全部移除，没有新建任何输入'
   )
-  const svgs = groupNodes.filter((node) => node.type === 'svg')
-  assert.equal(svgs[0].props['aria-label'], zh['lean.remote.qr'])
 
   const text = textOf(group)
   for (const expected of [
     '远程控制', // 页内分组标题
-    '访问方式', '端口', '访问令牌', // 精简三字段
-    '生成', '复制', '自检', // 保留的动作
-    '注意', // 自检结果用既有 remote.probe.warn 文案（fakeState 的 probe.level=warn）
-    '部分可用：本机能绑上，平板可达未证实' // 自检结论仍是同一份真实数据
+    zh['lean.remote.mode.hint'], '自动选中：lan', // 方式 + 自动选中原因
+    'Tailscale：平板需加入同一 tailnet', '局域网：同一 Wi-Fi',
+    '局域网也需要端口和令牌：二维码里已经带好，不用手输；令牌阻止同一网络里的其他人控制这台 DSH。',
+    '显示二维码', '复制配对串', '重新生成', '自检', '停止接受连接',
+    '谁连进来过' // 脱敏审计
   ]) {
     assert.ok(text.includes(expected), `合并后远程组缺少「${expected}」`)
   }
-  // 被删的运行时状态 / 前置说明 / 操作步骤段落全部退场（旧正向断言改为负向守卫）。
   for (const dead of ['运行中', '绑定地址', '被拒次数', '最近错误', '需先准备', '图形化端口映射', '怎么做', '用平板扫这个码']) {
     assert.equal(text.includes(dead), false, `已删入口「${dead}」不得在精简远程组复现`)
   }

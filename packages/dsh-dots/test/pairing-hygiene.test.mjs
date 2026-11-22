@@ -28,6 +28,17 @@ const PAYLOAD = JSON.stringify({
   v: 1, instanceId: 'gwl-pc', transport: 'lan', host: '192.168.1.6', port: 44996,
   token: TOKEN, tlsFingerprint: 'AA:BB', announceRef: ''
 })
+// pairing-client 接线后：qr 来自且仅来自显式 pairingShow；text 只进剪贴板。
+const PAIR_TEXT = 'DSHDOTS1|1|gwl-pc|lan|192.168.1.6|44996|' + TOKEN + '|AA:BB||00000000'
+const PAIR_VIEW = {
+  v: 1, instanceId: 'gwl-pc', transport: 'lan', host: '192.168.1.6', port: 44996,
+  tlsFingerprint: 'AA:BB', announceRef: '', token: 'present'
+}
+const PAIR_REASONS = [
+  'Tailscale：平板需加入同一 tailnet', '局域网：同一 Wi-Fi',
+  'IPv6：本机需有 IPv6，部分运营商屏蔽入站',
+  '局域网也需要端口和令牌：二维码里已经带好，不用手输；令牌阻止同一网络里的其他人控制这台 DSH。'
+]
 
 function flatten(list, out) {
   for (const item of list) {
@@ -155,15 +166,30 @@ const settle = async () => {
   for (let i = 0; i < 12; i += 1) await new Promise((resolve) => setTimeout(resolve, 5))
 }
 
+let mountCalls = []
 async function renderReal() {
   const Panel = await loadPanel()
+  mountCalls = []
   globalThis.fetch = async function (_url, options) {
     const body = JSON.parse(options.body)
+    mountCalls.push(body.action)
     const data = {
       getState: { settings: { repoUrl: 'https://github.com/u/r.git', mode: 'lan', port: 44996, hasToken: true }, status: {}, modes: [] },
-      remoteGetState: { settings: { repoUrl: 'https://github.com/u/r.git', mode: 'lan', port: 44996, hasToken: true }, status: {}, modes: [] },
+      remoteGetState: { settings: { repoUrl: 'https://github.com/u/r.git', mode: 'lan', port: 44996, hasToken: true }, status: { running: true, probe: null }, modes: [] },
       remoteShowLink: LINK,
-      remoteProbe: { level: 'ok', verdict: '自检通过', checks: [] }
+      remoteProbe: { level: 'ok', verdict: '自检通过', checks: [] },
+      pairingProvision: { view: PAIR_VIEW, changed: { port: false, token: false, cert: false }, republish: null },
+      pairingTransports: {
+        selected: 'lan', selectedHost: '192.168.1.6', overrideUnavailable: false,
+        candidates: {
+          tailscale: { kind: 'tailscale', available: false, reason: PAIR_REASONS[0], host: '' },
+          lan: { kind: 'lan', available: true, reason: PAIR_REASONS[1], host: '192.168.1.6' },
+          ipv6: { kind: 'ipv6', available: false, reason: PAIR_REASONS[2], host: '' }
+        },
+        reasonLines: PAIR_REASONS
+      },
+      pairingConnections: [],
+      pairingShow: { payload: PAYLOAD, text: PAIR_TEXT, qr: LINK.qr }
     }[body.action]
     return { status: 200, async text() { return JSON.stringify(data === undefined ? { ok: false, error: { code: 'E_NO_STUB', message: 'no stub' } } : { ok: true, data }) } }
   }
@@ -173,10 +199,11 @@ async function renderReal() {
   return activeMount
 }
 
-test('H1：挂载 / 接线过程零剪贴板写入（只有显式「复制」按钮可以写）', async () => {
+test('H1：挂载 / 接线过程零剪贴板写入，也不触碰 pairingShow（只有显式动作可以）', async () => {
   copied.length = 0
   await renderReal()
-  assert.equal(copied.length, 0, 'mount 不得自动复制含令牌的地址')
+  assert.equal(copied.length, 0, 'mount 不得自动复制含令牌的串')
+  assert.equal(mountCalls.includes('pairingShow'), false, 'mount 不得触碰 bearer secret 出口')
 })
 
 test('H2：渲染树里没有 token、完整载荷或含 token 的 URL（QR + 复制，绝不纯文本）', async () => {
@@ -208,7 +235,7 @@ test('H3：显式点「复制」才写剪贴板，且复制后 DOM 仍无 token'
   await copyButton.props.onClick()
   await settle()
   assert.equal(copied.length, 1)
-  assert.equal(copied[0], LINK.url)
+  assert.equal(copied[0], PAIR_TEXT, '复制的是配对引擎的紧凑 DSHDOTS1|… 串')
   assert.equal(textOf(mount.tree).includes(TOKEN), false)
 })
 
