@@ -92,6 +92,7 @@ import { describeError, scheduleStore } from '../../services/scheduleStore';
 import { timelineStore } from '../../services/timelineStore';
 import { recordWriter } from '../../services/recordWriter';
 import { syncProtocolStore } from '../../services/syncProtocolStore';
+import type { CycleResult } from '../../services/syncProtocolStore';
 import { bridgeGitRunner } from '../../services/gitRunner';
 import { bindBridgeRunner } from '../../services/gitRunner';
 import { syncStatusStore } from '../../services/syncStatusStore';
@@ -347,10 +348,18 @@ export struct SchedulePane {
         this.reload();
         this.loadSummary();
       },
-      commitStatus: (result: RefreshCycleResult | null): void => {
-        this.syncStatus = result !== null
-          ? syncStatusStore.fromCycle(result, new Date())
-          : syncStatusStore.snapshot();
+      commitStatus: (cycle: RefreshCycleResult | null): void => {
+        // 纯层结果与服务的 CycleResult 是两个 interface：ArkTS 要求显式逐字段构成服务层值。
+        if (cycle !== null) {
+          const result: CycleResult = {
+            ok: cycle.ok, code: cycle.code, message: cycle.message, days: cycle.days,
+            conflicts: cycle.conflicts, added: cycle.added, dropped: cycle.dropped,
+            pending: cycle.pending, failed: cycle.failed, attempts: cycle.attempts
+          };
+          this.syncStatus = syncStatusStore.fromCycle(result, new Date());
+        } else {
+          this.syncStatus = syncStatusStore.snapshot();
+        }
       },
       reportFailure: (reason: string): void => {
         this.syncStatus = syncStatusStore.setFailed(reason);
@@ -380,10 +389,17 @@ export struct SchedulePane {
         runCycle: async (): Promise<RefreshCycleResult | null> => {
           return await syncProtocolStore.runConfiguredCycle(ctx);
         },
-        commitStatus: (result: RefreshCycleResult | null): void => {
-          this.syncStatus = result !== null
-            ? syncStatusStore.fromCycle(result, new Date())
-            : syncStatusStore.snapshot();
+        commitStatus: (cycle: RefreshCycleResult | null): void => {
+          if (cycle !== null) {
+            const result: CycleResult = {
+              ok: cycle.ok, code: cycle.code, message: cycle.message, days: cycle.days,
+              conflicts: cycle.conflicts, added: cycle.added, dropped: cycle.dropped,
+              pending: cycle.pending, failed: cycle.failed, attempts: cycle.attempts
+            };
+            this.syncStatus = syncStatusStore.fromCycle(result, new Date());
+          } else {
+            this.syncStatus = syncStatusStore.snapshot();
+          }
         },
         reportFailure: (reason: string): void => {
           this.syncStatus = syncStatusStore.setFailed(reason);

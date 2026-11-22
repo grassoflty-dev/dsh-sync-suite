@@ -38,6 +38,7 @@ import { globalRefreshCoordinator, isRepoBlockedStatus } from '../model/homeGlob
 import type { RefreshCycleResult } from '../model/homeGlobalRefresh';
 import { bindBridgeRunner } from '../services/gitRunner';
 import { syncProtocolStore } from '../services/syncProtocolStore';
+import type { CycleResult } from '../services/syncProtocolStore';
 import { syncStatusStore } from '../services/syncStatusStore';
 import {
   DIVIDER,
@@ -132,9 +133,17 @@ struct Home {
       reloadCloudChat: (): void => {
         this.cloudChatRefreshTick = this.cloudChatRefreshTick + 1;
       },
-      commitStatus: (result: RefreshCycleResult | null): void => {
+      commitStatus: (cycle: RefreshCycleResult | null): void => {
         // 状态存储最后写；typed 失败原因原样落进 syncStatusStore，只有一个渲染点。
-        syncStatusStore.fromCycle(result, new Date());
+        // ArkTS 不允许两个 interface 之间结构化赋值：把纯层结果按字段构成服务层 CycleResult。
+        if (cycle !== null) {
+          const result: CycleResult = {
+            ok: cycle.ok, code: cycle.code, message: cycle.message, days: cycle.days,
+            conflicts: cycle.conflicts, added: cycle.added, dropped: cycle.dropped,
+            pending: cycle.pending, failed: cycle.failed, attempts: cycle.attempts
+          };
+          syncStatusStore.fromCycle(result, new Date());
+        }
         this.statusRefreshTick = this.statusRefreshTick + 1;
       },
       reportFailure: (reason: string): void => {

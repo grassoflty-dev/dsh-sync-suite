@@ -27,6 +27,7 @@ import { ledgerDeleteLine, ledgerRestoreLine } from '../model/timelineWrite';
 import type { OutboxEntry } from '../model/syncProtocol';
 import type { ScheduleRecord } from '../model/types';
 import { syncProtocolStore } from './syncProtocolStore';
+import type { CycleResult } from './syncProtocolStore';
 import { bindBridgeRunner } from './gitRunner';
 import { syncStatusStore } from './syncStatusStore';
 import { globalRefreshCoordinator, isRepoBlockedStatus } from '../model/homeGlobalRefresh';
@@ -128,8 +129,14 @@ export class RecordWriter {
       overrides.markSyncing = (): void => {
         syncStatusStore.setSyncing();
       };
-      overrides.commitStatus = (result: RefreshCycleResult | null): void => {
-        if (result !== null) {
+      overrides.commitStatus = (cycle: RefreshCycleResult | null): void => {
+        // 纯层结果与 CycleResult 是两个 interface：ArkTS 禁止结构化赋值，逐字段构成服务层值。
+        if (cycle !== null) {
+          const result: CycleResult = {
+            ok: cycle.ok, code: cycle.code, message: cycle.message, days: cycle.days,
+            conflicts: cycle.conflicts, added: cycle.added, dropped: cycle.dropped,
+            pending: cycle.pending, failed: cycle.failed, attempts: cycle.attempts
+          };
           syncStatusStore.fromCycle(result, new Date());
         }
       };
