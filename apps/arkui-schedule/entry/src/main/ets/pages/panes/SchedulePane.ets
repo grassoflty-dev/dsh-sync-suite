@@ -362,6 +362,9 @@ export struct SchedulePane {
    * P1-2 用户「重试同步」：把 failed 意图原子复位（attempts=0, state=pending）后，
    * 用真实 ctx 跑一次周期（runConfiguredCycle(ctx) → runCycle(ctx) → wired 周期），
    * 结果交三态行显示。pending 但未 failed 的意图无需复位（预算未耗尽）。
+   *
+   * 单飞（mod-sync-single-flight）：重试与下拉 / 自动同步共用协调器的唯一在飞 Promise，
+   * ctx 原样包在 runCycle 覆盖项里；否则重试撞上在飞周期仍会起第二个 commit。
    */
   private async retrySync(): Promise<void> {
     try {
@@ -373,12 +376,19 @@ export struct SchedulePane {
         }
       }
       const ctx = syncProtocolStore.wiredContext(getContext(this) as common.UIAbilityContext);
-      const result = await syncProtocolStore.runConfiguredCycle(ctx);
-      if (result !== null) {
-        this.syncStatus = syncStatusStore.fromCycle(result, new Date());
-      } else {
-        this.syncStatus = syncStatusStore.snapshot();
-      }
+      await globalRefreshCoordinator.runOnce({
+        runCycle: async (): Promise<RefreshCycleResult | null> => {
+          return await syncProtocolStore.runConfiguredCycle(ctx);
+        },
+        commitStatus: (result: RefreshCycleResult | null): void => {
+          this.syncStatus = result !== null
+            ? syncStatusStore.fromCycle(result, new Date())
+            : syncStatusStore.snapshot();
+        },
+        reportFailure: (reason: string): void => {
+          this.syncStatus = syncStatusStore.setFailed(reason);
+        }
+      });
     } catch (error) {
       this.syncStatus = syncStatusStore.setPending(
         0, error instanceof Error ? error.message : String(error));

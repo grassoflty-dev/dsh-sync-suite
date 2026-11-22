@@ -34,7 +34,7 @@
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
-import { globalRefreshCoordinator } from '../model/homeGlobalRefresh';
+import { globalRefreshCoordinator, isRepoBlockedStatus } from '../model/homeGlobalRefresh';
 import type { RefreshCycleResult } from '../model/homeGlobalRefresh';
 import { bindBridgeRunner } from '../services/gitRunner';
 import { syncProtocolStore } from '../services/syncProtocolStore';
@@ -139,6 +139,12 @@ struct Home {
       },
       reportFailure: (reason: string): void => {
         syncStatusStore.setFailed(reason);
+        this.statusRefreshTick = this.statusRefreshTick + 1;
+      },
+      // 隐私门禁的「已停止上传」更可执行：只读判定 + 独立落点，通用失败不得覆盖它。
+      isRepoBlocked: (): boolean => isRepoBlockedStatus(syncStatusStore.snapshot()),
+      reportRepoBlocked: (code: string): void => {
+        syncStatusStore.setRepoBlocked(code, new Date());
         this.statusRefreshTick = this.statusRefreshTick + 1;
       }
     });

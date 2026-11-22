@@ -27,9 +27,11 @@ import { ledgerDeleteLine, ledgerRestoreLine } from '../model/timelineWrite';
 import type { OutboxEntry } from '../model/syncProtocol';
 import type { ScheduleRecord } from '../model/types';
 import { syncProtocolStore } from './syncProtocolStore';
-import type { CycleResult } from './syncProtocolStore';
 import { bindBridgeRunner } from './gitRunner';
 import { syncStatusStore } from './syncStatusStore';
+import { globalRefreshCoordinator, isRepoBlockedStatus } from '../model/homeGlobalRefresh';
+import type { GlobalRefreshHooks } from '../model/homeGlobalRefresh';
+import type { RefreshCycleResult } from '../model/homeGlobalRefresh';
 import { common } from '@kit.AbilityKit';
 
 /** 本模块会停放的三种意图（outbox 的 purge 由同步协议自身产生，这里不生成）。 */
@@ -105,20 +107,44 @@ export class RecordWriter {
   /**
    * 写成功后的 fire-and-forget 同步（F1 关闭）：typed 结果统一交给 syncStatusStore 驱动三态，
    * 失败如实显示原因；没有 runner / 未启用时周期返回 null，只跳过不伪造「已同步」。
+   *
+   * 单飞（mod-sync-single-flight）：这里**不直接**跑周期，而是把 `runConfiguredCycle()` 作为
+   * `runCycle` 覆盖项交给全局协调器——与外壳下拉 / 面板下拉共用它的唯一 `inFlight` Promise。
+   * 于是自动同步在飞时用户再下拉，只会共享同一次周期与一次 commit，不会双写仓库。
    */
   private triggerSync(): void {
     // 建记录后的 fire-and-forget 也走同一条确定性绑定：不依赖「EntryAbility.onCreate 一定先跑过」
     // 或「页面 bootstrap 已完成」这种时序假设；即使两者都缺席，runner 也在此一次到位。
     bindBridgeRunner(getContext() as common.UIAbilityContext);
-    // 三态行先切「同步中…」，周期返回后再由 fromCycle 落到「已同步 · HH:MM」或 typed 失败。
-    syncStatusStore.setSyncing();
-    syncProtocolStore.runConfiguredCycle()
-      .then((result: CycleResult | null): void => {
+    const overrides: Partial<GlobalRefreshHooks> = {
+      // 周期入口仍由本处注入：即使 Home 还没 aboutToAppear，自动同步也能照常发起。
+      runCycle: async (): Promise<RefreshCycleResult | null> => {
+        return await syncProtocolStore.runConfiguredCycle();
+      }
+    };
+    if (!globalRefreshCoordinator.isConfigured()) {
+      // 早期启动 / fallback 路由没有 Home 登记的四读回：补齐同形状态落点，三态行不能卡在「同步中…」。
+      // Home 已登记时这里不覆盖它的钩子（含 statusRefreshTick），状态行照常收到一次更新。
+      overrides.markSyncing = (): void => {
+        syncStatusStore.setSyncing();
+      };
+      overrides.commitStatus = (result: RefreshCycleResult | null): void => {
         if (result !== null) {
           syncStatusStore.fromCycle(result, new Date());
         }
-      })
+      };
+      overrides.reportFailure = (reason: string): void => {
+        syncStatusStore.setFailed(reason);
+      };
+      // 隐私阻塞态优先：只用公开 snapshot() 只读判定，不碰隐私 lane 的文件。
+      overrides.isRepoBlocked = (): boolean => isRepoBlockedStatus(syncStatusStore.snapshot());
+      overrides.reportRepoBlocked = (code: string): void => {
+        syncStatusStore.setRepoBlocked(code, new Date());
+      };
+    }
+    void globalRefreshCoordinator.runOnce(overrides)
       .catch((error: Error): void => {
+        // 协调器自身的意外错误（非周期 typed 失败）才落到这里；仍是同一个状态存储面。
         syncStatusStore.setPending(0, this.errorText(error));
       });
   }

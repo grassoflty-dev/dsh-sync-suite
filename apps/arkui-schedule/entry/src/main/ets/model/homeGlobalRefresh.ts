@@ -8,14 +8,15 @@
  *      第二个直接 `await` 第一个的在飞 Promise——周期只跑一次、四个读回只跑一次，
  *      但第二个调用方**不会**被静默跳过，它拿到同一份已完成结果；
  *   ② **固定顺序**：周期 settle 之后依次 日程 → dots → 云端对话 → 状态存储（最后），
- *      因此状态行与三个列表看到的是同一次周期的结果。
+ *      且这份读回清单住在 `execute()` 的 `finally` 里——抛错也照样按序读回四个面，
+ *      因此状态行与三个列表看到的是同一次周期的结果（即使周期只写了一半）。
  *
  * 复用 `model/syncGuard.ts` 的 `beginExclusive` / `endExclusive` 作为单飞闸原语
  * （与启动 pull 的 `PullGate` 同一套语义），**不另造状态机、不实现第二份同步**：
  * 真正的周期由调用方注入（ETS 侧就是 `syncProtocolStore.runConfiguredCycle()`）。
  *
- * 失败只有一个落点：周期返回失败结果或抛错时，都只经 `commitStatus` / `reportFailure`
- * 写唯一的状态存储（ETS 侧 `syncStatusStore`），本层不 toast、不生成第二份错误文案。
+ * 失败只有一个落点：周期返回失败结果走 `commitStatus`，抛错走 `reportFailure`，
+ * 二者互斥且都只写唯一的状态存储（ETS 侧 `syncStatusStore`），本层不 toast、不生成第二份错误文案。
  */
 import { beginExclusive, endExclusive, idleRunState } from './syncGuard';
 import type { SyncRunState } from './syncGuard';
@@ -61,6 +62,40 @@ export interface GlobalRefreshHooks {
   commitStatus?: (result: RefreshCycleResult | null) => void;
   /** 周期抛错时的 typed 失败唯一落点（与 commitStatus 互斥，恰好走一条）。 */
   reportFailure?: (reason: string) => void;
+  /** 只读：当前状态行是否已是「仓库可见性阻塞」（ETS 注入 snapshot() 判定，不写盘）。 */
+  isRepoBlocked?: () => boolean;
+  /** 隐私码失败的唯一落点（ETS 注入 `syncStatusStore.setRepoBlocked`），优先于通用 reportFailure。 */
+  reportRepoBlocked?: (code: string) => void;
+}
+
+/**
+ * 只读的仓库阻塞判据：只认 `syncStatusStore.snapshot()` 公开视图里的两个 state。
+ * 这里不 import 隐私 lane 的文件（它们在并行修改），也不写任何状态——纯判定。
+ */
+export interface RepoBlockSnapshotLike {
+  state: string;
+}
+
+export function isRepoBlockedStatus(snapshot: RepoBlockSnapshotLike | null | undefined): boolean {
+  if (snapshot === null || snapshot === undefined) {
+    return false;
+  }
+  return snapshot.state === 'repo_public' || snapshot.state === 'repo_unknown';
+}
+
+/** 隐私 typed 码（与 `model/repoVisibility.ts` 导出的常量同字面量；本文件不依赖另一 lane）。 */
+export const REPO_PUBLIC_CODE: string = 'E_REPO_PUBLIC';
+export const REPO_VISIBILITY_UNKNOWN_CODE: string = 'E_REPO_VISIBILITY_UNKNOWN';
+
+/** 抛错文案里带隐私码就归隐私路径；普通错误返回空串走通用 typed 失败。 */
+function repoBlockCodeOf(reason: string): string {
+  if (reason.indexOf(REPO_PUBLIC_CODE) >= 0) {
+    return REPO_PUBLIC_CODE;
+  }
+  if (reason.indexOf(REPO_VISIBILITY_UNKNOWN_CODE) >= 0) {
+    return REPO_VISIBILITY_UNKNOWN_CODE;
+  }
+  return '';
 }
 
 /** 调用方拿到的结果：`leader=false` 表示复用了别人的在飞 Promise（没有二次周期 / 二次读回）。 */
@@ -76,6 +111,11 @@ export interface GlobalRefreshOutcome {
 
 function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** 只读地查当前状态行是否已是仓库阻塞（钩子缺席 = 没有阻塞事实可依据）。 */
+function repoBlocked(hooks: GlobalRefreshHooks): boolean {
+  return hooks.isRepoBlocked !== undefined && hooks.isRepoBlocked();
 }
 
 /**
@@ -102,6 +142,17 @@ export class GlobalRefreshCoordinator {
     this.configured = hooks;
   }
 
+  /**
+   * Home 是否已登记完整钩子。
+   *
+   * 写后自动同步（recordWriter）可能在 Home 的 `aboutToAppear()` 之前就发生：它据此决定
+   * 是否补齐一份与 Home 同形的状态落点，避免早期周期把三态行卡在「同步中…」。
+   * 这只是在**填充钩子**，不新增第二把闸——闸门仍只有下面的 `inFlight`。
+   */
+  isConfigured(): boolean {
+    return this.configured !== null;
+  }
+
   /** 合并「Home 完整钩子」与「面板覆盖项」；`runCycle` 必须最终存在。 */
   private hooksOf(overrides?: Partial<GlobalRefreshHooks>): GlobalRefreshHooks {
     const base: GlobalRefreshHooks | null = this.configured;
@@ -119,7 +170,9 @@ export class GlobalRefreshCoordinator {
       reloadDots: overrides?.reloadDots ?? base?.reloadDots,
       reloadCloudChat: overrides?.reloadCloudChat ?? base?.reloadCloudChat,
       commitStatus: overrides?.commitStatus ?? base?.commitStatus,
-      reportFailure: overrides?.reportFailure ?? base?.reportFailure
+      reportFailure: overrides?.reportFailure ?? base?.reportFailure,
+      isRepoBlocked: overrides?.isRepoBlocked ?? base?.isRepoBlocked,
+      reportRepoBlocked: overrides?.reportRepoBlocked ?? base?.reportRepoBlocked
     };
     return merged;
   }
@@ -159,33 +212,62 @@ export class GlobalRefreshCoordinator {
     }
   }
 
-  /** 真正的编排：一个周期 → 按序四个读回 → 单一失败落点。 */
+  /**
+   * 真正的编排：一个周期 →（无论成败）按序四个读回 → 单一失败落点。
+   *
+   * 四个读回**只写在 `finally`**：周期抛错时旧实现会在 catch 里提前 return，
+   * 把三个列表留在周期之前的旧快照；现在 catch 只记录 typed 原因，
+   * 真正的状态面写入（失败走 reportFailure / 成功走 commitStatus）也在 finally 的最后一步。
+   * 因此成功与抛错两条路径都恰好按 日程 → dots → 云端 → 状态 各读回一次。
+   */
   private async execute(hooks: GlobalRefreshHooks): Promise<GlobalRefreshOutcome> {
-    if (hooks.markSyncing !== undefined) {
+    // 仓库可见性阻塞是更可执行的既有状态：连「同步中…」都不写，避免一个周期出现两条状态文案。
+    const blockedAtStart: boolean = repoBlocked(hooks);
+    if (hooks.markSyncing !== undefined && !blockedAtStart) {
       hooks.markSyncing();
     }
     let result: RefreshCycleResult | null = null;
+    let thrown: boolean = false;
+    let thrownReason: string = '';
     try {
       result = await hooks.runCycle();
     } catch (error) {
-      const reason: string = reasonOf(error);
-      if (hooks.reportFailure !== undefined) {
-        hooks.reportFailure(reason);
+      // 只记 typed 原因，**不 return**：return 会跳过 finally 的四个读回（P1-D 的 Minor 1）。
+      thrown = true;
+      thrownReason = reasonOf(error);
+    } finally {
+      // 固定顺序（注入方不能改）：日程 → dots → 云端 → 状态存储最后。
+      // 状态这一步互斥：抛错只走 reportFailure，不再写 commitStatus（失败仍只有一个落点）。
+      if (hooks.reloadSchedule !== undefined) {
+        hooks.reloadSchedule();
       }
-      return { leader: true, cycleInvoked: true, ok: false, reason: reason };
+      if (hooks.reloadDots !== undefined) {
+        hooks.reloadDots();
+      }
+      if (hooks.reloadCloudChat !== undefined) {
+        hooks.reloadCloudChat();
+      }
+      if (thrown) {
+        const repoCode: string = repoBlockCodeOf(thrownReason);
+        if (repoCode.length > 0) {
+          // 抛错本身就是隐私码：只走隐私落点；无该钩子时才退回 reportFailure，且只传隐私码。
+          if (hooks.reportRepoBlocked !== undefined) {
+            hooks.reportRepoBlocked(repoCode);
+          } else if (hooks.reportFailure !== undefined) {
+            hooks.reportFailure(repoCode);
+          }
+        } else if (blockedAtStart || repoBlocked(hooks)) {
+          // 已存在（或周期中刚写入）「已停止上传（最近尝试 HH:MM）」：更可执行，通用失败不得覆盖。
+          // 本分支刻意不写任何状态面——一个失败周期只保留隐私那一条文案。
+        } else if (hooks.reportFailure !== undefined) {
+          hooks.reportFailure(thrownReason);
+        }
+      } else if (hooks.commitStatus !== undefined) {
+        hooks.commitStatus(result);
+      }
     }
-    // 固定顺序（注入方不能改）：日程 → dots → 云端 → 状态存储最后。
-    if (hooks.reloadSchedule !== undefined) {
-      hooks.reloadSchedule();
-    }
-    if (hooks.reloadDots !== undefined) {
-      hooks.reloadDots();
-    }
-    if (hooks.reloadCloudChat !== undefined) {
-      hooks.reloadCloudChat();
-    }
-    if (hooks.commitStatus !== undefined) {
-      hooks.commitStatus(result);
+    if (thrown) {
+      return { leader: true, cycleInvoked: true, ok: false, reason: thrownReason };
     }
     const ok: boolean = result !== null && result.ok && result.pending === 0 && result.failed === 0;
     const reason: string = result === null ? '' : result.message;

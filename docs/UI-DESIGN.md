@@ -623,3 +623,5 @@ API Key 密码框、自定义源才显示接口地址，没有「高级」控制
 **失败只有一个渲染面**：`失败：<typed 原因>` 只由 `SchedulePane.SyncStatusRow()` 渲染（唯一数据源 `syncStatusStore`），面板与外壳的下拉路径都**不弹第二个 toast**、不拼第二处「失败：」文案；外壳不复制状态行。日程面板自己的下拉**保留**（旧交互不删），但改走同一把闸与同一份在飞 Promise，与外壳手势同时触发时不会双周期、不会漏读回。
 
 `tools/test/homeGlobalRefresh.test.mjs`（真 spy 计数 / 顺序 / 共享 Promise / 单一失败落点 6 例 + 源码形状 4 例）与 `shellLayout` L-26 / `paneLayout` P-28 / `indexHeader` H-7 / `uiTokens` U-S9（旧断言一条未删）钉住上述契约；ArkUI 手势、真机横竖屏观感与 ArkTS 编译**只能静态断言 / unverified**（安装版 `1000006`；设备检查随 `1000007`；本批不构建、不装机）。
+
+刷新失败时列表仍会被重新读取，失败只在状态行显示一次。

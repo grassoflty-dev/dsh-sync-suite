@@ -191,6 +191,47 @@ export class SyncStatusStore {
     }
   }
 
+  /**
+   * 只读当前是否处于仓库可见性阻塞态。
+   * 判定放在 store（而不是某个调用点）：所有失败写入都必须经过这里，才能挡住
+   * `E_SYNC_UNAVAILABLE` 这类「没走到推送门禁就早退」的结果覆盖更可执行的阻塞文案。
+   */
+  private repoBlockedNow(): boolean {
+    const state: string = this.stateOf();
+    return state === 'repo_public' || state === 'repo_unknown';
+  }
+
+  /** 从 typed 失败原因里认出隐私码（精确码或「码: 文案」前缀），用于失败写入的分流。 */
+  private repoBlockCodeOf(reason: string): string {
+    if (reason.length === 0) {
+      return '';
+    }
+    if (reason === E_REPO_PUBLIC || reason.indexOf(`${E_REPO_PUBLIC}:`) === 0) {
+      return E_REPO_PUBLIC;
+    }
+    if (reason === E_REPO_VISIBILITY_UNKNOWN || reason.indexOf(`${E_REPO_VISIBILITY_UNKNOWN}:`) === 0) {
+      return E_REPO_VISIBILITY_UNKNOWN;
+    }
+    return '';
+  }
+
+  /**
+   * 实时可见性复核通过：只解除阻塞，绝不伪造一次同步成功。
+   *
+   * 清掉阻塞三键并把 `live` 归零 ⇒ `snapshot()` 回到盘上**最近真实结果**（没有则「尚未同步」）；
+   * `KEY_LAST_AT`（上次成功时刻）与已落盘的偏好 outcome 一字不动——复核通过不是同步。
+   */
+  clearRepoBlock(): SyncStatusView {
+    if (!this.repoBlockedNow()) {
+      return this.snapshot();
+    }
+    AppStorage.setOrCreate<string>(KEY_STATE, '');
+    AppStorage.setOrCreate<string>(KEY_REASON, '');
+    AppStorage.setOrCreate<string>(KEY_REPO_BLOCK_AT, '');
+    this.live = false;
+    return this.snapshot();
+  }
+
   /** 安全读 AppStorage 的 state（给启动决策判断是否有在途周期）。 */
   private stateOf(): string {
     try {
@@ -208,6 +249,11 @@ export class SyncStatusStore {
       // 仓库可见性拒绝有两条独立文案 + 最近尝试时刻，绝不折叠进「失败：…（可重试）」。
       if (outcome.code === E_REPO_PUBLIC || outcome.code === E_REPO_VISIBILITY_UNKNOWN) {
         return this.setRepoBlocked(outcome.code, now);
+      }
+      // 已有仓库阻塞 ⇒ 非隐私失败（如 E_SYNC_UNAVAILABLE 早退）只保留原阻塞与原「最近尝试」戳。
+      // setFailed 里还有同一道闸，防止其它直接调用点绕过 fromCycle。
+      if (this.repoBlockedNow()) {
+        return this.snapshot();
       }
       const reason: string = outcome.message.length > 0 ? outcome.message : UNKNOWN_REASON;
       return this.setFailed(reason, outcome.pending + outcome.failed);
@@ -237,8 +283,22 @@ export class SyncStatusStore {
     return this.snapshot();
   }
 
-  /** 失败态：typed 原因逐字展示；count 记下仍有几条待同步意图（不拼进文案）。 */
+  /**
+   * 失败态：typed 原因逐字展示；count 记下仍有几条待同步意图（不拼进文案）。
+   *
+   * 唯一失败写入口（fromCycle / reportFailure / setPending / setError 都汇到此处）：
+   * - 隐私码 ⇒ 刷新仓库阻塞态（这是新的尝试，允许更新戳）；
+   * - 已是阻塞态 + 非隐私失败 ⇒ **整体拒绝写入**（保留原文案与原戳），绝不让「失败：…」盖掉更可执行的提示；
+   * - 其它情况照常写失败态。成功清理由 setSynced 负责，不在这里开后门。
+   */
   setFailed(reason: string, count: number = 0): SyncStatusView {
+    const privacyCode: string = this.repoBlockCodeOf(reason);
+    if (privacyCode.length > 0) {
+      return this.setRepoBlocked(privacyCode, new Date());
+    }
+    if (this.repoBlockedNow()) {
+      return this.snapshot();
+    }
     this.live = true;
     const shown: string = reason.length > 0 ? reason : UNKNOWN_REASON;
     AppStorage.setOrCreate<string>(KEY_STATE, 'failed');

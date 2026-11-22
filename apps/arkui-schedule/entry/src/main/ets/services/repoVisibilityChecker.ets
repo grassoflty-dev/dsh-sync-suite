@@ -9,6 +9,7 @@
  */
 import { http } from '@kit.NetworkKit';
 import { settingsStore } from './settingsStore';
+import { syncStatusStore } from './syncStatusStore';
 import type { ScheduleSettings } from './settingsStore';
 import { REPO_VISIBILITY_OK, E_REPO_VISIBILITY_UNKNOWN, decideRepoVisibility } from '../model/repoVisibility';
 import type { RepoVisibilityDecision } from '../model/repoVisibility';
@@ -120,6 +121,11 @@ class RepoVisibilityChecker {
         this.transport(url, headers, timeoutMs)
     );
     this.state = applyRepoVisibilityDecision(this.state, decision, Date.now());
+    if (decision.ok) {
+      // 新证据推翻旧阻塞：只有校验器知道「刚刚实时复核通过」，状态机归 store 清。
+      // clearRepoBlock 不写同步成功、不动 lastSyncAt；缓存命中（没发新请求）不会走到这里。
+      syncStatusStore.clearRepoBlock();
+    }
     return decision;
   }
 
