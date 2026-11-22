@@ -88,6 +88,13 @@ dsh plugin --profile web remove dsh-dots
 | 快照 | 写前恢复快照列表（id / time / reason / bytes），回滚需二次确认 |
 | 错误 | 内联显示 `code + message`；网络异常、HTTP 500、`{ok:false}` 均不白屏；预览过期提示「请重新预览」 |
 
+> **精简面板（当前实际界面）**：**只要地址 + 令牌；登录名由地址推断，仅在鉴权失败时才要求填写**。
+> 同步组上方表格里的「平台 / 认证方式 / 用户名 / 设备标识 / 分支」控件已下线（能力保留为 dormant，
+> 见 `docs/MODULES.md` §2）。Gitee 登录名优先取手填 / `DSH_DOTS_GIT_USERNAME`，否则按
+> `https://gitee.com/<owner>/<repo>.git` 推断 owner；GitHub 留空仍用 `x-access-token`。
+> 鉴权失败（401/403，典型是 Gitee 组织仓库）才出现可编辑「登录名」，填过的值只写本机
+> `settings.json`，不进配对载荷、仓库或日志。
+
 同步语义（与 `docs/DATA-CONTRACT.md` 一致）：
 
 - 远端目录 `devices/<deviceId>/`，每台设备只写自己的目录。

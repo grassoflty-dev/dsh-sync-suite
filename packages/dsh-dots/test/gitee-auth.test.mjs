@@ -46,11 +46,11 @@ test('resolveAskpassUser：Gitee 用户名 / GitHub 留空 / 自定义留空', (
   assert.equal(resolveAskpassUser('custom', ''), 'x-access-token')
 })
 
-test('GitRepo：Gitee + https + 空用户名时任何 git 命令都先报可读错误（buildEnv 门禁）', async (t) => {
+test('GitRepo：Gitee + https + 地址也推不出 owner 时任何 git 命令都先报可读错误（buildEnv 门禁）', async (t) => {
   const dir = await tempDir(t, 'gcs-gitee-')
   const repo = new GitRepo({
     dir,
-    repoUrl: 'https://gitee.com/owner/repo.git',
+    repoUrl: 'https://gitee.com/',
     branch: 'main',
     authMode: 'https',
     platform: 'gitee',

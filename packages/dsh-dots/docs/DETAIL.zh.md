@@ -158,12 +158,18 @@ GitHub 的 PAT 可以用任意非空用户名（本插件默认 `x-access-token`
 Gitee 的 HTTPS 规则是「**Gitee 登录名作用户名 + 私人令牌作密码**」。把 `x-access-token`
 套到 Gitee 只会得到 403/认证失败，而且错误藏在 git 输出里，很难定位。
 
-- 设置页 `认证方式 = HTTPS` 时出现「用户名」字段（只存本机 `settings.json`，**不进** `credentials.json`）：
-  - GitHub：可留空 → 默认 `x-access-token`；
-  - **Gitee：必填 Gitee 登录名**（不是邮箱、不是仓库名），私人令牌填在「访问令牌」；
-  - 自定义 / 自建：按服务要求填写，可留空。
-- `platform='gitee'` 且用户名为空时，host 在真正执行 git 前直接报 `E_VALIDATION`：
-  「Gitee 需要填写用户名（Gitee 登录名），私人令牌只作密码」——不会静默用错用户名。
+- **精简面板口径**：**只要地址 + 令牌；登录名由地址推断，仅在鉴权失败时才要求填写**。
+  地址下方有一行只读派生「登录名：<owner>（由仓库地址推断）」；只有 401 / 403（Gitee 组织仓库
+  常见）才展开可编辑「登录名」，文案逐字为「Gitee 的私人令牌只能当密码，需要你的登录名；
+  通常就是仓库地址里的 owner」，失焦即写本机 `settings.json::username`，鉴权成功后收起。
+- 用户名规则（**唯一实现** `src/engine/gitUsername.ts`）：
+  - 显式值（手填 / 环境变量 `DSH_DOTS_GIT_USERNAME`）优先；
+  - Gitee 留空 → 从 `https://gitee.com/<owner>/<repo>.git` 取 owner，**不再**一上来就报缺少用户名；
+  - GitHub / 自定义留空 → `x-access-token`（GitHub PAT 约定，历史行为不变；不发送 URL owner）；
+  - Gitee 既无显式值也推不出 owner → 报 `E_VALIDATION`：
+    「Gitee 需要填写用户名（Gitee 登录名），私人令牌只作密码」——不会静默用错用户名。
+- 用户名只存本机 `settings.json`（**不进** `credentials.json`），只经 `DSH_GIT_SYNC_USER`
+  传给临时 askpass；不进配对载荷、不进同步仓库、不进日志/错误串（错误串对 token 与用户名都打码）。
 - 保存设置时若仓库地址是 `gitee.com` 而平台仍是默认 GitHub，会**自动纠正为 Gitee 并在提示条说明**；
   `gitlab.com` 地址纠正为「自定义」。用户明确选 Gitee / 自定义时不会被覆盖。
 

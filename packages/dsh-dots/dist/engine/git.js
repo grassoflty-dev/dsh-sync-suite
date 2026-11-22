@@ -15,6 +15,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { SyncError } from './errors.js';
+import { GITEE_USERNAME_REQUIRED, resolveGitUsername, scrubAuthValue } from './gitUsername.js';
 /**
  * 网络命令（ls-remote / fetch / push）的单次超时上限。
  *
@@ -168,19 +169,16 @@ function isAuthFailure(text) {
     return /Authentication failed|could not read Username|could not read Password|Permission denied \(publickey\)|fatal: Authentication|Invalid username or password|terminal prompts disabled|Repository not found|access denied|403 Forbidden/i.test(text);
 }
 /**
- * HTTPS askpass 用户名规则：
- *   - 填了 username → 用它（Gitee 必须是登录名）；
- *   - Gitee 留空 → 可读错误（私人令牌只作密码，不能当用户名）；
- *   - GitHub / 自定义留空 → `x-access-token`（GitHub PAT 约定）。
+ * HTTPS askpass 用户名门闸（薄包装，规则只在 `gitUsername.ts` 一份）：
+ *   - 显式 username（界面手填 / `DSH_DOTS_GIT_USERNAME`）优先；
+ *   - Gitee 留空 → 按仓库地址推断 owner；推不出来才报可读错误；
+ *   - GitHub / 自定义留空 → `x-access-token`（GitHub PAT 约定，历史行为不变）。
  */
-export function resolveAskpassUser(platform, username) {
-    const trimmed = typeof username === 'string' ? username.trim() : '';
-    if (trimmed !== '')
-        return trimmed;
-    if (platform === 'gitee') {
-        throw new SyncError('E_VALIDATION', 'Gitee 需要填写用户名（Gitee 登录名），私人令牌只作密码');
-    }
-    return 'x-access-token';
+export function resolveAskpassUser(platform, username, repoUrl = '') {
+    const resolved = resolveGitUsername(platform, username, repoUrl);
+    if (resolved === '')
+        throw new SyncError('E_VALIDATION', GITEE_USERNAME_REQUIRED);
+    return resolved;
 }
 export class GitRepo {
     dir;
@@ -209,7 +207,12 @@ export class GitRepo {
         this.branch = options.branch.trim();
         this.authMode = options.authMode;
         this.platform = options.platform ?? 'custom';
-        this.username = typeof options.username === 'string' ? options.username.trim() : '';
+        // 显式 username（面板手填）优先；否则读本机环境变量 DSH_DOTS_GIT_USERNAME。
+        // 两者都为空时才走 gitUsername.ts 的地址推断（Gitee owner / GitHub x-access-token）。
+        const explicitUser = typeof options.username === 'string' ? options.username.trim() : '';
+        const envUserRaw = options.env?.DSH_DOTS_GIT_USERNAME ?? process.env.DSH_DOTS_GIT_USERNAME;
+        const envUser = typeof envUserRaw === 'string' ? envUserRaw.trim() : '';
+        this.username = explicitUser !== '' ? explicitUser : envUser;
         this.token = options.token !== undefined && options.token !== null && options.token !== '' ? options.token : null;
         this.allowLocalRepo = options.allowLocalRepo === true;
         this.extraEnv = options.env ?? {};
@@ -222,11 +225,13 @@ export class GitRepo {
     usesAskpass() {
         return this.authMode === 'https' && this.token !== null && /^https:\/\//i.test(this.repoUrl);
     }
-    /** 把可能出现在文本里的 token / URL 凭据抹掉，保证错误消息可安全上报。 */
+    /** 把可能出现在文本里的 token / 用户名 / URL 凭据抹掉，保证错误消息可安全上报。 */
     scrub(text) {
         let out = typeof text === 'string' ? text : String(text);
         if (this.token !== null && this.token.length >= 4)
-            out = out.split(this.token).join('***');
+            out = scrubAuthValue(out, this.token);
+        // 登录名不是秘密，但也不该进日志/错误串（只用于本机 HTTPS 鉴权）。
+        out = scrubAuthValue(out, this.username);
         out = out.replace(/(\bhttps?:\/\/)[^@/\s]+@/gi, '$1***@');
         return out;
     }
@@ -247,15 +252,14 @@ export class GitRepo {
             GIT_MERGE_AUTOEDIT: 'no',
         };
         // Gitee 的 HTTPS 规则是「用户名（登录名）+ 私人令牌作密码」；x-access-token 只适用于
-        // GitHub PAT，直接套用会让 Gitee 认证静默失败（用户只看到 git 的 403）。
-        if (this.authMode === 'https' && this.platform === 'gitee' && this.username === '') {
-            throw new SyncError('E_VALIDATION', 'Gitee 需要填写用户名（Gitee 登录名），私人令牌只作密码');
-        }
+        // GitHub PAT。登录名优先手填 / DSH_DOTS_GIT_USERNAME，否则按仓库地址推断 owner；
+        // 只有 Gitee 且两者都拿不到时才报可读错误（规则只在 gitUsername.ts 一份）。
+        const askpassUser = this.authMode === 'https' ? resolveAskpassUser(this.platform, this.username, this.repoUrl) : '';
         if (this.usesAskpass()) {
             await this.ensureAskpass();
             env.GIT_ASKPASS = this.askpassPath ?? undefined;
             env.DSH_GIT_SYNC_TOKEN = this.token ?? undefined;
-            env.DSH_GIT_SYNC_USER = resolveAskpassUser(this.platform, this.username);
+            env.DSH_GIT_SYNC_USER = askpassUser;
             env.DSH_GIT_SYNC_NODE = process.execPath;
             env.DSH_GIT_SYNC_ASKPASS_COUNTER = this.askpassCounter ?? undefined;
             env.SSH_ASKPASS_REQUIRE = 'never';
