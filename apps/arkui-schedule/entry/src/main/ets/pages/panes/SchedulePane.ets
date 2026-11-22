@@ -85,6 +85,8 @@ import { formatDiagnostics } from '../../model/stateView';
 import type { DiagnosticsInput } from '../../model/stateView';
 import { SAVED_MARKER_KEY, decodeSavedMarker, containsRecordVersion } from '../../model/homeRefresh';
 import type { SavedMarker } from '../../model/homeRefresh';
+import { globalRefreshCoordinator } from '../../model/homeGlobalRefresh';
+import type { RefreshCycleResult } from '../../model/homeGlobalRefresh';
 import { redactSecrets } from '../../model/syncError';
 import { describeError, scheduleStore } from '../../services/scheduleStore';
 import { timelineStore } from '../../services/timelineStore';
@@ -181,6 +183,16 @@ export struct SchedulePane {
    * 数字，不在外壳里替面板读盘 / 改筛选，单一事实来源仍是面板自己的 reload()。
    */
   @Prop @Watch('onShowTick') showTick: number = 0;
+  /**
+   * 首页全局下拉刷新的日程读回信号：一次周期 settle 后 +1（mod-home-global-refresh）。
+   * 保活面板拿不到 onPageShow，由 @Watch 复用自己的 reload() 重读 timelineStore + 汇总。
+   */
+  @Prop @Watch('onGlobalRefreshTick') globalRefreshTick: number = 0;
+  /**
+   * 状态行读回信号：Home 在把周期结果写进 syncStatusStore **之后**才 +1，
+   * 保证唯一失败渲染点 SyncStatusRow() 与刚重读的三个列表看到同一份 typed 结果。
+   */
+  @Prop @Watch('onStatusRefreshTick') statusRefreshTick: number = 0;
 
   /** 当前查看的日期（今日 tab 数据源）。 */
   @State selectedDate: string = localDateKey(new Date());
@@ -319,20 +331,31 @@ export struct SchedulePane {
    * 三态行经 `syncStatusStore` 更新，失败原因原样保留，不弹第二个「同步失败」toast。
    */
   private async onPullRefresh(): Promise<void> {
-    try {
-      // 与「重试同步」同一条确定性绑定入口：下拉刷新也绝不在 runner 未绑定态发起周期。
-      bindBridgeRunner(getContext(this) as common.UIAbilityContext);
-      syncStatusStore.setSyncing();
-      const result = await syncProtocolStore.runConfiguredCycle();
-      this.syncStatus = result !== null
-        ? syncStatusStore.fromCycle(result, new Date())
-        : syncStatusStore.snapshot();
-    } catch (error) {
-      this.syncStatus = syncStatusStore.setFailed(
-        error instanceof Error ? error.message : String(error));
-    }
-    this.reload();
-    this.loadSummary();
+    // 与首页外壳下拉共用**同一把单飞闸 + 同一份在飞 Promise**（mod-home-global-refresh）。
+    // 两个手势同时到达时第二个不另起周期也不被静默跳过，而是 await 同一结果；
+    // dots / 云端读回继承 Home.configure() 登记的那份，四个面仍按固定顺序各重读一次。
+    await globalRefreshCoordinator.runOnce({
+      markSyncing: (): void => {
+        syncStatusStore.setSyncing();
+      },
+      runCycle: async (): Promise<RefreshCycleResult | null> => {
+        // 与「重试同步」同一条确定性绑定入口：下拉刷新也绝不在 runner 未绑定态发起周期。
+        bindBridgeRunner(getContext(this) as common.UIAbilityContext);
+        return await syncProtocolStore.runConfiguredCycle();
+      },
+      reloadSchedule: (): void => {
+        this.reload();
+        this.loadSummary();
+      },
+      commitStatus: (result: RefreshCycleResult | null): void => {
+        this.syncStatus = result !== null
+          ? syncStatusStore.fromCycle(result, new Date())
+          : syncStatusStore.snapshot();
+      },
+      reportFailure: (reason: string): void => {
+        this.syncStatus = syncStatusStore.setFailed(reason);
+      }
+    });
   }
 
   /**
@@ -370,6 +393,20 @@ export struct SchedulePane {
    */
   onShowTick(): void {
     this.onPageShow();
+  }
+
+  /**
+   * 外壳全局下拉的日程读回：只重读磁盘 / 重算派生，不在这里再跑一个周期
+   * （周期由 Home 与纯层协调器单飞执行，两个入口共享同一份在飞 Promise）。
+   */
+  onGlobalRefreshTick(): void {
+    this.reload();
+    this.loadSummary();
+  }
+
+  /** 状态存储已由 Home 最后写入，这里只把唯一状态行的 @State 镜像刷新。 */
+  onStatusRefreshTick(): void {
+    this.syncStatus = syncStatusStore.snapshot();
   }
 
   /** 从编辑页/设置页返回时重新加载（追加写语义下必须重读）。 */

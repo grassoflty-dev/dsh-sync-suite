@@ -64,8 +64,14 @@ export struct DotsPane {
   @Prop deepLinkId: string = '';
   /** 保活可见性：Home 当前分段为 dots 时传 true。 */
   @Prop active: boolean = true;
+  /**
+   * 首页全局下拉刷新的读回信号（mod-home-global-refresh）：Home 在一次周期 settle 后 +1。
+   * 本面板是保活 @Component，框架不会调用自己的 onPageShow，只能靠 @Watch 接外壳信号；
+   * 这里**只重读 chatStore**（无网络、无第二个周期），与 aboutToAppear 共用同一条 reload()。
+   */
+  @Prop @Watch('onGlobalRefreshTick') globalRefreshTick: number = 0;
 
-  /** 全部 dots 会话（已排序、已按 kind 过滤）；只在 aboutToAppear / 重试时重读一次。 */
+  /** 全部 dots 会话（已排序、已按 kind 过滤）；只在 aboutToAppear / 重试 / 全局刷新时重读。 */
   @State chats: ChatIndexEntry[] = [];
   /** 读取失败原因；空串 = 无错误。 */
   @State errorText: string = '';
@@ -78,6 +84,11 @@ export struct DotsPane {
     chatStore.prepare(getContext(this) as common.UIAbilityContext);
     this.reload();
     this.grantLine = this.buildGrantLine();
+  }
+
+  /** 外壳全局刷新信号：一次周期的结果已落盘，这里只从 chatStore 重读，不重跑任何同步。 */
+  onGlobalRefreshTick(): void {
+    this.reload();
   }
 
   // ------------------------------------------------------------------ 数据

@@ -359,11 +359,15 @@ describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
       assert.ok(at >= 0, `Home 没有装配 ${name}`);
       const keys = passedKeys(HOME_CODE.slice(at), name);
       assert.ok(keys !== null, `${name} 装配点必须有属性区`);
-      // mod-home-list-instant-refresh：仅日程面板多一个 showTick（Home.onPageShow 的 show 信号），
-      // 其余三面仍是 deepLinkId + active 两 prop；旧断言逐字保留为三面的期望值，没有放宽。
+      // mod-home-list-instant-refresh：日程面板多一个 showTick（Home.onPageShow 的 show 信号）。
+      // mod-home-global-refresh：三个 git 依赖面板（日程 / dots / 云端）再多一个 globalRefreshTick，
+      // 日程因状态行最后重读再多一个 statusRefreshTick；InstancesPane 不依赖仓库，仍只有两 prop。
+      // 旧断言的全部 key 仍在期望集合里，只是补上新增项（更严，不放宽）。
       const expected = name === 'SchedulePane'
-        ? ['active', 'deepLinkId', 'showTick']
-        : ['active', 'deepLinkId'];
+        ? ['active', 'deepLinkId', 'globalRefreshTick', 'showTick', 'statusRefreshTick']
+        : (name === 'DotsPane' || name === 'CloudChatPane')
+          ? ['active', 'deepLinkId', 'globalRefreshTick']
+          : ['active', 'deepLinkId'];
       assert.deepEqual([...keys].sort(), expected, '少传 = 保活/深链/即时刷新断线；多传 = 名字拼错被静默忽略');
       if (name === 'SchedulePane') {
         assert.match(code, /@Prop @Watch\('onShowTick'\) showTick: number = 0;/,
@@ -430,8 +434,10 @@ describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
     assert.equal(/onPageShow\(/.test(code), false, '无 onPageShow');
     const at = HOME_CODE.indexOf('DotsPane({');
     assert.ok(at >= 0, 'Home 必须装配 DotsPane');
-    assert.deepEqual([...passedKeys(HOME_CODE.slice(at), 'DotsPane')].sort(), ['active', 'deepLinkId'],
-      '装配 props 双向齐全（少传 = 保活/深链断线）');
+    // mod-home-global-refresh：dots 多了全局读回 tick；旧的两个 prop 仍在（收紧，不放宽）。
+    assert.deepEqual([...passedKeys(HOME_CODE.slice(at), 'DotsPane')].sort(),
+      ['active', 'deepLinkId', 'globalRefreshTick'],
+      '装配 props 双向齐全（少传 = 保活/深链/全局读回断线）');
     assert.match(code, /ForEach\(\s*this\.chats/, '真实会话数组必须经 ForEach 渲染');
     assert.match(code, /router\.pushUrl\(\{ url: 'pages\/ChatDetail', params: params \}\)/, '只 push 只读详情');
     assert.equal(/pushUrl\(\{\s*url:\s*'pages\/(Chats|Home|Settings)'/.test(code), false,

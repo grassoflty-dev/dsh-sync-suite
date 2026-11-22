@@ -704,4 +704,29 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
       'visibleRecords 必须由当前 records + 当前 filter 派生');
     assert.match(schedule.source, /ForEach\(\s*this\.visibleRecords/, '列表必须渲染派生后的 visibleRecords');
   });
+
+  // mod-home-global-refresh（新增正向守卫，旧 P-01..P-27 一条未删）：
+  // 三个 git 依赖面板必须暴露 tick 读回钩子（保持原 props / Hidden 保活契约），只读盘不重跑周期。
+  test('P-28 日程 / dots / 云端三面板暴露全局读回 tick；读回只重读 store，保活契约不变', () => {
+    for (const name of ['SchedulePane', 'DotsPane', 'CloudChatPane']) {
+      const p = pane(name);
+      assert.match(p.source, /@Prop @Watch\('onGlobalRefreshTick'\) globalRefreshTick: number = 0;/,
+        `${name} 必须暴露 @Watch 读回 tick`);
+      const watcher = blockAfter(p.source, '\n  onGlobalRefreshTick(): void ');
+      assert.match(watcher, /this\.reload\(\)/, `${name} 读回只重读本面板数据源`);
+      assert.equal(/runConfiguredCycle|syncController|pullNow|showToast/.test(watcher), false,
+        `${name} 读回不得重跑周期 / 弹 toast`);
+      assert.match(p.source, /@Prop active: boolean = true;/, `${name} 原 active prop 不变`);
+      assert.match(p.body, /\.visibility\(this\.active \? Visibility\.Visible : Visibility\.Hidden\)/,
+        `${name} 仍用 Hidden 保活`);
+    }
+    const schedule = pane('SchedulePane');
+    assert.match(schedule.source, /@Prop @Watch\('onStatusRefreshTick'\) statusRefreshTick: number = 0;/);
+    const statusWatcher = blockAfter(schedule.source, '\n  onStatusRefreshTick(): void ');
+    assert.match(statusWatcher, /syncStatusStore\.snapshot\(\)/,
+      '状态行在周期结果落进 store 之后才重读（status last）');
+    const pull = blockAfter(schedule.source, '\n  private async onPullRefresh(');
+    assert.match(pull, /globalRefreshCoordinator\.runOnce\(\{/, '面板自己的下拉也必须走同一把闸');
+    assert.equal(/promptAction|showToast/.test(pull), false, '面板下拉失败不弹第二处 toast');
+  });
 });

@@ -33,6 +33,12 @@
  * 其余回落 dots；`id` 原样传给每个面板组件（日程面板保留，三个占位预留）。
  */
 import { promptAction, router } from '@kit.ArkUI';
+import { common } from '@kit.AbilityKit';
+import { globalRefreshCoordinator } from '../model/homeGlobalRefresh';
+import type { RefreshCycleResult } from '../model/homeGlobalRefresh';
+import { bindBridgeRunner } from '../services/gitRunner';
+import { syncProtocolStore } from '../services/syncProtocolStore';
+import { syncStatusStore } from '../services/syncStatusStore';
 import {
   DIVIDER,
   FONT,
@@ -91,7 +97,51 @@ struct Home {
    */
   @State scheduleShowTick: number = 0;
 
+  /**
+   * 首页全局下拉刷新（mod-home-global-refresh / P1-D）：一次手势 = 一个周期 + 四个读回。
+   *
+   * `globalRefreshing` 只驱动外壳 Refresh 的转圈；真正的单飞闸 + 在飞 Promise 共享在
+   * `globalRefreshCoordinator`（纯模型，Node 可测）。三个 tick 是外壳通知保活面板「重读磁盘」
+   * 的唯一通道（与 `scheduleShowTick` 同款：面板是外部 @Component，拿不到自己的 onPageShow）。
+   * 状态行仍由 `SchedulePane.SyncStatusRow()` 唯一渲染——`statusRefreshTick` 只让它在周期结果
+   * 落进 syncStatusStore **之后**再读一次，保证状态与三个列表看到的是同一次周期。
+   */
+  @State globalRefreshing: boolean = false;
+  @State scheduleRefreshTick: number = 0;
+  @State dotsRefreshTick: number = 0;
+  @State cloudChatRefreshTick: number = 0;
+  @State statusRefreshTick: number = 0;
+
   aboutToAppear(): void {
+    // 只登记一次完整的四读回钩子：日程 / dots / 云端 / 状态存储（最后写）。
+    // 日程面板自己的下拉只传覆盖项（它自己的 reload + 状态 @State），dots / cloud 读回继承这里。
+    globalRefreshCoordinator.configure({
+      runCycle: async (): Promise<RefreshCycleResult | null> => {
+        bindBridgeRunner(getContext(this) as common.UIAbilityContext);
+        return await syncProtocolStore.runConfiguredCycle();
+      },
+      markSyncing: (): void => {
+        syncStatusStore.setSyncing();
+      },
+      reloadSchedule: (): void => {
+        this.scheduleRefreshTick = this.scheduleRefreshTick + 1;
+      },
+      reloadDots: (): void => {
+        this.dotsRefreshTick = this.dotsRefreshTick + 1;
+      },
+      reloadCloudChat: (): void => {
+        this.cloudChatRefreshTick = this.cloudChatRefreshTick + 1;
+      },
+      commitStatus: (result: RefreshCycleResult | null): void => {
+        // 状态存储最后写；typed 失败原因原样落进 syncStatusStore，只有一个渲染点。
+        syncStatusStore.fromCycle(result, new Date());
+        this.statusRefreshTick = this.statusRefreshTick + 1;
+      },
+      reportFailure: (reason: string): void => {
+        syncStatusStore.setFailed(reason);
+        this.statusRefreshTick = this.statusRefreshTick + 1;
+      }
+    });
     try {
       const params = router.getParams() as Record<string, string>;
       if (params !== undefined && params !== null) {
@@ -116,6 +166,17 @@ struct Home {
    */
   onPageShow(): void {
     this.scheduleShowTick = this.scheduleShowTick + 1;
+  }
+
+  /**
+   * 首页外壳唯一的下拉处理：把整次刷新交给单飞协调器。
+   *
+   * 不在这里直接调周期、不弹 toast：周期入口、四读回顺序、失败单一落点全在纯层
+   * `globalRefreshCoordinator`。与日程面板自己的下拉共享同一把闸与同一份在飞 Promise，
+   * 两个手势同时到达时只跑一个周期、四个读回只发生一次；跟随者也 await 到完成结果。
+   */
+  private async onGlobalPull(): Promise<void> {
+    await globalRefreshCoordinator.runOnce();
   }
 
   /**
@@ -186,6 +247,10 @@ struct Home {
   }
 
   build() {
+    // 首页全局下拉刷新（mod-home-global-refresh）：唯一一层 Refresh 包住整个外壳，
+    // 竖屏 Row+rail / 横屏 Row+rail / compact 抽屉三种形态共用同一个手势入口；
+    // 面板自己的 Scroll / List 不受影响（Refresh 包的是外壳，不是再包一层内容 Column）。
+    Refresh({ refreshing: $$this.globalRefreshing }) {
     // root Stack 只放覆盖层（抽屉蒙层 / 抽屉条 / compact 的 ☰）；flex 切分只有下面这一个 Row。
     Stack({ alignContent: Alignment.TopStart }) {
       Row() {
@@ -207,12 +272,15 @@ struct Home {
         Stack({ alignContent: Alignment.TopStart }) {
           DotsPane({
             deepLinkId: this.deepLinkId,
-            active: this.section === SHELL_SECTION_DOTS
+            active: this.section === SHELL_SECTION_DOTS,
+            globalRefreshTick: this.dotsRefreshTick
           })
           SchedulePane({
             deepLinkId: this.deepLinkId,
             active: this.section === SHELL_SECTION_SCHEDULE,
-            showTick: this.scheduleShowTick
+            showTick: this.scheduleShowTick,
+            globalRefreshTick: this.scheduleRefreshTick,
+            statusRefreshTick: this.statusRefreshTick
           })
           InstancesPane({
             deepLinkId: this.deepLinkId,
@@ -220,7 +288,8 @@ struct Home {
           })
           CloudChatPane({
             deepLinkId: this.deepLinkId,
-            active: this.section === SHELL_SECTION_CLOUD_CHAT
+            active: this.section === SHELL_SECTION_CLOUD_CHAT,
+            globalRefreshTick: this.cloudChatRefreshTick
           })
         }
         .width('100%')
@@ -275,6 +344,18 @@ struct Home {
     .height('100%')
     .onAreaChange((_oldValue: Area, newValue: Area) => {
       this.applyArea(newValue);
+    })
+    }
+    .onRefreshing(() => {
+      this.globalRefreshing = true;
+      // 成功 / 失败 / 下游意外 reject 都复位转圈；typed 失败只由状态行渲染，这里不弹 toast。
+      this.onGlobalPull()
+        .then(() => {
+          this.globalRefreshing = false;
+        })
+        .catch(() => {
+          this.globalRefreshing = false;
+        });
     })
   }
 }

@@ -44,8 +44,14 @@ export struct CloudChatPane {
   @Prop deepLinkId: string = '';
   /** 保活可见性：Home 当前分段为 cloudChat 时传 true。 */
   @Prop active: boolean = true;
+  /**
+   * 首页全局下拉刷新的读回信号（mod-home-global-refresh）：Home 在一次周期 settle 后 +1。
+   * 保活面板拿不到自己的 onPageShow，只能靠 @Watch 接外壳信号；这里只重读 chatStore，
+   * 不重跑网络 / 不发起第二个周期。
+   */
+  @Prop @Watch('onGlobalRefreshTick') globalRefreshTick: number = 0;
 
-  /** 全部会话（已排序、已按 kind 过滤）；只在 aboutToAppear / 重试时重读一次。 */
+  /** 全部会话（已排序、已按 kind 过滤）；只在 aboutToAppear / 重试 / 全局刷新时重读。 */
   @State chats: ChatIndexEntry[] = [];
   /** 读取失败原因；空串 = 无错误。 */
   @State errorText: string = '';
@@ -54,6 +60,11 @@ export struct CloudChatPane {
 
   aboutToAppear(): void {
     chatStore.prepare(getContext(this) as common.UIAbilityContext);
+    this.reload();
+  }
+
+  /** 外壳全局刷新信号：一次周期的结果已落盘，这里只从 chatStore 重读，不重跑任何同步。 */
+  onGlobalRefreshTick(): void {
     this.reload();
   }
 

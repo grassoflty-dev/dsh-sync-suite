@@ -687,3 +687,17 @@ test('U-S8 dots 只读授权行来自 instanceGrantStore；禁用原因渲染在
     assert.equal(dots.includes(api), false, `只读面板不得调用 ${api}`)
   }
 })
+
+// mod-home-global-refresh（新增正向守卫，旧 U-S1..U-S8 一条未删）：
+// 新加的外壳 Refresh 包装不能抢走断点 / 令牌纪律，也不能引入第二处 flex 切分或写死高度。
+test('U-S9 外壳 Refresh 包装不破坏两种朝向的断点 / 令牌 / 单 flex 纪律', () => {
+  const home = stripComments(HOME)
+  assert.equal((home.match(/Refresh\(\{ refreshing: \$\$this\.globalRefreshing \}\)/g) ?? []).length, 1)
+  assert.match(home, /\.onAreaChange\(/)
+  assert.match(home, /resolveBreakpoint\(width, isLandscapeSize\(width, height\)\)/)
+  assert.equal(/600|840/.test(home), false, '断点阈值仍只在 uiTokens.ts')
+  assert.equal((home.match(/layoutWeight\(1\)/g) ?? []).length, 1, 'Refresh 不新增结构切分')
+  assert.equal(/\.height\(\s*\d+(\.\d+)?\s*\)/.test(home), false, 'Refresh 包装不得写死 vp 高度')
+  assert.equal(/(?:#[0-9A-Fa-f]{3,8}|Color\.[A-Z]|rgba?\()/.test(home), false, 'Refresh 包装不得写裸色值')
+  assert.deepEqual(settingsPushFiles(), ['Home.ets'], 'U-S4 不削弱：下拉刷新不新增设置出口')
+})

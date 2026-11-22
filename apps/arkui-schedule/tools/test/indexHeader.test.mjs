@@ -336,4 +336,23 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
       assert.equal(dots.includes(api), false, `只读面板不得调用 ${api}`);
     }
   });
+
+  // mod-home-global-refresh（新增正向守卫，旧 H-1..H-6 一条未删）：
+  // 全局下拉失败只由既有的 SyncStatusRow 渲染；外壳不新增第二行、面板不弹第二处 toast。
+  test('H-7 全局下拉只有一处 typed 失败渲染面（SyncStatusRow），外壳不复制状态行', () => {
+    const row = memberBody('SyncStatusRow');
+    assert.match(row, /Text\(this\.syncStatus\.text\)/, '状态行是唯一 typed 失败渲染点');
+    assert.match(row, /this\.syncStatus\.state === 'failed'/);
+    // 外壳只有全局 Refresh 容器与转圈状态，没有第二处状态行 / 失败文案
+    assert.equal(/SyncStatusRow|失败：\$\{|失败：$/.test(HOME_CODE), false,
+      'Home 不得复制状态行或拼第二处 typed 失败文案');
+    assert.equal(/promptAction|showToast/.test(source.slice(
+      source.indexOf('private async onPullRefresh(): Promise<void> {'),
+      source.indexOf('private async retrySync(): Promise<void> {'))), false,
+      '面板下拉路径零 toast');
+    // 状态行仍在竖屏与横屏两栏各一处（p0a syncWiring 62b 的同一契约）
+    for (const builder of ['CompactBody', 'WideBody']) {
+      assert.match(memberBody(builder), /this\.SyncStatusRow\(\)/, `${builder} 仍渲染同一状态行`);
+    }
+  });
 });

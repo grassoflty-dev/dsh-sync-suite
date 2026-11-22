@@ -180,7 +180,9 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     const between = build.slice(rowAt, stackAt);
     assert.equal(/Column\(/.test(between), false, 'Row 与内容 Stack 之间不得插入 Column 包裹层');
     // 内容 Stack 自身 height('100%')，不是固定 vp 高度。
-    const tail = build.slice(stackAt, stackAt + 900);
+    // mod-home-global-refresh：面板装配新增 globalRefreshTick / statusRefreshTick 三个 prop，
+    // 内容 Stack 的 body 变长；窗口从 900 → 1600 只为覆盖同一条属性链（负向断言扫描范围只增不减）。
+    const tail = build.slice(stackAt, stackAt + 1600);
     assert.match(tail, /\.height\('100%'\)/, '内容区必须 height(100%) 撑满');
     assert.equal(/\.height\(\s*\d+(\.\d+)?\s*\)/.test(tail), false, '内容区不得写死 vp 高度');
   });
@@ -592,5 +594,23 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       'SchedulePane 必须收到 show tick');
     assert.equal((HOME.match(/showTick: this\.scheduleShowTick/g) ?? []).length, 1,
       'show tick 只能装配给日程面板一处');
+  });
+
+  // mod-home-global-refresh（新增正向守卫，旧 L-01..L-25 一条未删）：
+  // 全局下拉是外壳唯一的 Refresh 容器；它必须包住竖屏/横屏两种形态，且外壳下拉路径零 toast。
+  test('L-26 外壳 owns 唯一全局 Refresh 容器，包住两种朝向，下拉只转交单飞协调器', () => {
+    assert.equal((HOME.match(/Refresh\(\{ refreshing: \$\$this\.globalRefreshing \}\)/g) ?? []).length, 1,
+      '外壳只能有一个全局 Refresh 容器');
+    const build = blockAfter(HOME, '\n  build() ');
+    assert.match(build, /^\s*Refresh\(\{ refreshing: \$\$this\.globalRefreshing \}\)/,
+      'Refresh 必须是 build() 的最外层容器');
+    assert.match(build, /if \(!this\.isCompact\(\)\)[\s\S]*?ShellRail\(\{/,
+      '宽屏常驻轨仍在 Refresh 内');
+    assert.match(build, /if \(this\.isCompact\(\)\)[\s\S]*?ShellRail\(\{/,
+      'compact 抽屉轨仍在 Refresh 内');
+    assert.match(build, /this\.onGlobalPull\(\)/, '下拉手势只转交外壳入口');
+    const pull = blockAfter(HOME, '\n  private async onGlobalPull(');
+    assert.match(pull, /globalRefreshCoordinator\.runOnce\(\)/, '外壳入口走单飞协调器');
+    assert.equal(/promptAction|showToast/.test(pull), false, '下拉失败不得在外壳弹 toast');
   });
 });

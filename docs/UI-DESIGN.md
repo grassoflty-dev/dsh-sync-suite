@@ -615,3 +615,11 @@ API Key 密码框、自定义源才显示接口地址，没有「高级」控制
 **模型下拉改由服务商返回填充（`mod-ai-models-fetch`，2026-11-22）**：API 配置页模型下拉不再只有写死预设——`GET <resolved baseURL>/models` 返回的规范 `id` 原样进列表，「刷新模型列表」是显式重拉行，已下线模型追加「自定义 / 未知：<id>」仍可选，失败 / 过期时保留上次成功列表并标注来源与「已过期」（**未装机 / unverified**，安装版 `1000005`；设备检查随 `1000006`）。
 
 **新建后即时可见（`mod-home-list-instant-refresh`，2026-11-22）**：日程列表的用户契约补一条——**在「当日全部日程」里新建一条记录后，它必须立即出现在当前筛选下的列表中，不需要先切「未完成」再切回来**，也不靠页面重载 / 定时器 / 轮询。实现是外壳把 `onPageShow` 的 show 信号转给日程面板，面板复用原「保存返回」入口消费一次性标记并重读、重算可见集；两 tab、关键词 / 作者筛选与自动同步时机一律不变。**未装机 / unverified**（安装版 `1000006`；设备检查随 `1000007`）。
+
+**首页全局下拉刷新（`mod-home-global-refresh`，2026-11-22）**：用户契约——**在首页外壳任意位置下拉一次，就一次性刷新所有依赖 git 的内容**：日程列表、dots 列表、云端对话列表、同步状态行，而不是只能刷新日程列表。竖屏（Row + 常驻轨）、宽屏 / 横屏（同 Row + 常驻轨 + 主从列）、compact（抽屉形态）共用外壳**唯一一层** `Refresh` 容器；面板自己的滚动 / refresh 布局不变。
+
+一次下拉 = **恰好一个同步周期**：复用 `syncProtocolStore.runConfiguredCycle()`（与建记录后的自动周期是同一入口），不另写第二份同步、不重复 commit / outbox 排空。`model/homeGlobalRefresh.ts` 的纯编排把周期与四个读回注入 spy 钩子并复用 `model/syncGuard.ts` 的 `beginExclusive`/`endExclusive`：第二个下拉**不另起周期也不被静默跳过**，而是 `await` 同一份在飞 Promise，拿到同一结果。周期 settle 后按固定顺序 **日程 → dots → 云端对话 → 状态存储（最后）** 从磁盘 / store 重读（面板是保活 @Component，靠 `@Prop @Watch` tick 接外壳信号）；状态行因此与刚重读的三个列表看到同一份结果。
+
+**失败只有一个渲染面**：`失败：<typed 原因>` 只由 `SchedulePane.SyncStatusRow()` 渲染（唯一数据源 `syncStatusStore`），面板与外壳的下拉路径都**不弹第二个 toast**、不拼第二处「失败：」文案；外壳不复制状态行。日程面板自己的下拉**保留**（旧交互不删），但改走同一把闸与同一份在飞 Promise，与外壳手势同时触发时不会双周期、不会漏读回。
+
+`tools/test/homeGlobalRefresh.test.mjs`（真 spy 计数 / 顺序 / 共享 Promise / 单一失败落点 6 例 + 源码形状 4 例）与 `shellLayout` L-26 / `paneLayout` P-28 / `indexHeader` H-7 / `uiTokens` U-S9（旧断言一条未删）钉住上述契约；ArkUI 手势、真机横竖屏观感与 ArkTS 编译**只能静态断言 / unverified**（安装版 `1000006`；设备检查随 `1000007`；本批不构建、不装机）。
