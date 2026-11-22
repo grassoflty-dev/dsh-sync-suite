@@ -29,7 +29,7 @@
 - 客户端模块（纯 JS，无需构建）：
 ```js
 window.__ModuleLoader__.load({
-  id: 'dots',
+  id: 'dsh-dots',
   factory(require) {
     const React = require('react')
     const h = React.createElement
@@ -41,6 +41,7 @@ window.__ModuleLoader__.load({
   },
 })
 ```
+- **三套独立命名空间，勿一并改名**：① loader id（上面 `id: 'dsh-dots'`，由 `scripts/build.mjs` 按 `package.json.name` 生成）；② slot / panel id（`settings.section` 的唯一 id `dots`，页内折叠分组 id `dots-remote`）；③ RPC 路径 `/dsh-dots/rpc`。locale NS `dots` 属面板内部命名，同样不随 loader id 改动。单一 `settings.section` 的展示名是 `DSH-dots`，配置同步 / 远程控制只是同一页内的两个分组。
 - Host RPC：`export const inject = ['webServer','connection']`；`ctx.effect(() => ctx.webServer.register({ kind:'exact', path:'/dsh-dots/rpc', handler }))`；handler 开头 `const rej = ctx.connection.requestRejection(req); if (rej) { res.statusCode = rej; res.end(); return }`。Client 用同源 `fetch('/dsh-dots/rpc', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({action, ...})})`。
 - 样式用 `--dsw-alias-*` 主题变量，自写控件，不引第三方 UI 库。
 

@@ -2,8 +2,8 @@
  * 远程访问 section 的渲染回归（桩渲染，React 语义与 client-render.test.mjs 一致）。
  *
  * 断言四件事：
- *   1. 注册了**两个独立** section：配置同步（id dots / order 70）与
- *      远程访问（id dots-remote / order 71），locale 都复用同一个 NS；
+ *   1. 全插件只注册**一个** section（id dots / order 70 / label DSH-dots），
+ *      远程控制只是该单页里的折叠分组（内部 id dots-remote），locale 共用同一个 NS；
  *   2. `remote.*` 文案在 locale/zh.json 与 locale/en.json 都存在且两侧键集一致；
  *   3. 用「含 uu（needs-setup：图形化端口映射）+ 四种 level 的 checks + qr 矩阵」的假 state
  *      渲染 RemotePanel 不抛异常，且 DOM 里出现「远程访问」「需先准备」「图形化端口映射」等文案；
@@ -211,6 +211,15 @@ function renderSections(mod) {
   return sections
 }
 
+/** 唯一 section 的单页组件把原 RemotePanel 暴露在 .RemotePanel 上，供本文件单独挂载。 */
+function remotePanel(mod) {
+  const sections = renderSections(mod)
+  assert.equal(sections.length, 1, '只允许一个 settings.section')
+  const component = sections[0].component.RemotePanel
+  assert.ok(component, '单页组件必须暴露原 RemotePanel')
+  return component
+}
+
 function walk(node, visit) {
   if (node === null || node === undefined || node === false || node === true) return
   if (Array.isArray(node)) {
@@ -268,6 +277,13 @@ function nodesOf(tree) {
   const nodes = []
   walk(tree, (node) => nodes.push(node))
   return nodes
+}
+
+/** 从合并后的单页里取出指定 id 的折叠分组（不绕过 merged panel 直接挂子面板）。 */
+function groupOf(tree, id) {
+  const group = nodesOf(tree).find((node) => node.type === 'details' && node.props.id === id)
+  assert.ok(group, `单页里必须存在 id=${id} 的折叠分组`)
+  return group
 }
 
 /* -------------------------------------------------------------------------- */
@@ -468,25 +484,19 @@ test('client.js 与 dist/client.js 必须保持同一份内容', () => {
   )
 })
 
-test('注册了两个独立 section：id/order/locale/label 正确', async () => {
+test('只注册一个 section：id/order/locale/label 正确', async () => {
   const { mod } = await loadClient()
   const sections = renderSections(mod)
-  assert.equal(sections.length, 2, '必须注册两个 settings.section')
-
-  const byId = new Map(sections.map((s) => [s.options.id, s]))
-  const sync = byId.get('dots')
-  const remote = byId.get('dots-remote')
-  assert.ok(sync, '配置同步 section 必须仍在')
-  assert.ok(remote, '远程访问 section 必须注册')
-  assert.equal(sync.options.name, 'settings.section')
-  assert.equal(remote.options.name, 'settings.section')
-  assert.equal(sync.options.order, 70)
-  assert.equal(remote.options.order, 71)
-  assert.equal(sync.options.locale, 'dots')
-  assert.equal(remote.options.locale, 'dots', '两个 section 复用同一个 locale NS')
-  assert.equal(typeof remote.options.label, 'function')
-  assert.equal(remote.options.label(), '远程访问')
-  assert.notEqual(remote.component, sync.component, '两个 section 必须是不同组件（状态互不影响）')
+  assert.equal(sections.length, 1, '只允许一个 settings.section')
+  const section = sections[0]
+  assert.equal(section.options.id, 'dots', '唯一 section 的 id 必须仍是 dots')
+  assert.equal(section.options.name, 'settings.section')
+  assert.equal(section.options.order, 70)
+  assert.equal(section.options.locale, 'dots')
+  assert.equal(typeof section.options.label, 'function')
+  assert.equal(section.options.label(), 'DSH-dots', '单一条目的名称必须是 DSH-dots')
+  assert.ok(section.component.RemotePanel, '远程控制必须作为单页内的分组存在')
+  assert.ok(section.component.SettingsPanel, '配置同步必须作为单页内的分组存在')
 })
 
 /* -------------------------------------------------------------------------- */
@@ -518,12 +528,11 @@ test('remote.* 键在 zh/en 都存在且两侧键集一致', () => {
 
 test('RemotePanel：假 state 渲染不抛异常，且出现「远程访问」「需先准备」等文案', async () => {
   const { mod } = await loadClient()
-  const sections = renderSections(mod)
-  const remote = sections.find((s) => s.options.id === 'dots-remote')
+  const remote = remotePanel(mod)
 
   let tree = null
   assert.doesNotThrow(() => {
-    tree = renderRemote(remote.component, { seedState: fakeState(), seedLink: fakeLink() })
+    tree = renderRemote(remote, { seedState: fakeState(), seedLink: fakeLink() })
   }, 'RemotePanel 渲染不得抛异常')
 
   const text = textOf(tree)
@@ -561,9 +570,8 @@ test('RemotePanel：假 state 渲染不抛异常，且出现「远程访问」�
 
 test('RemotePanel：uu（needs-setup）可被选中，显示 requires 与操作提示', async () => {
   const { mod } = await loadClient()
-  const sections = renderSections(mod)
-  const remote = sections.find((s) => s.options.id === 'dots-remote')
-  const tree = renderRemote(remote.component, { seedState: fakeState('uu') })
+  const remote = remotePanel(mod)
+  const tree = renderRemote(remote, { seedState: fakeState('uu') })
 
   const nodes = nodesOf(tree)
   const options = nodes.filter((node) => node.type === 'option')
@@ -595,9 +603,8 @@ test('RemotePanel：uu（needs-setup）可被选中，显示 requires 与操作�
 
 test('RemotePanel：端口是数字输入，字段来自 spec.fields', async () => {
   const { mod } = await loadClient()
-  const sections = renderSections(mod)
-  const remote = sections.find((s) => s.options.id === 'dots-remote')
-  const tree = renderRemote(remote.component, { seedState: fakeState() })
+  const remote = remotePanel(mod)
+  const tree = renderRemote(remote, { seedState: fakeState() })
   const nodes = nodesOf(tree)
 
   const numbers = nodes.filter((node) => node.type === 'input' && node.props.type === 'number')
@@ -615,9 +622,8 @@ test('RemotePanel：端口是数字输入，字段来自 spec.fields', async () 
 
 test('RemotePanel：二维码画成 SVG（模块 ≥3px、白底、四周留白）', async () => {
   const { mod } = await loadClient()
-  const sections = renderSections(mod)
-  const remote = sections.find((s) => s.options.id === 'dots-remote')
-  const tree = renderRemote(remote.component, { seedState: fakeState(), seedLink: fakeLink() })
+  const remote = remotePanel(mod)
+  const tree = renderRemote(remote, { seedState: fakeState(), seedLink: fakeLink() })
   const nodes = nodesOf(tree)
 
   const svgs = nodes.filter((node) => node.type === 'svg')
@@ -639,9 +645,8 @@ test('RemotePanel：二维码画成 SVG（模块 ≥3px、白底、四周留白�
 
 test('RemotePanel：渲染结果里没有任何 token 明文（含属性 / title / aria）', async () => {
   const { mod } = await loadClient()
-  const sections = renderSections(mod)
-  const remote = sections.find((s) => s.options.id === 'dots-remote')
-  const tree = renderRemote(remote.component, { seedState: fakeState(), seedLink: fakeLink() })
+  const remote = remotePanel(mod)
+  const tree = renderRemote(remote, { seedState: fakeState(), seedLink: fakeLink() })
 
   assert.ok(!textOf(tree).includes(TOKEN_PLAIN), '可见文案里不得出现 token')
   const dump = serialize(tree)
@@ -652,12 +657,11 @@ test('RemotePanel：渲染结果里没有任何 token 明文（含属性 / title
 
 test('RemotePanel：initial state 为 null 时也能渲染（加载态），不抛异常', async () => {
   const { mod } = await loadClient()
-  const sections = renderSections(mod)
-  const remote = sections.find((s) => s.options.id === 'dots-remote')
+  const remote = remotePanel(mod)
 
   let tree = null
   assert.doesNotThrow(() => {
-    tree = renderRemote(remote.component, {})
+    tree = renderRemote(remote, {})
   })
   const text = textOf(tree)
   assert.ok(text.includes('远程访问'))
@@ -668,10 +672,9 @@ test('RemotePanel：initial state 为 null 时也能渲染（加载态），不�
 
 test('RemotePanel：错误隔离——本 section 的 ErrorBox 不来自同步面板', async () => {
   const { mod } = await loadClient()
-  const sections = renderSections(mod)
-  const remote = sections.find((s) => s.options.id === 'dots-remote')
+  const remote = remotePanel(mod)
 
-  const tree = renderRemote(remote.component, { seedState: fakeState() })
+  const tree = renderRemote(remote, { seedState: fakeState() })
   // 两个 panel 是不同组件实例，远程面板自有 error state（初值为 null）。
   // 这里用「远程 state 里带 lastError」证明：状态里的失败只以中性框出现，不落成 role=alert 的红框。
   assert.equal(nodesOf(tree).filter((node) => node.props.role === 'alert').length, 0)
@@ -684,9 +687,8 @@ test('RemotePanel：错误隔离——本 section 的 ErrorBox 不来自同步�
 
 test('RemotePanel：token 字段渲染成 password 输入，初始值为空串，hint 用 remote.field.token.hint', async () => {
   const { mod } = await loadClient()
-  const sections = renderSections(mod)
-  const remote = sections.find((s) => s.options.id === 'dots-remote')
-  const tree = renderRemote(remote.component, { seedState: fakeState() })
+  const remote = remotePanel(mod)
+  const tree = renderRemote(remote, { seedState: fakeState() })
   const nodes = nodesOf(tree)
 
   const passwords = nodes.filter((node) => node.type === 'input' && node.props.type === 'password')
@@ -705,9 +707,8 @@ test('RemotePanel：token 字段渲染成 password 输入，初始值为空串�
 
 test('RemotePanel：令牌明文（即使 host 误塞进 settings）绝不进 DOM', async () => {
   const { mod } = await loadClient()
-  const sections = renderSections(mod)
-  const remote = sections.find((s) => s.options.id === 'dots-remote')
-  const tree = renderRemote(remote.component, {
+  const remote = remotePanel(mod)
+  const tree = renderRemote(remote, {
     // 契约里 settings 是 view（没有 token）；这里故意塞一个明文，验证客户端也不会渲染它。
     seedState: fakeState('lan', { tokenSet: true, tokenMasked: 'rt_p…6789', token: TOKEN_PLAIN }),
     seedLink: fakeLink()
@@ -724,9 +725,8 @@ test('RemotePanel：令牌明文（即使 host 误塞进 settings）绝不进 DO
 
 test('RemotePanel：已保存令牌显示中性徽章（打码）+「清除令牌」，点击不崩且不泄露明文', async () => {
   const { mod } = await loadClient()
-  const sections = renderSections(mod)
-  const remote = sections.find((s) => s.options.id === 'dots-remote')
-  const tree = renderRemote(remote.component, {
+  const remote = remotePanel(mod)
+  const tree = renderRemote(remote, {
     seedState: fakeState('lan', { tokenSet: true, tokenMasked: 'rt_p…6789' })
   })
 
@@ -745,8 +745,7 @@ test('RemotePanel：已保存令牌显示中性徽章（打码）+「清除令�
 
 test('RemotePanel：令牌字段出现在 lan/ipv6/tailscale/uu（manual 没有），字段数量随方式变化', async () => {
   const { mod } = await loadClient()
-  const sections = renderSections(mod)
-  const remote = sections.find((s) => s.options.id === 'dots-remote')
+  const remote = remotePanel(mod)
 
   const inputCount = (tree) => {
     const nodes = nodesOf(tree).filter((node) => node.type === 'input')
@@ -763,22 +762,71 @@ test('RemotePanel：令牌字段出现在 lan/ipv6/tailscale/uu（manual 没有�
     }
   }
 
-  const lan = inputCount(renderRemote(remote.component, { seedState: fakeState('lan') }))
+  const lan = inputCount(renderRemote(remote, { seedState: fakeState('lan') }))
   assert.deepEqual(lan, { total: 3, numbers: 1, texts: 1, passwords: 1, checkboxes: 1 }, 'lan：局域网地址 + 端口 + 令牌')
 
-  const ipv6 = inputCount(renderRemote(remote.component, { seedState: fakeState('ipv6') }))
+  const ipv6 = inputCount(renderRemote(remote, { seedState: fakeState('ipv6') }))
   assert.deepEqual(ipv6, { total: 3, numbers: 1, texts: 1, passwords: 1, checkboxes: 1 }, 'ipv6：IPv6 地址 + 端口 + 令牌')
 
-  const tailscale = inputCount(renderRemote(remote.component, { seedState: fakeState('tailscale') }))
+  const tailscale = inputCount(renderRemote(remote, { seedState: fakeState('tailscale') }))
   assert.deepEqual(tailscale, { total: 3, numbers: 1, texts: 1, passwords: 1, checkboxes: 1 }, 'tailscale：主机 + 端口 + 令牌')
 
-  const manual = inputCount(renderRemote(remote.component, { seedState: fakeState('manual') }))
+  const manual = inputCount(renderRemote(remote, { seedState: fakeState('manual') }))
   assert.deepEqual(manual, { total: 2, numbers: 1, texts: 1, passwords: 0, checkboxes: 1 }, 'manual：只有完整地址（自带令牌），没有令牌字段')
 
   // uu：对外入口（text）+ 可选令牌（password）；端口输入仍在（虽然 uu 不起监听）
-  const uu = inputCount(renderRemote(remote.component, { seedState: fakeState('uu') }))
+  const uu = inputCount(renderRemote(remote, { seedState: fakeState('uu') }))
   assert.deepEqual(uu, { total: 3, numbers: 1, texts: 1, passwords: 1, checkboxes: 1 }, 'uu：对外入口 + 可选令牌 + 端口输入')
 
-  const manualText = textOf(renderRemote(remote.component, { seedState: fakeState('manual') }))
+  const manualText = textOf(renderRemote(remote, { seedState: fakeState('manual') }))
   assert.equal(manualText.includes('访问令牌（可选）'), false, 'manual 不该出现令牌字段')
+})
+
+/* -------------------------------------------------------------------------- */
+/* 5) 通过合并后的单页（不是第二个 section）证明远程控件仍在                     */
+/* -------------------------------------------------------------------------- */
+
+test('merged panel：远程组的二维码/自检/状态/令牌控件仍在同一页内可达', async () => {
+  const { mod } = await loadClient()
+  const sections = renderSections(mod)
+  assert.equal(sections.length, 1, '只有一个 settings.section')
+  // 直接挂唯一的合并面板，不绕过它去挂 RemotePanel。
+  const tree = sections[0].component({
+    t: (key) => (typeof zh[key] === 'string' ? zh[key] : key),
+    close() {},
+    seedState: fakeState(),
+    seedLink: fakeLink()
+  })
+  const group = groupOf(tree, 'dots-remote')
+  const groupNodes = []
+  walk(group.props.children, (node) => groupNodes.push(node))
+
+  assert.equal(group.props.open, true, '远程组默认展开，控件首屏可达')
+  assert.equal(groupNodes.filter((node) => node.type === 'svg').length, 1, '二维码必须仍由单页渲染')
+  assert.equal(groupNodes.filter((node) => node.type === 'select').length, 1, '访问方式下拉仍在')
+  assert.equal(groupNodes.filter((node) => node.type === 'button').length, 9, '远程 9 个按钮全部保留')
+  const inputs = groupNodes.filter((node) => node.type === 'input')
+  assert.deepEqual(
+    {
+      text: inputs.filter((node) => node.props.type === 'text').length,
+      number: inputs.filter((node) => node.props.type === 'number').length,
+      password: inputs.filter((node) => node.props.type === 'password').length,
+      checkbox: inputs.filter((node) => node.props.type === 'checkbox').length
+    },
+    { text: 1, number: 1, password: 1, checkbox: 1 },
+    '监听地址 / 端口 / 令牌 / 允许开关四个输入仍在'
+  )
+
+  const text = textOf(group)
+  for (const expected of [
+    '远程控制', // 页内分组标题
+    '运行中', '绑定地址', '被拒次数', '最近错误', // 状态
+    '需先准备', '图形化端口映射', // 访问方式前置说明
+    '通过', '注意', '失败', '无法自证', // 自检四档
+    '扫码打开', '用平板扫这个码', // 二维码
+    'rt_••••••••' // 打码令牌
+  ]) {
+    assert.ok(text.includes(expected), `合并后远程组缺少「${expected}」`)
+  }
+  assert.equal(text.includes(TOKEN_PLAIN), false, '合并后仍不得出现令牌明文')
 })

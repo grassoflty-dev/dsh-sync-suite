@@ -457,7 +457,8 @@ function registerPanel(mod) {
   }
   mod.apply(ctx)
   assert.ok(Panel, '必须注册 id=dots 的 settings.section 组件')
-  return Panel
+  // 单页组件把原同步面板暴露在 .SettingsPanel 上；本文件的交互回归仍只挂同步面板。
+  return Panel.SettingsPanel || Panel
 }
 
 function walk(node, visit) {

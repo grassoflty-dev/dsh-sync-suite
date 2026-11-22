@@ -260,9 +260,11 @@ branch 非空；token 空字符串表示保留现有 token，`null` 表示清除
 
 ### 2.4 客户端 UI（`src/client.js`，纯 JS，不需要构建）
 
-严格按 BRIEF §2.2 的 `window.__ModuleLoader__.load({ id:'dots', factory(require){...} })`
-形态；`inject: ['slots','locale']`；注册 locale（NS=`dots`）与 `settings.section`
-（`id:'dots'`, `order:70`）。组件 props 含 `t`、`close`。
+严格按 BRIEF §2.2 的 `window.__ModuleLoader__.load({ id:'dsh-dots', factory(require){...} })`
+形态；`inject: ['slots','locale']`；注册 locale（NS=`dots`）与**唯一** `settings.section`
+（`id:'dots'`, `order:70`, label `DSH-dots`）。三套命名空间互不干涉：loader id 是包名
+`dsh-dots`（由 `scripts/build.mjs` 生成）；slot / panel id 是 `dots`，`dots-remote` 只能是
+单页内部的折叠分组 id，不再注册 section；RPC 路径是 `/dsh-dots/rpc`。组件 props 含 `t`、`close`。
 
 内容（BRIEF §2.5 全部覆盖）：仓库配置（平台 GitHub/Gitee/custom、仓库地址、认证方式 HTTPS/SSH、设备标识、
 分支）、同步范围四项默认全选、状态徽标（本地/仓库/待上传/待下载/冲突 + 分支 + 最近提交）、按钮

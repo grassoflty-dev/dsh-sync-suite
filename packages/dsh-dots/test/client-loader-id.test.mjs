@@ -5,11 +5,12 @@
  * `id: 'dots'`，导致 factory 执行了却没有注册到 `dsh-dots`，Web GUI 报
  * "loaded without registering \"dsh-dots\""。
  *
- * 本文件同时守住三套互不相同的命名空间，防止有人为了修 loader id 连带改名：
- *   1) loader id（window.__ModuleLoader__.load 的 id）= package.json.name
- *   2) slot / panel id（settings.section 的 dots、dots-remote）
- *   3) RPC 路径（/dsh-dots/rpc）
- * locale NS `dots` 与 slot id 同属面板内部命名，也不得改名。
+ * 本文件同时守住四套互不相同的命名空间，防止有人为了修 loader id 连带改名：
+ *   1) loader id（window.__ModuleLoader__.load 的 id）= package.json.name = dsh-dots
+ *   2) 唯一的 settings.section slot id `dots`（`dots-remote` 只是页内折叠分组 id）
+ *   3) locale NS `dots`
+ *   4) RPC 路径（/dsh-dots/rpc）
+ * 单一条目名称 `DSH-dots` 是展示文案，不参与以上任何命名空间。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -70,8 +71,9 @@ test('dist/client.js 与 build.mjs 新鲜构建输出逐字节一致', () => {
 
 test('面板内的 slot id / locale NS / RPC 路径未被连带改名', () => {
   assert.match(builtText, /ctx\.slots\.inject\('settings\.section'/, 'slot 名必须仍是 settings.section')
-  assert.match(builtText, /name:\s*'settings\.section',\s*\n\s*id:\s*'dots-remote'/, '远程面板 id 必须仍是 dots-remote')
-  assert.match(builtText, /name:\s*'settings\.section',\s*\n\s*id:\s*'dots'/, '设置面板 id 必须仍是 dots')
+  assert.match(builtText, /name:\s*'settings\.section',\s*\n\s*id:\s*'dots'/, '唯一 section 的 id 必须仍是 dots')
+  assert.doesNotMatch(builtText, /name:\s*'settings\.section',\s*\n\s*id:\s*'dots-remote'/, 'dots-remote 不得再注册 settings.section')
+  assert.match(builtText, /'details',\s*\n\s*\{\s*id: 'dots-remote'/, 'dots-remote 只能作为页内折叠分组 id 保留')
   assert.match(builtText, /const NS = 'dots'/, 'locale 命名空间必须仍是 dots')
   assert.match(builtText, /const RPC_PATH = '\/dsh-dots\/rpc'/, 'RPC 路径必须仍是 /dsh-dots/rpc')
 })

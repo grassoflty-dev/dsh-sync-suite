@@ -85,7 +85,7 @@ async function loadClient() {
   return loadedPromise
 }
 
-function renderPanel(mod) {
+function renderPanel(mod, which) {
   let Panel = null
   const registered = []
   const ctx = {
@@ -119,7 +119,9 @@ function renderPanel(mod) {
   }
   mod.apply(ctx)
   assert.ok(Panel, '必须注册 settings.section 组件')
-  return { tree: Panel({ t: (key) => 'T:' + key, close: function () {} }), registered }
+  // 单页组件通过 .SettingsPanel / .RemotePanel 暴露原面板，供既有面板级回归单独挂载。
+  const target = which && Panel[which] ? Panel[which] : Panel
+  return { tree: target({ t: (key) => 'T:' + key, close: function () {} }), registered }
 }
 
 function walk(node, visit) {
@@ -147,6 +149,16 @@ function textOf(node) {
   if (Array.isArray(node)) return node.map(textOf).join('')
   if (node && typeof node === 'object') return textOf(node.props && node.props.children)
   return ''
+}
+
+/** 从合并后的单页里取出指定 id 的折叠分组（证明控件在同一页内，而不是第二个 section）。 */
+function groupOf(tree, id) {
+  const found = []
+  walk(tree, (node) => {
+    if (node.type === 'details' && node.props.id === id) found.push(node)
+  })
+  assert.equal(found.length, 1, `单页里必须恰好有一个 id=${id} 的折叠分组`)
+  return found[0]
 }
 
 function collect(tree) {
@@ -184,15 +196,16 @@ test('Card/Field 不得再用 arguments 取 children（React 不会这样传）'
 
 test('设置面板真实渲染出仓库表单、同步范围与操作按钮', async () => {
   const { mod } = await loadClient()
-  const { tree, registered } = renderPanel(mod)
-  // 现在有两个 section（同步 + 远程访问）：按 id 取同步那个，不再假设只有一个。
-  assert.equal(registered.length, 2, '同步与远程访问各一个 settings.section')
-  const sync = registered.find((entry) => entry.id === 'dots')
-  assert.ok(sync !== undefined, '必须有 id=dots 的 section')
+  const { tree, registered } = renderPanel(mod, 'SettingsPanel')
+  // 全插件只有一个 section；远程控制是同一页内的折叠分组，不再是第二个 section。
+  assert.equal(registered.length, 1, '只允许一个 settings.section')
+  const sync = registered[0]
+  assert.equal(sync.id, 'dots', '唯一 section 的 id 必须仍是 dots')
   assert.equal(sync.name, 'settings.section')
   assert.equal(sync.order, 70)
   assert.equal(sync.locale, 'dots')
   assert.equal(typeof sync.label, 'function')
+  assert.equal(sync.label(), 'DSH-dots', '单一条目的名称必须是 DSH-dots')
 
   const { counts, labels, buttonLabels, inputs, selects } = collect(tree)
 
@@ -248,7 +261,7 @@ test('设置面板真实渲染出仓库表单、同步范围与操作按钮', as
 test('卡片字段默认值与 host settings 定义一致（平台/认证/分支/范围）', async () => {
   const host = defaultSettings()
   const { mod } = await loadClient()
-  const { tree } = renderPanel(mod)
+  const { tree } = renderPanel(mod, 'SettingsPanel')
   const { inputs, selects } = collect(tree)
 
   const selected = selects.map((select) => select.value).sort()
@@ -265,4 +278,28 @@ test('卡片字段默认值与 host settings 定义一致（平台/认证/分支
     ['config', 'mcp', 'plugins', 'providers'],
     'host scope 字段必须与卡片四个勾选框一一对应'
   )
+})
+
+test('merged panel：同步组仍在同一个面板里渲染全部仓库/范围/状态/动作控件', async () => {
+  const { mod } = await loadClient()
+  const { tree, registered } = renderPanel(mod)
+  assert.equal(registered.length, 1, '只允许一个 settings.section')
+  const group = groupOf(tree, 'dots')
+  assert.equal(group.props.open, true, '同步组默认展开')
+  assert.ok(textOf(group.props.children).includes('T:group.sync'), '页内分组标题必须取 group.sync（配置同步）')
+
+  const { counts, labels, buttonLabels, inputs } = collect(group.props.children)
+  assert.equal(counts.select, 2, '平台与认证方式两个下拉框仍在')
+  assert.equal(counts.input, 9, '5 个文本/密码输入 + 4 个 scope 勾选框仍在')
+  assert.equal(inputs.filter((p) => p.type === 'checkbox').length, 4)
+  assert.equal(inputs.filter((p) => p.type === 'password').length, 1)
+  assert.ok(counts.button >= 8, `同步按钮至少 8 个，实际 ${counts.button}`)
+  for (const key of ['repo.platform', 'repo.auth', 'repo.url', 'scope.config', 'scope.mcp']) {
+    assert.ok(labels.some((label) => label.includes(`T:${key}`)), `合并后缺少字段 ${key}`)
+  }
+  for (const key of ['repo.save', 'actions.test', 'actions.push', 'actions.preview', 'actions.apply']) {
+    assert.ok(buttonLabels.some((label) => label.includes(`T:${key}`)), `合并后缺少按钮 ${key}`)
+  }
+  // 远程组必须和同步组同处一个面板，而不是另一个 section。
+  assert.ok(groupOf(tree, 'dots-remote'), '远程控制分组必须在同一个单页内')
 })

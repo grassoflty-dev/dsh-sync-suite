@@ -1,8 +1,11 @@
 /**
  * dsh-dots — client half (hand-written `__ModuleLoader__` bundle, no build step).
  *
- * Registers one settings section (Settings → 配置同步 / Config sync):
+ * Registers exactly ONE settings section (Settings → DSH-dots):
  *   slot `settings.section`, id `dots`, order 70, locale NS `dots`.
+ *   Inside that single view the two capability groups are stacked on one page:
+ *     「配置同步」(repository / scope / status / actions) then
+ *     「远程控制」(listen address / access mode / token / self-check / QR).
  *
  * Contents:
  *   - repository form: platform / repoUrl / authMode / deviceId / branch / token
@@ -25,8 +28,9 @@
  * Styling: inline styles only, colours exclusively from `--dsw-alias-*` theme variables.
  */
 // loader id 必须等于 package.json.name（DSH 以包名作为模块工厂的 key）。
-// 它与 settings.section 的 slot id `dots` / `dots-remote`、locale NS `dots`、
+// 它与 settings.section 的唯一 slot id `dots`、locale NS `dots`、
 // RPC 路径 `/dsh-dots/rpc` 是互相独立的命名空间，勿一并改名。
+// `dots-remote` 现只作为单页内部折叠分组的 id，不再是 settings.section 注册。
 // build.mjs 会用 package.json.name 重写下面的字面量，防止与包名漂移。
 window.__ModuleLoader__.load({
   id: 'dsh-dots',
@@ -46,6 +50,10 @@ window.__ModuleLoader__.load({
       "meta.description": "通过 Git 在设备间同步 DSH 配置（patch 条目、provider、插件清单、MCP）。入口：设置 → 配置同步；密钥永不进入仓库。",
       "meta.detail": "docs/DETAIL.zh.md",
       "nav": "配置同步",
+      // 单一条目的名称 + 单页内两组能力的分组标题（不是两个插件视图）。
+      "panel.title": "DSH-dots",
+      "group.sync": "配置同步",
+      "group.remote": "远程控制",
       "title": "Git 配置同步",
       "subtitle": "在设备间同步 DSH 配置：本机只写自己的目录，冲突按条目人工确认。",
 
@@ -341,6 +349,10 @@ window.__ModuleLoader__.load({
       "meta.description": "Sync DSH configuration across devices over Git (patch entries, providers, plugin manifest, MCP). Open Settings → Config sync; secrets never enter the repository.",
       "meta.detail": "docs/DETAIL.md",
       "nav": "Config sync",
+      // One entry name + two in-page group headings (not two plugin views).
+      "panel.title": "DSH-dots",
+      "group.sync": "Config sync",
+      "group.remote": "Remote control",
       "title": "Git config sync",
       "subtitle": "Sync DSH configuration across devices. Each device writes only its own directory; conflicts are resolved entry by entry.",
 
@@ -765,6 +777,15 @@ window.__ModuleLoader__.load({
         maxWidth: '100%',
         boxSizing: 'border-box'
       },
+      // 单页内的两组能力：默认展开、可折叠，但仍属于同一个 settings.section。
+      panelTitle: { fontSize: 16, fontWeight: 600, margin: 0, color: C.labelPrimary },
+      group: {
+        display: 'flex', flexDirection: 'column', gap: 8,
+        padding: '8px 10px', border: '1px solid ' + C.borderL2,
+        borderRadius: 10, background: C.bgFloat, minWidth: 0, boxSizing: 'border-box'
+      },
+      groupSummary: { cursor: 'pointer', fontSize: 13, fontWeight: 600, color: C.labelPrimary, listStyle: 'none' },
+      groupBody: { display: 'flex', flexDirection: 'column', gap: 10, paddingTop: 4 },
       head: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' },
       headText: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 },
       title: { fontSize: 16, fontWeight: 600, margin: 0, color: C.labelPrimary },
@@ -3117,9 +3138,9 @@ window.__ModuleLoader__.load({
     }
 
     // ------------------------------------------------------------------
-    // 远程访问 section（settings.section，id `dots-remote`）
+    // 远程控制分组（单页内的组件，内部 id `dots-remote`；不是 settings.section）
     //
-    // 与「配置同步」是两个**互相独立**的 section：各自的 state / error / busy，
+    // 与「配置同步」保持各自独立的 state / error / busy：
     // 一侧失败只会出现在自己的 ErrorBox 里，绝不把另一侧标红。
     //
     // token 纪律：明文 token 只存在于 `RemoteLink.url`。本组件**不把它写进 DOM**
@@ -4053,6 +4074,35 @@ window.__ModuleLoader__.load({
     }
 
     // ------------------------------------------------------------------
+    // 单一条目 DSH-dots：两组能力在同一页内纵向堆叠（不是 tab，不是第二个视图）。
+    // 折叠只是页内的空间管理：默认都展开，控件始终属于同一个 settings.section。
+    // `dots-remote` 只保留为远程分组的内部 id，不再注册 settings.section。
+    // ------------------------------------------------------------------
+    function DotsPanel(props) {
+      const tr = makeT(props)
+      return h(
+        'div',
+        { style: S.root },
+        h('h2', { style: S.panelTitle }, tr('panel.title')),
+        h(
+          'details',
+          { id: 'dots', open: true, style: S.group },
+          h('summary', { style: S.groupSummary }, tr('group.sync')),
+          h('div', { style: S.groupBody }, h(SettingsPanel, props))
+        ),
+        h(
+          'details',
+          { id: 'dots-remote', open: true, style: S.group },
+          h('summary', { style: S.groupSummary }, tr('group.remote')),
+          h('div', { style: S.groupBody }, h(RemotePanel, props))
+        )
+      )
+    }
+    // 内部测试接缝：两个原有面板仍以原样渲染，测试可单独挂载它们做控件回归。
+    DotsPanel.SettingsPanel = SettingsPanel
+    DotsPanel.RemotePanel = RemotePanel
+
+    // ------------------------------------------------------------------
     // Plugin body
     // ------------------------------------------------------------------
     const inject = ['slots', 'locale']
@@ -4076,23 +4126,8 @@ window.__ModuleLoader__.load({
       } catch (e) {
         serviceT = null
       }
-      // 第二个 section：远程访问（order 71，与「配置同步」并列且**互相独立**）。
-      // 先注册它、再注册同步：host 按 `order` 排序展示，注册先后不影响顺序；
-      // 把同步留在最后，既有「最后一个注册的 panel 就是同步面板」的渲染回归不受影响。
-      ctx.slots.inject('settings.section', function () {
-        return ctx.slots.register(
-          {
-            name: 'settings.section',
-            id: 'dots-remote',
-            order: 71,
-            label: function () {
-              return t('remote.nav')
-            },
-            locale: NS
-          },
-          RemotePanel
-        )
-      })
+      // 全插件只注册这一个 settings.section（「内置插件」因此只有一个条目）。
+      // 配置同步 / 远程控制 是同一页里的两个折叠分组，id 保留在页内，绝不再注册为 section。
       ctx.slots.inject('settings.section', function () {
         return ctx.slots.register(
           {
@@ -4100,11 +4135,11 @@ window.__ModuleLoader__.load({
             id: 'dots',
             order: 70,
             label: function () {
-              return t('nav')
+              return t('panel.title')
             },
             locale: NS
           },
-          SettingsPanel
+          DotsPanel
         )
       })
     }
