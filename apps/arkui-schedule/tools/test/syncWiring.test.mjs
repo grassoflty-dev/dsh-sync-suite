@@ -555,6 +555,7 @@ test('39 static（old→new）: GitRunner 在 app 启动时确定性绑定，页
 // mod-auto-sync 重定位：原用例钉住旧的四态文案（已同步 / N 条待同步 / 错误）；
 // 新契约只有一行三态（已同步 · HH:MM / 同步中… / 失败：<typed 原因>）+ 状态行点一下重试。
 // 断言不比原来弱：既逐字钉新文案，也反向禁止旧按钮与第四态复活。
+// 注：本例锚在 fallback 路由 pages/Index.ets；真日程面板已由 mod-sync-ui-silence PHASE A 只读化。
 test('40 static: exactly three status states with exact copy, no manual sync buttons', () => {
   const index = src('pages/Index.ets');
   assert.match(index, /SyncStatusRow\(\)/);
@@ -863,7 +864,7 @@ test('62 static: BOTH portrait CompactBody and wide WideBody use ONE shared Refr
   assert.match(src('services/recordWriter.ets'), /syncStatusStore\.setSyncing\(\)/);
 });
 
-test('62b static: 日程面板三态状态行文案与点一下重试保持不变', () => {
+test('62b static: 日程面板三态状态行文案不变，且为只读（无手动同步控件）', () => {
   const pane = src('pages/panes/SchedulePane.ets');
   const status = src('services/syncStatusStore.ets');
   assert.match(status, /'已同步 · '/, '已同步·HH:MM 前缀不得改');
@@ -874,8 +875,10 @@ test('62b static: 日程面板三态状态行文案与点一下重试保持不�
   assert.match(row[1], /this\.syncStatus\.text/);
   assert.match(row[1], /this\.syncStatus\.state === 'synced'/);
   assert.match(row[1], /this\.syncStatus\.state === 'failed'/);
-  assert.match(row[1], /重试同步/, '失败态仍由状态行上的一次点击重试');
-  assert.match(row[1], /this\.retrySync\(\)/);
+  // mod-sync-ui-silence PHASE A：唯一状态面保持原文案，但用户不再手动重试。
+  assert.doesNotMatch(row[1], /重试同步|立即同步|查看状态|测试连接/, '只读状态行无手动同步文案');
+  assert.doesNotMatch(row[1], /\.onClick\s*\(/, '状态行不挂点击 handler');
+  assert.doesNotMatch(pane, /this\.retrySync\(\)/, 'retrySync 能力保留但无 UI 调用点');
   // 竖屏与横屏都必须显示同一三态行（不再只钉横屏那一处）。
   for (const name of ['CompactBody', 'WideBody']) {
     assert.match(builderBody(pane, name), /this\.SyncStatusRow\(\)/, `${name} 也要显示同一三态行`);

@@ -261,7 +261,9 @@ test('HGR-10 失败只有一个渲染面：状态行；下拉路径零 toast、�
   const row = memberBody(SCHEDULE, 'SyncStatusRow')
   assert.match(row, /Text\(this\.syncStatus\.text\)/, '状态行是唯一 typed 失败渲染点')
   assert.match(row, /this\.syncStatus\.state === 'failed'/)
-  assert.match(row, /重试同步/)
+  // mod-sync-ui-silence PHASE A：状态行只读，不再有「重试同步」点击出口。
+  assert.doesNotMatch(row, /重试同步|立即同步|查看状态|测试连接/)
+  assert.doesNotMatch(row, /\.onClick\s*\(/, '状态行不挂任何点击 handler')
   // 两个下拉入口本身都零 toast；失败全部经 syncStatusStore → 状态行
   assert.doesNotMatch(memberBody(SCHEDULE, 'onPullRefresh'), /promptAction|showToast/,
     '面板下拉失败不弹 toast')

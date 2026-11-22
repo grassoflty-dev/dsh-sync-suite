@@ -68,6 +68,24 @@
  *   记录恢复；超时倒计时条自动消失（墓碑早已落盘，超时不需要补写）；
  * - 倒计时只是为了给用户一个撤销机会：即使定时器被系统回收（应用退后台），删除结论依然正确。
  */
+/**
+ * 同步触发清单（mod-sync-ui-silence / PHASE A，全文见 apps/arkui-schedule/docs/MOD-SYNC-UI-SILENCE.md）。
+ *
+ * 「静默」= 配置完成后软件自己跑周期，用户不需要、也没有手动同步控件。本面板的
+ * SyncStatusRow() 是唯一的只读状态面；失败意图的复位能力（retrySync）保留给支持排障，
+ * 但不再由任何 UI handler 调用。当前五类触发的真实状态（不臆造、只登记事实）：
+ *   ① 冷启动：present —— Home.aboutToAppear → homeStartupSync → 单飞协调器；
+ *   ② 保存成功：present —— services/recordWriter.ets 的 triggerSync()；
+ *   ③ 回到前台：MISSING —— Home.onPageShow 只推进 showTick 重读列表，进程内一次性启动配额
+ *      已被冷启动消费，不再跑第二个周期；
+ *   ④ 网络恢复：MISSING —— 全树无 @kit.NetworkKit 连接监听接入同步周期；
+ *   ⑤ 首页下拉手势：present —— Home.onGlobalPull / 本面板 onPullRefresh 共用单飞协调器。
+ *
+ * 可观测性：本面板 onPullRefresh 的 runCycle 回调里有一行
+ * `console.info('[sync-trigger] pull')`——协调器只对 leader 执行一次 runCycle，
+ * 所以一次尝试恰好一行日志，无载荷 / 无 token / 无 URL。其余四类触发的日志接线属缺口，
+ * 待 Lead 排期（不在 PHASE A 实现新触发）。
+ */
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { loadingText, toastMsFor } from '../../common/copy';
@@ -340,7 +358,10 @@ export struct SchedulePane {
         syncStatusStore.setSyncing();
       },
       runCycle: async (): Promise<RefreshCycleResult | null> => {
-        // 与「重试同步」同一条确定性绑定入口：下拉刷新也绝不在 runner 未绑定态发起周期。
+        // PHASE A 可观测触发：本回调只由 globalRefreshCoordinator 的 leader 执行一次，
+        // 故这条日志「一次尝试恰好一行」；无载荷 / 无 token / 无 URL（凭据卫生）。
+        console.info('[sync-trigger] pull');
+        // 与保留的重试能力（retrySync）同一条确定性绑定入口：下拉刷新也绝不在 runner 未绑定态发起周期。
         bindBridgeRunner(getContext(this) as common.UIAbilityContext);
         return await syncProtocolStore.runConfiguredCycle();
       },
@@ -368,16 +389,20 @@ export struct SchedulePane {
   }
 
   /**
-   * P1-2 用户「重试同步」：把 failed 意图原子复位（attempts=0, state=pending）后，
-   * 用真实 ctx 跑一次周期（runConfiguredCycle(ctx) → runCycle(ctx) → wired 周期），
-   * 结果交三态行显示。pending 但未 failed 的意图无需复位（预算未耗尽）。
+   * 失败意图复位 + 一次真实周期的能力保留（mod-sync-ui-silence / PHASE A）。
    *
-   * 单飞（mod-sync-single-flight）：重试与下拉 / 自动同步共用协调器的唯一在飞 Promise，
-   * ctx 原样包在 runCycle 覆盖项里；否则重试撞上在飞周期仍会起第二个 commit。
+   * 用户可见的「重试同步」控件已按需求移除，本方法不再由任何 UI handler 调用；保留它是
+   * 为了支持 / 排障：诊断可复用同一条确定性绑定入口，不必另写第二份重试实现。行为不变——
+   * 把 failed 意图原子复位（attempts=0, state=pending）后，用真实 ctx 跑一次周期
+   * （runConfiguredCycle(ctx) → runCycle(ctx) → wired 周期），结果交三态行显示。
+   * pending 但未 failed 的意图无需复位（预算未耗尽）。
+   *
+   * 单飞（mod-sync-single-flight）：与下拉 / 自动同步共用协调器的唯一在飞 Promise，
+   * ctx 原样包在 runCycle 覆盖项里；否则撞上在飞周期仍会起第二个 commit。
    */
   private async retrySync(): Promise<void> {
     try {
-      // 用户点「重试同步」是真实路径：绑定与周期同处一次点击，不再赌启动链/页面 bootstrap 的时序。
+      // 支持排障走本能力时同样是真实路径：绑定与周期同处一次调用，不再赌启动链 / bootstrap 的时序。
       bindBridgeRunner(getContext(this) as common.UIAbilityContext);
       for (const entry of outboxStore.list()) {
         if (entry.state === 'failed') {
@@ -517,7 +542,7 @@ export struct SchedulePane {
       syncProtocolStore.setRunner(bridgeGitRunner);
       await syncProtocolStore.ensureReadyForBootstrap(getContext(this) as common.UIAbilityContext);
       await outboxStore.ensureReady(getContext(this) as common.UIAbilityContext);
-      // P1-2/P2-5：带残留 outbox 启动时显示「N 条待同步」并暴露「重试同步」入口。
+      // P1-2/P2-5：带残留 outbox 启动时仍显示「N 条待同步」（状态行只读，无手动重试控件）。
       const parked = outboxStore.list();
       if (parked.length > 0) {
         const failed: number = parked.filter((e): boolean => e.state === 'failed').length;
@@ -1687,9 +1712,10 @@ export struct SchedulePane {
   }
 
   /**
-   * 唯一同步状态行（mod-auto-sync）：`已同步 · HH:MM` / `同步中…` / `失败：<typed 原因>`。
-   * 三态文案由 syncStatusStore 逐字给出，这里只负责显示与着色；失败态保留状态行上的
-   * 「点一下」重试（不是按钮），复用 outbox 的 `retry()` 复位失败意图。
+   * 唯一同步状态行（mod-auto-sync / mod-sync-ui-silence PHASE A）：`已同步 · HH:MM` /
+   * `同步中…` / `失败：<typed 原因>`。**只读**：三态文案由 syncStatusStore 逐字给出，
+   * 这里只负责显示与着色，文案一个字不改；用户不需要也不应该手动发起同步，
+   * 所以失败态不再渲染「重试同步」点击控件（PHASE A 删除，能力仍保留给支持排障）。
    */
   @Builder
   SyncStatusRow() {
@@ -1703,16 +1729,6 @@ export struct SchedulePane {
         .layoutWeight(1)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-      // 失败态的重试：状态行上的一次点击，不新增按钮；契约 §9 P1-1 的用户重试入口。
-      if (this.syncStatus.state === 'failed') {
-        Text('重试同步')
-          .fontSize(FONT.caption)
-          .fontColor($r('app.color.warning'))
-          .padding({ left: SPACING.xs, right: SPACING.xs })
-          .onClick(() => {
-            this.retrySync();
-          })
-      }
     }
     .width('100%')
     .height(TOUCH_MIN)

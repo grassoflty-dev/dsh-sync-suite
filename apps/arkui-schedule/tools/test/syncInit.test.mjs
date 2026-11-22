@@ -9,7 +9,7 @@
 // 3. 启动期确定性绑定 runner + filesDir（EntryAbility.onCreate），页面 bootstrap 仅幂等兜底；
 // 4. BridgeGitRunner 等待内核而不是首调即抛；
 // 5. 建记录后的自动同步与手动「同步/下拉刷新」走同一个周期函数（post-create = manual）；
-// 6. E_SYNC_UNAVAILABLE 落到失败三态行，状态行可点「重试同步」，不是死路。
+// 6. E_SYNC_UNAVAILABLE 落到失败三态行；mod-sync-ui-silence PHASE A 后状态行只读、无手动重试控件。
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
@@ -167,13 +167,16 @@ test('5 static: post-create triggers the same cycle function as the manual 同�
   assert.match(retry[1], /syncProtocolStore\.runConfiguredCycle\(ctx\)/, 'retry converges on the same cycle');
 });
 
-test('6 static: E_SYNC_UNAVAILABLE lands in failed three-state row with tap-to-retry', () => {
+test('6 static: E_SYNC_UNAVAILABLE lands in read-only failed three-state row (no retry control)', () => {
   const pane = src('pages/panes/SchedulePane.ets');
   const row = /SyncStatusRow\(\) \{([\s\S]*?)\n  \}/.exec(pane);
   assert.ok(row, 'SyncStatusRow builder not found');
+  assert.match(row[1], /this\.syncStatus\.text/, '状态行仍显示 typed 失败文案');
   assert.match(row[1], /this\.syncStatus\.state === 'failed'/);
-  assert.match(row[1], /Text\('重试同步'\)/);
-  assert.match(row[1], /this\.retrySync\(\)/);
+  // mod-sync-ui-silence PHASE A：用户不需要手动同步。状态行只读，retrySync 只留能力、不留控件。
+  assert.doesNotMatch(row[1], /重试同步|立即同步|查看状态|测试连接/);
+  assert.doesNotMatch(row[1], /\.onClick\s*\(/, '状态行不挂任何点击 handler');
+  assert.doesNotMatch(pane, /this\.retrySync\(\)/, 'retrySync 能力保留但无 UI 调用点');
   const status = src('services/syncStatusStore.ets');
   const fromCycle = /fromCycle\(outcome: CycleResult, now: Date\): SyncStatusView \{([\s\S]*?)\n  \}/.exec(status);
   assert.ok(fromCycle, 'fromCycle body not found');
