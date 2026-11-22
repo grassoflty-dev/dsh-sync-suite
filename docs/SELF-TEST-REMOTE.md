@@ -68,6 +68,13 @@ hdc -t <serial> shell "cat /data/app/el2/100/base/com.itwill.schedule/haps/entry
 ### 2.1 监听端口
 
 - 默认 **44996**（首选端口，空闲即用），被占用时会扫描并记录到 remote 设置；`[现成]`。
+- **pre-flight expectation（任何配对测试之前）**：先确认 `enabled === true`，再确认本端口确实能接受一条 TCP 连接；两者缺一就不要开始配对（此时配对失败不能归因于对端）。探测命令（端口若已被扫描改成别的值，把 `44996` 换成实际端口）：
+
+  ```
+  node -e "require('net').connect({port:44996,host:'127.0.0.1'}).on('connect',()=>{console.log('OPEN');process.exit(0)}).on('error',e=>{console.log('CLOSED',e.code);process.exit(0)})"
+  ```
+
+  输出 `OPEN` 才算端口可用；`CLOSED <code>` 说明监听没起来，先回去核对 `enabled` 与实际端口。
 - 读当前端口：`payload` 里的 `port`（见 2.2），或 `remote-pairing-state.json` / remote 设置里的 `port`。
 - `[待 RC-4]` 若 TLS 落地后端口或协议有变，在此处补一行。
 

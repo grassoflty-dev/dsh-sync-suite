@@ -83,7 +83,7 @@ function held(
 /**
  * URL 拼装所需的最小字段。
  *
- * 公告（scheme/host/port 来自签名公告）与手动配对（scheme 固定 http，host/port 来自配对串）
+ * 公告（scheme/host/port 来自签名公告）与手动配对（scheme 固定 https，host/port 来自配对串）
  * 都满足这个结构；把入参从 `Announcement` 收窄到这里，是为了让两端**共用同一份**拼装逻辑，
  * 而不是在配对模块里再写第二份 `${scheme}://${host}:${port}`。
  */
