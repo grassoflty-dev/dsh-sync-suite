@@ -83,6 +83,15 @@ import {
 import type { ClaimFailure, ClaimOutcome, DeviceRegistryPort, RegistryEntry, RegistryParseResult } from '../model/deviceRegistry';
 import { sha256Hex } from '../model/sha256';
 import { settingsStore } from './settingsStore';
+// mod-crash-settings-sync：构建可达路径上的 fs 调用一律经零 SDK 纯层归一成 typed 结果；
+// 日志走独立出口（credentialHygiene 禁止本文件出现 hilog 字面量）。
+import {
+  bridgeFailureEnvelope,
+  safeCall,
+  safeList
+} from '../model/settingsBuildSafety';
+import type { FsListResult } from '../model/settingsBuildSafety';
+import { logFsSafety } from '../common/fsSafetyLog';
 
 // ---------------------------------------------------------------- 对外接口
 
@@ -1455,19 +1464,26 @@ export class GitSyncService {
     const decoded: Uint8Array = GitSyncService.base64().decodeSync(base64);
     const bytes: Uint8Array = new Uint8Array(decoded.length);
     bytes.set(decoded);
-    const file: fs.File = fs.openSync(
-      target,
-      fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC
-    );
+    let file: fs.File | null = null;
+    // 打开也在 try 内且带 catch：ENOTDIR / EACCES 归一为 false（桥侧转 typed E_FS），
+    // 绝不让 openSync 的异常穿过 JS 代理落到 ArkUI 的构建/刷新路径上。
     try {
+      file = fs.openSync(
+        target,
+        fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC
+      );
       if (bytes.length > 0) {
         fs.writeSync(file.fd, bytes.buffer as ArrayBuffer);
       }
+    } catch (error) {
+      return false;
     } finally {
-      try {
-        fs.closeSync(file);
-      } catch (error) {
-        // 关闭失败按写入成功处理（内容已落盘）
+      if (file !== null) {
+        try {
+          fs.closeSync(file);
+        } catch (error) {
+          // 关闭失败按写入成功处理（内容已落盘）
+        }
       }
     }
     return true;
@@ -1486,29 +1502,50 @@ export class GitSyncService {
     if (target.length === 0 || target === '/' || target === '.') {
       return true;
     }
-    if (this.isDirectory(target)) {
+    // stat / mkdir 都经 typed 纯层：目标不存在是常态（不记日志），
+    // 路径被文件挡住（ENOTDIR）或权限失败则记一次日志，但依旧不抛。
+    const existing = safeCall<fs.Stat>(target, (): fs.Stat => fs.statSync(target));
+    if (existing.ok && existing.value !== null && existing.value.isDirectory()) {
       return true;
     }
     const parent: string = dirnameOf(target);
     if (parent.length > 0 && parent !== target) {
       this.mkdirp(parent);
     }
-    try {
+    safeCall<void>(target, (): void => {
       fs.mkdirSync(target);
-    } catch (error) {
-      // 已存在或并发创建：都视为成功
-    }
+    }, logFsSafety);
     return true;
   }
 
+  /**
+   * 目录列举（WebView 桥代理，同步）。**永不抛**：异常在纯层归一成 typed 失败，
+   * 返回带 `__fsFailure` 的信封；桥侧 fs adapter 据此变成带 ENOENT code 的 rejected promise，
+   * 绝不谎报成空目录（那会让 unborn `.git` 被误判为空仓库）。
+   */
   readdir(path: string): string {
-    const names: string[] = fs.listFileSync(normalizePath(path));
-    return JSON.stringify(names);
+    const target: string = normalizePath(path);
+    const listed: FsListResult = safeList(target, (p: string): string[] => fs.listFileSync(p), logFsSafety);
+    if (!listed.ok) {
+      return bridgeFailureEnvelope(listed);
+    }
+    return JSON.stringify(listed.names);
   }
 
+  /** UI / 构建侧目录列举：typed 结果，永不抛；缺目录 / 被文件挡住 = 没有 issue 可报。 */
+  readdirTyped(path: string): FsListResult {
+    return safeList(normalizePath(path), (p: string): string[] => fs.listFileSync(p), logFsSafety);
+  }
+
+  /** stat 同样 defensive：失败返回带 code 的失败信封，绝不跨 JS 代理抛成 fatal Js Error。 */
   stat(path: string): string {
     const target: string = normalizePath(path);
-    const info: fs.Stat = fs.statSync(target);
+    const result = safeCall<fs.Stat>(target, (): fs.Stat => fs.statSync(target), logFsSafety);
+    if (!result.ok || result.value === null) {
+      const failed: FsListResult = { ok: false, names: [], code: result.code, path: target };
+      return bridgeFailureEnvelope(failed);
+    }
+    const info: fs.Stat = result.value;
     const isDir: boolean = info.isDirectory();
     let mode: number = isDir ? MODE_DIR : MODE_FILE;
     if (info.mode > 0) {
@@ -1848,15 +1885,13 @@ export class GitSyncService {
     if (!this.isDirectory(dir)) {
       return names;
     }
-    let listing: string[] = [];
-    try {
-      listing = JSON.parse(this.readdir(dir)) as string[];
-    } catch (error) {
+    // 构建 / 身份横幅用的列举必须走 typed 缝：目录缺失或被文件挡住 = 没有可报的设备目录，
+    // 不是错误态；readdirTyped 永不抛，即使真机磁盘状态异常也不会把异常带进 UI。
+    const listed: FsListResult = this.readdirTyped(dir);
+    if (!listed.ok) {
       return names;
     }
-    if (!Array.isArray(listing)) {
-      return names;
-    }
+    const listing: string[] = listed.names;
     for (let index = 0; index < listing.length; index++) {
       const name: string = listing[index];
       if (name.length === 0 || name === '.' || name === '..') {

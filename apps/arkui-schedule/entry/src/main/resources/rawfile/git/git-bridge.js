@@ -754,8 +754,25 @@
     return !!(options && typeof options === 'object' && typeof options.encoding === 'string' && options.encoding.length > 0);
   }
 
-  function parseNames(raw) {
+  /**
+   * 宿主 fs 失败信封（mod-crash-settings-sync）：宿主侧 readdir/stat **不再同步抛异常**
+   * （那会跨 JS 代理升级成 fatal Js Error 杀进程），而是返回 `{__fsFailure:true,code,path}`。
+   * 这里把它在 Promise 链内部还原成带 POSIX code 的普通 Error：git 需要的是 rejected promise，
+   * 绝不能拿到 `[]` 那种「目录存在但为空」的假成功（会把 unborn .git 误判成空仓库）。
+   */
+  function parseHostFsPayload(raw) {
     var value = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (value && value.__fsFailure === true) {
+      var code = typeof value.code === 'string' && value.code.length > 0 ? value.code : 'E_FS_UNKNOWN';
+      var error = new Error('宿主文件系统读取失败（' + code + '）：' + (value.path || ''));
+      error.code = code;
+      throw error;
+    }
+    return value;
+  }
+
+  function parseNames(raw) {
+    var value = parseHostFsPayload(raw);
     if (!value || typeof value.length !== 'number') {
       throw bridgeError('E_FS', '宿主 readdir 返回的不是数组');
     }
@@ -819,7 +836,7 @@
       return null;
     }
     var raw = hostCall('stat', [target]);
-    var info = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    var info = parseHostFsPayload(raw);
     return makeStatObject(info, target);
   }
 
