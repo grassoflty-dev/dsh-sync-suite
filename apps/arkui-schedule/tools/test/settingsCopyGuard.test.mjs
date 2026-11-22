@@ -324,3 +324,20 @@ test('C8 同步用户可见文案只有三态 + 诊断区，旧的初始化死�
     }
   }
 });
+
+// mod-p0a-no-main-probe（C9，只加不删）：非空无 main 的 known typed 文案不套「未知错误…原始信息」；
+// 空仓库是正常起点；已撤回的「以远端分支建 main」动作不得出现在用户可见文案里。
+test('C9 同步面文案：known typed 不嵌套转储，空仓库不是失败，无 adopt 动作', () => {
+  const all = SYNC_SURFACE_FILES.map((file) => syncLiterals(file).join('\n')).join('\n');
+  for (const banned of [
+    /未知错误：可以直接重试一次/, /原始信息：/, /以远端分支/, /创建 main/, /覆盖并重建/
+  ]) {
+    assert.equal(banned.test(all), false, `用户可见文案残留：${banned}`);
+  }
+  const model = readSettingsFile('model/syncError.ts');
+  assert.match(model, /no-main/, 'no-main 分类必须存在');
+  assert.match(model, /remote-indeterminate/, '探测未定分类必须存在');
+  const cycle = readSettingsFile('model/syncCycle.ts');
+  assert.match(cycle, /远端已有分支：\$\{names\}；缺少 main/, '文案必须点名真实分支');
+  assert.match(cycle, /远端并非空仓库/, '非空仓库绝不能说成空仓库');
+});

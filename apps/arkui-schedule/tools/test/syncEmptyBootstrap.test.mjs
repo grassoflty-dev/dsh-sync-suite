@@ -318,7 +318,10 @@ test('4 non-empty remote without main → typed error, no bootstrap, no writes',
   const result = await run(fake, [intent]);
   assert.equal(result.ok, false);
   assert.equal(result.code, E_NO_MAIN_CODE);
-  assert.equal(result.message, E_NO_MAIN_MESSAGE, '保留既有 typed 错误 + 中文下一步');
+  assert.match(result.message, /master/, 'typed 文案必须点名真实分支 master');
+  assert.match(result.message, /缺少 main/);
+  assert.equal(result.message.includes('未知错误'), false, 'known typed 错不得再包一层未知错误 + 原始信息');
+  assert.equal(result.message.includes('原始信息：'), false, 'typed 文案不得嵌套原始信息转储');
   assert.notEqual(result.bootstrapped, true);
   assert.equal(fake.commitCount, 0, '绝不覆盖别人的历史');
   assert.equal(fake.pushCount, 0);
@@ -432,9 +435,12 @@ test('10 static: bootstrap adds no force / rebase / reset outside the rejection 
     join(APP, 'entry', 'src', 'main', 'resources', 'rawfile', 'git', 'git-bridge.js'), 'utf8');
   assert.ok(bridge.includes("if (op === 'remoteLayout')"));
   assert.ok(bridge.includes("if (op === 'listLocalTimeline')"));
-  // M1：emptiness 必须覆盖所有引用类别，注释也要写明「任何 heads/tags/pull 引用都没有才算空」。
-  assert.ok(bridge.includes('任何 heads/tags/pull 引用都没有才算空仓库'));
-  assert.ok(bridge.includes('isEmpty: allNames.length === 0'));
+  // M1（mod-p0a-no-main-probe，old→new 同等或更严）：emptiness 改由 listServerRefs 的原始引用数组
+  // 决定（空数组 = 任何 heads/tags/pull 引用都没有），不再被 getRemoteInfo 的嵌套形状欺骗。
+  assert.ok(bridge.includes('任何 heads/tags/pull 引用都没有才算空仓库'), 'M1 口径说明必须保留');
+  assert.ok(bridge.includes('listServerRefs('), '必须用原始引用数组判空');
+  assert.ok(bridge.includes('if (serverRefs.length === 0)'), '空数组分支必须存在');
+  assert.ok(bridge.includes('isEmpty: probe.empty'), 'remoteLayout 的 isEmpty 必须来自原始数组探测');
   // M3：桥侧用与 listFilesRecursive 相同的宿主 fs 访问器读本地 schema 标记。
   assert.ok(bridge.includes("if (op === 'readLocalTimelineSchema')"));
   assert.ok(bridge.includes('readHostFileBase64(schemaPath)'));
@@ -464,7 +470,9 @@ test('12 tags-only remote → typed E_GIT, no bootstrap (M1)', async () => {
   const result = await run(fake, [upsertIntent()]);
   assert.equal(result.ok, false);
   assert.equal(result.code, E_NO_MAIN_CODE);
-  assert.equal(result.message, E_NO_MAIN_MESSAGE);
+  assert.match(result.message, /v1/, 'tags-only 仓库的 typed 文案必须点名实际引用 v1');
+  assert.match(result.message, /缺少 main/);
+  assert.equal(result.message.includes('未知错误'), false);
   assert.notEqual(result.bootstrapped, true);
   assert.equal(fake.commitCount, 0, '绝不覆盖别人的历史');
   assert.equal(fake.pushCount, 0);

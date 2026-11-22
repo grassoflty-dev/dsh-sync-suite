@@ -496,6 +496,9 @@
 
   function repoInitialized() {
     try {
+      // 只认确切的 `.git`。`.git.clone-failed-*` 是 clone 失败时的隔离目录，
+      // 不是仓库；老设备上残留的隔离目录因此永远不会被误判为「已初始化」，
+      // 也不会挡住空远端的 init 路径——下一次同步无需卸载或清数据。
       return hostCall('fileExists', [pathJoin(session.repoRoot, '.git')]) === true;
     } catch (error) {
       return false;
@@ -1408,7 +1411,7 @@
       if (hostCall('fileExists', [gitDir]) !== true) {
         return '';
       }
-      var target = pathJoin(session.repoRoot, '.git.clone-failed-' + String(Date.now()));
+      var target = pathJoin(session.repoRoot, CLONE_QUARANTINE_PREFIX + String(Date.now()));
       if (hostCall('rename', [gitDir, target]) === false) {
         return '';
       }
@@ -1418,7 +1421,15 @@
     }
   }
 
-  async function opClone(args) {
+  /**
+   * clone 操作本体（`OP_HANDLERS.clone` 的直接目标，也是门面 `GitSyncService.ensureRepoInitialised()`
+   * 走的唯一 clone 入口）。mod-p0a-no-main-probe 起，**App 路径（args.autoInit === 'true'）在
+   * 任何 git.clone 之前必须过 probeRemoteRefs**：空远端直接本地 init 返回首跑态，
+   * 非空无 main 给 typed 文案，探测失败给 typed 未定；只有确认有 main 才 clone。
+   * `skipProbe` 只由已在本函数上游做过同一决策的 `ensureRepoInitialised` / `opPull` 传入，
+   * 避免二次探测。直接调桥且不带 autoInit 的单测保持旧 clone 语义（它们是传输/隔离测试，不测首跑）。
+   */
+  async function opClone(args, skipProbe) {
     var config = applyConfig(args);
     var root = ensureRepo();
     var git = gitApi();
@@ -1434,6 +1445,30 @@
     }
     var url = requireRepoUrl(config);
     var backup = config.deviceId ? snapshotDeviceFiles(config.deviceId) : [];
+    if (skipProbe !== true && args && args.autoInit === 'true') {
+      var probe = await probeRemoteRefs(git, config, url);
+      if (probe.empty) {
+        await git.init({ fs: session.fs, dir: root, defaultBranch: branch });
+        await ensureRemote(git, config);
+        var preservedEmpty = backup.length > 0 ? restoreDeviceFiles(backup) : { restored: [], unioned: [], kept: [] };
+        return {
+          cloned: false, initialized: true, emptyRemote: true, repoRoot: root,
+          message: '远端仓库为空（首次同步的正常起点），正在初始化 main 时间线',
+          branch: await currentBranchOf(git), head: await resolveHead(git), localPreserved: preservedEmpty
+        };
+      }
+      if (probe.heads.indexOf(branch) < 0) {
+        var label = probe.heads.length > 0
+          ? '远端已有分支：' + probe.heads.join('、')
+          : '远端已有引用：' + probe.names.join('、');
+        throw bridgeError(
+          'E_GIT',
+          label + '；缺少 ' + branch +
+            '。远端并非空仓库，本应用不会克隆，也不会覆盖任何已有历史；' +
+            '下一步：把远端默认分支改名为 ' + branch + '（或改用空仓库）后重试'
+        );
+      }
+    }
     try {
       await git.clone({
         fs: session.fs,
@@ -1466,7 +1501,19 @@
     };
   }
 
-  /** mod-sync-silent-autoinit：远端引用一个都没有 = 空仓库首跑态（不是传输故障）。 */
+  /** clone 失败隔离目录的固定前缀（只作识别，不参与仓库是否初始化的判定）。 */
+  var CLONE_QUARANTINE_PREFIX = '.git.clone-failed-';
+
+  /** 纯判定：名字是否是 clone 失败隔离目录。老设备上的陈旧隔离目录一律按「无关目录」处理。 */
+  function isCloneQuarantineDir(name) {
+    return typeof name === 'string' && name.indexOf(CLONE_QUARANTINE_PREFIX) === 0;
+  }
+
+  /**
+   * mod-sync-silent-autoinit 的历史谓词，保留给诊断 / 单测与旧守卫。
+   * 空仓库判定**不再**用它：getRemoteInfo 返回的嵌套 refs 对象形状随服务端而变
+   * （Gitee 空仓库在某些形状下会被误判成「非空无 main」），改用 listServerRefs 的原始引用数组。
+   */
   function remoteHasNoRefs(info) {
     var refs = (info && info.refs) || {};
     var keys = Object.keys(refs);
@@ -1482,16 +1529,112 @@
     return true;
   }
 
+  /** 从 listServerRefs 的 {ref,oid} 数组取 heads 名（去掉 refs/heads/ 前缀），排序去重。 */
+  function serverRefHeadNames(serverRefs) {
+    var out = [];
+    if (!Array.isArray(serverRefs)) {
+      return out;
+    }
+    for (var i = 0; i < serverRefs.length; i++) {
+      var raw = serverRefs[i] && typeof serverRefs[i].ref === 'string'
+        ? serverRefs[i].ref
+        : (typeof serverRefs[i] === 'string' ? serverRefs[i] : '');
+      if (raw.indexOf('refs/heads/') === 0) {
+        var name = raw.slice('refs/heads/'.length);
+        if (name.length > 0 && out.indexOf(name) < 0) {
+          out.push(name);
+        }
+      }
+    }
+    out.sort();
+    return out;
+  }
+
+  /** 从同一数组取展示名：heads 原名，其它类别带类别前缀（tags/v1），排序去重。 */
+  function serverRefDisplayNames(serverRefs) {
+    var out = [];
+    if (!Array.isArray(serverRefs)) {
+      return out;
+    }
+    for (var i = 0; i < serverRefs.length; i++) {
+      var raw = serverRefs[i] && typeof serverRefs[i].ref === 'string'
+        ? serverRefs[i].ref
+        : (typeof serverRefs[i] === 'string' ? serverRefs[i] : '');
+      if (raw.length === 0) {
+        continue;
+      }
+      var label = raw.indexOf('refs/heads/') === 0
+        ? raw.slice('refs/heads/'.length)
+        : (raw.indexOf('refs/') === 0 ? raw.slice('refs/'.length) : raw);
+      if (label.length > 0 && out.indexOf(label) < 0) {
+        out.push(label);
+      }
+    }
+    out.sort();
+    return out;
+  }
+
   /**
-   * 静默初始化前置步骤（mod-sync-silent-autoinit）：所有需要仓库的操作在触碰 .git 之前先过这里。
-   * - 已有仓库 → 空操作，直接返回；
-   * - 没有仓库且调用方带 `autoInit:'true'`（App 侧 configArgs 恒带）→ 静默 clone：
-   *   复用 opClone 的设备目录备份 / 并集恢复 / 失败隔离，失败抛 normalizeError 的 typed 错（可重试），
-   *   文案里不再出现「尚未初始化 / 先拉取」；
-   * - 空远端（服务端引用 advertisement 一个引用都没有）→ 本地 init + 配 origin，
-   *   交给 E_REMOTE_EMPTY 首跑引导继续，绝不覆盖别人的历史；
-   * - 直接调桥（单测 / 内部不变量）不带 autoInit 时本函数空跑，旧 E_GIT 不变量仍守住；
-   *   正常用户流程每条路径都带 autoInit，下面四个「先拉取」死结不可达、永不用户可见。
+   * 远端状态探测（mod-p0a-no-main-probe，先决策后落地）：
+   * 用 isomorphic-git 1.25.3 的 `listServerRefs({http,url,onAuth})` 取**原始引用数组**判定空仓：
+   * 空数组 = 服务端一个引用都没有 = 真正的首跑态；这个数组不受嵌套 `refs.heads/tags/pull`
+   * 的对象形状差异影响。**探测抛错一律 typed 失败，绝不再 fallthrough 到 git.clone**——
+   * 旧实现「探测不到就克隆」正是把空仓库误报成「Could not find main」并留下隔离目录的根因。
+   * 只有数组非空且确认存在 main 分支时才允许后续 clone（普通首次克隆路径）。
+   */
+  async function probeRemoteRefs(git, config, url) {
+    var serverRefs;
+    try {
+      serverRefs = await git.listServerRefs({
+        http: session.http, url: url, onAuth: makeOnAuth(config)
+      });
+    } catch (error) {
+      var text = sanitizeMessage(error && error.message !== undefined ? error.message : error);
+      throw bridgeError(
+        'E_GIT',
+        '无法确认远端状态（探测失败）：' + text +
+          '；下一步：检查网络与仓库地址后重试（本应用不会克隆，也不会覆盖任何远端历史）'
+      );
+    }
+    if (!Array.isArray(serverRefs)) {
+      throw bridgeError(
+        'E_GIT',
+        '无法确认远端状态（探测返回异常）；下一步：重试（本应用不会克隆，也不会覆盖任何远端历史）'
+      );
+    }
+    if (serverRefs.length === 0) {
+      return { empty: true, heads: [], names: [] };
+    }
+    var heads = serverRefHeadNames(serverRefs);
+    var names = serverRefDisplayNames(serverRefs);
+    // getRemoteInfo 只在已确认非空时用于**补充分支名**；即使它抛错或形状异常也不影响决策。
+    try {
+      var info = await git.getRemoteInfo({ http: session.http, url: url, onAuth: makeOnAuth(config) });
+      var infoHeads = Object.keys((info && info.refs && info.refs.heads) || {});
+      for (var i = 0; i < infoHeads.length; i++) {
+        if (heads.indexOf(infoHeads[i]) < 0) {
+          heads.push(infoHeads[i]);
+        }
+      }
+      heads.sort();
+    } catch (ignored) {
+      // 形状差异 / 二次探测失败：以 listServerRefs 的数组为准。
+    }
+    return { empty: false, heads: heads, names: names };
+  }
+
+  /**
+   * 静默初始化前置步骤（mod-sync-silent-autoinit + mod-p0a-no-main-probe）：
+   * 所有需要工作副本的 op 在触碰 .git 之前先过这里。
+   * - 已有仓库 → 空操作；`remoteLayout` 是只读远端探测，不需要工作副本，直接跳过；
+   * - 空远端（listServerRefs 空数组）→ 本地 init + 配 origin，交给 E_REMOTE_EMPTY 首跑引导；
+   *   这一支**没有 git.clone 调用**，也就不会产生 .git.clone-failed-* 隔离目录；
+   * - 远端非空且有 main → 普通首次 clone（opClone）；
+   * - 远端非空但没有 main → typed 错误并点名实际分支，**不克隆、不建引用、不覆盖任何历史**；
+   * - 探测抛错 / 形状异常 → typed「无法确认远端状态」，**不克隆**（fail-closed，下次重试重探）；
+   * - 直接调桥（单测 / 内部不变量）不带 autoInit 时本函数空跑，旧 E_GIT 不变量仍守住。
+   * 老设备上的 `.git.clone-failed-*` 是孤立目录，repoInitialized() 只看确切的 `.git`，
+   * 永远不会被它误判，下一次同步无需卸载 / 清数据即可正常初始化。
    */
   async function ensureRepoInitialised(args) {
     var config = applyConfig(args);
@@ -1503,22 +1646,14 @@
         branch: await currentBranchOf(git), head: await resolveHead(git)
       };
     }
-    if (!args || args.autoInit !== 'true') {
+    if (!args || args.autoInit !== 'true' || args.op === 'remoteLayout') {
       return { cloned: false, skipped: true, repoRoot: root };
     }
     var url = requireRepoUrl(config);
     var branch = config.branch || 'main';
     var backup = config.deviceId ? snapshotDeviceFiles(config.deviceId) : [];
-    var refsKnown = false;
-    var emptyRemote = false;
-    try {
-      var info = await git.getRemoteInfo({ http: session.http, url: url, onAuth: makeOnAuth(config) });
-      refsKnown = true;
-      emptyRemote = remoteHasNoRefs(info);
-    } catch (error) {
-      // 探测不到引用不算空仓库（fail-closed）：交给 clone 抛 typed 传输/认证错误
-    }
-    if (refsKnown && emptyRemote) {
+    var probe = await probeRemoteRefs(git, config, url);
+    if (probe.empty) {
       await git.init({ fs: session.fs, dir: root, defaultBranch: branch });
       await ensureRemote(git, config);
       var preservedEmpty = backup.length > 0 ? restoreDeviceFiles(backup) : { restored: [], unioned: [], kept: [] };
@@ -1527,7 +1662,19 @@
         branch: await currentBranchOf(git), head: await resolveHead(git), localPreserved: preservedEmpty
       };
     }
-    return await opClone(args);
+    if (probe.heads.indexOf(branch) < 0) {
+      var label = probe.heads.length > 0
+        ? '远端已有分支：' + probe.heads.join('、')
+        : '远端已有引用：' + probe.names.join('、');
+      throw bridgeError(
+        'E_GIT',
+        label + '；缺少 ' + branch +
+          '。远端并非空仓库，本应用不会克隆，也不会覆盖任何已有历史；' +
+          '下一步：把远端默认分支改名为 ' + branch + '（或改用空仓库）后重试'
+      );
+    }
+    // 本函数刚做完同一决策，opClone 不再探测；单仓内唯一 clone 决策点不重复执行。
+    return await opClone(args, true);
   }
 
   async function opFetch(args) {
@@ -1566,7 +1713,7 @@
     var root = ensureRepo();
     var git = gitApi();
     if (!repoInitialized()) {
-      var cloned = await opClone(args);
+      var cloned = await opClone(args, true);
       return {
         cloned: true,
         branch: cloned.branch,
@@ -2148,36 +2295,17 @@
       return out;
     }
     if (op === 'remoteLayout') {
-      // 首跑探测：直接读服务端引用 advertisement，不经过 fetch —— 空仓库上 `fetch origin main`
-      // 会抛 "Could not find origin/main"，那是首跑态不是传输故障，必须先分流。
-      // 任何 heads/tags/pull 引用都没有才算空仓库（可引导）；只要有任何引用却没有 main，
-      // 就是别人的历史（例如只有 tags 的仓库），拒绝引导、保留 typed 错误。
+      // 首跑探测：用 listServerRefs 的原始引用数组判空，不经过 fetch、也不依赖 getRemoteInfo 的
+      // 嵌套 refs 形状 —— Gitee 空仓库曾在这里返回「非空无 main」，把首跑误报成失败。
+      // 旧口径「任何 heads/tags/pull 引用都没有才算空仓库」语义不变，但改由原始数组表述，
+      // 不再被嵌套对象的形状差异欺骗。空数组 = 真正空仓库（可引导）；有引用但没有 main
+      // = 别人的历史，保留 typed 错误、绝不覆盖。
       var url = requireRepoUrl(config);
-      var info = await git.getRemoteInfo({
-        http: session.http, url: url, onAuth: makeOnAuth(config)
-      });
-      var refs = (info && info.refs) || {};
-      var heads = refs.heads || {};
-      var names = Object.keys(heads);
-      names.sort();
-      // 引用总览（诊断用）：heads 原名在前，其它类别带类别前缀追加，顺序确定。
-      var allNames = names.slice();
-      var categories = Object.keys(refs);
-      categories.sort();
-      for (var c = 0; c < categories.length; c++) {
-        var group = refs[categories[c]];
-        if (!group || typeof group !== 'object') { continue; }
-        var groupNames = Object.keys(group);
-        groupNames.sort();
-        for (var g = 0; g < groupNames.length; g++) {
-          var label = categories[c] === 'heads' ? groupNames[g] : categories[c] + '/' + groupNames[g];
-          if (allNames.indexOf(label) < 0) { allNames.push(label); }
-        }
-      }
+      var probe = await probeRemoteRefs(git, config, url);
       out.value = JSON.stringify({
-        hasMain: Object.prototype.hasOwnProperty.call(heads, 'main'),
-        isEmpty: allNames.length === 0,
-        refs: allNames
+        hasMain: probe.heads.indexOf('main') >= 0,
+        isEmpty: probe.empty,
+        refs: probe.names
       });
       return out;
     }
@@ -2590,6 +2718,17 @@
     utf8Decode: utf8Decode,
     sanitizeMessage: sanitizeMessage,
     normalizeError: normalizeError,
+    // mod-p0a-no-main-probe：纯判定 + 决策入口（Node 单测用 shaped refs 钉死三条分支）
+    isCloneQuarantineDir: isCloneQuarantineDir,
+    cloneQuarantinePrefix: CLONE_QUARANTINE_PREFIX,
+    remoteHasNoRefs: remoteHasNoRefs,
+    serverRefHeadNames: serverRefHeadNames,
+    serverRefDisplayNames: serverRefDisplayNames,
+    probeRemoteRefs: function (git, config, url) { return probeRemoteRefs(git, config, url); },
+    ensureRepoInitialised: function (args) { return ensureRepoInitialised(args); },
+    opClone: opClone,
+    opHandlers: OP_HANDLERS,
+    repoInitializedOf: function () { ensureRepo(); return repoInitialized(); },
     collectBody: collectBody,
     byteStream: byteStream,
     snapshotDeviceFiles: snapshotDeviceFiles,

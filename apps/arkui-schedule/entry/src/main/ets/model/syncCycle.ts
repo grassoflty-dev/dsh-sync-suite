@@ -37,7 +37,10 @@ import type { FreshStartDecision } from './freshStart';
  *   **保留 typed 错误，绝不引导覆盖别人的历史**。这一区分是本模块的安全底线。
  *
  * 说明：在空远端上 `git fetch origin main` 会以 "Could not find origin/main" 失败（这是首跑态，不是传输故障），
- * 所以状态探测放在 fetch **之前**，由桥的 `getRemoteInfo` 直接列举服务端引用，绕过 fetch 的 ref 解析。
+ * 所以状态探测放在 fetch **之前**。mod-p0a-no-main-probe 起，桥侧用 isomorphic-git 的
+ * `listServerRefs` 原始引用数组判空（空数组 = 真正空仓库），不再受 `getRemoteInfo` 嵌套 refs 形状差异影响；
+ * 探测抛错是 typed「无法确认远端状态」，绝不 fallthrough 到 clone。非空无 main 只产 typed 文案，
+ * 不在本模块创建分支、不克隆、不覆盖任何已有历史。
  */
 export interface RemoteLayout {
   /** 服务端是否存在 refs/heads/main。 */
@@ -62,13 +65,28 @@ export function remoteStateDecision(hasMain: boolean, isEmpty: boolean): RemoteS
 export const E_REMOTE_EMPTY_CODE: string = 'E_REMOTE_EMPTY';
 export const E_REMOTE_EMPTY_MESSAGE: string = '远端仓库为空（首次同步的正常起点），正在初始化 main 时间线';
 /**
- * 非空但无 main 的 typed 错误：逐字保留桥侧既有错误文案，再给可执行的中文下一步。
+ * 非空但无 main 的 typed 错误（mod-p0a-no-main-probe）：点名服务端**实际存在的分支**，
+ * 不再说「远端仓库为空」——那会把有内容的仓库误报成空仓库。保留 `Could not find origin/main`
+ * 作为可诊断的原始错误串（既有断言与日志口径），但不再把 known typed 错包进「未知错误…原始信息」。
  * 不引入新的错误码，避免改变 UI 既有分类（仍归 E_GIT）。
+ * 边界：本模块**不创建任何引用 / 不克隆 / 不覆盖历史**；用户只能在远端自行改名分支或换空仓库。
  */
 export const E_NO_MAIN_CODE: string = 'E_GIT';
-export const E_NO_MAIN_MESSAGE: string =
-  'E_GIT: 远端仓库为空，或分支/引用不存在：Could not find origin/main. ' +
-  '下一步：远端已有其它分支或提交历史但没有 main，本应用不会覆盖它；请检查仓库地址，或在远端建立 main 分支后重试';
+
+/** 用探测到的分支名构造诚实的 typed 文案（空数组时退化成通用版）。 */
+export function noMainMessage(refs: string[]): string {
+  const names: string = Array.isArray(refs)
+    ? refs.filter((item: string): boolean => typeof item === 'string' && item.length > 0).join('、')
+    : '';
+  const head: string = names.length > 0
+    ? `E_GIT: 远端已有分支：${names}；缺少 main。远端并非空仓库。`
+    : 'E_GIT: 远端缺少 main 分支。远端并非空仓库。';
+  return head +
+    ' 原始错误：Could not find origin/main.' +
+    ' 下一步：本应用不会克隆，也不会覆盖任何已有历史；请把远端默认分支改名为 main（或改用空仓库）后重试';
+}
+
+export const E_NO_MAIN_MESSAGE: string = noMainMessage([]);
 /** 引导提交信息：只建一次，后续周期继续用 [`COMMIT_PREFIX`]。 */
 export const BOOTSTRAP_COMMIT_MESSAGE: string = '[v2] bootstrap main';
 
@@ -379,12 +397,13 @@ function gateFailure(gate: WriteGateResult, outbox: OutboxEntry[]): CycleOutcome
   };
 }
 
-/** 非空无 main 的 typed 结果：零写入、零提交、意图原样留 outbox（绝不引导覆盖他人历史）。 */
-function noMainOutcome(outbox: OutboxEntry[]): CycleOutcome {
+/** 非空无 main 的 typed 结果：零写入、零提交、意图原样留 outbox（绝不克隆 / 建引用 / 覆盖历史）。 */
+function noMainOutcome(outbox: OutboxEntry[], refs?: string[]): CycleOutcome {
+  const message: string = refs !== undefined && refs.length > 0 ? noMainMessage(refs) : E_NO_MAIN_MESSAGE;
   return {
     ok: false, code: E_NO_MAIN_CODE, days: EMPTY_DAYS.slice(),
     applied: 0, dropped: 0, failed: countFailed(outbox),
-    pending: replayable(outbox).length, message: E_NO_MAIN_MESSAGE,
+    pending: replayable(outbox).length, message: message,
     conflicts: 0, added: 0, attempts: 0,
     resultOutbox: outbox.slice(), droppedIds: []
   };
@@ -625,7 +644,8 @@ export async function runCyclePure(
       return await bootstrapEmptyRemote(port, days, readDay, outbox, now, write);
     }
     if (decision === 'no-main') {
-      return noMainOutcome(outbox);
+      // 把服务端实际分支名带进用户可见文案；这里只产出 typed 结果，不做任何 git 写入。
+      return noMainOutcome(outbox, layout.refs);
     }
   }
   // 步骤 1：fetch（只读）→ 步骤 2：§11 门禁（以 freshly fetched origin/main 计算祖先关系）。

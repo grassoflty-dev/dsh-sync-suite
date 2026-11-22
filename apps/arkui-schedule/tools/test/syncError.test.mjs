@@ -353,3 +353,36 @@ describe('冲突语义（沿用既有契约，不发明新格式）', () => {
     assert.equal(folded[0].ts, '2026-11-15T10:00:00+08:00');
   });
 });
+
+// mod-p0a-no-main-probe（old→new，只加不删）：known typed 错不再落进兜底的
+// 「未知错误…原始信息：<原文>」嵌套转储；空仓库的正常起点文案不得被当成失败。
+describe('远端探测的 known typed 文案', () => {
+  test('远端已有分支但无 main → no-main/fatal，一句话说清，不套未知错误', () => {
+    for (const message of [
+      'E_GIT: 远端已有分支：master；缺少 main。远端并非空仓库。',
+      '同步失败：远端仓库为空，或分支/引用不存在：Could not find main.（已隔离未完成的本地仓库 .git.clone-failed-1795323540282）'
+    ]) {
+      const info = assertShape(classifySyncError('E_GIT', message), 'fatal', 'no-main');
+      assert.match(info.title, /main/);
+      assert.equal(info.detail.includes('未知错误'), false);
+      assert.equal(info.detail.includes('原始信息：'), false);
+      assert.match(info.detail, /master|Could not find main/, '必须给出可诊断的分支 / 原始错误');
+    }
+  });
+
+  test('探测未定 → remote-indeterminate/retry，不误报空仓库也不说是配置问题', () => {
+    const info = assertShape(
+      classifySyncError('E_GIT', '无法确认远端状态（探测失败）：E_AUTH: token rejected；下一步：重试'),
+      'retry', 'remote-indeterminate'
+    );
+    assert.equal(info.retryable, true);
+    assert.match(info.title, /无法确认远端状态/);
+    assert.equal(info.detail.includes('未知错误'), false);
+    assert.equal(info.detail.includes('原始信息：'), false);
+  });
+
+  test('真正的空仓库引导文案不是失败态（classify 不把它归 no-main）', () => {
+    const info = classifySyncError('E_GIT', '远端仓库为空（首次同步的正常起点），正在初始化 main 时间线');
+    assert.notEqual(info.kind, 'no-main', '首跑是正常起点，不是「远端已有分支但无 main」');
+  });
+});

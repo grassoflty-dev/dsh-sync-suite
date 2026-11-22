@@ -195,3 +195,29 @@ test('R5 static: 查看状态 / 测试连接 / 重试 all re-run silent init, no
     assert.equal(banned.test(page + '\n' + section), false, `失败出口残留死结文案：${banned}`);
   }
 });
+
+// mod-p0a-no-main-probe（新增不替代）：重试前不会因空仓库再走 clone，也不要求用户清数据。
+test('R6 static + decision: empty remote recovers on retry, stale quarantine is ignored, never reports "Could not find main"', () => {
+  const bridge = readFileSync(
+    join(APP, 'entry/src/main/resources/rawfile/git/git-bridge.js'), 'utf8');
+  // 探测先于 clone：App 实际入口 OP_HANDLERS.clone → opClone 内部先 probe 再 git.clone。
+  const opAt = bridge.indexOf('async function opClone(args, skipProbe)');
+  assert.ok(opAt > 0, 'opClone 入口必须存在');
+  const opBody = bridge.slice(opAt, bridge.indexOf('async function ensureRepoInitialised(args)', opAt));
+  const probeAt = opBody.indexOf('probeRemoteRefs(git, config, url)');
+  const cloneAt = opBody.indexOf('git.clone(');
+  assert.ok(probeAt > 0 && cloneAt > probeAt, 'App 克隆入口必须先探测后 clone');
+  const emptyAt = opBody.indexOf('if (probe.empty)');
+  assert.ok(emptyAt > 0 && emptyAt < cloneAt);
+  assert.match(opBody.slice(emptyAt, cloneAt), /git\.init\(/, '空远端分支走 init');
+  assert.doesNotMatch(opBody.slice(emptyAt, cloneAt), /git\.clone\(/, '空远端分支无 clone');
+  // 陈旧隔离目录：repoInitialized 只看确切 .git，隔离目录被识别但绝不参与判定。
+  assert.match(bridge, /CLONE_QUARANTINE_PREFIX/);
+  assert.match(bridge, /hostCall\('fileExists', \[pathJoin\(session\.repoRoot, '\.git'\)\]\)/);
+  // 用户可见失败文案不再有「未知错误…原始信息」嵌套；空仓库首跑是正常起点。
+  const page = src('pages/SettingsSync.ets');
+  const model = src('model/syncError.ts');
+  assert.match(model, /'no-main'/, 'known typed 分支必须存在');
+  assert.match(model, /'remote-indeterminate'/, '探测未定分支必须存在');
+  assert.doesNotMatch(page, /未知错误：可以直接重试一次/, '兜底转储文案不得出现在用户文案里');
+});

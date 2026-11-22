@@ -928,7 +928,11 @@ test('65 static: every repo-needing bridge op funnels through ensureRepoInitiali
   const calls = bridge.match(/await ensureRepoInitialised\(args\);/g) || [];
   assert.equal(calls.length, 9, `九个 repo op 都必须调用静默前置，实际 ${calls.length}`);
   // 缺仓库：复用 opClone 的备份/并集/隔离；空远端走本地 init 交给 E_REMOTE_EMPTY，绝不覆盖历史。
-  assert.match(bridge, /return await opClone\(args\);/);
+  // mod-p0a-no-main-probe（equal-or-stricter）：上游两处已决策调用必须显式跳过二次探测；
+  // 唯一允许无条件调用的是 OP_HANDLERS.clone 自己在 opClone 内完成的 probe-before-clone。
+  assert.match(bridge, /return await opClone\(args, true\);/);
+  assert.equal((bridge.match(/await opClone\(args\)/g) || []).length, 0,
+    '不得留下任何未标记 skipProbe 的上游 opClone 调用');
   assert.match(bridge, /emptyRemote: true/);
   assert.match(bridge, /remoteHasNoRefs/);
   // 四个旧死结只作为内部不变量保留，且有中文注释声明「非用户提示 / 不可达」。
@@ -1004,4 +1008,33 @@ test('67 static (review M1/m1): one status source, no fabricated success, diagno
   // 相对时间兜底已整支删除（Lead 追加要求）。
   assert.doesNotMatch(store, /刚刚/);
   assert.match(store, /label = TEXT_NEVER;/);
+});
+
+// mod-p0a-no-main-probe（old→new，仅新增）：先探测后落地 + 已撤回的 adopt 通道不得复活。
+test('68 static: bridge probes with listServerRefs before any clone; no adopt/ref-write on this path', () => {
+  const bridge = readFileSync(
+    join(APP, 'entry', 'src', 'main', 'resources', 'rawfile', 'git', 'git-bridge.js'), 'utf8');
+  assert.match(bridge, /git\.listServerRefs\(/, '判空必须走 isomorphic-git 原始引用数组');
+  assert.match(bridge, /function probeRemoteRefs\(git, config, url\)/);
+  const at = bridge.indexOf('async function ensureRepoInitialised(args)');
+  assert.ok(at > 0, 'ensureRepoInitialised not found');
+  const [start, end] = matchBrace(bridge, bridge.indexOf('{', at));
+  const ensure = bridge.slice(start, end);
+  const emptyAt = ensure.indexOf('if (probe.empty)');
+  assert.ok(emptyAt > 0, '必须有显式空远端分支');
+  const emptyBranch = ensure.slice(emptyAt);
+  assert.match(emptyBranch, /git\.init\(/);
+  assert.doesNotMatch(emptyBranch, /git\.clone\(/, '空远端分支绝不能 clone');
+  assert.match(bridge, /if \(probe\.heads\.indexOf\(branch\) < 0\)/, '非空无 main 必须 typed 拒绝');
+  assert.match(bridge, /无法确认远端状态（探测失败）/, '探测抛错必须 typed 未定');
+  // 已撤回的 adopt：这三个文件里不得出现建 main / 建引用 / 删分支 / 强推。
+  for (const rel of ['model/syncCycle.ts', 'services/gitRunner.ets', 'pages/SettingsSync.ets']) {
+    const code = src(rel);
+    for (const banned of [
+      /adopt(Branch|Main|Remote|AsMain)/i, /writeRef\s*\(/, /createRef\s*\(/,
+      /branch\s+-D/, /--force/, /\brebase\b/
+    ]) {
+      assert.doesNotMatch(code, banned, `${rel} 残留已撤回的 adopt / 强改通道：${banned}`);
+    }
+  }
 });

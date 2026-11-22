@@ -110,4 +110,21 @@ describe('mod-settings-sync-min：同步组只留仓库地址 + 访问令牌', (
     assert.match(PAGE, /this\.author = settings\.author/, '存量作者名铺回（不清空）');
     assert.match(PAGE, /gitUsername: this\.gitUsername\.trim\(\)/, '保存仍写回用户名（静默派生值）');
   });
+
+  // mod-p0a-no-main-probe（只加不删）：同步面不新增「以远端分支建 main」等配置入口，
+  // 分支仍静默固定 main；非空无 main 只给 typed 文案，不让用户改分支/建引用。
+  test('同步面没有 adopt / 建分支入口，分支仍静默固定 main', () => {
+    for (const [name, source] of [
+      ['同步真页面', SYNC_PAGE], ['同步正文', SYNC], ['同步服务', readSettingsFile('services/GitSyncService.ets')]
+    ]) {
+      for (const banned of [
+        /adopt(Branch|Main|Remote|AsMain)/i, /创建 main/, /以远端分支/, /branch\s+-D/, /--force/
+      ]) {
+        assert.equal(banned.test(source), false, `${name} 残留已撤回的建分支通道：${banned}`);
+      }
+    }
+    const cycle = readSettingsFile('model/syncCycle.ts');
+    assert.match(cycle, /把远端默认分支改名为 main/, '下一步只能是远端改名 / 换空仓库的纯提示');
+    assert.match(SYNC_PAGE, /branch: DEFAULT_BRANCH/, 'configure() 仍固定 main');
+  });
 });

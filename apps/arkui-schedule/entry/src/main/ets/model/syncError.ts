@@ -36,6 +36,8 @@ export type SyncErrorKind =
   | 'forbidden'
   | 'notfound'
   | 'conflict'
+  | 'no-main'
+  | 'remote-indeterminate'
   | 'disk'
   | 'input'
   | 'unknown';
@@ -260,6 +262,17 @@ export function classifySyncError(kindOrStatus: string | number, message: string
       ),
       false
     );
+  }
+
+  // 3b. 远端非空但没有 main（mod-p0a-no-main-probe）：known typed 错必须**一句话说清**。
+  // 绝不落进 §9 兜底的「未知错误：…原始信息：<原文>」嵌套转储；文案本身已经点名分支与下一步。
+  if (/远端已有分支|远端已有引用|缺少 main|远端并非空仓库|Could not find (origin\/)?main/i.test(raw)) {
+    return info('no-main', 'fatal', '远端缺少 main 分支', raw, false);
+  }
+
+  // 3c. 探测未定（桥 fail-closed）：不是网络抖动，也不是「空仓库」，重试会重新探测。
+  if (/无法确认远端状态|远端状态探测失败/.test(raw)) {
+    return info('remote-indeterminate', 'retry', '无法确认远端状态', raw, true);
   }
 
   // 4. 仓库不存在：404 在 GitHub 上也可能是「私有仓库 + 无凭据」
