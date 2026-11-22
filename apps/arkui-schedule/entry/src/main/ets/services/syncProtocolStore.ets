@@ -45,6 +45,11 @@ import type { GitPort, CycleOutcome, DayRead, DayWriteTexts, WritePort } from '.
 // mod-repo-privacy-gate（调用点 3/3）：推送前置门禁。本地写入 / outbox 停放不受影响，
 // 只挡「推」这一步；公共 / 无法确认的判定 sticky，状态由 syncStatusStore 单线呈现。
 import { repoVisibilityChecker } from './repoVisibilityChecker';
+// mod-settings-configured-state：与设置页共用同一个「已配置」判据，缓存每次入周期前冷读刷新。
+import { repoCycleGuard } from '../model/repoConfigured';
+import type { RepoConfigInput, RepoCycleGuardResult } from '../model/repoConfigured';
+import { settingsStore } from './settingsStore';
+import type { ScheduleSettings } from './settingsStore';
 
 /** git 命令执行器：接收参数数组，返回 stdout；非 0 退出由 runner 抛错。 */
 export type GitRunner = (args: string[]) => Promise<string>;
@@ -125,6 +130,26 @@ export class SyncProtocolStore {
   /** 注入真实 git 绑定（页面 bootstrap 调一次）；未注入时周期保持 inert。 */
   setRunner(port: GitPort): void {
     this.runner = port;
+  }
+
+  /**
+   * mod-settings-configured-state：周期入口的配置读取缝。
+   * 默认每次都冷读 preferences（顺带刷新 settingsStore 缓存），因此开机后第一周期不会拿
+   * 「构造时 repoUrl='' 的旧缓存」误判未配置；单测注入 seam 即可断言 guard 的通过 / 拒绝。
+   */
+  private configReader: () => Promise<RepoConfigInput> = async (): Promise<RepoConfigInput> => {
+    const settings: ScheduleSettings = await settingsStore.load();
+    const input: RepoConfigInput = {
+      repoUrl: settings.repoUrl,
+      token: settings.token,
+      authMode: settings.authMode
+    };
+    return input;
+  };
+
+  /** 仅供测试 / 显式重绑：替换配置读取缝。 */
+  setConfigReader(reader: () => Promise<RepoConfigInput>): void {
+    this.configReader = reader;
   }
 
   /** 真实 git 绑定是否已注入（未注入时周期保持惰性、不伪造成功）。 */
@@ -270,6 +295,25 @@ export class SyncProtocolStore {
       // 文案带中文下一步，且可点「重试同步」。
       const outbox: OutboxEntry[] = this.filesDir.length === 0 ? [] : this.readOutbox();
       return this.outcomeToResult(unavailableOutcome(outbox));
+    }
+    // mod-settings-configured-state：与设置页共用同一个已配置判据（repoConfigured.ts）。
+    // 只回答「配置齐不齐」；仓库可见性 / 推送许可是下一段独立的 privacy lane，二者绝不混用。
+    let repoConfig: RepoConfigInput;
+    try {
+      repoConfig = await this.configReader();
+    } catch {
+      // 读盘失败 ⇒ 没有可证明的配置 ⇒ 未配置（typed 点名缺项），不伪造成功。
+      repoConfig = { repoUrl: '', token: '' };
+    }
+    const repoGuard: RepoCycleGuardResult = repoCycleGuard(repoConfig);
+    if (!repoGuard.start) {
+      const parkedConfig: OutboxEntry[] = this.filesDir.length === 0 ? [] : this.readOutbox();
+      const unconfigured: CycleResult = {
+        ok: false, code: repoGuard.code, message: repoGuard.message,
+        days: 0, conflicts: 0, added: 0, dropped: [],
+        pending: this.pendingCount(parkedConfig), failed: this.failedCount(parkedConfig), attempts: 0
+      };
+      return unconfigured;
     }
     // 推送前置：60 s 去重 + sticky。被挡时返回 typed CycleResult（ok=false，绝无「已同步」），
     // 记录已在本地写好、意图仍在 outbox；只有下一次自然周期 / 保存 / 测试连接才会重试。

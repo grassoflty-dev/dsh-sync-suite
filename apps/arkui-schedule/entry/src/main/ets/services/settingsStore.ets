@@ -47,6 +47,14 @@ import { normalizeUuid } from '../model/deviceRegistry';
 // mod-config-persistence-wiring：版本信封接线（本文件只做 IO 编排，判定全在 configSchema 纯层）。
 import { CONFIG_ENVELOPE_KEY, encodeEnvelope } from '../model/configSchema';
 import type { ConfigValue } from '../model/configSchema';
+// mod-settings-configured-state：合并读口与测试共用同一个纯函数（扁平键优先、信封兜底）。
+import {
+  readRepoConfigFromPrefs,
+  REPO_KEY_AUTH_MODE,
+  REPO_KEY_TOKEN,
+  REPO_KEY_URL
+} from '../model/repoConfigured';
+import type { RepoConfigInput } from '../model/repoConfigured';
 import { createConfigStore } from './configStore';
 import type { ConfigStoreSpec } from './configStore';
 
@@ -509,8 +517,29 @@ export class SettingsStore {
     const deviceUuid = readString(await prefs.get(KEY_DEVICE_UUID, ''), '');
     // 设备编号是否自动分配：旧数据没有该键 → false（老用户沿用自己填的标识）
     const deviceIdAuto = readBoolean(await prefs.get(KEY_DEVICE_ID_AUTO, false), false);
-    const repoUrl = readString(await prefs.get(KEY_REPO_URL, ''), '');
-    const token = readString(await prefs.get(KEY_TOKEN, ''), '');
+    // mod-settings-configured-state：已配置字段走唯一的合并读口（纯函数 readRepoConfigFromPrefs）。
+    // 扁平键优先、信封 values 兜底；生产用真 prefs 实现 seam，测试注入同样接口的内存 seam。
+    // 扁平键的 prefs.get 仍在 load() 内（读写成对断言钉住它），坏字节 / 未知版本读成空表、零写入。
+    const flatRepoUrlValue: preferences.ValueType = await prefs.get(KEY_REPO_URL, '');
+    const flatTokenValue: preferences.ValueType = await prefs.get(KEY_TOKEN, '');
+    const flatAuthValue: preferences.ValueType = await prefs.get(KEY_AUTH_MODE, '');
+    const repoConfigInput: RepoConfigInput = await readRepoConfigFromPrefs({
+      getFlat: async (key: string): Promise<string> => {
+        let value: preferences.ValueType = flatAuthValue;
+        if (key === REPO_KEY_URL) {
+          value = flatRepoUrlValue;
+        } else if (key === REPO_KEY_TOKEN) {
+          value = flatTokenValue;
+        }
+        return typeof value === 'string' ? value : '';
+      },
+      getEnvelope: async (): Promise<string> => {
+        const rawEnvelope: preferences.ValueType = await prefs.get(CONFIG_ENVELOPE_KEY, '');
+        return typeof rawEnvelope === 'string' ? rawEnvelope : '';
+      }
+    });
+    let repoUrl: string = repoConfigInput.repoUrl;
+    let token: string = repoConfigInput.token;
     const aiKey = readString(await prefs.get(KEY_AI_KEY, ''), '');
     // 迁移：旧版本只存了 aiKey。providerId 为空即旧数据 → findProvider 回退默认源 deepseek，
     // 模型为空 → deepseek-chat，地址 → 该源预设地址（三个字段一起补齐，不留半套配置）。

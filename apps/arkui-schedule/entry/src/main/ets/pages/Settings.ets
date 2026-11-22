@@ -36,6 +36,10 @@ import {
   apiRowSummary
 } from '../model/settingsMenu';
 import { PageLayout } from '../components/PageLayout';
+// mod-settings-configured-state：与同步周期共用同一个已配置判据；阻断态走独立 lane。
+import { repoConfigStateOf, repoRowSummary } from '../model/repoConfigured';
+import { isRepoBlockedStatus } from '../model/homeGlobalRefresh';
+import { syncStatusStore } from '../services/syncStatusStore';
 
 /** 四行菜单的目标路由；`pages/Instances` 是既有顶层页，原样复用。 */
 const ROUTE_SYNC: string = 'pages/SettingsSync';
@@ -46,7 +50,8 @@ const ROUTE_API: string = 'pages/SettingsApi';
 @Entry
 @Component
 struct Settings {
-  @State repoSummary: string = '未配置 · 未同步';
+  // 读取中给中性占位，绝不先写死「未配置」：prefs 尚未加载时的初值不是配置事实。
+  @State repoSummary: string = '读取中…';
   @State instanceSummary: string = '0 个实例';
   @State dataSummary: string = '未导出';
   @State apiSummary: string = '未配置 · 未配置';
@@ -70,7 +75,10 @@ struct Settings {
         return;
       }
       const host: string = repoHostOf(settings.repoUrl);
-      this.repoSummary = `${host} · ${syncRowSummary(settings.lastSyncAt, settings.lastSyncError)}`;
+      const syncText: string = syncRowSummary(settings.lastSyncAt, settings.lastSyncError);
+      // 阻断是独立问题：已配置但仓库公开 / 不可确认 → 「已配置（可见性阻断…）」，不是「未配置」。
+      const blocked: boolean = isRepoBlockedStatus(syncStatusStore.snapshot());
+      this.repoSummary = repoRowSummary(host, syncText, repoConfigStateOf(settings), blocked);
       this.apiSummary = apiRowSummary(
         findProvider(settings.aiProviderId).label,
         this.modelLabelOf(settings.aiProviderId, settings.aiModel)
