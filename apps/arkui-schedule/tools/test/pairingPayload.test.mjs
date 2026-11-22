@@ -175,7 +175,7 @@ describe('TOFU：同 instanceId 指纹必须一致', () => {
     assert.equal(first.items.length, 1);
     assert.equal(first.items[0].pairingInstanceId, 'gwl-pc');
     assert.equal(first.items[0].tlsFingerprint, FP_A_CANON);
-    assert.equal(first.items[0].url, 'http://192.168.1.6:44996');
+    assert.equal(first.items[0].url, 'https://192.168.1.6:44996');
     const before = JSON.stringify(first.items);
 
     const conflict = P.addPairedInstance(first.items, json({
@@ -198,7 +198,7 @@ describe('TOFU：同 instanceId 指纹必须一致', () => {
     assert.equal(updated.ok, true);
     assert.equal(updated.action, 'updated');
     assert.equal(updated.items.length, 1, '不产生第二条记录');
-    assert.equal(updated.items[0].url, 'http://192.168.1.8:45001');
+    assert.equal(updated.items[0].url, 'https://192.168.1.8:45001');
     assert.equal(updated.items[0].tlsFingerprint, first.items[0].tlsFingerprint, 'pin 未被改写');
     assert.equal(updated.items[0].pairingInstanceId, 'gwl-pc');
     assert.equal(updated.items[0].token, 'ZyXwVuTsRqPoNmLkJiHgFeDcBa098765', '轮换后的令牌随载荷更新');
@@ -209,7 +209,7 @@ describe('TOFU：同 instanceId 指纹必须一致', () => {
       transport: 'ipv6', host: '2001:DB8::1', port: 44996
     }));
     assert.equal(first.ok, true);
-    assert.equal(first.items[0].url, 'http://[2001:db8::1]:44996');
+    assert.equal(first.items[0].url, 'https://[2001:db8::1]:44996');
     assert.equal(first.items[0].mode, 'ipv6');
 
     const round = I.decodeInstances(I.encodeInstances(first.items));
@@ -219,6 +219,23 @@ describe('TOFU：同 instanceId 指纹必须一致', () => {
     const view = I.redactInstance(round.items[0]);
     assert.equal(view.fingerprintPrefix, 'AA:AA:AA:AA:AA:AA…');
     assert.equal(JSON.stringify(view).includes(TOKEN), false, '渲染视图没有令牌');
+  });
+
+  test('P6-4 配对地址是 https；host/port/token 与 TOFU pin 不随 scheme 切换改变（回退 http 必失败）', () => {
+    const added = P.addPairedInstance([], json());
+    assert.equal(added.ok, true, JSON.stringify(added));
+    const row = added.items[0];
+    // 插件监听器只提供 HTTPS：明文 http 地址会让平板预检以「无法校验证书链」拒绝连接。
+    assert.equal(row.url, 'https://192.168.1.6:44996', '配对地址必须是 https；回退 http 会在此失败');
+    assert.match(row.url, /^https:\/\//, 'scheme 必须是 https');
+    assert.equal(row.url.startsWith('http://'), false, '不得回退到明文 http://');
+    assert.equal(row.url.includes('192.168.1.6:44996'), true, 'host/port 沿用载荷，未被 scheme 切换改写');
+    assert.equal(row.token, TOKEN, '令牌原样落表，不进 URL');
+    assert.equal(row.tlsFingerprint, FP_A_CANON, '配对钉住的证书指纹不因 scheme 切换改变');
+    // 源形状：唯一 URL 出口必须以 https 调用（改回 http 时这条静态断言同样失败）。
+    assert.match(codeOnly(src('model/pairingPayload.ts')),
+      /announcementBaseUrl\(\{ scheme: 'https', host: innerHost, port: payload\.port \}\)/,
+      '配对模型必须以 https 调用唯一 URL 出口');
   });
 });
 
@@ -253,8 +270,8 @@ describe('P7 UI 与源码形状（静态守卫）', () => {
 
   test('P7-3 只有一份 URL 拼装；新代码没有 console.* 回显载荷 / 令牌', () => {
     const modelCode = codeOnly(MODEL);
-    assert.match(modelCode, /announcementBaseUrl\(\{ scheme: 'http', host: innerHost, port: payload\.port \}\)/,
-      '必须复用 scheme/host/port 的唯一 URL 出口');
+    assert.match(modelCode, /announcementBaseUrl\(\{ scheme: 'https', host: innerHost, port: payload\.port \}\)/,
+      '必须复用 scheme/host/port 的唯一 URL 出口（https：监听器无明文回退）');
     assert.equal(/[`'"][^`'"\n]*:\/\/\$\{/.test(modelCode), false, '配对模型不得写第二份 URL 拼装');
     for (const [name, text] of [
       ['model/pairingPayload.ts', MODEL], ['services/instanceStore.ets', STORE],
@@ -309,7 +326,7 @@ describe('P8 配对更新保留实例 id（公告 pin 的键不能被换掉）',
     assert.deepEqual(row.capabilities, I.deriveCapabilities(oldId), '能力集必须由保留的 id 派生');
     assert.equal(pins.getPin(row.id), announceKey,
       '公告 pin 仍用更新行的 id 解析，不会在读侧变成「机器换了身份」');
-    assert.equal(row.url, 'http://192.168.1.8:45001', '地址仍随载荷更新');
+    assert.equal(row.url, 'https://192.168.1.8:45001', '地址仍随载荷更新');
     assert.equal(row.token, 'ZyXwVuTsRqPoNmLkJiHgFeDcBa098765', '令牌仍随载荷更新');
     assert.equal(row.tlsFingerprint, first.items[0].tlsFingerprint, '证书 TOFU pin 未改写');
   });
@@ -324,7 +341,7 @@ describe('P8 配对更新保留实例 id（公告 pin 的键不能被换掉）',
     assert.equal(second.items.length, 2, '新实例必须新增一行，而不是覆盖旧实例');
     const added = second.items.find((item) => item.pairingInstanceId === 'new-pc');
     assert.ok(added, '新增行必须带新 instanceId');
-    assert.equal(added.id, I.instanceIdFromUrl('http://192.168.1.9:45002'),
+    assert.equal(added.id, I.instanceIdFromUrl('https://192.168.1.9:45002'),
       '新增路径仍按新 URL 派生 id');
     assert.notEqual(added.id, first.items[0].id, '新实例不得复用旧 id');
   });

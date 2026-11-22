@@ -514,9 +514,9 @@ export function addPairedInstance(list: DsInstance[], text: string): PairingAddR
   const innerHost: string = payload.host.startsWith('[') && payload.host.endsWith(']')
     ? payload.host.slice(1, payload.host.length - 1)
     : payload.host;
-  // 直连 DSH 的 Web 面板由插件的 node:http 监听器提供（无网关 / 无 TLS 终结反代），
-  // 所以配对路径固定 http；证书只用于 TOFU pin，不改scheme决定权。
-  const base: string = announcementBaseUrl({ scheme: 'http', host: innerHost, port: payload.port });
+  // 直连 DSH 的 Web 面板由插件的 HTTPS 监听器提供（无明文回退 / 无网关），
+  // 配对时钉住的证书指纹在连接时校验；所以配对路径固定 https，scheme 由唯一 URL 出口决定。
+  const base: string = announcementBaseUrl({ scheme: 'https', host: innerHost, port: payload.port });
   const check = normalizeRemoteUrl(base);
   if (!check.ok) {
     return addFail('E_PAIRING_MALFORMED', '配对地址不可用，请重新复制配对串');
