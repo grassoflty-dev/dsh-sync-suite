@@ -43,7 +43,9 @@ import { REMOTE_MODE_LAN, REMOTE_MODE_ORDER, findRemoteMode } from '../../model/
 import { mergeRemoteToken, normalizeRemoteUrl, routeToRemote, stripRemoteToken } from '../../model/remoteUrl';
 import { FIRST_PAIRING_DETAIL, FIRST_PAIRING_WORDING } from '../../model/remoteAnnounceRefresh';
 import type { AnnounceRefreshOutcome, AnnounceRefreshState } from '../../model/remoteAnnounceRefresh';
+import { PAIRING_REACHABLE_WORDING } from '../../model/pairingPayload';
 import { instanceStore } from '../../services/instanceStore';
+import { tcpConnectProbe } from '../../services/pairingProbeService';
 import { remoteAnnounceRefreshService } from '../../services/remoteAnnounceRefresh';
 import { settingsStore } from '../../services/settingsStore';
 import { describeError } from '../../services/scheduleStore';
@@ -114,6 +116,8 @@ export struct InstancesPane {
   @State pairingText: string = '';
   /** 手动配对的 typed 错误中文文案（固定原因，永不含 token / 地址 / 指纹的值）。 */
   @State pairingError: string = '';
+  /** 正在做 ≤3 s 的 TCP 探活：按钮进入 busy，防重复点击；探针全程异步不卡 UI 线程。 */
+  @State pairingBusy: boolean = false;
 
   /**
    * 首配提案（非 @State：候选地址是 capability，绝不进页面响应式状态 / 日志）。
@@ -403,24 +407,39 @@ export struct InstancesPane {
   /**
    * 手动配对（与签名公告的两步同意是**不同路径**）：粘贴电脑面板给出的
    * `DSHDOTS1|…` 或规范 JSON，端口 / 令牌随串带好，不用手输。
-   * 写入统一走 store 的 TOFU 门禁：冲突时逐字上屏 refusal 文案，旧 pin 与旧地址不动；
-   * 成功时只清粘贴框并刷新列表，绝不把 token 拼进任何提示 / 日志。
+   *
+   * mod-pairing-reachability：写表前先做一次真实短超时 TCP 探活（≤3 s，Promise 异步不卡 UI）。
+   * 探针失败 ⇒ typed 原因逐字上屏、**粘贴框原文保留**供改端口重试，整表零写入、不产行、不写 pin；
+   * 探针通过才由 store 的 TOFU 门禁落表，成功提示逐字说明「已配对（地址可达，尚未校验证书）」：
+   * TCP 可达只是传输层事实，不冒充证书指纹已校验的身份真实性。
+   * 绝不把 token 拼进任何提示 / 日志；冲突时旧 pin 与旧地址不动。
    */
-  private addByPairing(): void {
+  private async addByPairing(): Promise<void> {
+    if (this.pairingBusy) {
+      return;
+    }
     const text: string = this.pairingText.trim();
     if (text.length === 0) {
       this.pairingError = '请先粘贴电脑面板生成的配对串';
       return;
     }
-    const result = instanceStore.addByPairing(text);
-    if (!result.ok) {
-      this.pairingError = result.reason;
-      return;
-    }
-    this.pairingText = '';
+    this.pairingBusy = true;
     this.pairingError = '';
-    promptAction.showToast({ message: result.reason, duration: 3000 });
-    this.reload();
+    try {
+      const result = await instanceStore.addByPairing(text, tcpConnectProbe);
+      if (!result.ok) {
+        // 失败保留粘贴原文（与 sync-repo 保存同一口径）：改端口 / 地址后可直接重试。
+        this.pairingError = result.reason;
+        return;
+      }
+      this.pairingText = '';
+      promptAction.showToast({ message: result.reason, duration: 3000 });
+      this.reload();
+    } finally {
+      if (!this.disposed) {
+        this.pairingBusy = false;
+      }
+    }
   }
 
   /** 删除任意远程行（没有受保护的本机行）；删完立刻重读内存镜像，空表不回补实例。 */
@@ -684,8 +703,21 @@ export struct InstancesPane {
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .textAlign(TextAlign.Start)
 
-      // 手动配对固定过证书指纹的行：只展示前缀 + 已固定标记，完整指纹 / 令牌都不上屏。
+      // 手动配对行的文案只陈述**传输层事实**：探针通过也说「地址可达，尚未校验证书」，
+      // 绝不把 TCP 可达写成身份真实性（证书指纹由 TLS lane gate）。之后监听器停了，
+      // 「打开」失败会把同一行降为不可达（复用既有三态，不另造状态机）。
       if (view.fingerprintPrefix !== undefined && view.fingerprintPrefix.length > 0) {
+        Text(view.reachable === 'ok'
+          ? PAIRING_REACHABLE_WORDING
+          : view.reachable === 'fail' ? '已配对（当前不可连接）' : '已配对（尚未探测地址可达性）')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor(view.reachable === 'fail' ? $r('app.color.danger') : $r('app.color.text_secondary'))
+          .width('100%')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .textAlign(TextAlign.Start)
+        // 只展示前缀 + 已固定标记，完整指纹 / 令牌都不上屏。
         Text(`指纹 ${view.fingerprintPrefix} · 已固定指纹`)
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)
@@ -794,6 +826,12 @@ export struct InstancesPane {
           .fontColor($r('app.color.text_secondary'))
           .width('100%')
           .textAlign(TextAlign.Start)
+        Text('添加前会先连一次电脑的监听端口（最多 3 秒）；连不上不会保存，配对串会留在框里供修改重试。')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
         TextInput({ text: this.pairingText, placeholder: 'DSHDOTS1|… 或 {…} 配对 JSON' })
           .width('100%')
           .height(TOUCH_MIN)
@@ -814,7 +852,7 @@ export struct InstancesPane {
           label: '添加实例',
           actionEnabled: true,
           disabledReason: '',
-          busy: false,
+          busy: this.pairingBusy,
           variant: 'primary',
           block: false,
           onTap: (): void => {

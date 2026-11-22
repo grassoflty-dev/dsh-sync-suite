@@ -31,8 +31,9 @@ import {
 import type { DsInstance, InstanceProblem, RedactedInstance } from '../model/instances';
 import { seedInstances } from '../model/instanceSeed';
 import type { LegacyInstanceSettings } from '../model/instanceSeed';
-import { addPairedInstance } from '../model/pairingPayload';
+import { addPairedInstanceWithProbe } from '../model/pairingPayload';
 import type { PairingAddResult } from '../model/pairingPayload';
+import type { PairingProbeTransport } from '../model/pairingProbe';
 
 /** 唯一持久键：JSON 字符串信封。 */
 const INSTANCE_STORAGE_KEY: string = 'instances.json';
@@ -138,12 +139,13 @@ export class InstanceStore {
   }
 
   /**
-   * 手动配对落表：纯模型 `addPairedInstance()` 先做 schema 校验与 TOFU 比对，
-   * 只有它返回 ok 才整表替换；冲突 / 坏载荷一次都不写盘（pin 与旧地址字节不变）。
-   * 返回给页面的是 typed code + 固定中文文案，reason 永不含令牌值。
+   * 手动配对落表（mod-pairing-reachability）：先做真实短超时 TCP 探活，再走 TOFU 门禁。
+   * 只有「探测通过 + schema 合法 + TOFU 不冲突」（result.ok）才整表替换；
+   * 连接被拒 / 超时 / 指纹冲突 / 坏载荷一律零写入，pin 与旧地址逐字不变，
+   * 粘贴框由页面保留供用户改端口后重试。返回 typed code + 固定中文文案（永不含令牌值）。
    */
-  addByPairing(text: string): PairingAddResult {
-    const result: PairingAddResult = addPairedInstance(this.load(), text);
+  async addByPairing(text: string, probe: PairingProbeTransport): Promise<PairingAddResult> {
+    const result: PairingAddResult = await addPairedInstanceWithProbe(this.load(), text, probe);
     if (result.ok) {
       this.commit(result.items);
     }

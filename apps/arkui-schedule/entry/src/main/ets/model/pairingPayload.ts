@@ -20,7 +20,13 @@
  */
 
 import type { DsInstance } from './instances';
-import { deriveCapabilities, instanceIdFromUrl, pinnedFingerprintPrefix, sortInstances } from './instances';
+import {
+  applyReachability,
+  deriveCapabilities,
+  instanceIdFromUrl,
+  pinnedFingerprintPrefix,
+  sortInstances
+} from './instances';
 import { announcementBaseUrl } from './remoteAnnounceRefresh';
 import { normalizeRemoteUrl } from './remoteUrl';
 import { isIpv6Literal } from './remoteUrl';
@@ -29,6 +35,8 @@ import {
   REMOTE_MODE_LAN,
   REMOTE_MODE_TAILSCALE
 } from './remoteAccess';
+import { probePairingTarget, PAIRING_PROBE_TIMEOUT_MS } from './pairingProbe';
+import type { PairingProbeTransport } from './pairingProbe';
 
 /** 配对载荷版本（只认 1）。 */
 export const PAIRING_VERSION: number = 1;
@@ -53,7 +61,10 @@ export type PairingErrorCode =
   | 'E_PAIRING_PORT'
   | 'E_PAIRING_TOKEN'
   | 'E_PAIRING_FINGERPRINT'
-  | 'E_PAIRING_FINGERPRINT_MISMATCH';
+  | 'E_PAIRING_FINGERPRINT_MISMATCH'
+  // mod-pairing-reachability：配对先探活，连不上 / 指纹不符都不许写成 healthy 行。
+  | 'E_PAIRING_UNREACHABLE'
+  | 'E_PAIRING_TLS_MISMATCH';
 
 /** 成功时 `code='ok'`；失败时 `payload=null` 且 `reason` 为固定中文文案。 */
 export interface PairingParseResult {
@@ -101,6 +112,14 @@ export const PAIRING_FINGERPRINT_MISMATCH_WORDING: string =
 /** 成功提示（不含地址 / 指纹值 / 令牌）。 */
 export const PAIRING_ADDED_WORDING: string = '已添加实例并固定证书指纹';
 export const PAIRING_UPDATED_WORDING: string = '证书指纹一致，已更新实例地址';
+
+/**
+ * 探活通过后的成功提示：**只陈述传输层事实**（地址可达），并显式声明尚未校验证书。
+ * TCP 可达 ≠ 配对真实性；身份真实性由 TLS lane 的握手 + 叶证书指纹比对 gate，
+ * 本路径 `fingerprintVerified=false`，所以文案绝不裸写「已验证」，避免读成身份已校验。
+ * 只有 `addPairedInstanceWithProbe()` 会产出它；旧同步入口仍保留原文案给老调用点。
+ */
+export const PAIRING_REACHABLE_WORDING: string = '已配对（地址可达，尚未校验证书）';
 
 const INSTANCE_ID_RE: RegExp = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const TOKEN_RE: RegExp = /^[A-Za-z0-9+/=_-]{32,512}$/;
@@ -590,4 +609,63 @@ export function addPairedInstance(list: DsInstance[], text: string): PairingAddR
     action: 'added'
   };
   return added;
+}
+
+/**
+ * 配对前探活的**唯一**新增入口（mod-pairing-reachability）：
+ * 解析 → 真实短超时探针 → 只有探针通过才复用上面的 TOFU 落表逻辑 → 把目标行标成「刚验证过可达」。
+ *
+ * - 坏载荷在探针之前被拒（零网络调用、零写入）；
+ * - 探针失败返回 `addFail()`：items 恒空表，调用方只认 `result.ok` 才整表写盘；
+ * - TOFU 冲突 / URL 不合法仍由同步 `addPairedInstance()` 原样判定，不放宽任何一条断言。
+ *
+ * 与同步 `addPairedInstance()` 分工：后者保持纯 schema + TOFU 语义供既有测试直接驱动；
+ * 本函数只在它前面加一道真实可达性门禁，绝不改写 pin / id / 地址的派生规则。
+ */
+export async function addPairedInstanceWithProbe(
+  list: DsInstance[],
+  text: string,
+  probe: PairingProbeTransport,
+  timeoutMs: number = PAIRING_PROBE_TIMEOUT_MS,
+  nowMs: number = Date.now()
+): Promise<PairingAddResult> {
+  const parsed: PairingParseResult = parsePairingPayload(text);
+  if (!parsed.ok || parsed.payload === null) {
+    // 坏载荷不发网络请求：直接 typed 拒绝，整表零写入。
+    const code: PairingErrorCode = parsed.code === 'ok' ? 'E_PAIRING_MALFORMED' : parsed.code;
+    return addFail(code, parsed.reason);
+  }
+  const payload: PairingPayload = parsed.payload;
+  // 先探活再构造落表结果——这就是「配对 ≠ 本地写一行」的门禁。
+  const outcome = await probePairingTarget(
+    payload.host, payload.port, payload.tlsFingerprint, probe, timeoutMs
+  );
+  if (!outcome.ok) {
+    // ArkTS 不做跨联合分支的 code 收窄：在这里显式投影成公共 typed 码，
+    // 既不回显任何探测细节，也不会把 'ok' 漏进失败结果。
+    const code: PairingErrorCode =
+      outcome.code === 'E_PAIRING_TLS_MISMATCH' ? 'E_PAIRING_TLS_MISMATCH' : 'E_PAIRING_UNREACHABLE';
+    return addFail(code, outcome.reason);
+  }
+  const built: PairingAddResult = addPairedInstance(list, text);
+  if (!built.ok) {
+    // TOFU 冲突等 reject 原样透传，整表零写入。
+    return built;
+  }
+  // 探针刚刚连通过：把目标行从 unknown / fail 推进为 ok，并记下这次成功探测时间。
+  // 之后若监听器停了，「打开」失败会经 markReachable(fail) 把同一行降为「不可达」。
+  let rows: DsInstance[] = built.items;
+  for (const item of built.items) {
+    if (item.pairingInstanceId === payload.instanceId) {
+      rows = applyReachability(rows, item.id, 'ok', nowMs);
+      break;
+    }
+  }
+  return {
+    ok: true,
+    items: rows,
+    code: 'ok',
+    reason: PAIRING_REACHABLE_WORDING,
+    action: built.action
+  };
 }
