@@ -16,9 +16,12 @@
  * → reload()/loadSummary()；右栏仍用自己的 `paneRefreshing`。共享包装让「只修一栏」的布局漂移
  * 无法再发生（静态守卫同时钉住竖屏与横屏两处调用）。
  *
- * 已知边界：onPageShow() 的「保存返回一次性标记」消费在 fallback 路由（Index）照常触发；
- * 在 shell 路由下页面生命周期属于 Home，本批未把 Home 的 onPageShow 转发进来（unverified，
- * 下一片接线时处理）。
+ * 新建后即时可见（mod-home-list-instant-refresh）：shell 路由下页面生命周期属于 Home，
+ * 本面板是保活的外部 @Component，框架不会调用自己的 onPageShow()。现在 Home.onPageShow()
+ * 每次推进 `scheduleShowTick` 并作为 `showTick` 传进来，@Watch('onShowTick') 直接复用原来的
+ * onPageShow() 入口：消费一次性保存标记 → reload() 重读 v2 时间线 → refreshQuery() 按当前
+ * tab / 搜索 / 作者条件重算 visibleRecords。于是新建返回后不必切「未完成 / 当日全部日程」
+ * 就能看到新记录；fallback 路由（Index）仍由它自己的 onPageShow 走同一条链。
  */
 /**
  * 主页：日期条 + 当日全部日程/未完成 两段 + 列表（左勾选 / 中标题+时间 / 右手迹）
@@ -170,6 +173,14 @@ export struct SchedulePane {
    * 本组件的 @State、滚动位置与选中态在分段切换后仍然保留）。
    */
   @Prop active: boolean = true;
+  /**
+   * 页面重新显示信号（由 Home.onPageShow 每次 +1 转发）：@Watch 里消费一次性保存标记并重读列表。
+   *
+   * shell 路由下本面板常驻在 Home 的 Stack 里（Visibility.Hidden 保活），框架不会调用它的
+   * onPageShow()；这是「保存返回 → 列表即时刷新」唯一的 show 触发源。只传一个单调递增的
+   * 数字，不在外壳里替面板读盘 / 改筛选，单一事实来源仍是面板自己的 reload()。
+   */
+  @Prop @Watch('onShowTick') showTick: number = 0;
 
   /** 当前查看的日期（今日 tab 数据源）。 */
   @State selectedDate: string = localDateKey(new Date());
@@ -349,6 +360,16 @@ export struct SchedulePane {
       this.syncStatus = syncStatusStore.setPending(
         0, error instanceof Error ? error.message : String(error));
     }
+  }
+
+  /**
+   * Home.onPageShow 转发来的 show 信号：复用既有的「保存返回 → 局部重读」入口。
+   *
+   * 不在这里另写刷新逻辑（避免两套语义漂移）：消费标记、重读 records、按当前 filter 重算
+   * visibleRecords 全部由 onPageShow() 完成。没有定时器、没有轮询，只有页面生命周期的一次事件。
+   */
+  onShowTick(): void {
+    this.onPageShow();
   }
 
   /** 从编辑页/设置页返回时重新加载（追加写语义下必须重读）。 */

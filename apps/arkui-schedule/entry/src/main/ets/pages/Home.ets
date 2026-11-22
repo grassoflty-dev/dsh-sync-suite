@@ -82,6 +82,14 @@ struct Home {
   @State contentWidth: number = 0;
   /** compact 抽屉是否展开。 */
   @State drawerOpen: boolean = false;
+  /**
+   * 日程面板的「页面重新显示」信号（单调递增；每次 onPageShow +1）。
+   *
+   * Home 是 @Entry 页，只有它拿得到 onPageShow 生命周期；日程面板是保活的外部 @Component，
+   * 自己的 onPageShow 永远不会被框架调用。新建记录后从编辑页返回时，必须由这里把 show 信号
+   * 转给面板，面板在 @Watch 里消费一次性保存标记并重读列表——否则列表要等用户切一下 tab 才刷新。
+   */
+  @State scheduleShowTick: number = 0;
 
   aboutToAppear(): void {
     try {
@@ -98,6 +106,16 @@ struct Home {
       this.section = SHELL_SECTION_DOTS;
       this.deepLinkId = '';
     }
+  }
+
+  /**
+   * 页面重新显示：把一次性 show 信号转给日程面板（由它的 @Watch 消费保存标记 → 重读列表）。
+   *
+   * 只推进 tick、不在外壳里替面板读盘 / 改筛选：单一事实来源仍是面板自己的 reload()。
+   * 不跑定时器、不轮询；show 是页面生命周期的自然一次事件。
+   */
+  onPageShow(): void {
+    this.scheduleShowTick = this.scheduleShowTick + 1;
   }
 
   /**
@@ -193,7 +211,8 @@ struct Home {
           })
           SchedulePane({
             deepLinkId: this.deepLinkId,
-            active: this.section === SHELL_SECTION_SCHEDULE
+            active: this.section === SHELL_SECTION_SCHEDULE,
+            showTick: this.scheduleShowTick
           })
           InstancesPane({
             deepLinkId: this.deepLinkId,

@@ -359,7 +359,19 @@ describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
       assert.ok(at >= 0, `Home 没有装配 ${name}`);
       const keys = passedKeys(HOME_CODE.slice(at), name);
       assert.ok(keys !== null, `${name} 装配点必须有属性区`);
-      assert.deepEqual([...keys].sort(), ['active', 'deepLinkId'], '少传 = 保活/深链断线；多传 = 名字拼错被静默忽略');
+      // mod-home-list-instant-refresh：仅日程面板多一个 showTick（Home.onPageShow 的 show 信号），
+      // 其余三面仍是 deepLinkId + active 两 prop；旧断言逐字保留为三面的期望值，没有放宽。
+      const expected = name === 'SchedulePane'
+        ? ['active', 'deepLinkId', 'showTick']
+        : ['active', 'deepLinkId'];
+      assert.deepEqual([...keys].sort(), expected, '少传 = 保活/深链/即时刷新断线；多传 = 名字拼错被静默忽略');
+      if (name === 'SchedulePane') {
+        assert.match(code, /@Prop @Watch\('onShowTick'\) showTick: number = 0;/,
+          '日程面板必须用 @Watch 接住 Home 转发的 show 信号');
+        assert.match(HOME_CODE, /@State scheduleShowTick: number = 0;/, 'Home 必须持有 show tick');
+        assert.match(HOME_CODE, /onPageShow\(\): void \{[\s\S]{0,200}scheduleShowTick = this\.scheduleShowTick \+ 1;/,
+          'Home.onPageShow 必须推进 show tick');
+      }
     }
   });
 

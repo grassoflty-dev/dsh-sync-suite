@@ -683,4 +683,25 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
       assert.equal(dots.source.includes(api), false, `只读面板不得调用 ${api}`);
     }
   });
+
+  // mod-home-list-instant-refresh（新增正向守卫，旧 P-01..P-26 一条未删）：
+  // 面板用 @Watch 接住 Home 的 show tick → 复用 onPageShow → reload → refreshQuery 重算 visible，
+  // 保证新建记录在当前筛选下立即出现，不依赖切 tab。
+  test('P-27 日程面板 show → reload → re-derive 链路（新建即时可见）', () => {
+    const schedule = pane('SchedulePane');
+    assert.match(schedule.source, /@Prop @Watch\('onShowTick'\) showTick: number = 0;/,
+      '日程面板必须声明 @Watch 的 showTick');
+    const watcher = blockAfter(schedule.source, '\n  onShowTick(): void ');
+    assert.match(watcher, /this\.onPageShow\(\);/, 'watcher 必须复用原保存返回入口');
+    assert.equal(/setInterval|setTimeout/.test(watcher), false, 'watcher 不得引入定时器');
+    const onShow = blockAfter(schedule.source, '\n  onPageShow(): void ');
+    assert.match(onShow, /this\.consumeSavedMarker\(\)[\s\S]{0,200}this\.reload\(\)/,
+      '保存返回必须先消费标记再重读列表');
+    const reload = blockAfter(schedule.source, '\n  private reload(): void ');
+    assert.match(reload, /this\.refreshQuery\(\);/, 'reload 必须重算 derive');
+    const refresh = blockAfter(schedule.source, '\n  private refreshQuery(): void ');
+    assert.match(refresh, /this\.visibleRecords = applyQuery\(this\.records, filter\);/,
+      'visibleRecords 必须由当前 records + 当前 filter 派生');
+    assert.match(schedule.source, /ForEach\(\s*this\.visibleRecords/, '列表必须渲染派生后的 visibleRecords');
+  });
 });

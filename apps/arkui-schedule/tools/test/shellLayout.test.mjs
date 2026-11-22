@@ -578,4 +578,19 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       assert.equal(code.includes(api), false, `只读面板不得调用 ${api}`);
     }
   });
+
+  // mod-home-list-instant-refresh（新增正向守卫，旧 L-01..L-24 一条未删）：
+  // shell 路由下只有 Home 拿得到 onPageShow，必须把 show 信号转给日程面板，
+  // 否则新建记录要等用户切 tab 才显示（用户反馈的安装版 1000006 行为）。
+  test('L-25 Home.onPageShow 把 show tick 转给日程面板（新建后即时可见）', () => {
+    assert.match(HOME, /@State scheduleShowTick: number = 0;/, 'Home 必须持有单调递增的 show tick');
+    const show = blockAfter(HOME, '\n  onPageShow(');
+    assert.match(show, /this\.scheduleShowTick = this\.scheduleShowTick \+ 1;/,
+      'onPageShow 必须推进 tick（不替面板读盘 / 改筛选）');
+    assert.equal(/setInterval|setTimeout/.test(show), false, 'show 信号不得用定时器 / 轮询伪造');
+    assert.match(HOME, /SchedulePane\(\{[\s\S]{0,240}showTick: this\.scheduleShowTick/,
+      'SchedulePane 必须收到 show tick');
+    assert.equal((HOME.match(/showTick: this\.scheduleShowTick/g) ?? []).length, 1,
+      'show tick 只能装配给日程面板一处');
+  });
 });
