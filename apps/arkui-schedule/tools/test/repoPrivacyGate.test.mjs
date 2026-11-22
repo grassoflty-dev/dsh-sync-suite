@@ -275,8 +275,10 @@ test('A1 public 判定：本地写成功 + 停放 outbox，推送拒绝，状态
   assert.equal(publicDecision.code, 'E_REPO_PUBLIC');
   let state = appGate.applyRepoVisibilityDecision(appGate.initialRepoVisibilityGate(), publicDecision, 1000);
   assert.equal(state.blocked, true);
-  // 推送入口在 60s 窗口内复用该拒绝，不再发第二次调用。
-  assert.equal(appGate.shouldRunRepoVisibilityCheck(state, 1000 + 1000, false), false);
+  // mod-sync-silence-phase-b：阻塞态必须在 60 s 窗口内也强制实时复核，
+  // 否则仓库转私有后没有后续事件能解挡；sticky 由「只有通过的实时校验才清挡」保证。
+  assert.equal(appGate.shouldRunRepoVisibilityCheck(state, 1000 + 1000, false), true,
+    '阻塞态绕过 60 s 去重');
   const reused = appGate.cachedRepoVisibilityDecision(state);
   assert.equal(reused.code, 'E_REPO_PUBLIC');
   // 本地写不受影响。
@@ -355,7 +357,8 @@ test('S2 force 校验（保存 / 测试连接）绕过 60 s 窗口，且公开�
   }
   const decision = { ok: false, code: 'E_REPO_PUBLIC', message: MESSAGES.E_REPO_PUBLIC };
   const state = appGate.applyRepoVisibilityDecision(appGate.initialRepoVisibilityGate(), decision, 1000);
-  assert.equal(appGate.shouldRunRepoVisibilityCheck(state, 1001, false), false);
+  assert.equal(appGate.shouldRunRepoVisibilityCheck(state, 1001, false), true,
+    '阻塞态也实时查（mod-sync-silence-phase-b）');
   assert.equal(appGate.shouldRunRepoVisibilityCheck(state, 1001, true), true, '保存 / 测试连接必须实时查');
   const page = readEts('pages/SettingsSync.ets');
   assert.match(page, /repoVisibilityChecker\.checkNow\(/);

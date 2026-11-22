@@ -300,9 +300,15 @@ test('HSS-07 单闸证据：Home 只经 globalRefreshCoordinator.runOnce，没�
   assert.doesNotMatch(startupHooks, /runConfiguredCycle\s*\(/, '启动钩子不得直连周期')
   assert.match(appear, /homeStartupSync\.configure\(\{/, 'Home 登记一次性启动钩子')
   assert.match(appear, /homeStartupSync\.request\(\)/, '冷启动提出一次请求')
-  assert.match(appear, /globalRefreshCoordinator\.runOnce\(\)/, '唯一周期入口是协调器')
-  assert.match(appear, /isRepoConfigured\(input\)/, '已配置判据复用 repoConfigured 单一来源')
-  assert.match(appear, /settingsStore\.load\(abilityContext\)/, '配置冷读，不用过期缓存')
+  // mod-sync-silence-phase-b：仍是唯一协调器入口，只是多带一个触发名给 leader 日志。
+  assert.match(appear, /globalRefreshCoordinator\.runOnce\(undefined, 'cold-launch'\)/,
+    '唯一周期入口是协调器（冷启动名）')
+  // mod-sync-silence-phase-b：判据抽成 Home.isSyncConfigured()，供冷启动 / 前台 / 网络共用。
+  assert.match(HOME, /private async isSyncConfigured\(\): Promise<boolean>/, '判据单一来源方法仍在');
+  assert.match(HOME, /isRepoConfigured\(input\)/, '已配置判据复用 repoConfigured 单一来源');
+  assert.match(HOME, /settingsStore\.load\(ctx\)/, '配置冷读，不用过期缓存');
+  assert.match(appear, /isConfigured: async \(\): Promise<boolean> => this\.isSyncConfigured\(\)/,
+    '启动钩子复用同一判据');
   assert.doesNotMatch(appear, /promptAction|showToast/, '启动路径零 toast')
   const show = memberBody(HOME, 'onPageShow')
   assert.match(show, /homeStartupSync\.request\(\)/, '每次 show 都问一次，但进程内只消费一次')

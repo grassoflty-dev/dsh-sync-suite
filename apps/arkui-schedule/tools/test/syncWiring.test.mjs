@@ -1004,10 +1004,11 @@ test('67 static (review M1/m1): one status source, no fabricated success, diagno
   const actionAt = page.indexOf('private async runAction(');
   const [actionStart, actionEnd] = matchBrace(page, page.indexOf('{', actionAt));
   assert.match(page.slice(actionStart, actionEnd), /if \(op === 'pull'\) \{\s*this\.lastSyncAt = nowIso\(\);/);
-  // 诊断区只读：可执行文案不渲染；状态行点一下仍可重试。
+  // 诊断区只读：可执行文案不渲染；状态行也不再可点重试（mod-sync-silence-phase-b）。
   assert.doesNotMatch(section, /statusReadiness/);
   assert.doesNotMatch(section, /describePushReadiness/);
-  assert.match(section, /onRetryStatus\(\)/);
+  assert.match(section, /Text\(this\.syncMessage\)/, '唯一状态行仍渲染');
+  assert.doesNotMatch(section, /onRetryStatus\(\)/, '状态行不得挂手动重试');
   // 相对时间兜底已整支删除（Lead 追加要求）。
   assert.doesNotMatch(store, /刚刚/);
   assert.match(store, /label = TEXT_NEVER;/);

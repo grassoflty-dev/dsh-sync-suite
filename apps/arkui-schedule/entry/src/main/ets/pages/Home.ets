@@ -35,8 +35,16 @@
 import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { webview } from '@kit.ArkWeb';
+import { BusinessError } from '@kit.BasicServicesKit';
+import { connection } from '@kit.NetworkKit';
 import { globalRefreshCoordinator, isRepoBlockedStatus } from '../model/homeGlobalRefresh';
 import type { RefreshCycleResult } from '../model/homeGlobalRefresh';
+// mod-sync-silence-phase-b：前台 5 分钟冷却 / 网络变化合并的纯决策（零 SDK，Node 可测）。
+import {
+  NETWORK_DEBOUNCE_MS,
+  shouldArmNetworkDebounce,
+  shouldRunForegroundTrigger
+} from '../model/syncTriggerPolicy';
 import { isRepoConfigured } from '../model/repoConfigured';
 import type { RepoConfigInput } from '../model/repoConfigured';
 import { homeStartupSync, BRIDGE_NOT_READY_REASON } from '../model/homeStartupSync';
@@ -124,7 +132,23 @@ struct Home {
   @State cloudChatRefreshTick: number = 0;
   @State statusRefreshTick: number = 0;
 
+  // ---------------------------------------------------------------- 静默触发（mod-sync-silence-phase-b）
+  /** 前台触发 / 配置冷读共用的 Ability context（aboutToAppear 里取一次）。 */
+  private abilityContext: common.UIAbilityContext | null = null;
+  /** 网络恢复监听：页面销毁时 unregister，避免泄漏。 */
+  private netConnection: connection.NetConnection | null = null;
+  /** 网络变化 debounce 定时器（-1 = 未武装）。 */
+  private netDebounceTimer: number = -1;
+  /** 上一次已受理的 transport（同类型事件忽略）。 */
+  private lastTransport: string = '';
+
   aboutToAppear(): void {
+    // mod-sync-silence-phase-b：给纯层协调器安装唯一的日志落点。纯模型里不能引用 console
+    // （Node tsc 无 DOM lib），所以由 ETS 宿主注入；日志无插值 / 无 token / 无 URL。
+    globalRefreshCoordinator.setLogger((line: string): void => {
+      console.info(line);
+    });
+
     // 只登记一次完整的四读回钩子：日程 / dots / 云端 / 状态存储（最后写）。
     // 日程面板自己的下拉只传覆盖项（它自己的 reload + 状态 @State），dots / cloud 读回继承这里。
     globalRefreshCoordinator.configure({
@@ -173,26 +197,15 @@ struct Home {
     // 在 Home 上补齐）。这里只登记钩子并提出一次请求；桥未就绪时由 GitBridgeHost.onReady
     // 兑现，绝不静默丢弃。重复 onPageShow / 重渲染不会再来第二个周期。
     const abilityContext: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+    this.abilityContext = abilityContext;
     homeStartupSync.configure({
       isBridgeReady: (): boolean => syncController.isReady(),
-      isConfigured: async (): Promise<boolean> => {
-        try {
-          const settings: ScheduleSettings = await settingsStore.load(abilityContext);
-          const input: RepoConfigInput = {
-            repoUrl: settings.repoUrl,
-            token: settings.token,
-            authMode: settings.authMode
-          };
-          // 与设置页 / 周期共用唯一已配置判据；隐私阻断不等于未配置，照样进周期由门禁拒推。
-          return isRepoConfigured(input);
-        } catch {
-          // 冷读失败 = 没有可证明的配置 ⇒ 零周期、零状态写入、零 toast。
-          return false;
-        }
-      },
+      // 与前台 / 网络触发共用同一个「已配置」判据（冷读失败按未配置处理）。
+      isConfigured: async (): Promise<boolean> => this.isSyncConfigured(),
       // 唯一周期入口就是单飞协调器；Home 里没有第二处 runConfiguredCycle 调用。
+      // mod-sync-silence-phase-b：触发名交给协调器，leader 每次尝试恰好打一行日志。
       runOnce: async (): Promise<void> => {
-        await globalRefreshCoordinator.runOnce();
+        await globalRefreshCoordinator.runOnce(undefined, 'cold-launch');
       },
       reportFailure: (reason: string): void => {
         // 唯一失败面：既有状态行（SyncStatusRow）；不弹 toast、不写第二份错误文案。
@@ -201,6 +214,10 @@ struct Home {
       }
     });
     homeStartupSync.request();
+
+    // 网络恢复静默触发：订阅默认网络的 transport 变化，2 s debounce 合并突发；
+    // 权限 / 后台限制导致订阅不可用时只降级到前台触发，绝不假装已经监听成功。
+    this.subscribeNetworkRegain();
 
     try {
       const params = router.getParams() as Record<string, string>;
@@ -228,6 +245,144 @@ struct Home {
     this.scheduleShowTick = this.scheduleShowTick + 1;
     // 冷启动请求只在进程第一次生效；这里再调也不会多跑一个周期（无定时器 / 无轮询）。
     homeStartupSync.request();
+    // 前台恢复（mod-sync-silence-phase-b）：选 Home.onPageShow 而不是 EntryAbility.onForeground——
+    // 这里才有已登记的协调器钩子和配置判据。冷启动刚同步完 / 5 分钟内 / 在途 / 未配置均零周期。
+    void this.maybeForegroundSync();
+  }
+
+  /** 与冷启动 / 网络恢复共用的唯一「已配置」判据；读盘失败按未配置处理（零周期、零状态写入）。 */
+  private async isSyncConfigured(): Promise<boolean> {
+    const ctx: common.UIAbilityContext | null = this.abilityContext;
+    if (ctx === null) {
+      return false;
+    }
+    try {
+      const settings: ScheduleSettings = await settingsStore.load(ctx);
+      const input: RepoConfigInput = {
+        repoUrl: settings.repoUrl,
+        token: settings.token,
+        authMode: settings.authMode
+      };
+      // 隐私阻断不等于未配置：照样进周期，由既有门禁决定能不能推。
+      return isRepoConfigured(input);
+    } catch {
+      return false;
+    }
+  }
+
+  /** 前台恢复的一次静默周期（冷却 / 配置 / 启动幂等全部在这里收敛）。 */
+  private async maybeForegroundSync(): Promise<void> {
+    const startup = homeStartupSync.snapshot();
+    // 冷启动请求还挂着（桥未就绪）：绝不在前台插一脚，等它自己发一次，避免冷启动双同步。
+    if (startup.requested && !startup.attempted) {
+      return;
+    }
+    if (!(await this.isSyncConfigured())) {
+      return;
+    }
+    if (globalRefreshCoordinator.isRefreshing()) {
+      return;
+    }
+    const due: boolean = shouldRunForegroundTrigger({
+      configured: true,
+      inFlight: false,
+      nowMs: Date.now(),
+      lastAttemptMs: globalRefreshCoordinator.lastAttemptAt()
+    });
+    if (!due) {
+      return;
+    }
+    // 唯一周期入口：单飞协调器，不由本方法直接调 runConfiguredCycle。
+    await globalRefreshCoordinator.runOnce(undefined, 'foreground');
+  }
+
+  /**
+   * 网络恢复订阅（mod-sync-silence-phase-b）：只关心默认网络的 transport 真正变化。
+   * `register()` 需要 ohos.permission.GET_NETWORK_INFO（已声明在 module.json5）；权限被拒 /
+   * 系统服务不可用 / 后台被限制时静默降级——前台触发仍在，不留「假装已监听」的假象。
+   */
+  private subscribeNetworkRegain(): void {
+    try {
+      const net: connection.NetConnection = connection.createNetConnection();
+      net.on('netCapabilitiesChange', (info: connection.NetCapabilityInfo): void => {
+        this.onNetTransportChanged(this.transportOf(info));
+      });
+      net.on('netLost', (_handle: connection.NetHandle): void => {
+        // 断网后回到同一种 transport 也算一次真实变化，允许再次触发。
+        this.lastTransport = '';
+      });
+      net.register((error: BusinessError): void => {
+        if (error !== undefined && error !== null) {
+          // 订阅失败只降级到前台触发，不写状态行、不弹 toast（这不是同步结果）。
+          this.netConnection = null;
+        }
+      });
+      this.netConnection = net;
+    } catch {
+      this.netConnection = null;
+    }
+  }
+
+  /** transport 标识只取 bearer 类型号，不含地址 / 凭据；空串表示「没有可用网络」。 */
+  private transportOf(info: connection.NetCapabilityInfo): string {
+    const bearers: connection.NetBearType[] = info.netCap.bearerTypes;
+    if (bearers.length === 0) {
+      return '';
+    }
+    return `bearer-${String(bearers[0])}`;
+  }
+
+  /** 事件侧：同类型 / 断开 / 在途一律忽略，真正变化才（重新）武装 2 s debounce。 */
+  private onNetTransportChanged(transport: string): void {
+    const armed: boolean = shouldArmNetworkDebounce({
+      // 配置在定时器触发时再冷读一次；这里无法 await，避免把异步读盘塞进网络回调。
+      configured: true,
+      inFlight: globalRefreshCoordinator.isRefreshing(),
+      transport: transport,
+      lastTransport: this.lastTransport
+    });
+    if (!armed) {
+      return;
+    }
+    if (this.netDebounceTimer !== -1) {
+      clearTimeout(this.netDebounceTimer);
+      this.netDebounceTimer = -1;
+    }
+    this.netDebounceTimer = setTimeout((): void => {
+      this.netDebounceTimer = -1;
+      void this.runNetworkCycle(transport);
+    }, NETWORK_DEBOUNCE_MS);
+  }
+
+  /** 定时器到期：再查一次配置 / 在途 / 同类型，然后经协调器跑唯一一次周期。 */
+  private async runNetworkCycle(transport: string): Promise<void> {
+    if (transport === this.lastTransport || globalRefreshCoordinator.isRefreshing()) {
+      return;
+    }
+    if (!(await this.isSyncConfigured())) {
+      return;
+    }
+    if (globalRefreshCoordinator.isRefreshing() || transport === this.lastTransport) {
+      return;
+    }
+    this.lastTransport = transport;
+    await globalRefreshCoordinator.runOnce(undefined, 'network');
+  }
+
+  /** 页面消失：撤定时器 + unregister，避免页面重建后重复订阅造成泄漏。 */
+  aboutToDisappear(): void {
+    if (this.netDebounceTimer !== -1) {
+      clearTimeout(this.netDebounceTimer);
+      this.netDebounceTimer = -1;
+    }
+    if (this.netConnection !== null) {
+      try {
+        this.netConnection.unregister((_error: BusinessError): void => {});
+      } catch {
+        // 已注销 / 订阅本就失败：忽略，不留悬挂引用。
+      }
+      this.netConnection = null;
+    }
   }
 
   /**
@@ -265,7 +420,9 @@ struct Home {
    * 两个手势同时到达时只跑一个周期、四个读回只发生一次；跟随者也 await 到完成结果。
    */
   private async onGlobalPull(): Promise<void> {
-    await globalRefreshCoordinator.runOnce();
+    // 外壳下拉的触发名交给协调器；日程面板自己的下拉仍用 Phase A 的 runCycle 内日志，
+    // 两条路径各自恰好一行，不重复定义（S5 守卫钉住面板那一行）。
+    await globalRefreshCoordinator.runOnce(undefined, 'pull');
   }
 
   /**

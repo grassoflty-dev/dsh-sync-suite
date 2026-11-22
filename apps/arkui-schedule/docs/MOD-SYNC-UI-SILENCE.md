@@ -49,20 +49,34 @@ An absent control is not proof of silence; the trigger inventory and its log are
   hashes are not module-level evidence. The durable module-level evidence is the source diff
   plus the abc **name hit** `[sync-trigger] pull` (exactly once).
 
-## 2. Silent-trigger inventory — present / missing (do not invent)
+## 2. Silent-trigger inventory — Phase B final state
+
+**Phase B update (`mod-sync-silence-phase-b`):** all five triggers below are present, and all
+five now emit an observability line. The Phase A "missing" rows are no longer open work.
 
 | # | Trigger | Status today | Evidence / where | Gap to schedule |
 |---|---------|--------------|------------------|-----------------|
-| 1 | Cold launch | **present** | `pages/Home.ets:127-203` `aboutToAppear()` → `homeStartupSync.configure()` + `request()`; `Home.ets:240-252` `onBridgeReady()` → `homeStartupSync.onBridgeReady()`; `model/homeStartupSync.ts:83-160` (one quota per process, deferred until bridge ready, single `globalRefreshCoordinator.runOnce()`); fallback route has the same wiring in `SchedulePane.onBridgeReady()` | none |
-| 2 | After a successful save | **present** | `services/recordWriter.ets:100,105` → `triggerSync()` at `:116-123` → `syncProtocolStore.runConfiguredCycle()` | none |
-| 3 | Returning to foreground | **missing** | `Home.onPageShow()` at `Home.ets:227-231` only bumps `scheduleShowTick` (list re-read); `homeStartupSync.request()` is called again but `HomeStartupSync.request()` (`model/homeStartupSync.ts:83-89`) consumes one process-wide quota at cold launch, so no second cycle runs. `EntryAbility.onForeground()` (`EntryAbility.ets:121-126`) only logs. | Add a foreground trigger (not a second startup quota); decide dedupe + config gate. Phase B / its own module. |
-| 4 | Network regain | **missing** | No `netAvailable` / `@kit.NetworkKit` connection listener feeds any cycle. The only `@kit.NetworkKit` imports are http clients (`SettingsSync.ets:20`, `GitSyncService.ets:29`, `deepseek.ets:25`, `repoVisibilityChecker.ets:10`, `aiFallbackRunner.ets:18`, `SettingsHost.ets:47`). | Add a net-available listener with dedupe; do not add a polling timer. Phase B / its own module. |
-| 5 | Home pull-to-refresh | **present** | `Home.ets:267-269` `onGlobalPull()` → `globalRefreshCoordinator.runOnce()`; pane's own gesture `SchedulePane.RefreshableList()` → `onPullRefresh()` at `:352-389`; both share the single-flight coordinator | none |
+| 1 | Cold launch | **present** | `pages/Home.ets:127-203` `aboutToAppear()` → `homeStartupSync.configure()` + `request()`; `Home.ets:240-252` `onBridgeReady()` → `homeStartupSync.onBridgeReady()`; `Home.ets:208` `runOnce(undefined,'cold-launch')`; `model/homeStartupSync.ts:83-160` (one quota per process, deferred until bridge ready) | none |
+| 2 | After a successful save | **present** | `services/recordWriter.ets:100,105` → `triggerSync()` → `globalRefreshCoordinator.runOnce(overrides,'save')` at `:153` (single-flight, not a direct `runConfiguredCycle`) | none |
+| 3 | Returning to foreground | **present (Phase B)** | `Home.onPageShow()` (`pages/Home.ets:244-250`) → `maybeForegroundSync()` (`:274-297`): configured gate + 5-minute cooldown (`model/syncTriggerPolicy.ts:14,35-50`) + coordinator single-flight. Chose `Home.onPageShow` over `EntryAbility.onForeground` because Home owns the coordinator hooks. | none |
+| 4 | Network regain | **present (Phase B, foreground-only guarantee)** | `Home.ets:304-371` subscribes `connection.createNetConnection().on('netCapabilitiesChange')` + `netLost`, 2 s debounce, same-type / in-flight filters, `unregister` at `:373-386`; `entry/src/main/module.json5` declares `ohos.permission.GET_NETWORK_INFO`. Limitation below. | background delivery not guaranteed |
+| 5 | Home pull-to-refresh | **present** | `Home.ets:425` global pull → `runOnce(undefined,'pull')`; pane gesture `SchedulePane.onPullRefresh()` → coordinator with Phase A's own log at `:363`; both share the single-flight coordinator | none |
 
-Observability coverage: only the **pane's** pull entry point inside #5 currently logs a
-trigger label (`[sync-trigger] pull`); the Home global-pull path and triggers #1–#4 have no
-`[sync-trigger]` line. Adding those labels is a follow-up, not a new trigger, and must keep
-the one-line-per-attempt / no-payload rule from §1.
+Observability coverage (Phase B): **all five triggers emit exactly one line per attempt** —
+`[sync-trigger] cold-launch`, `[sync-trigger] save`, `[sync-trigger] pull`,
+`[sync-trigger] foreground`, `[sync-trigger] network`. The names are literals in
+`model/homeGlobalRefresh.ts:34-40`; the line is emitted in the coordinator's leader-only
+cycle callback (`:269-275`); the ETS host installs `console.info` at `Home.ets:148-150`.
+The Phase A pane `pull` line stays at `SchedulePane.ets:363`, so that path is logged once, not
+twice. No interpolation / payload / token / URL; `credentialHygiene` restricted files contain
+no `[sync-trigger]` text (`tools/test/syncTriggerMatrix.test.mjs:T9`). The closed set (no
+silently added sixth name) is asserted in T1 with a positive control in T1b.
+
+**Network-regain limitation (explicit, not a claim of background sync):** regain detection
+works **while the page/ability is alive**; HarmonyOS does **not** guarantee
+`netCapabilitiesChange` delivery when suspended, and permission denial / net-service failure
+makes `register()` a no-op ⇒ the app degrades to the **foreground** trigger;
+**background sync is not claimed**.
 
 ## 3. Phase B input — privacy gate loses its "test" button (analysis only)
 

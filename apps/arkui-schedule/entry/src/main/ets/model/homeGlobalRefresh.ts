@@ -25,6 +25,27 @@ import type { SyncRunState } from './syncGuard';
 export const GLOBAL_REFRESH_ACTION: string = 'globalRefresh';
 
 /**
+ * 五个静默触发源（mod-sync-silence-phase-b）：冷启动 / 保存后 / 下拉 / 前台恢复 / 网络恢复。
+ * 名字即整条日志的内容——表里存的是**字面量**，日志调用无插值、无 token、无 URL。
+ */
+export type SyncTriggerName = 'cold-launch' | 'save' | 'pull' | 'foreground' | 'network';
+
+/** 名字 → 完整日志行（字面量；artifact 里按名字可直接命中）。 */
+const TRIGGER_LOG: Record<SyncTriggerName, string> = {
+  'cold-launch': '[sync-trigger] cold-launch',
+  'save': '[sync-trigger] save',
+  'pull': '[sync-trigger] pull',
+  'foreground': '[sync-trigger] foreground',
+  'network': '[sync-trigger] network'
+};
+
+/**
+ * 日志落点：ETS 侧注入 `console.info`（本纯模型不 import / 不引用 console，保证 Node 可编译），
+ * Node 测试注入 spy 以证明「一次尝试恰好一行」。默认 no-op：没有 ETS 宿主时不伪造日志。
+ */
+export type TriggerLogger = (line: string) => void;
+
+/**
  * 周期结果与 ETS 侧 `services/syncProtocolStore.CycleResult` 逐字段同形（不 import 服务，
  * 保持本文件可在 Node 直接编译）：这样 `syncStatusStore.fromCycle(result)` 无需任何断言。
  */
@@ -131,6 +152,26 @@ export class GlobalRefreshCoordinator {
   private inFlight: Promise<GlobalRefreshOutcome> | null = null;
   /** Home 登记的完整钩子（含 dots / cloud 读回），面板下拉传覆盖项时继承它。 */
   private configured: GlobalRefreshHooks | null = null;
+  /** 最近一次**真正发起**周期的进程内时刻（epoch ms；`null` = 本进程还没跑过）。 */
+  private lastAttemptMs: number | null = null;
+  /** 注入时钟与日志落点（生产时钟 Date.now；日志由 ETS 侧安装，测试可直接注入假件）。 */
+  private now: () => number;
+  private logger: TriggerLogger;
+
+  constructor(now?: () => number, logger?: TriggerLogger) {
+    this.now = now === undefined ? (): number => Date.now() : now;
+    this.logger = logger === undefined ? (_line: string): void => {} : logger;
+  }
+
+  /** ETS 侧安装 `console.info` 落点；单飞单例只装一次，重复安装以最后一次为准。 */
+  setLogger(logger: TriggerLogger): void {
+    this.logger = logger;
+  }
+
+  /** 只读：最近一次周期发起时刻，供前台触发的 5 分钟冷却判定（不写盘、不触发同步）。 */
+  lastAttemptAt(): number | null {
+    return this.lastAttemptMs;
+  }
 
   /** 当前是否有刷新在途（诊断 / 测试用；判定请用 `runOnce`）。 */
   isRefreshing(): boolean {
@@ -183,7 +224,10 @@ export class GlobalRefreshCoordinator {
    * 在飞时**共享同一个 Promise**（不是静默返回 skipped）：第二个手势 await 到同一结果，
    * 周期与四个读回都只发生一次；调用方据此复位自己的转圈即可。
    */
-  async runOnce(overrides?: Partial<GlobalRefreshHooks>): Promise<GlobalRefreshOutcome> {
+  async runOnce(
+    overrides?: Partial<GlobalRefreshHooks>,
+    trigger: SyncTriggerName | '' = ''
+  ): Promise<GlobalRefreshOutcome> {
     if (this.inFlight !== null) {
       const shared: GlobalRefreshOutcome = await this.inFlight;
       return { leader: false, cycleInvoked: false, ok: shared.ok, reason: shared.reason };
@@ -202,7 +246,7 @@ export class GlobalRefreshCoordinator {
       endExclusive(this.run, GLOBAL_REFRESH_ACTION);
       throw error;
     }
-    const task: Promise<GlobalRefreshOutcome> = this.execute(hooks);
+    const task: Promise<GlobalRefreshOutcome> = this.execute(hooks, trigger);
     this.inFlight = task;
     try {
       return await task;
@@ -220,7 +264,15 @@ export class GlobalRefreshCoordinator {
    * 真正的状态面写入（失败走 reportFailure / 成功走 commitStatus）也在 finally 的最后一步。
    * 因此成功与抛错两条路径都恰好按 日程 → dots → 云端 → 状态 各读回一次。
    */
-  private async execute(hooks: GlobalRefreshHooks): Promise<GlobalRefreshOutcome> {
+  private async execute(
+    hooks: GlobalRefreshHooks,
+    trigger: SyncTriggerName | ''
+  ): Promise<GlobalRefreshOutcome> {
+    // 只有 leader 进到这里：一次尝试一次戳、一条触发日志（跟随者共享 Promise，不重复记）。
+    this.lastAttemptMs = this.now();
+    if (trigger !== '') {
+      this.logger(TRIGGER_LOG[trigger]);
+    }
     // 仓库可见性阻塞是更可执行的既有状态：连「同步中…」都不写，避免一个周期出现两条状态文案。
     const blockedAtStart: boolean = repoBlocked(hooks);
     if (hooks.markSyncing !== undefined && !blockedAtStart) {

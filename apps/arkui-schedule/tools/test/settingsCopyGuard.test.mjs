@@ -151,9 +151,12 @@ test('C2 中性区块标题 + 数据组只有一个导入/导出入口', () => {
   // mod-status-honesty-regression：忙碌文案收敛到纯模型常量，页面只委托唯一渲染器。
   assert.match(readSettingsFile('model/syncStatusPersist.ts'), /TEXT_SYNCING: string = '同步中…'/, '忙碌态文案');
   assert.match(syncPage, /syncStatusLineOf\(\{/, '页面委托唯一渲染器');
-  for (const action of ['查看状态', '测试连接', '重试']) {
-    assert.match(syncPage, new RegExp(`Text\\('${action}'\\)`), `失败出口「${action}」必须在真页面上`);
+  // mod-sync-silence-phase-b：三个手动同步出口必须**不在**真页面渲染树里（标签 + handler 双层扫描）。
+  for (const action of ['查看状态', '测试连接', '重试', '立即同步', '推送']) {
+    assert.doesNotMatch(syncPage, new RegExp(`Text\\('${action}'\\)`), `真页面不得有「${action}」按钮`);
+    assert.doesNotMatch(syncPage, new RegExp(`label:\\s*'${action}'`), `真页面不得有「${action}」控件`);
   }
+  assert.doesNotMatch(syncPage, /onClick\(\(\) => \{\s*this\.(runAction|testConnection|retryFromStatus)\(/);
   // 只扫可执行源码：注释里的「没有高级 / 没有推送」说明不算入口；「已暂停推送 N 个附件」
   // 是常驻 warning 文案（附件被远端改动），不是手动按钮，故只匹配按钮 / 文字入口的写法。
   const pageCode = withoutComments(syncPage);

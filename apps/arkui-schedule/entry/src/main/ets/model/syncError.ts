@@ -631,6 +631,9 @@ export function describeAheadBehind(info: AheadBehind): string {
   return `与远端分叉：领先 ${info.ahead}、落后 ${info.behind}`;
 }
 
+/** 本机改动的上传状态（只读诊断词，不是同步结果）。 */
+export type UploadState = 'blocked' | 'failed' | 'retrying' | 'pending';
+
 /** 同步状态视图（页面/服务共用一份文案）。 */
 export interface SyncStatusView {
   /** 本机仓库是否已初始化（首次拉取前为 false）。 */
@@ -647,8 +650,14 @@ export interface SyncStatusView {
   diverged: boolean;
   /** 冲突文件数（应用不 merge，正常应为 0）。 */
   conflicts: number;
-  /** 工作区改动数。 */
+  /** 工作区改动数（本机尚未上传的事实，绝不暗示云端已有）。 */
   changedCount: number;
+  /**
+   * 这些本机改动的上传状态（mod-sync-silence-phase-b）：只用于诊断措辞，
+   * 与 `changedCount` 成对出现，绝不把「本机未上传」写成「云端已同步」。
+   * 缺省按 `pending`，保证任何调用点都不会输出无状态的裸改动数。
+   */
+  uploadState?: UploadState;
   /** 远端是否已配置。 */
   remoteConfigured: boolean;
   /** 最近一条提交说明（可空）。 */
@@ -665,9 +674,23 @@ export function shortSha(sha: string): string {
 }
 
 /**
- * 同步状态一行文案（A2）：分支 / HEAD / ahead / behind / 冲突 / 本地改动 / 远端。
+ * 上传状态的短标签（mod-sync-silence-phase-b）：只描述本机意图的上传处境，不是同步结果。
+ * 四项穷举 + 缺省 `待上传`，因此「本地改动 N 处」永远带着一个非成功的状态词。
+ */
+export function describeUploadState(state: UploadState | undefined): string {
+  switch (state) {
+    case 'blocked': return '已停止上传';
+    case 'failed': return '上传失败';
+    case 'retrying': return '重试中';
+    case 'pending': return '待上传';
+    default: return '待上传';
+  }
+}
+
+/**
+ * 同步状态一行文案（A2）：分支 / HEAD / ahead / behind / 本机未上传改动 / 冲突 / 远端。
  *
- * 例：`分支 main｜HEAD a1b2c3d｜领先远端 2 个提交｜本地改动 3 处｜冲突 0｜远端 已配置`
+ * 例：`分支 main｜HEAD a1b2c3d｜领先远端 2 个提交｜本地改动 3 处（本机未上传·待上传）｜冲突 0｜远端 已配置`
  */
 export function describeSyncStatus(view: SyncStatusView): string {
   if (view === null || view === undefined || view.initialized !== true) {
@@ -685,7 +708,9 @@ export function describeSyncStatus(view: SyncStatusView): string {
       comparable: trimText(view.head).length > 0
     })
   );
-  parts.push(`本地改动 ${view.changedCount} 处`);
+  // mod-sync-silence-phase-b：本机改动 ≠ 云端已有。改动数永远与上传状态成对出现，
+  // 措辞明确「本机未上传」，避免把本地工作区事实读成云端同步成功。
+  parts.push(`本地改动 ${view.changedCount} 处（本机未上传·${describeUploadState(view.uploadState)}）`);
   parts.push(`冲突 ${view.conflicts}`);
   parts.push(`远端 ${view.remoteConfigured === true ? '已配置' : '未配置'}`);
   const message: string = trimText(view.lastCommitMessage);

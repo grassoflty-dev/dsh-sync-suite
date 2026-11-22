@@ -9,8 +9,9 @@
  * - 保存只写本页拥有的同步字段（repoUrl / token 与静默派生的 authMode / gitUsername /
  *   gitPlatform），是 `settingsStore.save()` 的 patch —— 其它设置键保持原值，互不覆盖；
  * - 校验仍走 `checkSettingsFields`，与拆分前逐字一致（仓库地址可空、token 留空沿用已存值）；
- * - 诚实状态行：`已同步·HH:MM` / `同步中…` / `失败：原因`，失败态点一下即「重试」；
- * - 失败出口「查看状态 / 测试连接 / 重试」都在本页；没有「高级」，也没有「推送 / 立即同步」。
+ * - 诚实状态行：`已同步·HH:MM` / `同步中…` / `失败：原因`，只读、不可点；
+ * - mod-sync-silence-phase-b：手动同步出口「查看状态 / 测试连接 / 重试」已全部删除；
+ *   同步由冷启动 / 保存 / 下拉 / 前台恢复 / 网络恢复五个事件静默触发，对应能力方法留在代码里供排障。
  *
  * 凭据 hygiene：token 只走 HTTPS Basic 头，不打印、不写日志、不进 Git 载荷。
  */
@@ -657,7 +658,7 @@ struct SettingsSync {
   private async runAction(action: string): Promise<void> {
     if (action === 'cancel-wait') {
       this.syncBusy = false;
-      this.notice('已停止等待：后台可能仍在执行，稍后点「查看状态」确认结果');
+      this.notice('已停止等待：后台可能仍在执行，结果会自动显示在同步状态行');
       return;
     }
     if (!this.webReady) {
@@ -776,9 +777,10 @@ struct SettingsSync {
   /** 状态行已统一到 SyncSection 的 `syncMessage`（由 honestStatus() 提供），本页不再渲染第二行。 */
 
   /**
-   * 唯一的「更多」弹层（mod-fix-sync-affordance）：组头「更多」是唯一帮助/动作入口，
-   * 承载查看状态 / 测试连接 / 重试（没有手动推送 / 立即同步）+ 仓库地址帮助文案。
-   * 原先仓库地址行的 `?` 打开的是同一个弹层，重复入口已移除。
+   * 唯一的「更多」帮助弹层（mod-sync-silence-phase-b）：同步已全部由事件静默触发，
+   * 这里只保留仓库地址 / 平台 / token 的只读帮助文案，不再承载任何手动同步控制。
+   * `testConnection()` / `retryFromStatus()` / `runAction()` 仍留在代码里供支持排障，
+   * 但本页没有任何 UI 调用点（与 Phase A 的 `retrySync()` 同一模式）。
    */
   @Builder
   SyncMoreSheet() {
@@ -802,43 +804,8 @@ struct SettingsSync {
       .width('100%')
       .alignItems(VerticalAlign.Center)
 
-      Text('查看状态')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .height(TOUCH_MIN)
-        .textAlign(TextAlign.Start)
-        .enabled(!this.syncBusy)
-        .onClick(() => {
-          this.panel = '';
-          this.runAction('status');
-        })
-      Text('测试连接')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .height(TOUCH_MIN)
-        .textAlign(TextAlign.Start)
-        .enabled(!this.connectionBusy)
-        .onClick(() => {
-          this.panel = '';
-          this.testConnection();
-        })
-      if (canRetrySync(this.lastSyncAction, this.syncBusy)) {
-        Text('重试')
-          .fontSize(FONT.body)
-          .lineHeight(LINE_HEIGHT.body)
-          .fontColor($r('app.color.warning'))
-          .width('100%')
-          .height(TOUCH_MIN)
-          .textAlign(TextAlign.Start)
-          .onClick(() => {
-            this.panel = '';
-            this.runAction(this.lastSyncAction);
-          })
-      }
+      // mod-sync-silence-phase-b：查看状态 / 测试连接 / 重试三个手动同步按钮已删除。
+      // 同步由冷启动、保存、下拉、前台恢复、网络恢复五个事件静默触发；能力方法保留为零 UI 调用点。
 
       Divider()
         .strokeWidth(DIVIDER)
@@ -924,12 +891,8 @@ struct SettingsSync {
                   this.includeOtherDevices = isOn;
                   AppStorage.setOrCreate<boolean>(HOME_INCLUDE_OTHER_KEY, isOn);
                 },
-                runAction: (action: string): void => {
-                  this.runAction(action);
-                },
-                onRetryStatus: (): void => {
-                  this.retryFromStatus();
-                },
+                // mod-sync-silence-phase-b：同步动作 / 状态行重试的 UI 接线已移除；
+                // runAction() / retryFromStatus() 只剩方法体，供支持排障时复用。
                 onOpenSyncMore: (): void => {
                   this.panel = 'more';
                 },
@@ -963,7 +926,7 @@ struct SettingsSync {
         .height('100%')
       }
 
-      // 唯一的「更多」弹层（查看状态 / 测试连接 / 重试 + 仓库地址帮助与测试连接结果）；点 scrim 关闭。
+      // 唯一的「更多」帮助弹层（只有仓库地址 / 平台 / token 的只读帮助文案）；点 scrim 关闭。
       if (this.panel.length > 0) {
         Column()
           .width('100%')

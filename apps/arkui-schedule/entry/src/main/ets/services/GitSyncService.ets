@@ -47,8 +47,10 @@ import {
   describeSyncStatus,
   validateBranchName
 } from '../model/syncError';
-import type { SyncStatusView } from '../model/syncError';
+import type { SyncStatusView, UploadState } from '../model/syncError';
 import type { SyncPreconditionInput, SyncPreconditionResult, SyncRunBegin, SyncRunState } from '../model/syncGuard';
+// mod-sync-silence-phase-b：本地改动数的措辞要与当前上传处境成对出现（只读，不驱动动作）。
+import { syncStatusStore } from './syncStatusStore';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import {
@@ -1345,10 +1347,27 @@ export class GitSyncService {
       diverged: data.diverged === true,
       conflicts: GitSyncService.numberOf(data.conflicts, 0),
       changedCount: GitSyncService.numberOf(data.changedCount, 0),
+      // mod-sync-silence-phase-b：改动数与上传状态成对输出，绝不暗示云端已经拿到这些改动。
+      uploadState: GitSyncService.uploadStateOf(),
       remoteConfigured: remoteUrl.length > 0,
       lastCommitMessage: lastCommitMessage
     };
     return view;
+  }
+
+  /** 当前上传处境 → 诊断词；只读 status snapshot，不写盘、不触发任何同步。 */
+  private static uploadStateOf(): UploadState {
+    const state: string = syncStatusStore.snapshot().state;
+    if (state === 'repo_public' || state === 'repo_unknown') {
+      return 'blocked';
+    }
+    if (state === 'syncing') {
+      return 'retrying';
+    }
+    if (state === 'failed' || state === 'past_failed') {
+      return 'failed';
+    }
+    return 'pending';
   }
 
   /** 桥字段 → 字符串：非字符串（含 null/undefined）一律回落（桥用 null 表示「没有值」）。 */

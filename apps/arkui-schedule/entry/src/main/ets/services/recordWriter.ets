@@ -149,7 +149,8 @@ export class RecordWriter {
         syncStatusStore.setRepoBlocked(code, new Date());
       };
     }
-    void globalRefreshCoordinator.runOnce(overrides)
+    // mod-sync-silence-phase-b：保存后触发名交给协调器，leader 每次尝试恰好打一行日志。
+    void globalRefreshCoordinator.runOnce(overrides, 'save')
       .catch((error: Error): void => {
         // 协调器自身的意外错误（非周期 typed 失败）才落到这里；仍是同一个状态存储面。
         syncStatusStore.setPending(0, this.errorText(error));

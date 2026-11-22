@@ -81,7 +81,10 @@ class RepoVisibilityChecker {
     return await this.runCheck(target, token, true);
   }
 
-  /** 推送前置：只按 60 s 窗口复用，任何非私有判定 sticky 阻断。 */
+  /**
+   * 推送前置：未阻塞时按 60 s 窗口复用；阻塞态强制实时复核（mod-sync-silence-phase-b），
+   * 让下一次自动周期在仓库恢复私有后立即解挡。任何非私有判定依旧 sticky 阻断。
+   */
   async guardPush(): Promise<RepoPushGuardResult> {
     let settings: ScheduleSettings;
     try {
@@ -100,7 +103,9 @@ class RepoVisibilityChecker {
       // 没配置可用仓库地址时不会推（本地记录照常写）；这里不制造拒绝文案。
       return { allowed: true, decision: cachedRepoVisibilityDecision(this.state) };
     }
-    const decision: RepoVisibilityDecision = await this.runCheck(target, settings.token, false);
+    // 阻塞态 = 强制实时复核；非阻塞仍走 60 s 去重。纯模型 shouldRunRepoVisibilityCheck 也有同一道判断，
+    // 两处并存是刻意的：ETS 入参点名意图，纯模型对其它调用点同样成立。
+    const decision: RepoVisibilityDecision = await this.runCheck(target, settings.token, this.state.blocked);
     const result: RepoPushGuardResult = { allowed: decision.ok, decision: decision };
     return result;
   }

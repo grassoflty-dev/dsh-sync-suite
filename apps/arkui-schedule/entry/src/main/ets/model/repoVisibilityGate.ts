@@ -3,9 +3,10 @@
  *
  * 三条硬语义：
  * 1. **60 s 去重窗口**：两次推送尝试在 60 s 内只发一次真实 API 调用；过了窗口才再查一次。
- *    没有「本会话只查一次」、没有 24 h 缓存。
+ *    例外（mod-sync-silence-phase-b）：阻塞态强制实时复核，绕过窗口；没有「本会话只查一次」、
+ *    没有 24 h 缓存。
  * 2. **sticky**：public / unknown 等任何非私有判定一直挡着；时间流逝不会自动解挡，
- *    后续「成功周期」也不会解挡 —— 只有一次**通过的实时校验**才清掉。
+ *    后续「成功周期」也不会解挡 —— 只有一次**通过的实时校验**才清掉（且清挡不写同步成功）。
  * 3. **本地优先**：门禁只决定「能不能推」，从不拦本地写入 / outbox 停放。
  */
 import { REPO_VISIBILITY_OK, decisionForRepoCode } from './repoVisibility';
@@ -45,15 +46,19 @@ export function initialRepoVisibilityGate(): RepoVisibilityGateState {
 /**
  * 是否要发一次真实校验。
  * - `force=true`（保存设置 / 测试连接）：永远实时查，不受去重窗口影响；
- * - 推送路径：从未查过，或距上次校验 ≥ 60 s 才查；窗口内复用上次判定。
- * 注意：已 blocked 也必须过窗口再查 —— 这正是「只有新的一次通过校验才能解挡」。
+ * - **阻塞态强制实时复核**（mod-sync-silence-phase-b）：`state.blocked=true` 时绕过 60 s 去重，
+ *   让下一个自动周期在仓库重新变为私有后立刻解挡，不被窗口卡住；
+ * - 其余推送路径：从未查过，或距上次校验 ≥ 60 s 才查；窗口内复用上次判定。
+ *
+ * sticky 语义不变：强制复核**不自动解挡**，只有复核结果 `ok=true` 才由调用方清阻塞；
+ * 复核仍失败则维持原阻塞（并刷新最近尝试时刻）。
  */
 export function shouldRunRepoVisibilityCheck(
   state: RepoVisibilityGateState,
   nowMs: number,
   force: boolean
 ): boolean {
-  if (force || state.lastCheckAtMs === 0) {
+  if (force || state.blocked || state.lastCheckAtMs === 0) {
     return true;
   }
   const elapsed: number = Math.max(0, nowMs - state.lastCheckAtMs);

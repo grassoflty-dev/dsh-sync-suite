@@ -12,9 +12,9 @@
  * - Git 用户名 / 设备标识 / 作者名不再有输入控件：用户名按地址推断、编号由仓库自动分配、
  *   作者名默认「我」，全部由软件静默安排；旧值仍可读于 settingsStore，只是不再上屏；
  * - 设备标识重复是**常驻** warning（不是 toast），附件被暂停推送同样常驻一行；
- * - Git 操作全部由 app 自动完成（创建记录后拉取 → 并集 → 推送，首页下拉刷新拉取 + 推送），
- *   本组件**没有**「推送 / 立即同步」手动按钮；查看状态 / 测试连接 / 重试与仓库地址帮助
- *   都在组头**唯一**的「更多」弹层里（弹层在页面，见 `pages/SettingsSync.ets`）；
+ * - Git 操作全部由 app 自动完成（冷启动 / 保存 / 下拉 / 前台恢复 / 网络恢复静默触发），
+ *   本组件**没有**任何手动同步按钮；组头**唯一**的「更多」只留仓库地址帮助文案
+ *   （弹层在页面，见 `pages/SettingsSync.ets`，mod-sync-silence-phase-b）；
  *   已保存的认证方式是 SSH 时
  *   本组件给一行只读警告 + 一个显式「改用 HTTPS 令牌」按钮（不是认证方式选择器；只切状态、
  *   不自动保存，落盘仍由用户点「保存设置」完成）；
@@ -23,9 +23,9 @@
  *
  * A 批（`docs/STATE-UI.md` §4/§5）：
  * - 组头「更多」与 SSH 切换入口统一用 `ActionButton`（禁用也**可点**，点了给具体中文原因）；
- * - 同步中 → `LoadingState`（>3s 出现「取消」，回调走 `runAction('cancel-wait')`，**不假装成功**）；
+ * - 同步中 → `LoadingState`（只读进度；取消等待的手动控制已删除，周期自行 settle）；
  * - 没填仓库地址 → `EmptyState`（「去填仓库地址」），只占状态行位置，**不藏表单**；
- * - `lastSyncError` 非空 → `ErrorState`（三段式 + 诊断四要素 + 重试）。
+ * - `lastSyncError` 非空 → `ErrorState`（三段式 + 诊断四要素；`onRetry` 为 null）。
  */
 import { webview } from '@kit.ArkWeb';
 import { loadingText } from '../../common/copy';
@@ -54,8 +54,9 @@ const EMPTY_SYNC_ACTION: string = '去填仓库地址';
 
 /** 错误态的三段式标题与两条「下一步」（可重试 / 只能先改配置）。 */
 const SYNC_ERROR_WHAT: string = '同步失败';
-const SYNC_ERROR_NEXT_RETRY: string = '点重试重新拉取；仍失败就到设置页检查仓库地址与 token';
-const SYNC_ERROR_NEXT_FIX: string = '先按上面的原因修正，再重试';
+// mod-sync-silence-phase-b：下一步不再指向任何手动按钮；下一次自动周期会自行重试。
+const SYNC_ERROR_NEXT_RETRY: string = '下一次自动同步会自行重试；持续失败请检查仓库地址与 token';
+const SYNC_ERROR_NEXT_FIX: string = '先按上面的原因修正，随后会自动重试';
 
 /** 仓库地址下的固定说明：平台随地址推断、分支固定 main（本页没有平台/分支选择控件）。 */
 const SYNC_CAPTION: string = '平台按地址自动识别 · 分支固定 main';
@@ -117,12 +118,10 @@ export struct SyncSection {
   onChangeToken: (value: string) => void = () => {};
   /** 首页过滤开关（页面同时写 AppStorage）。 */
   onToggleIncludeOtherDevices: (isOn: boolean) => void = () => {};
-  /** pull / push / status（与拆分前 `runAction(action)` 同一个入口）。 */
-  runAction: (action: string) => void = () => {};
-  /** 打开唯一的「更多」弹层（组头「更多」与空态动作都走这里）。 */
+  // mod-sync-silence-phase-b：runAction / onRetryStatus 两个回调已移除——
+  // 同步由事件静默触发，状态行与错误态都不再提供可点的手动同步出口。
+  /** 打开唯一的「更多」帮助弹层（组头「更多」与空态动作都走这里）。 */
   onOpenSyncMore: () => void = () => {};
-  /** 状态行点一下即重试上次动作（零步恢复）；不可重试时页面侧自行忽略。 */
-  onRetryStatus: () => void = () => {};
   /** SSH 警告行的显式出口：页面切 authMode + toast；本组件不改状态、不自动保存。 */
   onSwitchToHttpsToken: () => void = () => {};
 
@@ -350,22 +349,20 @@ export struct SyncSection {
           .textAlign(TextAlign.Start)
       }
 
-      // ---- 加载态（`docs/STATE-UI.md` §5）：忙时在状态行上方给进度 + 5s 后可取消 ----
+      // ---- 加载态（`docs/STATE-UI.md` §5）：忙时在状态行上方给进度 ----
+      // mod-sync-silence-phase-b：取消等待也是手动同步控制，已移除；后台周期自行 settle。
       if (this.syncBusy) {
         LoadingState({
           title: loadingText('同步'),
           detail: this.loadingDetail(),
           progress: -1,
           compact: true,
-          onCancel: (): void => {
-            // 只停「等待」，不假装同步已结束（后台可能仍在跑，页面只写「已停止等待」）
-            this.runAction('cancel-wait');
-          }
+          onCancel: null
         })
       }
 
       // 状态行位置：未配置仓库 → 空态（给出「去填仓库地址」这一步），否则显示最近一次结果
-      // （状态行本身不再可点：它要保留 caption 字号与失败红字，重复入口统一走组头「更多」）
+      // （状态行只读：mod-sync-silence-phase-b 删除了点状态行重试的 onClick）
       if (this.showEmptyState()) {
         EmptyState({
           title: EMPTY_SYNC_TITLE,
@@ -387,9 +384,6 @@ export struct SyncSection {
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
           .textAlign(TextAlign.Start)
-          .onClick(() => {
-            this.onRetryStatus();
-          })
       }
 
       // 诊断区（mod-sync-silent-autoinit）：分支 / HEAD / 领先落后 / 本地改动 / 等待重试数
@@ -436,7 +430,8 @@ export struct SyncSection {
       .alignItems(VerticalAlign.Center)
 
       // 写入统一走日程目录；状态行只展示同步结果，不表达任何模式。
-      // 错误态（`docs/STATE-UI.md` §4.3）：发生了什么 / 为什么 / 下一步 + 可复制诊断 + 重试
+      // 错误态（`docs/STATE-UI.md` §4.3）：发生了什么 / 为什么 / 下一步 + 可复制诊断；
+      // mod-sync-silence-phase-b：`onRetry` 置 null——失败由下一次自动周期自行恢复，用户点不到手动重试。
       if (this.lastSyncError.length > 0) {
         ErrorState({
           what: SYNC_ERROR_WHAT,
@@ -444,9 +439,7 @@ export struct SyncSection {
           next: this.errorNext(),
           diagnostics: this.errorDiagnostics(this.lastSyncError),
           compact: false,
-          onRetry: (): void => {
-            this.runAction('pull');
-          },
+          onRetry: null,
           onOpenSettings: null
         })
       }

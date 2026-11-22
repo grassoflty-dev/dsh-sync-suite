@@ -77,7 +77,6 @@ import {
 } from '../../model/settingsForm';
 import type { SettingsFieldIssue } from '../../model/settingsForm';
 import {
-  canRetrySync,
   classifySyncError,
   describePushReadiness,
   normalizeSyncAction,
@@ -112,9 +111,6 @@ import { normalizeThemeMode, resolveTheme, themeModeHint, themeModeLabel } from 
 
 /** 仓库探测超时（毫秒）：探测只看域名通不通，不需要长超时。 */
 const PROBE_TIMEOUT_MS: number = 10000;
-
-/** 底部弹层的单行高度。 */
-const SHEET_ROW: number = 48;
 
 /** 锚点还没测到位置时的提示（点了不能静默，见 docs/STATE-UI.md §3）。 */
 const ANCHOR_NOT_READY: string = '页面还在排版，稍后再点一次';
@@ -1138,50 +1134,16 @@ export struct SettingsHost {
     .alignItems(VerticalAlign.Center)
   }
 
-  /** 同步组「更多」：查看状态 / 重试 / 测试连接（Git 操作自动完成，无手动推送入口）。 */
+  /**
+   * 遗留实现宿主里的「更多」弹层（mod-sync-silence-phase-b）。
+   * 本组件未挂任何路由 / 未被任何 @Component 实例化（reachability 见 §module doc），
+   * 但为避免任何「可达面提供手动同步」的可能，三个手动同步控件仍在此删除：
+   * 查看状态 / 重试 / 测试连接的能力方法保留给支持排障，本弹层只剩只读探测诊断。
+   */
   @Builder
   SyncMoreSheet() {
     Column({ space: SPACING.md }) {
       this.SheetHeader('同步（Git）更多操作')
-
-      Text('查看状态')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .height(SHEET_ROW)
-        .textAlign(TextAlign.Start)
-        .enabled(!this.syncBusy)
-        .onClick(() => {
-          this.panel = PANEL_NONE;
-          this.runAction('status');
-        })
-
-      if (canRetrySync(this.lastSyncAction, this.syncBusy)) {
-        Text(`重试${syncActionLabel(this.lastSyncAction)}`)
-          .fontSize(FONT.body)
-          .lineHeight(LINE_HEIGHT.body)
-          .fontColor($r('app.color.warning'))
-          .width('100%')
-          .height(SHEET_ROW)
-          .textAlign(TextAlign.Start)
-          .onClick(() => {
-            this.panel = PANEL_NONE;
-            this.runAction(this.lastSyncAction);
-          })
-      }
-
-      Text(this.connectionBusy ? '探测中…' : '测试连接')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .height(SHEET_ROW)
-        .textAlign(TextAlign.Start)
-        .enabled(!this.connectionBusy)
-        .onClick(() => {
-          this.testConnection();
-        })
 
       Divider()
         .strokeWidth(DIVIDER)

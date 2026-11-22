@@ -610,7 +610,8 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       'compact 抽屉轨仍在 Refresh 内');
     assert.match(build, /this\.onGlobalPull\(\)/, '下拉手势只转交外壳入口');
     const pull = blockAfter(HOME, '\n  private async onGlobalPull(');
-    assert.match(pull, /globalRefreshCoordinator\.runOnce\(\)/, '外壳入口走单飞协调器');
+    // mod-sync-silence-phase-b：仍是单飞协调器，只多带 pull 触发名给 leader 日志。
+    assert.match(pull, /globalRefreshCoordinator\.runOnce\(undefined, 'pull'\)/, '外壳入口走单飞协调器');
     assert.equal(/promptAction|showToast/.test(pull), false, '下拉失败不得在外壳弹 toast');
   });
 });

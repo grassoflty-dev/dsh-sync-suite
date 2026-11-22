@@ -64,9 +64,11 @@ const ACTIONS = [
     name: 'SettingsSync',
     read: readSyncPage,
     primary: "Button('保存')",
+    // mod-sync-silence-phase-b：三个手动同步出口已删；动作词表改为钉住仍存在的
+    // 配置动作（保存方法 + 帮助弹层 + SSH 切换），不再是「空页也算过」。
     own: [
       'this.SyncMoreSheet()', 'switchToHttpsToken()',
-      "Text('查看状态')", "Text('测试连接')", "Text('重试')"
+      'SyncSection({'
     ]
   },
   {

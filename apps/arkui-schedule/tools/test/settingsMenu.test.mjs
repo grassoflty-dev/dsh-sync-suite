@@ -104,9 +104,12 @@ test('M-07 同步子页渲染真实正文：两个字段 + 诚实状态行 + 失
   const constants = readSettingsFile('model/syncStatusPersist.ts');
   assert.match(constants, /TEXT_SYNCING: string = '同步中…'/, '忙碌态文案由唯一模型定义');
   assert.match(page, /syncStatusLineOf\(\{/, '页面委托唯一渲染器');
-  for (const action of ['查看状态', '测试连接', '重试']) {
-    assert.match(page, new RegExp(`Text\\('${action}'\\)`), `失败出口「${action}」`);
+  // mod-sync-silence-phase-b：手动同步出口全部移除（同步由五个事件静默触发）。
+  for (const action of ['查看状态', '测试连接', '重试', '立即同步', '推送']) {
+    assert.doesNotMatch(page, new RegExp(`Text\\('${action}'\\)`), `不得有「${action}」按钮`);
+    assert.doesNotMatch(page, new RegExp(`label:\\s*'${action}'`), `不得有「${action}」控件`);
   }
+  assert.match(page, /private async runAction\(action: string\)/, '能力方法保留给支持排障');
   assert.equal(/SettingsHost\(\{/.test(page), false, '同步子页不得再是复用宿主的薄壳');
 
   // 正文（presentational body 保持在 SyncSection，锚点不搬走）。
@@ -284,7 +287,10 @@ test('M-12 同步子页三态词汇 + 诊断区标注，仓库事实不再当提
   assert.ok(section.includes('Text(this.statusLine)'), '诊断区展示真实状态事实');
   assert.equal(section.includes('this.statusReadiness'), false, '可执行文案不得留在诊断区');
   assert.equal(section.includes('describePushReadiness'), false, '「先做什么」文案不进诊断区');
-  assert.ok(page.includes('onRetryStatus: (): void => {'), '状态行点一下仍能重试');
+  // mod-sync-silence-phase-b：状态行只读，不再有点一下重试的接线。
+  assert.equal(page.includes('onRetryStatus: (): void => {'), false, '状态行不得挂重试 handler');
+  assert.doesNotMatch(section, /Text\(this\.syncMessage\)[\s\S]{0,320}\.onClick\(/,
+    '状态行仍渲染但不得可点');
   for (const banned of [/尚未初始化/, /首次克隆/, /先执行「拉取」/]) {
     assert.equal(banned.test(page + '\n' + section), false, `同步面残留死结文案：${banned}`);
   }

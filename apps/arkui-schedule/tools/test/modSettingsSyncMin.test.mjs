@@ -72,13 +72,15 @@ describe('mod-settings-sync-min：同步组只留仓库地址 + 访问令牌', (
     assert.match(SYNC, /label: '改用 HTTPS 令牌'/, '保留显式切换出口（不清空存量 authMode）');
   });
 
-  test('诚实状态行 + 失败三段式重试保留（失败 affordance 不删）', () => {
+  test('诚实状态行 + 只读错误态保留；手动重试出口已删（能力方法留作排障）', () => {
     const form = buildBody(SYNC);
     assert.match(form, /Text\(this\.syncMessage\)/, '诚实状态行必须存在');
     assert.match(form, /ErrorState\(\{/, '错误态三段式必须保留');
-    assert.match(form, /this\.runAction\('pull'\)/, '错误态的重试路径仍在');
-    assert.match(PAGE, /this\.runAction\(this\.lastSyncAction\)/, '组头「更多」的重试上次仍在');
-    assert.match(PAGE, /canRetrySync\(this\.lastSyncAction, this\.syncBusy\)/, '可重试判定仍在');
+    assert.match(form, /onRetry: null/, '错误态不再挂手动重试');
+    assert.doesNotMatch(form, /this\.runAction\(/);
+    assert.match(SYNC_PAGE, /private retryFromStatus\(\): void/, '能力方法保留给支持');
+    assert.match(SYNC_PAGE, /canRetrySync\(this\.lastSyncAction, this\.syncBusy\)/, '可重试判定仍在方法体内');
+    assert.match(SYNC, /下一次自动同步会自行重试/, '下一步文案指向自动周期');
     // mod-sync-silent-autoinit（old→new，只加不删）：状态行文案改成三态；失败态按「失败：」着色，
     // 仓库事实（HEAD / 分支 / 领先落后）退到标注为诊断的区块，不再是无下一步的死结提示。
     assert.match(form, /this\.syncMessage\.startsWith\('失败：'\)/, '失败态按三态词汇着色');

@@ -140,7 +140,9 @@ test('R3 static: retry + post-create + pull-refresh all bind deterministically b
   assert.match(src('services/syncProtocolStore.ets'), /outcomeToResult\(unavailableOutcome\(outbox\)\)/);
 });
 
-test('R4 static: Settings → 同步仓库 has exactly ONE help/更多 entry, carrying status/test/retry', () => {
+// mod-sync-silence-phase-b（old→new，语义收紧）：「更多」仍是唯一帮助入口，但里头
+// 只剩仓库地址 / 平台 / token 的帮助文案；三个手动同步出口必须**不在**渲染树里。
+test('R4 static: Settings → 同步仓库 has exactly ONE help/更多 entry, carrying NO manual sync control', () => {
   const section = src('components/settings/SyncSection.ets');
   const page = src('pages/SettingsSync.ets');
 
@@ -154,17 +156,22 @@ test('R4 static: Settings → 同步仓库 has exactly ONE help/更多 entry, ca
   assert.doesNotMatch(section, /onOpenRepoHelp/);
   assert.doesNotMatch(page, /onOpenRepoHelp/);
 
-  // 被保留的那一个入口确实承载三个失败出口（正向断言，不是只数次数）。
+  // 被保留的「更多」只留非同步帮助：标签扫描 + handler prop 扫描（复用 syncUiSilence 的写法）。
   const sheet = /SyncMoreSheet\(\) \{([\s\S]*?)\n  \}/.exec(page);
   assert.ok(sheet, 'SyncMoreSheet builder not found');
-  for (const action of ['查看状态', '测试连接', '重试']) {
-    assert.match(sheet[1], new RegExp(`Text\\('${action}'\\)`), `更多 sheet must carry ${action}`);
+  for (const action of ['查看状态', '测试连接', '重试', '立即同步', '推送']) {
+    assert.doesNotMatch(sheet[1], new RegExp(`Text\\('${action}'\\)`), `更多 sheet 不得含 ${action}`);
+    assert.doesNotMatch(sheet[1], new RegExp(`label:\\s*'${action}'`), `更多 sheet 不得含 ${action} 控件`);
   }
+  assert.doesNotMatch(sheet[1], /runAction\(|testConnection\(|retryFromStatus\(/,
+    '帮助弹层不得挂任何同步方法调用');
   assert.match(sheet[1], /仓库地址可以先留空/, 'repo help folded into the single sheet');
+  assert.match(sheet[1], /token 只保存在本机 preferences/, 'token 帮助文案保留');
 });
 
-// mod-sync-silent-autoinit：失败后零步恢复——重试仍在同一「更多」出口，且重试前静默重建工作副本。
-test('R5 static: 查看状态 / 测试连接 / 重试 all re-run silent init, no manual clone prerequisite', () => {
+// mod-sync-silence-phase-b（old→new，语义收紧）：能力方法保留给支持排障，但 UI 调用点清零；
+// 静默 init 的前置语义和 typed 失败文案不变。
+test('R5 static: capability methods stay with ZERO UI call sites; silent init + typed failure intact', () => {
   const page = src('pages/SettingsSync.ets');
   const section = src('components/settings/SyncSection.ets');
   const service = src('services/GitSyncService.ets');
@@ -174,11 +181,17 @@ test('R5 static: 查看状态 / 测试连接 / 重试 all re-run silent init, no
     const [start, end] = matchBrace(source, source.indexOf('{', at));
     return source.slice(start, end);
   };
-  // 状态行点击与「更多 → 重试」都不消失；重试直接重放上次动作，不提示用户先做什么。
+  // 能力保留 + 零 UI 调用点：方法体仍在（支持 / 排障可复用），渲染树里没有按钮 / 点击入口。
   assert.match(page, /private retryFromStatus\(\): void/);
-  assert.match(page, /this\.runAction\(this\.lastSyncAction\)/);
-  assert.match(section, /Text\(this\.syncMessage\)/);
-  assert.match(section, /onRetry: \(\): void => \{[\s\S]{0,80}this\.runAction\('pull'\)/);
+  assert.match(page, /private async testConnection\(\): Promise<void>/);
+  assert.match(page, /private async runAction\(action: string\): Promise<void>/);
+  assert.match(page, /this\.runAction\(this\.lastSyncAction\)/, '方法体之间的复用保留');
+  assert.match(section, /Text\(this\.syncMessage\)/, '唯一状态行仍渲染');
+  assert.doesNotMatch(section, /onRetryStatus/);
+  assert.doesNotMatch(section, /onRetry: \(\): void =>/);
+  assert.doesNotMatch(section, /this\.runAction\(/);
+  assert.doesNotMatch(page, /onRetryStatus:\s*\(\)/);
+  assert.doesNotMatch(page, /onClick\(\(\) => \{\s*this\.(runAction|testConnection|retryFromStatus)\(/);
   // 三条出口都先静默 init：测试连接显式调用；查看状态/重试经 status/pull → 门面 ensureRepoInitialised。
   assert.match(bodyOf(page, 'private async testConnection()'), /this\.sync\.ensureRepoInitialised\(\)/);
   for (const op of ['pull', 'push', 'status']) {
