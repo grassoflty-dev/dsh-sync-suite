@@ -91,6 +91,10 @@ export function isOursCommit(commit, instanceId = DEFAULT_V2_INSTANCE_ID) {
         commit.paths.length > 0 &&
         commit.paths.every(isConfinedTimelinePath);
 }
+/** 意图是否已被某次提交认领（新字段优先；旧 outbox 用 attempts≥1 兜底）。 */
+export function isCommittedIntent(entry) {
+    return (typeof entry.commitSha === 'string' && entry.commitSha !== '') || entry.attempts >= 1;
+}
 // ---------------------------------------------------------------- outbox 纯操作
 /** 一条意图的唯一键 = (date,id,ts,op) 的内容哈希：同一四元组只入队一次。 */
 export function makeIntentId(date, id, ts, op) {
@@ -418,56 +422,222 @@ async function pendingIsOurs(git, instanceId) {
     return commits.length > 0 && commits.every((commit) => isOursCommit(commit, instanceId));
 }
 /**
- * F1：恢复推送前的**同一套** refuse-and-park 校验。
- * 用真实 entries（不是 []）重算 union：`assertUpsertIntent` 在 unionDay 内部逐条执行，
- * 并要求重放并集的字节已经等于本地已提交文件——否则意图并未证明落在待推树里。
- * 任何失败都抛 typed E_CORRUPT：不推、不出队、不落盘（意图原样停放）。
+ * 逐意图对照认领它的提交树（m2：只读 HEAD 的**已提交字节**，工作树不算证据）。
+ *
+ * 这是原 union 全量校验的替代：绝不把「尚未应用的新写入」并进一个与 HEAD 比对的 union，
+ * 否则新意图必然让字节不等，被误判成「已提交却缺字节」→ E_CORRUPT（死锁的根因）。
+ *
+ * 三分支：
+ * - present：同 (id[,ts]) 的规范字节已在提交树里 → (b) 出队 + 推送；
+ * - absent：同 id 的行字节不符，或意图已被提交认领却找不到 → (a) 诚实 E_CORRUPT；
+ * - unapplied：提交树里没有这个 id，且意图还没被任何提交认领 → (c) 应用→提交→再校验。
+ *
+ * 「认领本意图的提交」= `OutboxIntent.commitSha`（提交成功后回填），旧数据以 attempts≥1 兜底；
+ * 已经认领的意图用 HEAD 提交树核对（HEAD 就是/包含那次提交），新意图不允许走这条捷径。
+ */
+export function classifyIntentLanding(intent, head, date) {
+    const base = { intentId: intent.intentId };
+    if (intent.date !== date)
+        return { ...base, code: 'unapplied', reason: '意图日期不在本日' };
+    if (intent.op === 'upsert') {
+        const incoming = parseRecordLine(intent.line);
+        if (incoming === null)
+            return { ...base, code: 'absent', reason: 'line 不是合法记录对象' };
+        const parsed = parseTimelineDay(head.records, date);
+        const existing = parsed.day === null
+            ? undefined
+            : parsed.day.allRecords.find((record) => record.id === incoming.id);
+        if (existing === undefined) {
+            return isCommittedIntent(intent)
+                ? { ...base, code: 'absent', reason: '认领提交的树里找不到同 id 记录' }
+                : { ...base, code: 'unapplied', reason: '尚未应用到任何提交' };
+        }
+        // 同 id 但字节不符（含同 id 不同 ts 被更晚记录覆盖）：保守判为诚实拒绝。
+        return canonicalRecordLine(existing) === canonicalRecordLine(incoming)
+            ? { ...base, code: 'present', reason: '规范行已落在提交树里' }
+            : { ...base, code: 'absent', reason: '同 id 的提交字节与意图 line 不符' };
+    }
+    // delete / purgeRows 落在 deleted.jsonl，restore 落在 restore.jsonl。
+    const ledgerText = intent.op === 'restore' ? head.restore : head.deleted;
+    const landed = parseLedger(ledgerText).entries.some((entry) => entry.id === intent.id && entry.ts === intent.ts);
+    if (landed)
+        return { ...base, code: 'present', reason: '账本行已落在提交树里' };
+    return isCommittedIntent(intent)
+        ? { ...base, code: 'absent', reason: '认领提交的账本里找不到该行' }
+        : { ...base, code: 'unapplied', reason: '尚未应用到任何提交' };
+}
+/**
+ * F1（修订）：先逐意图分类，再决定动作；不再做「全量 union 对 HEAD 一次比字节」。
+ *
+ * B1 形状校验仍先于任何写入/推送：畸形意图原样抛 E_CORRUPT。
+ * (a) 缺字节的意图在这里抛 typed E_CORRUPT：不推、不出队、不落盘（意图原样停放）——
+ * 这正是原检查的诚实拒绝，保留下来；区别只在于不再把未应用的新写入算成 (a)。
  */
 async function proveRecoveryState(ctx) {
-    const replay = replayable(ctx.all);
-    const appliedIds = [];
+    const heads = new Map();
     for (const date of ctx.days) {
+        heads.set(date, {
+            records: await ctx.git.showHead(timelineRecordsPath(date)),
+            deleted: await ctx.git.showHead(timelineDeletedPath(date)),
+            restore: await ctx.git.showHead(timelineRestorePath(date)),
+        });
+    }
+    // B1：先校验所有可重放意图的形状，畸形意图在推送/写入之前 typed 拒绝。
+    for (const entry of replayable(ctx.all)) {
+        if (entry.op === 'upsert')
+            assertUpsertIntent(entry.date, entry);
+    }
+    const landedIds = [];
+    const unapplied = [];
+    for (const entry of replayable(ctx.all)) {
+        const head = heads.get(entry.date);
+        if (head === undefined)
+            continue; // 不在本周期覆盖日的意图原样停放
+        const verdict = classifyIntentLanding(entry, head, entry.date);
+        if (verdict.code === 'absent') {
+            throw new SyncError(V2_ERROR.CORRUPT, `恢复校验失败（${entry.date}）：意图 ${entry.intentId} 与 HEAD 已提交树不一致（sha=${entry.commitSha ?? `旧数据 attempts=${entry.attempts}`}；${verdict.reason}），意图未被证明已落地，拒绝推送与出队`, { date: entry.date, intentId: entry.intentId, sha: entry.commitSha ?? '' });
+        }
+        if (verdict.code === 'present') {
+            if (!landedIds.includes(entry.intentId))
+                landedIds.push(entry.intentId);
+        }
+        else {
+            unapplied.push(entry);
+        }
+    }
+    return { landedIds, unapplied };
+}
+/**
+ * (c) 新意图：应用 → 提交 → 再校验，顺序不可颠倒。
+ *
+ * 以 HEAD 已提交字节为基线重算 union（工作树不算证据），写入后 add/commit，
+ * 提交完成才把新的 commitSha 回填到意图并以新 HEAD 逐意图复核。
+ * 任何一步失败都 typed E_CORRUPT，绝不带着未证明的字节去推送。
+ */
+async function applyUnappliedIntents(ctx, fresh) {
+    const dates = [...new Set(fresh.map((entry) => entry.date))]
+        .filter((date) => ctx.days.includes(date)).sort();
+    const writtenPaths = [];
+    let touchedDays = 0;
+    for (const date of dates) {
         const remote = {
             records: await ctx.git.showRemote(timelineRecordsPath(date)),
             deleted: await ctx.git.showRemote(timelineDeletedPath(date)),
             restore: await ctx.git.showRemote(timelineRestorePath(date)),
         };
-        // m2：以 HEAD 的**提交字节**作为「已落在待推树里」的证据；工作树可能被别的写入者改脏。
-        const local = {
+        // m2：基线取 HEAD 提交字节，不读工作树；避免把脏工作树当成已落地事实。
+        const head = {
             records: await ctx.git.showHead(timelineRecordsPath(date)),
             deleted: await ctx.git.showHead(timelineDeletedPath(date)),
             restore: await ctx.git.showHead(timelineRestorePath(date)),
         };
-        // 关键：传真实 replay，unionDay 内部会对每条 upsert 调 assertUpsertIntent。
-        const union = unionDay(date, remote, local, replay.filter((entry) => entry.date === date), ctx.now);
-        if (union.recordsText !== local.records || union.deletedText !== local.deleted ||
-            union.restoreText !== local.restore || union.conflictRows.length > 0) {
-            throw new SyncError(V2_ERROR.CORRUPT, `恢复校验失败（${date}）：带意图的 union 字节与 HEAD 已提交文件不一致（工作树不算证据），意图未被证明已落地，拒绝推送与出队`, { date });
+        const corrupt = dayIntegrityError(date, remote.records, head.records);
+        if (corrupt !== '')
+            throw new SyncError(V2_ERROR.CORRUPT, `E_CORRUPT: ${corrupt}`, { date });
+        const union = unionDay(date, remote, head, fresh.filter((entry) => entry.date === date), ctx.now);
+        if (union.recordsText !== head.records) {
+            await atomicReplace(ctx.fs, timelineRecordsPath(date), union.recordsText, 'records');
+            if (!writtenPaths.includes(timelineRecordsPath(date)))
+                writtenPaths.push(timelineRecordsPath(date));
+            touchedDays += 1;
         }
-        for (const id of union.applied)
-            if (!appliedIds.includes(id))
-                appliedIds.push(id);
+        if (union.deletedText !== head.deleted) {
+            const merged = mergeLedgerText(head.deleted, localLines(union.deletedText), true);
+            if (merged.appended.length > 0) {
+                await ctx.fs.append(timelineDeletedPath(date), merged.text.slice(head.deleted.length));
+                if (!writtenPaths.includes(timelineDeletedPath(date)))
+                    writtenPaths.push(timelineDeletedPath(date));
+                touchedDays += 1;
+            }
+        }
+        if (union.restoreText !== head.restore) {
+            const merged = mergeLedgerText(head.restore, localLines(union.restoreText), false);
+            if (merged.appended.length > 0) {
+                await ctx.fs.append(timelineRestorePath(date), merged.text.slice(head.restore.length));
+                if (!writtenPaths.includes(timelineRestorePath(date)))
+                    writtenPaths.push(timelineRestorePath(date));
+                touchedDays += 1;
+            }
+        }
+        if (union.conflictRows.length > 0) {
+            const conflictsRel = `timeline/${date}/conflicts.jsonl`;
+            const existingRows = localLines((await ctx.fs.read(conflictsRel)) ?? '');
+            const seen = new Set(existingRows.map(conflictKey));
+            const freshRows = union.conflictRows.filter((row) => {
+                const key = conflictKey(row);
+                if (seen.has(key))
+                    return false;
+                seen.add(key);
+                return true;
+            });
+            if (freshRows.length > 0) {
+                await ctx.fs.append(conflictsRel, `${freshRows.join('\n')}\n`);
+                if (!writtenPaths.includes(conflictsRel))
+                    writtenPaths.push(conflictsRel);
+                touchedDays += 1;
+            }
+        }
     }
-    return { appliedIds };
+    if (writtenPaths.length > 0) {
+        await ctx.git.addPaths(writtenPaths.slice());
+        await ctx.git.commit(syncCommitMessage(touchedDays), v2TrailerLine(ctx.instanceId));
+    }
+    const commitSha = await ctx.git.headSha();
+    // 提交之后才校验：此刻 HEAD 就是认领这些新意图的提交。
+    const landedIds = [];
+    for (const entry of fresh) {
+        if (!dates.includes(entry.date))
+            continue;
+        const head = {
+            records: await ctx.git.showHead(timelineRecordsPath(entry.date)),
+            deleted: await ctx.git.showHead(timelineDeletedPath(entry.date)),
+            restore: await ctx.git.showHead(timelineRestorePath(entry.date)),
+        };
+        const verdict = classifyIntentLanding(entry, head, entry.date);
+        if (verdict.code !== 'present') {
+            throw new SyncError(V2_ERROR.CORRUPT, `恢复校验失败（${entry.date}）：意图 ${entry.intentId} 提交后仍未落在 HEAD（${verdict.reason}），拒绝推送与出队`, { date: entry.date, intentId: entry.intentId });
+        }
+        if (!landedIds.includes(entry.intentId))
+            landedIds.push(entry.intentId);
+    }
+    return { landedIds, commitSha };
 }
 /**
- * 有界恢复：只在通过归属证明与带意图的 union 校验后才推送；
- * 只出队被证明已落在推送树里的意图；无硬回退 / 无变基 / 无文件写入。
+ * 有界恢复：逐意图证明 (a)/(b)/(c) 后才推送；
+ * 只出队被证明已落在推送树里的意图；无硬回退 / 无变基。
  */
 async function recoverPendingLocalCommit(ctx) {
     let all = ctx.all;
     let attempts = 0;
     for (let retry = 0; retry < MAX_CYCLE_RETRIES; retry += 1) {
         attempts += 1;
-        // F1：先校验、再推；失败即 typed E_CORRUPT，零 push / 零出队 / 零 outbox 写入。
-        let proven;
+        ctx.all = all;
+        // F1：先逐意图校验、再推；失败即 typed E_CORRUPT，零 push / 零出队 / 零 outbox 写入。
+        let proof;
         try {
-            proven = await proveRecoveryState(ctx);
+            proof = await proveRecoveryState(ctx);
         }
         catch (error) {
-            const reason = typedError(error);
-            return failure(V2_ERROR.CORRUPT, `E_CORRUPT: ${reason}`, all, 0);
+            return failure(V2_ERROR.CORRUPT, `E_CORRUPT: ${typedError(error)}`, all, 0);
         }
+        let freshIds = [];
+        if (proof.unapplied.length > 0) {
+            try {
+                // (c)：先应用→提交→再校验；提交完成才回填 commitSha 并标记 syncing 落盘。
+                const applied = await applyUnappliedIntents(ctx, proof.unapplied);
+                freshIds = applied.landedIds;
+                const freshSet = new Set(proof.unapplied.map((entry) => entry.intentId));
+                all = all.map((entry) => freshSet.has(entry.intentId)
+                    ? { ...entry, commitSha: applied.commitSha, state: 'syncing' }
+                    : entry);
+                ctx.all = all;
+                await ctx.outbox.save(all);
+            }
+            catch (error) {
+                return failure(V2_ERROR.CORRUPT, `E_CORRUPT: ${typedError(error)}`, all, 0);
+            }
+        }
+        const verifiedIds = [...proof.landedIds, ...freshIds];
         let pushed = false;
         try {
             await ctx.git.pushMain(PUSH_ARGS);
@@ -481,12 +651,12 @@ async function recoverPendingLocalCommit(ctx) {
             await ctx.outbox.save(all);
         }
         if (pushed) {
-            // F1：只出队 union 证明已落在树里的意图，不再假设「全部 replayable 都已应用」。
-            const done = dequeueIntents(all, proven.appliedIds);
+            // 只出队被逐意图证明已落在树里的意图（含刚提交的新意图）。
+            const done = dequeueIntents(all, verifiedIds);
             await ctx.outbox.save(done);
             return {
                 ok: true, code: V2_ERROR.OK, message: '已同步（本地未推提交已恢复）',
-                days: [], applied: proven.appliedIds.length, dropped: 0, failed: countFailed(done),
+                days: [], applied: verifiedIds.length, dropped: 0, failed: countFailed(done),
                 pending: replayable(done).length, attempts, conflicts: 0, writtenPaths: [], outbox: done.slice(),
             };
         }
@@ -552,7 +722,7 @@ export async function runV2Cycle(options) {
             ours = false;
         }
         if (ours) {
-            return await recoverPendingLocalCommit({ git, outbox, days, now, all, instanceId });
+            return await recoverPendingLocalCommit({ git, fs, outbox, days, now, all, instanceId });
         }
     }
     if (!gate.ok)
@@ -666,6 +836,12 @@ export async function runV2Cycle(options) {
         await git.addPaths(writtenPaths.slice());
         // F2：尾注写进 body（第二个 -m），App 的 `-m subject` 不会产生它。
         await git.commit(syncCommitMessage(touchedDays), v2TrailerLine(instanceId));
+        // per-intent：提交成功后回填认领 sha；下次有界恢复据此逐意图核对，不再全量 union 比 HEAD。
+        const committedSha = await git.headSha();
+        all = all.map((entry) => replayable([entry]).length > 0
+            ? { ...entry, commitSha: committedSha }
+            : entry);
+        await outbox.save(all);
         attempts = 1;
         try {
             await git.pushMain(PUSH_ARGS);

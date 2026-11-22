@@ -89,6 +89,7 @@ class FakeGit {
     this.behind = opts.behind ?? 0
     this.aheadCommitList = opts.aheadCommits ?? []
     this.onPush = opts.onPush ?? null
+    this.onCommit = opts.onCommit ?? null
     this.calls = []
   }
   async branchName() { return this.branch }
@@ -98,7 +99,10 @@ class FakeGit {
   async showRemote(rel) { return this.remote[rel] ?? '' }
   async showHead(rel) { return this.headFiles[rel] ?? '' }
   async addPaths(paths) { this.calls.push(['add', paths.slice()]) }
-  async commit(message, body) { this.calls.push(['commit', message, body]) }
+  async commit(message, body) {
+    this.calls.push(['commit', message, body])
+    if (this.onCommit !== null) await this.onCommit()
+  }
   async pushMain(args) {
     this.calls.push(['push', args])
     if (this.onPush !== null) await this.onPush()
@@ -611,4 +615,115 @@ test('C29 m2 工作树匹配但 HEAD 不同 → typed E_CORRUPT，零推送、�
   assert.equal(JSON.stringify(outbox.entries), snapshot)
   assert.equal(outbox.saves, 0)
   assert.equal(git.calls.filter((c) => c[0] === 'push').length, 0)
+})
+
+// ================================================================ mod-plugin-outbox-per-intent
+//
+// per-intent 恢复校验的三分支回归：停放意图（已认领，b）/ 缺字节（诚实拒绝，a）/
+// 新写入（未应用，c）。今天的代码把 c 当 a，导致停放意图永远无法 flush 且新写入永远被拒。
+
+test('PI-01 停放意图(attempts≥1) + 一条新写入 → 两者都应用并推送，无 E_CORRUPT', async () => {
+  const rel = `timeline/${DAY}/records.json`
+  const outbox = new MemOutbox([makeIntent({ id: 'a1', ts: T0930 })])
+  const fs1 = new MemFs({ 'timeline/schema.json': FRESH_SCHEMA_TEXT })
+  const git1 = new FakeGit({ pushError: 'E_PUSH_REJECTED: auth-prompt' })
+  const first = await runV2Cycle(opts({ fs: fs1, git: git1, outbox }))
+  assert.equal(first.code, V2_ERROR.PUSH_REJECTED)
+  assert.equal(outbox.entries[0].attempts, 1)
+  const parked = outbox.entries[0] // 停放意图已被提交认领（commitSha 在下方断言）
+
+  // 停放期间新来一条写入（不同 id），还没落地任何提交。
+  outbox.entries.push(makeIntent({ id: 'b2', ts: T1000 }))
+
+  const headText = fs1.files.get(rel)
+  const fs2 = new MemFs({ 'timeline/schema.json': FRESH_SCHEMA_TEXT, [rel]: headText })
+  const git2 = new FakeGit({
+    head: 'local-v2', origin: 'remote-1', ahead: 1, behind: 0,
+    aheadCommits: [ownCommit()], headFiles: { [rel]: headText },
+  })
+  // 模拟真实提交/推送的字节流：commit 把工作树写进 HEAD，push 把 HEAD 当作 origin。
+  git2.onCommit = async () => { git2.headFiles[rel] = fs2.files.get(rel) ?? ''; git2.head = 'local-v2-2' }
+  git2.onPush = async () => { git2.origin = git2.head }
+
+  const second = await runV2Cycle(opts({ fs: fs2, git: git2, outbox }))
+  assert.equal(second.ok, true)
+  assert.notEqual(second.code, V2_ERROR.CORRUPT)
+  assert.ok(parked.commitSha) // 认领停放意图的提交 sha 已回填
+  assert.deepEqual(outbox.entries, [])
+  assert.equal(git2.calls.filter((c) => c[0] === 'push').length, 1)
+  const ids = parseTimelineDay(git2.headFiles[rel], DAY).day.allRecords.map((r) => r.id).sort()
+  assert.deepEqual(ids, ['a1', 'b2']) // 停放 + 新写入都落在被推送的树里
+})
+
+test('PI-02 认领提交里确实缺该意图的行 → E_CORRUPT，零推送，意图原样保留（诚实 case a）', async () => {
+  const rel = `timeline/${DAY}/records.json`
+  // 认领提交里只有别的记录，a1 的行确实不在其中。
+  const headText = buildRecordsText(DAY, [rec({ id: 'other', ts: T0930 })])
+  const intentional = makeIntent({ id: 'a1', ts: T0930, attempts: 1, state: 'pending', commitSha: 'claim-sha' })
+  const outbox = new MemOutbox([intentional])
+  const snapshot = JSON.stringify(outbox.entries)
+  const fs = new MemFs({ 'timeline/schema.json': FRESH_SCHEMA_TEXT, [rel]: headText })
+  const git = new FakeGit({
+    head: 'local-v2', origin: 'remote-1', ahead: 1, behind: 0,
+    aheadCommits: [ownCommit()], headFiles: { [rel]: headText },
+  })
+  const result = await runV2Cycle(opts({ fs, git, outbox }))
+  assert.equal(result.ok, false)
+  assert.equal(result.code, V2_ERROR.CORRUPT)
+  assert.match(result.message, /HEAD/)
+  assert.equal(git.calls.filter((c) => c[0] === 'push').length, 0)
+  assert.equal(git.calls.some((c) => c[0] === 'add' || c[0] === 'commit'), false)
+  assert.equal(JSON.stringify(outbox.entries), snapshot) // 未出队、未改 attempts
+})
+
+test('PI-03 恢复推送成功后 outbox 排空且 HEAD == origin/main', async () => {
+  const rel = `timeline/${DAY}/records.json`
+  const headText = buildRecordsText(DAY, [rec()])
+  const outbox = new MemOutbox([makeIntent({ attempts: 1, state: 'pending', commitSha: 'claim-sha' })])
+  const fs = new MemFs({ 'timeline/schema.json': FRESH_SCHEMA_TEXT, [rel]: headText })
+  const git = new FakeGit({
+    head: 'local-v2', origin: 'remote-1', ahead: 1, behind: 0,
+    aheadCommits: [ownCommit()], headFiles: { [rel]: headText },
+  })
+  git.onPush = async () => { git.origin = git.head }
+  const result = await runV2Cycle(opts({ fs, git, outbox }))
+  assert.equal(result.ok, true)
+  assert.notEqual(result.code, V2_ERROR.CORRUPT)
+  assert.deepEqual(outbox.entries, [])
+  assert.equal(git.head, git.origin)
+  assert.equal(git.calls.filter((c) => c[0] === 'push').length, 1)
+  assert.equal(git.calls.some((c) => c[0] === 'add' || c[0] === 'commit'), false) // 停放意图只推不重写
+})
+
+test('PI-04 两个停放意图 + 一条新写入 → 三者全部落地，无 E_CORRUPT', async () => {
+  const rel = `timeline/${DAY}/records.json`
+  const outbox = new MemOutbox([
+    makeIntent({ id: 'a1', ts: T0930 }),
+    makeIntent({ id: 'b2', ts: T1000 }),
+  ])
+  const fs1 = new MemFs({ 'timeline/schema.json': FRESH_SCHEMA_TEXT })
+  const git1 = new FakeGit({ pushError: 'E_PUSH_REJECTED: auth-prompt' })
+  const first = await runV2Cycle(opts({ fs: fs1, git: git1, outbox }))
+  assert.equal(first.code, V2_ERROR.PUSH_REJECTED)
+  assert.equal(outbox.entries.filter((e) => e.attempts >= 1).length, 2)
+
+  outbox.entries.push(makeIntent({ id: 'c3', ts: `${DAY}T11:00:00+08:00` }))
+
+  const headText = fs1.files.get(rel)
+  const fs2 = new MemFs({ 'timeline/schema.json': FRESH_SCHEMA_TEXT, [rel]: headText })
+  const git2 = new FakeGit({
+    head: 'local-v2', origin: 'remote-1', ahead: 1, behind: 0,
+    aheadCommits: [ownCommit()], headFiles: { [rel]: headText },
+  })
+  git2.onCommit = async () => { git2.headFiles[rel] = fs2.files.get(rel) ?? ''; git2.head = 'local-v2-2' }
+  git2.onPush = async () => { git2.origin = git2.head }
+
+  const second = await runV2Cycle(opts({ fs: fs2, git: git2, outbox }))
+  assert.equal(second.ok, true)
+  assert.notEqual(second.code, V2_ERROR.CORRUPT)
+  assert.deepEqual(outbox.entries, [])
+  const ids = parseTimelineDay(git2.headFiles[rel], DAY).day.allRecords.map((r) => r.id).sort()
+  assert.deepEqual(ids, ['a1', 'b2', 'c3'])
+  assert.equal(git2.calls.filter((c) => c[0] === 'commit').length, 1) // 新写入一次提交
+  assert.equal(git2.calls.filter((c) => c[0] === 'push').length, 1)
 })
