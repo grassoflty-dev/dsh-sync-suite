@@ -41,7 +41,10 @@ import type { DsInstance, InstanceProblem, RawInstance, RedactedInstance } from 
 import { reachabilityLabel, relativeLastSeen } from '../../model/instanceSeed';
 import { REMOTE_MODE_LAN, REMOTE_MODE_ORDER, findRemoteMode } from '../../model/remoteAccess';
 import { mergeRemoteToken, normalizeRemoteUrl, routeToRemote, stripRemoteToken } from '../../model/remoteUrl';
+import { FIRST_PAIRING_DETAIL, FIRST_PAIRING_WORDING } from '../../model/remoteAnnounceRefresh';
+import type { AnnounceRefreshOutcome, AnnounceRefreshState } from '../../model/remoteAnnounceRefresh';
 import { instanceStore } from '../../services/instanceStore';
+import { remoteAnnounceRefreshService } from '../../services/remoteAnnounceRefresh';
 import { settingsStore } from '../../services/settingsStore';
 import { describeError } from '../../services/scheduleStore';
 
@@ -64,6 +67,12 @@ const ROUTE_INSTANCES: string = 'pages/Instances';
 /** 面板模式：空 = 收起；`add` = 添加实例；`edit` = 编辑当前行（仅 configurable=true 可进入）。 */
 const PANEL_ADD: string = 'add';
 const PANEL_EDIT: string = 'edit';
+
+/**
+ * 公告结果行的展示种类：与文案一起显式设置，不从其它字段反推。
+ * 成功 / 无公告没有可确认的事，因此不渲染 CTA；只有不可信与首配各有自己的 CTA。
+ */
+type AnnounceNoticeKind = '' | 'success' | 'refusal' | 'first-pairing' | 'no-announcement';
 
 @Component
 export struct InstancesPane {
@@ -95,7 +104,20 @@ export struct InstancesPane {
   @State formMode: string = REMOTE_MODE_LAN;
   /** 表单错误文案（中文，永不回显 token）。 */
   @State formError: string = '';
+  /** 公告刷新结果文案（空串 = 不显示；不可信时逐字显示 KEEP_WORDING，永不回显地址）。 */
+  @State announceNotice: string = '';
+  /** 触发刷新的实例 id：失败时「手动确认」据此打开对应配置，成功时清空。 */
+  @State announceNoticeId: string = '';
+  /** 结果行种类（显式设置，决定颜色 / 后果说明 / CTA，绝不由其它字段猜）。 */
+  @State announceNoticeKind: AnnounceNoticeKind = '';
 
+  /**
+   * 首配提案（非 @State：候选地址是 capability，绝不进页面响应式状态 / 日志）。
+   * 只有用户点「确认信任该公告」才把它交给服务的 confirmFirstPairing()。
+   */
+  private pendingAnnounce: AnnounceRefreshOutcome | null = null;
+  /** 首配提案对应的实例 id（非秘密，仅用于取回真身）。 */
+  private pendingViewId: string = '';
   /** 页面是否已销毁（异步 bootstrap 回来后不再 setState）。 */
   private disposed: boolean = false;
   /** 下拉框顺序与 `REMOTE_MODE_ORDER` 同源。 */
@@ -157,6 +179,87 @@ export struct InstancesPane {
       }
     }
     return null;
+  }
+
+  /**
+   * 地址不再应答时的显式恢复动作（唯一的公告消费者入口）：
+   * 从同步仓库工作副本只读公告 → 四步验证。有 pin 且全过才直接改地址；
+   * 没有 pin 时只生成首配提案（零写入），等用户点「确认信任该公告」再落锚点 + 地址。
+   * 不轮询、不后台定时器、不在 aboutToAppear / onPageShow 自动触发（HarmonyOS 后台限制见
+   * docs/TAILCAT-HARMONYOS-SPIKE.md）；服务吞异常，这里不写 try/catch 也不抛到 UI 线程。
+   */
+  /** 由服务返回的 typed 状态映射展示种类；不从 pendingAnnounce / noticeId 反推。 */
+  private noticeKindOf(state: AnnounceRefreshState): AnnounceNoticeKind {
+    if (state === 'refreshed') {
+      return 'success';
+    }
+    if (state === 'first-pairing-pending' || state === 'awaiting-consent') {
+      return 'first-pairing';
+    }
+    if (state === 'no-announcement') {
+      return 'no-announcement';
+    }
+    return 'refusal';
+  }
+
+  private refreshAddressFromAnnouncement(view: RedactedInstance): void {
+    const full: DsInstance | null = this.fullOf(view.id);
+    if (full === null) {
+      return;
+    }
+    remoteAnnounceRefreshService.init(getContext(this) as common.UIAbilityContext);
+    const outcome = remoteAnnounceRefreshService.refresh(full);
+    // 只取文案 / 状态：outcome.newUrl 是地址，不进 @State、不进日志
+    if (outcome.state === 'first-pairing-pending') {
+      this.pendingAnnounce = outcome;
+      this.pendingViewId = view.id;
+      this.announceNotice = FIRST_PAIRING_WORDING;
+    } else {
+      this.pendingAnnounce = null;
+      this.pendingViewId = '';
+      this.announceNotice = outcome.wording;
+    }
+    this.announceNoticeId = outcome.state === 'refreshed' ? '' : view.id;
+    this.announceNoticeKind = this.noticeKindOf(outcome.state);
+    this.reload();
+  }
+
+  /**
+   * 首配的**唯一**确认出口（与「手动确认」是不同按钮、不同语义）：
+   * 只有这里会把提案交给服务的 confirmFirstPairing()；取消 / 关闭页面都让提案自然作废，
+   * 不写 pin、不改地址。已有 pin 时服务 typed 拒绝，按钮永不复用成换钥入口。
+   */
+  private confirmFirstPairing(): void {
+    const pending: AnnounceRefreshOutcome | null = this.pendingAnnounce;
+    const id: string = this.pendingViewId;
+    if (pending === null || id.length === 0) {
+      return;
+    }
+    const full: DsInstance | null = this.fullOf(id);
+    if (full === null) {
+      return;
+    }
+    const outcome = remoteAnnounceRefreshService.confirmFirstPairing(full, pending);
+    this.pendingAnnounce = null;
+    this.pendingViewId = '';
+    this.announceNotice = outcome.wording;
+    this.announceNoticeId = outcome.state === 'refreshed' ? '' : id;
+    this.announceNoticeKind = this.noticeKindOf(outcome.state);
+    this.reload();
+  }
+
+  /** 「手动确认」出口：设置页就地打开对应行的编辑表单，首页回到设置配置落点。 */
+  private confirmAnnounceManually(): void {
+    if (this.configurable) {
+      for (const view of this.views) {
+        if (view.id === this.announceNoticeId) {
+          this.showEdit(view);
+          return;
+        }
+      }
+      return;
+    }
+    this.openInstanceConfig();
   }
 
   /** 方式徽章：六种枚举给中文标签，未知值原样显示（不猜、不回落）。 */
@@ -449,6 +552,65 @@ export struct InstancesPane {
     }
   }
 
+  /**
+   * 公告结果行：严格按 announceNoticeKind 渲染，颜色 / 后果说明 / CTA 都由种类决定。
+   * - success / no-announcement：中性色 + **没有 CTA**（没有需要用户确认的事）；
+   * - refusal：danger 色 + 「手动确认」（只走手动改地址，绝不写 pin）；
+   * - first-pairing：中性色 + 后果说明 + 「确认信任该公告」（唯一信任锚点写入路径）。
+   */
+  @Builder
+  AnnounceNoticeRow() {
+    if (this.announceNotice.length > 0 && this.announceNoticeKind.length > 0) {
+      Column({ space: SPACING.xs }) {
+        Text(this.announceNotice)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor(this.announceNoticeKind === 'refusal' ? $r('app.color.danger') : $r('app.color.text_secondary'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+        if (this.announceNoticeKind === 'first-pairing') {
+          Text(FIRST_PAIRING_DETAIL)
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.text_secondary'))
+            .width('100%')
+            .textAlign(TextAlign.Start)
+          ActionButton({
+            label: '确认信任该公告',
+            actionEnabled: true,
+            disabledReason: '',
+            busy: false,
+            variant: 'secondary',
+            block: false,
+            onTap: (): void => {
+              this.confirmFirstPairing();
+            },
+            onBlockedTap: null
+          })
+        }
+        if (this.announceNoticeKind === 'refusal') {
+          ActionButton({
+            label: '手动确认',
+            actionEnabled: true,
+            disabledReason: '',
+            busy: false,
+            variant: 'secondary',
+            block: false,
+            onTap: (): void => {
+              this.confirmAnnounceManually();
+            },
+            onBlockedTap: null
+          })
+        }
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .padding(SPACING.md)
+      .backgroundColor($r('app.color.warning_soft'))
+      .borderRadius(RADIUS.sm)
+    }
+  }
+
   /** 单行：名称 / 方式 / 三态 + 相对时间 / 打码 URL /「打开」；编辑·删除只在可配置模式。 */
   @Builder
   InstanceRow(view: RedactedInstance) {
@@ -496,6 +658,35 @@ export struct InstancesPane {
         .textAlign(TextAlign.Start)
 
       Row({ space: SPACING.sm }) {
+        // 地址不再应答（reachable=fail，由「打开」跳转失败标记）才出现的显式恢复动作。
+        // 没有 pin 时是首配：标签 / 后果说明都与普通刷新刻意不同，且这一下只生成提案，
+        // 不写 pin / 地址；真正确认走结果行的「确认信任该公告」。不轮询、不后台定时器。
+        if (view.reachable === 'fail') {
+          Column({ space: SPACING.xs }) {
+            if (!remoteAnnounceRefreshService.hasPin(view.id)) {
+              Text(FIRST_PAIRING_DETAIL)
+                .fontSize(FONT.caption)
+                .lineHeight(LINE_HEIGHT.caption)
+                .fontColor($r('app.color.text_secondary'))
+                .width('100%')
+                .textAlign(TextAlign.Start)
+            }
+            ActionButton({
+              label: remoteAnnounceRefreshService.hasPin(view.id)
+                ? '按公告刷新地址'
+                : FIRST_PAIRING_WORDING,
+              actionEnabled: true,
+              disabledReason: '',
+              busy: false,
+              variant: 'secondary',
+              block: false,
+              onTap: (): void => {
+                this.refreshAddressFromAnnouncement(view);
+              },
+              onBlockedTap: null
+            })
+          }
+        }
         ActionButton({
           label: '打开',
           actionEnabled: true,
@@ -632,6 +823,7 @@ export struct InstancesPane {
           .width('100%')
           .textAlign(TextAlign.Start)
         this.ProblemRow()
+        this.AnnounceNoticeRow()
         if (this.configurable) {
           this.FormPanel()
         }
