@@ -32,8 +32,16 @@ dsh plugin --profile web add link:<repo>/packages/dsh-dots
 > （与仓库根 README「插件安装」② 一致）。本地目录请用上面的 GUI/CLI 链接安装，不要把
 > `link:` 传给 `/dsh-safe-launch/install-plugin`。
 >
-> 安装完成后刷新 Web GUI：新 bundle 通常经 HMR 生效；**替换/升级已安装的包后需要重启 DSH**，
-> 才能加载新的客户端模块。设置页会出现「设置 → 配置同步」分区（`id: dots`，`order: 70`）。
+> 安装完成后刷新 Web GUI：新 bundle 通常经 HMR 生效。改动分三种，别一概重启：
+> ① **只改客户端 bundle**（`dist/client.js`；包名、`dsh.client`、`exports`、插件 roster 都不变）：
+> 直接 **F5 硬刷新** Web GUI 即可。服务端 `/plugins/<id>/client.js?rev=…` 每次请求都从磁盘读取
+> 当前文件（`rev` 只是 URL 缓存键，不参与文件读取），设置分区表也是每次页面加载时由新客户端
+> 重新注册的，不需要重启、不需要重新绑定插件。
+> ② **改 `package.json` 的 `dsh.client` / `exports`**：包元数据在 client-modules 表里有缓存，
+> 需要在插件管理里卸载后重新链接安装，或重启 DSH。
+> ③ **改插件 entry / `cordis.patch.yml` 的 roster**：需要禁用再启用插件，或重启 DSH。
+> 设置页只有一个条目：**设置 → DSH-dots**（`settings.section` id `dots`，`order: 70`）；
+> 「配置同步」与「远程控制」是同一页内的两个折叠分组，不再各占一个条目。
 
 ### 1.2 打包后安装（分发给其他机器）
 

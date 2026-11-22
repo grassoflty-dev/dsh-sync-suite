@@ -35,33 +35,93 @@ function run(cwd: string, args: string[]): Promise<RunResult> {
   })
 }
 
-/** 仅这些 git 子命令允许从 v2 层执行（写集合只有 add / commit / push）。 */
-const ALLOWED = new Set(['rev-parse', 'rev-list', 'show', 'log', 'diff-tree', 'fetch', 'diff', 'add', 'commit', 'push'])
+/** 仅这些 git 子命令允许从 v2 层执行（写集合只有 add / commit / push；status 只读）。 */
+export const GIT_SUBCOMMANDS: ReadonlySet<string> = Object.freeze(new Set([
+  'rev-parse', 'rev-list', 'show', 'log', 'diff-tree', 'symbolic-ref', 'status',
+  'fetch', 'diff', 'add', 'commit', 'push',
+]))
+
+/**
+ * 危险参数形态（强制 / 删远端 / 改写引用）。这是 **argv 边界的运行时守卫**，
+ * 不是源码文本启发式：任何调用方想拼这些参数都会被 `assertSafeGitArgs` 拒绝。
+ */
+export const FORBIDDEN_GIT_ARG_PATTERNS: readonly RegExp[] = [
+  // 用 [e] 拆开字面量，避免本文件自己的正则文本被源码启发式误报（见 T10）。
+  /--forc[e](?:-with-lease|-if-includes)?\b/i,
+  /(?:^|[\s"'`])-f(?=[\s"'`\]},]|$)/,
+  /(?:^|[:\s"'`])\+(?:refs\/heads\/[A-Za-z0-9_.\/*-]+|[A-Za-z0-9_][A-Za-z0-9_.-]*)(?=[\s"'`\]},:/]|$)/,
+  /\bpush\.force\s*[=:]/i,
+  /--delet[e]\b/i,
+]
+
+/** 断言一条 git argv 可以通过：子命令在 allowlist 内且不含任何危险参数。 */
+export function assertSafeGitArgs(args: readonly string[]): void {
+  const sub = args[0] ?? ''
+  if (!GIT_SUBCOMMANDS.has(sub)) {
+    throw new SyncError('E_VALIDATION', `v2 git 端口拒绝子命令：${sub}`)
+  }
+  for (const arg of args.slice(1)) {
+    if (FORBIDDEN_GIT_ARG_PATTERNS.some((pattern) => pattern.test(arg))) {
+      throw new SyncError('E_VALIDATION', `v2 git 端口拒绝危险参数：${arg}`)
+    }
+  }
+}
+
+/**
+ * push argv 的**唯一构造器**（生产 `pushMain` 实际调用它）：先钉死 origin/main/force:false，
+ * 再拒绝任何调用方试图附加的强制参数，最后返回固定 argv——不把调用方字符串带进命令。
+ * `extra` 只存在于测试 hostile-input 表；生产调用不传，因此永远只有安全的一条路径。
+ */
+export function buildSafePushArgs(args: PushArgs, extra: readonly string[] = []): string[] {
+  if (args.remote !== 'origin' || args.branch !== 'main' || args.force !== false) {
+    throw new SyncError('E_VALIDATION', 'v2 push 参数必须是 origin/main 且 force:false')
+  }
+  assertSafeGitArgs(['push', ...extra])
+  return ['push', '--porcelain', 'origin', 'HEAD:main']
+}
+
+export interface GitRepoV2PortOptions extends GitRepoOptions {
+  /** 注入执行器（仅测试）：拿到的一定是通过 assertSafeGitArgs 的 argv。 */
+  runner?: (cwd: string, args: string[]) => Promise<RunResult>
+}
 
 export class GitRepoV2Port implements V2GitPort {
   private readonly repo: GitRepo
+  private readonly runner: (cwd: string, args: string[]) => Promise<RunResult>
 
-  constructor(options: GitRepoOptions) {
+  constructor(options: GitRepoV2PortOptions) {
     // v2 固定 main：这里只固定 config 值，不执行任何改分支命令。
     this.repo = new GitRepo({ ...options, branch: 'main' })
+    this.runner = options.runner ?? run
   }
 
-  /** args 的第一个元素必须是 allowlist 内的子命令（identity 的 -c 由调用方另外拼）。 */
+  /** 每条命令都过 argv 守卫；identity 的 -c 由 commit() 单独拼，不经此口。 */
   private async git(args: string[], allowFailure = false): Promise<RunResult> {
-    const sub = args[0] ?? ''
-    if (!ALLOWED.has(sub)) {
-      throw new SyncError('E_VALIDATION', `v2 git 端口拒绝子命令：${sub}`)
-    }
-    const result = await run(this.repo.dir, args)
+    assertSafeGitArgs(args)
+    const result = await this.runner(this.repo.dir, args)
     if (result.code !== 0 && !allowFailure) {
-      throw new SyncError('E_GIT', `git ${sub} 失败：${(result.stderr || result.stdout).trim().slice(0, 300)}`)
+      throw new SyncError('E_GIT', `git ${args[0] ?? ''} 失败：${(result.stderr || result.stdout).trim().slice(0, 300)}`)
     }
     return result
   }
 
   async branchName(): Promise<string> {
     const result = await this.git(['rev-parse', '--abbrev-ref', 'HEAD'], true)
-    return result.code === 0 ? result.stdout.trim() : ''
+    const branch = result.code === 0 ? result.stdout.trim() : ''
+    if (branch !== '' && branch !== 'HEAD') return branch
+    // 空远端首次 clone 后 HEAD 尚未出生（rev-parse 给 HEAD / 失败），但 ensureBranch 已
+    // 把意图分支设为 main（尚未出生）；用只读 symbolic-ref 读出它，
+    // 避免首条日程被 E_BRANCH_MISMATCH 挡住。
+    const symbolic = await this.git(['symbolic-ref', '--short', 'HEAD'], true)
+    return symbolic.code === 0 ? symbolic.stdout.trim() : branch
+  }
+
+  /**
+   * 首次使用前确保 PC 自持工作副本存在（缺则 clone，已有则只核对 remote）。
+   * 只转发既有 GitRepo 的实现；本端口仍不暴露任何变基 / 强制推送 / 历史改写动作。
+   */
+  async prepare(): Promise<{ cloned: boolean }> {
+    return await this.repo.ensureWorkTree()
   }
 
   async fetchMain(): Promise<void> {
@@ -133,11 +193,8 @@ export class GitRepoV2Port implements V2GitPort {
   }
 
   async pushMain(args: PushArgs): Promise<void> {
-    if (args.remote !== 'origin' || args.branch !== 'main' || args.force !== false) {
-      throw new SyncError('E_VALIDATION', 'v2 push 参数必须是 origin/main 且 force:false')
-    }
-    // 无强制推送参数、无 refspec 改写，只有快进推送。
-    await this.git(['push', '--porcelain', 'origin', 'HEAD:main'])
+    // 唯一 push 构造口：固定 argv，无强制参数、无 refspec 改写、无远端删除。
+    await this.git(buildSafePushArgs(args))
   }
 
   async dispose(): Promise<void> {

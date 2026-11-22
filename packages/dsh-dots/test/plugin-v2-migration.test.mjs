@@ -56,15 +56,20 @@ async function makeScene(extraLocalCommit = false) {
 
 // ================================================================ 路径决策
 
-test('M01 v2 唯一 clone 路径是 App 的 git-repo/；旧 work/<repoHash> 仅供迁移检测', async () => {
+test('M01 v2 仓库目录仍是 git-repo；默认根改为 repos/<repoHash>（mod-plugin-repo-root）', async () => {
   const appFiles = path.join(os.tmpdir(), 'app-files')
   assert.equal(resolveV2RepoDir({ appFilesDir: appFiles }), path.join(appFiles, SHARED_REPO_DIR_NAME))
   assert.equal(SHARED_REPO_DIR_NAME, 'git-repo')
   const overridden = resolveV2RepoDir({ appFilesDir: appFiles, overrideDir: path.join(appFiles, 'custom') })
   assert.equal(overridden, path.join(appFiles, 'custom'))
-  const workRoot = path.join(os.tmpdir(), 'dots', 'work')
   const url = 'https://example.test/a/b.git'
+  const workRoot = path.join(os.tmpdir(), 'dots', 'work')
   assert.equal(legacyWorkDir(workRoot, url), path.join(workRoot, repoHash(url)))
+  // 默认根与 legacy 兄弟并列、哈希相同、目录名仍是 git-repo。
+  const home = path.join(os.tmpdir(), 'home')
+  const defaultDir = resolveV2RepoDir({ homeDir: home, repoUrl: url, env: {} })
+  assert.equal(defaultDir, path.join(home, '.dsh', 'dots', 'repos', repoHash(url), SHARED_REPO_DIR_NAME))
+  assert.notEqual(defaultDir, path.join(home, '.dsh', 'dots', 'work', repoHash(url)))
 })
 
 // ================================================================ 未推提交 → typed 中止
@@ -115,7 +120,7 @@ test('M03 若无 origin/main 引用但有本地提交 → 保守视为未推，�
 
 // ================================================================ 干净 → 幂等迁移
 
-test('M04 干净旧副本 → 移动到共享 clone 并写标记；第二次运行幂等 no-op', async () => {
+test('M04 干净旧副本 → 先备份再移动并写标记；第二次运行幂等 no-op', async () => {
   const s = await makeScene(false)
   try {
     const first = await migrateLegacyWorkDir({ legacyDir: s.legacy, targetDir: s.target, markerPath: s.marker, io: s.io })
@@ -123,6 +128,9 @@ test('M04 干净旧副本 → 移动到共享 clone 并写标记；第二次运�
     assert.equal(first.action, 'moved')
     assert.equal(first.unpushed, 0)
     assert.equal(existsSync(s.legacy), false)
+    // 备份先于移动：原 README 在备份里逐字节可读。
+    assert.equal(existsSync(path.join(`${s.legacy}.dsh-backup`, 'README.md')), true)
+    assert.equal(readFileSync(path.join(`${s.legacy}.dsh-backup`, 'README.md'), 'utf8'), 'init\n')
     assert.equal(existsSync(path.join(s.target, '.git')), true)
     const markerBefore = await readFile(s.marker, 'utf8')
     assert.equal(path.resolve(JSON.parse(markerBefore).target), path.resolve(s.target))

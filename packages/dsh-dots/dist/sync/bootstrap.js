@@ -5,15 +5,17 @@
  * 这里刻意**不重连** v1 的 `schedule_*` 工具（`src/schedule/**` 原样保留）；
  * 本模块只负责 v2 timeline 的首跑迁移与周期，失败一律 typed、零静默。
  *
- * `appFilesDir` 来自显式注入或 `DSH_DOTS_APP_FILES_DIR`；拿不到时 fail-closed
- * （不猜路径、不创建目录），这是「共享 clone 路径仍是注入假设」的显式边界。
+ * 工作根由 `src/sync/repoRoot.ts` 按 `DSH_DOTS_REPO_ROOT` → `DSH_DOTS_APP_FILES_DIR`
+ * （已废弃别名）→ 默认 `~/.dsh/dots/repos/<repoHash>` 的优先级解析；没有 env 也照样工作，
+ * 旧的「缺 App filesDir」fail-closed 分支已删除。根不可创建/写入时 typed `E_REPO_ROOT_UNAVAILABLE`。
+ * 迁移只在「旧 work 目录存在且新 repos 根不存在」时发生，先备份再移动且幂等。
  */
 import path from 'node:path';
 import { SettingsStore } from '../engine/settings.js';
 import { statePaths } from '../engine/paths.js';
 import { SyncError } from '../engine/errors.js';
 import { NodeTimelineFs } from '../timeline/write.js';
-import { NodeMigrationIo, legacyWorkDir, migrateLegacyWorkDir, resolveV2RepoDir } from './repoPath.js';
+import { NodeMigrationIo, ensureRepoRoot, legacyWorkDir, migrateIfNeeded, resolveV2RepoDirDetailed, } from './repoPath.js';
 import { NodeOutboxPort } from './outbox.js';
 import { GitRepoV2Port } from './gitPort.js';
 import { runV2Cycle } from './cycle.js';
@@ -21,6 +23,8 @@ import { runV2Cycle } from './cycle.js';
 export class V2SyncRuntime {
     repoDir;
     outbox;
+    repoRootSource;
+    repoRootLogLine;
     homeDir;
     appFilesDir;
     settings;
@@ -34,8 +38,16 @@ export class V2SyncRuntime {
         this.now = options.now ?? new Date();
         const paths = statePaths(this.homeDir);
         this.settings = new SettingsStore(paths, { allowLocalRepo: this.allowLocalRepo });
-        // 单一 clone 路径决策点（App 的 git-repo/）。
-        this.repoDir = resolveV2RepoDir({ appFilesDir: this.appFilesDir });
+        // 单一仓库目录决策点：env 优先级 + 默认 ~/.dsh/dots/repos/<repoHash>/git-repo。
+        const resolved = resolveV2RepoDirDetailed({
+            appFilesDir: this.appFilesDir,
+            repoUrl: this.settings.readSettings().repoUrl,
+            homeDir: this.homeDir,
+            logger: options.logger,
+        });
+        this.repoDir = resolved.repoDir;
+        this.repoRootSource = resolved.source;
+        this.repoRootLogLine = resolved.logLine;
         const configuredRepoUrl = this.settings.readSettings().repoUrl;
         // 仓库外 outbox（%USERPROFILE%\.dsh\dots\outbox\<repoHash>.json）。
         this.outbox = new NodeOutboxPort({
@@ -48,28 +60,28 @@ export class V2SyncRuntime {
         const config = this.settings.readSettings();
         const base = {
             ok: false, code: 'E_UNCONFIGURED', message: '尚未配置仓库地址，v2 同步未启动',
-            repoDir: this.repoDir, outboxFile: this.outbox.filePath, migrated: false, synced: false,
+            repoDir: this.repoDir, repoRootSource: this.repoRootSource, repoRootLogLine: this.repoRootLogLine,
+            outboxFile: this.outbox.filePath, migrated: false, synced: false,
         };
         if (config.repoUrl.trim() === '') {
             this.lastStatus = base;
             return base;
-        }
-        if (this.appFilesDir === '') {
-            const status = {
-                ...base, code: 'E_NO_APP_FILES_DIR',
-                message: '缺少 App filesDir（注入 appFilesDir 或设置 DSH_DOTS_APP_FILES_DIR），拒绝猜测共享 clone 路径',
-            };
-            this.lastStatus = status;
-            return status;
         }
         const paths = statePaths(this.homeDir);
         const legacy = legacyWorkDir(paths.workRoot, config.repoUrl);
         const marker = path.join(paths.root, 'v2-migration.json');
         let migrated = false;
         try {
-            await migrateLegacyWorkDir({
-                legacyDir: legacy, targetDir: this.repoDir, markerPath: marker, io: new NodeMigrationIo(),
+            // 迁移无二义：仅 legacy 在、新 repos 根不在时搬运；其余情况零触碰。
+            await migrateIfNeeded({
+                legacyDir: legacy,
+                newRoot: path.dirname(this.repoDir),
+                targetDir: this.repoDir,
+                markerPath: marker,
+                io: new NodeMigrationIo(),
             });
+            // 新根不存在时创建并验证可写（迁移已搬入时为幂等 no-op）。
+            ensureRepoRoot(path.dirname(this.repoDir));
             migrated = true;
         }
         catch (error) {
@@ -79,7 +91,7 @@ export class V2SyncRuntime {
                 message: error instanceof Error ? error.message : String(error), migrated: false,
             };
             this.lastStatus = status;
-            return status; // E_LEGACY_UNPUSHED / E_MIGRATION_TARGET_MISMATCH 原样可见，零写入
+            return status; // E_LEGACY_UNPUSHED / E_REPO_ROOT_UNAVAILABLE 原样可见，零写入
         }
         // 真实 git 端口：复用 engine/git.ts 的 GitRepo（URL 校验 / 凭据卫生 / fetch）。
         const git = new GitRepoV2Port({
@@ -132,7 +144,11 @@ export class V2SyncRuntime {
  * 绝不让 v2 半侧影响配置同步 RPC 与 v1 日程工具的启动。
  */
 export function mountV2Sync(ctx, options = {}, registerEffect = true) {
-    const runtime = new V2SyncRuntime(options);
+    // 宿主 logger 可选：工作根那一行只交给它，绝不直接写 stdout（凭据卫生守卫）。
+    const runtime = new V2SyncRuntime({
+        ...options,
+        logger: options.logger ?? ctx.logger,
+    });
     if (registerEffect) {
         ctx.effect(() => {
             void runtime.start().catch(() => undefined);

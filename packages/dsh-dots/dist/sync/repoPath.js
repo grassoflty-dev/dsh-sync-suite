@@ -1,21 +1,24 @@
 /**
- * 共享 clone 路径决策 + 存量迁移（绑定决策 ③，唯一可能丢用户本地提交的环节）。
+ * v2 仓库路径决策（PC 自持 clone 为主，`mod-plugin-repo-root`）+ 存量迁移（绑定决策 ③）。
  *
- * 【唯一路径决策】App 的 `git-repo/`（`apps/arkui-schedule/.../GitSyncService.getRepoRoot()`，
- * `<filesDir>/git-repo`）是**唯一工作副本**；插件 v2 层永不写入旧的
- * `~/.dsh/dots/work/<repoHash>`，旧目录只是待迁移的存量。
+ * 【唯一路径决策】工作根由 `src/sync/repoRoot.ts` 的 `resolveV2RepoRoot` 按 env 优先级
+ * 解析；本文件的 `resolveV2RepoDir` 仍是「工作根 + 目录名 = 仓库目录」的**单一决策点**：
+ * 默认 `~/.dsh/dots/repos/<repoHash>/git-repo`，与遗留 `~/.dsh/dots/work/<repoHash>` 分开。
+ * 平板不跑 DSH，插件不再依赖 App 的 filesDir；该 env 仅作已废弃别名保留。
  *
- * 【安全底线】迁移前先核账：旧副本若含远端没有的本地提交，立刻 typed 中止——
- * 不删除、不移动、不覆盖任何文件；只有确认「没有未推提交」才移动或重指向，且幂等。
- * 本文件只用只读 git 子命令（rev-parse / rev-list）做核账，没有任何历史改写命令。
+ * 【安全底线】迁移只在「旧 work 目录存在 且 新 repos 根不存在」时发生（`migrateIfNeeded`）；
+ * 核账发现未推提交立刻 typed 中止——不删除、不移动、不覆盖任何文件；移动前先备份，
+ * 写标记后幂等。本文件只用只读 git 子命令（rev-parse / rev-list / config --get）核账，
+ * 没有任何变基 / 强制推送 / 历史改写命令。
  */
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { SyncError } from '../engine/errors.js';
 import { repoHash } from '../engine/paths.js';
-/** v2 唯一工作副本的目录名，与 App `ROOT_DIR_NAME = 'git-repo'` 逐字一致。 */
-export const SHARED_REPO_DIR_NAME = 'git-repo';
+import { resolveV2RepoRoot, } from './repoRoot.js';
+export { SHARED_REPO_DIR_NAME } from './repoRoot.js';
+export { E_REPO_ROOT_UNAVAILABLE, ensureRepoRoot } from './repoRoot.js';
 /** 迁移中止码（typed；不是泛化的 E_IO）。 */
 export const E_LEGACY_UNPUSHED = 'E_LEGACY_UNPUSHED';
 /** M5：目标 clone 不属于同一仓库时的 typed 中止码。 */
@@ -29,15 +32,26 @@ export function legacyWorkDir(workRoot, repoUrl) {
     return path.join(workRoot, repoHash(repoUrl));
 }
 /**
- * v2 层唯一的工作副本路径决策点。
- * 中文说明：App 的 `git-repo/` 是唯一工作副本（shared clone），插件不再另起
- * `~/.dsh/dots/work/<repoHash>`；旧 work 目录只在迁移时被检测与搬离。
+ * v2 层唯一的仓库目录决策点：工作根来自 `resolveV2RepoRoot`，目录名固定 `git-repo`。
+ * `overrideDir` 是历史集成测试通道，给出时原样返回（它本身已经是完整仓库目录）。
  */
-export function resolveV2RepoDir(options) {
+export function resolveV2RepoDirDetailed(options = {}) {
+    const resolution = resolveV2RepoRoot({
+        ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
+        ...(options.repoUrl !== undefined ? { repoUrl: options.repoUrl } : {}),
+        ...(options.appFilesDir !== undefined ? { appFilesDir: options.appFilesDir } : {}),
+        ...(options.env !== undefined ? { env: options.env } : {}),
+        ...(options.logger !== undefined ? { logger: options.logger } : {}),
+    });
     if (typeof options.overrideDir === 'string' && options.overrideDir.trim() !== '') {
-        return path.resolve(options.overrideDir);
+        const repoDir = path.resolve(options.overrideDir);
+        return { ...resolution, repoDir, logLine: `${resolution.logLine}; explicit overrideDir -> ${repoDir}` };
     }
-    return path.join(options.appFilesDir, SHARED_REPO_DIR_NAME);
+    return resolution;
+}
+/** 兼容旧调用签名：只取仓库目录字符串。 */
+export function resolveV2RepoDir(options = {}) {
+    return resolveV2RepoDirDetailed(options).repoDir;
 }
 /** 迁移中止文案（verbatim）：包含旧路径、未推提交数、下一步与「绝不丢提交」承诺。 */
 export function legacyUnpushedMessage(legacyDir, targetDir, count) {
@@ -56,6 +70,11 @@ export class NodeMigrationIo {
                 return false;
             throw error;
         }
+    }
+    async backup(from, to) {
+        await mkdir(path.dirname(to), { recursive: true });
+        // 整目录复制：即便后续 move 中途失败，旧副本仍有一份逐字节备份可人工恢复。
+        await cp(from, to, { recursive: true, force: false, errorOnExist: true });
     }
     async move(from, to) {
         await mkdir(path.dirname(to), { recursive: true });
@@ -119,7 +138,7 @@ function markerTargets(marker, target) {
  * 核账 + 迁移（幂等）：
  * - 旧目录不存在 → 若标记已指向目标则 no-op；不新建任何目录。
  * - 旧目录含未推提交 → 抛 `E_LEGACY_UNPUSHED`，什么也不动（verbatim 文案见 legacyUnpushedMessage）。
- * - 旧目录干净 → 目标不存在则移动，目标已存在则只重指向；写标记。
+ * - 旧目录干净 → 目标不存在则先整目录备份再移动，目标已存在则只重指向；写标记。
  * 重复运行第二次：旧目录已不在（或标记已存在）→ `action:'none'`，状态不变。
  */
 export async function migrateLegacyWorkDir(options) {
@@ -171,7 +190,27 @@ export async function migrateLegacyWorkDir(options) {
         await io.writeMarker(markerPath, markerText(legacyDir, targetDir));
         return { ok: true, code: '', message: '旧副本已核对干净，重指向共享 clone', from: legacyDir, to: targetDir, action: 'repointed', unpushed: 0 };
     }
+    // 备份先于移动：备份目录存在则视为上次已备份，避免重复覆盖安全网。
+    const backupDir = `${legacyDir}.dsh-backup`;
+    if (!await io.exists(backupDir))
+        await io.backup(legacyDir, backupDir);
     await io.move(legacyDir, targetDir);
     await io.writeMarker(markerPath, markerText(legacyDir, targetDir));
-    return { ok: true, code: '', message: '旧副本已核对干净，已移动到共享 clone', from: legacyDir, to: targetDir, action: 'moved', unpushed: 0 };
+    return { ok: true, code: '', message: '旧副本已核对干净，已备份并移动到新工作根', from: legacyDir, to: targetDir, action: 'moved', unpushed: 0 };
+}
+/**
+ * 生产迁移门禁（`mod-plugin-repo-root`）：**只有**旧 `work/<repoHash>` 存在且新
+ * `repos/<repoHash>` 不存在时才调用底层迁移；其余情况零 IO、零文件搬运，语义无二义。
+ * 新工作根已经存在（哪怕为空）就绝不搬旧目录——两份副本都合法，由运维决定如何合并。
+ */
+export async function migrateIfNeeded(options) {
+    const { legacyDir, newRoot, targetDir, markerPath, io } = options;
+    const [legacyExists, newRootExists] = await Promise.all([io.exists(legacyDir), io.exists(newRoot)]);
+    if (!legacyExists || newRootExists) {
+        return {
+            ok: true, code: '', message: '迁移门禁未触发（旧副本不存在或新工作根已存在）',
+            from: legacyDir, to: targetDir, action: 'none', unpushed: 0,
+        };
+    }
+    return await migrateLegacyWorkDir({ legacyDir, targetDir, markerPath, io });
 }
