@@ -1,0 +1,12 @@
+{
+  "request": {
+    "host": "gitee.com",
+    "status": 200,
+    "contentType": "application/json; charset=utf-8",
+    "body": "{\"id\":910001,\"full_name\":\"alice/dsh-schedule\",\"name\":\"dsh-schedule\",\"path\":\"dsh-schedule\",\"private\":true,\"owner\":{\"login\":\"alice\"}}"
+  },
+  "expected": {
+    "ok": true,
+    "code": "OK"
+  }
+}

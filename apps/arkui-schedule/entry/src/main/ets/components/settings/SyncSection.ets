@@ -60,6 +60,13 @@ const SYNC_ERROR_NEXT_FIX: string = '先按上面的原因修正，再重试';
 /** 仓库地址下的固定说明：平台随地址推断、分支固定 main（本页没有平台/分支选择控件）。 */
 const SYNC_CAPTION: string = '平台按地址自动识别 · 分支固定 main';
 
+/**
+ * mod-repo-privacy-gate：同步仓库字段下方的唯一规则行。
+ * 日程 `timeline/**`、聊天 `chats/**`、远程控制配置 `remote/**` 共用这一个仓库，
+ * 所以必须是私有仓库；具体拒绝文案由 typed 模型给出，不在这里另编第二套。
+ */
+const REPO_PRIVATE_RULE: string = '仓库必须是私有仓库（日程、聊天与远程控制配置会提交到这里）';
+
 /** 已保存的认证方式是 SSH 时的只读提示（同一行还有一个显式切换按钮，不自动迁移）。 */
 const SSH_STORED_WARNING: string = '当前保存的是 SSH 方式；本页只提供 HTTPS + 令牌，建议改成 HTTPS 地址后保存';
 
@@ -254,6 +261,8 @@ export struct SyncSection {
         // 固定说明：平台按地址推断、分支固定 main（没有平台/分支选择控件）
         this.HintLine(SYNC_CAPTION)
       }
+      // 常驻规则行：日程 / 聊天 / 远程控制配置共用同一仓库，只接受私有仓库。
+      this.HintLine(REPO_PRIVATE_RULE)
 
       this.FieldLabel('访问令牌（仅存本机）')
       TextInput({

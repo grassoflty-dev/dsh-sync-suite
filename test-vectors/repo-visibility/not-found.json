@@ -1,0 +1,12 @@
+{
+  "request": {
+    "host": "github.com",
+    "status": 404,
+    "contentType": "application/json; charset=utf-8",
+    "body": "{\"message\":\"Not Found\",\"documentation_url\":\"https://docs.github.com/rest\"}"
+  },
+  "expected": {
+    "ok": false,
+    "code": "E_REPO_NOT_FOUND"
+  }
+}

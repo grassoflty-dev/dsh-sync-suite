@@ -1,0 +1,12 @@
+{
+  "request": {
+    "host": "gitee.com",
+    "status": 200,
+    "contentType": "application/json; charset=utf-8",
+    "body": "{\"id\":910006,\"full_name\":\"alice/with-extra\",\"name\":\"with-extra\",\"path\":\"with-extra\",\"private\":true,\"fork\":false,\"visibility\":\"private\",\"default_branch\":\"main\",\"owner\":{\"login\":\"alice\",\"id\":7},\"extra\":{\"future_key\":\"ignored\"}}"
+  },
+  "expected": {
+    "ok": true,
+    "code": "OK"
+  }
+}

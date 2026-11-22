@@ -1,0 +1,12 @@
+{
+  "request": {
+    "host": "gitee.com",
+    "status": 500,
+    "contentType": "application/json; charset=utf-8",
+    "body": "{\"id\":910005,\"full_name\":\"alice/oops\",\"name\":\"oops\",\"private\":false}"
+  },
+  "expected": {
+    "ok": false,
+    "code": "E_REPO_VISIBILITY_UNKNOWN"
+  }
+}

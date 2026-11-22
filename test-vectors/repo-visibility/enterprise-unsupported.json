@@ -1,0 +1,12 @@
+{
+  "request": {
+    "host": "git.company.internal",
+    "status": 200,
+    "contentType": "application/json; charset=utf-8",
+    "body": "{\"id\":1,\"full_name\":\"team/repo\",\"name\":\"repo\",\"private\":false}"
+  },
+  "expected": {
+    "ok": false,
+    "code": "E_REPO_HOST_UNSUPPORTED"
+  }
+}

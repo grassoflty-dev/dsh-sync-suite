@@ -1,0 +1,12 @@
+{
+  "request": {
+    "host": "gitee.com",
+    "status": 200,
+    "contentType": "application/json; charset=utf-8",
+    "body": ""
+  },
+  "expected": {
+    "ok": false,
+    "code": "E_REPO_BAD_RESPONSE"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "request": {
+    "host": "github.com",
+    "status": 403,
+    "contentType": "application/json; charset=utf-8",
+    "body": "{\"message\":\"Resource not accessible by integration\"}"
+  },
+  "expected": {
+    "ok": false,
+    "code": "E_REPO_AUTH"
+  }
+}

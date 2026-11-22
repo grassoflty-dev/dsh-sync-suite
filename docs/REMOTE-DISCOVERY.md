@@ -13,6 +13,7 @@
 - host 用 **Ed25519** 签名，App 对**钉住的公钥**验签；首次配对 TOFU，之后**仅显式用户操作**可换公钥。理由：**谁能写仓库就能把 App 指向自己控制的主机——未签名公告按设计就是重定向攻击**。
 - 文件里**绝不**写 repo token / DSH access token / 任何私钥；只有 `tokenId` 与指纹（token 卫生先例：`apps/arkui-schedule/entry/src/main/ets/model/instances.ts:13-15,105-116,416-443`）。
 - 仓库必须**私有**；若公开，模块**拒绝发布**并给 typed 错误（`apps/arkui-schedule/entry/src/main/ets/model/instances.ts:52-65,220-248` 的 typed reason 口径）——公告 + 指纹仍是定向辅助。
+- **同一个仓库承载三类数据（mod-repo-privacy-gate）**：`timeline/**`（日程）+ `chats/**`（聊天会话）+ `remote/**`（远程控制配置）由平板 App 与 DSH 插件共用，**因此只能是私有仓库，且校验是阻断式的**：配置地址、测试连接、每次推送前都用 Gitee / GitHub 的 provider API 权威查询 `private`；只有显式 `private: true` 放行，公开 / 无权 / 不存在 / 未知域名 / 5xx / 超时一律拒绝提交（本地记录仍可写、意图停在 outbox）。
 - 时钟：`updatedAt` 超过**未来 5 分钟**或**过去 30 天**即拒并给 typed reason——否则敌意仓库可钉一个方便的时间。
 - 验收规则：仅当**验签通过 + `updatedAt` 更新 + 指纹匹配钉住值**才自动刷新地址；否则显示「公告不可信，请手动确认」并保旧址；两实例同 `instanceId` ⇒ **拒绝，不合并**（`unknown` 永不升 `ok`，`apps/arkui-schedule/entry/src/main/ets/model/instances.ts:49-50,331-340`）。
 ## 3 取舍与分期

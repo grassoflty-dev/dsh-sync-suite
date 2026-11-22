@@ -38,6 +38,12 @@ import type { GitSyncConfig, GitSyncResult } from '../services/GitSyncService';
 import { validateRepoUrl } from '../model/repoUrl';
 import type { RepoUrlCheck } from '../model/repoUrl';
 import { describeRepoProbe, repoProbeUrl } from '../model/repoUrl';
+// mod-repo-privacy-gate：保存 / 测试连接都要做权威 provider API 私有校验（硬阻断）。
+import { repoVisibilityChecker } from '../services/repoVisibilityChecker';
+import { repoTargetFromUrl } from '../model/repoVisibilityClient';
+import type { RepoVisibilityTarget } from '../model/repoVisibilityClient';
+import { E_REPO_HOST_UNSUPPORTED, decisionForRepoCode } from '../model/repoVisibility';
+import type { RepoVisibilityDecision } from '../model/repoVisibility';
 import {
   AUTH_HTTPS,
   FIELD_REPO_URL,
@@ -289,6 +295,26 @@ struct SettingsSync {
       this.pageScroller.scrollEdge(Edge.Top);
       return;
     }
+    // mod-repo-privacy-gate（调用点 1/3）：只要填了仓库地址就必须实时确认私有。
+    // 硬阻断：不落盘、不标记已配置；**不清空** repoUrl 输入框，用户改完仓库可一点重试。
+    if (!repoEmpty) {
+      const targetFromForm: RepoVisibilityTarget | null = repoTargetFromUrl(repoCheck.url);
+      if (targetFromForm === null) {
+        this.saveHint = decisionForRepoCode(E_REPO_HOST_UNSUPPORTED).message;
+        return;
+      }
+      const tokenForGate: string = effectiveToken(this.token, this.savedToken);
+      this.saveHint = '正在校验仓库可见性…';
+      const verdict: RepoVisibilityDecision = await repoVisibilityChecker.checkNow(targetFromForm, tokenForGate);
+      if (this.disposed) {
+        return;
+      }
+      if (!verdict.ok) {
+        this.saveHint = verdict.message;
+        this.pageScroller.scrollEdge(Edge.Top);
+        return;
+      }
+    }
     const context = getContext(this) as common.UIAbilityContext;
     try {
       // 字段作用域：本页只写同步字段；AI / 主题 / 远程等键不传 = `save()` 保持原值。
@@ -392,6 +418,32 @@ struct SettingsSync {
     if (repoCheck.scheme === 'ssh' || repoCheck.scheme === 'scp') {
       this.connectionText = `ℹ️ ${SSH_UNSUPPORTED_SHORT}：请改成 https:// 地址再测`;
       return;
+    }
+    // mod-repo-privacy-gate（调用点 2/3）：测试连接同样是权威 API 硬阻断。
+    // 公开 / 无法校验的仓库绝不进入 Git 探测，更不会给出任何成功假象。
+    const gateTarget: RepoVisibilityTarget | null = repoTargetFromUrl(repoCheck.url);
+    if (gateTarget === null) {
+      this.connectionText = decisionForRepoCode(E_REPO_HOST_UNSUPPORTED).message;
+      return;
+    }
+    const gateToken: string = effectiveToken(this.token, this.savedToken);
+    this.connectionBusy = true;
+    this.connectionText = '正在校验仓库可见性…';
+    let gatePassed: boolean = false;
+    try {
+      const gateVerdict: RepoVisibilityDecision = await repoVisibilityChecker.checkNow(gateTarget, gateToken);
+      if (this.disposed) {
+        return;
+      }
+      if (!gateVerdict.ok) {
+        this.connectionText = gateVerdict.message;
+        return;
+      }
+      gatePassed = true;
+    } finally {
+      if (!this.disposed && !gatePassed) {
+        this.connectionBusy = false;
+      }
     }
     const probeUrl: string = repoProbeUrl(repoCheck.url);
     if (probeUrl.length === 0) {

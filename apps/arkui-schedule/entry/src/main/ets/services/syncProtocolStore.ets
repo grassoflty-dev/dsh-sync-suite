@@ -42,6 +42,9 @@ import type {
 import type { ScheduleRecord } from '../model/types';
 import { runCyclePure, E_SYNC_UNAVAILABLE_CODE, unavailableOutcome } from '../model/syncCycle';
 import type { GitPort, CycleOutcome, DayRead, DayWriteTexts, WritePort } from '../model/syncCycle';
+// mod-repo-privacy-gate（调用点 3/3）：推送前置门禁。本地写入 / outbox 停放不受影响，
+// 只挡「推」这一步；公共 / 无法确认的判定 sticky，状态由 syncStatusStore 单线呈现。
+import { repoVisibilityChecker } from './repoVisibilityChecker';
 
 /** git 命令执行器：接收参数数组，返回 stdout；非 0 退出由 runner 抛错。 */
 export type GitRunner = (args: string[]) => Promise<string>;
@@ -267,6 +270,18 @@ export class SyncProtocolStore {
       // 文案带中文下一步，且可点「重试同步」。
       const outbox: OutboxEntry[] = this.filesDir.length === 0 ? [] : this.readOutbox();
       return this.outcomeToResult(unavailableOutcome(outbox));
+    }
+    // 推送前置：60 s 去重 + sticky。被挡时返回 typed CycleResult（ok=false，绝无「已同步」），
+    // 记录已在本地写好、意图仍在 outbox；只有下一次自然周期 / 保存 / 测试连接才会重试。
+    const guard = await repoVisibilityChecker.guardPush();
+    if (!guard.allowed) {
+      const parked: OutboxEntry[] = this.filesDir.length === 0 ? [] : this.readOutbox();
+      const blocked: CycleResult = {
+        ok: false, code: guard.decision.code, message: guard.decision.message,
+        days: 0, conflicts: 0, added: 0, dropped: [],
+        pending: this.pendingCount(parked), failed: this.failedCount(parked), attempts: 0
+      };
+      return blocked;
     }
     // 两条入口在此汇合：post-create fire-and-forget（无 ctx）与首页下拉刷新（无 ctx）直接进
     // runWiredCycle；「重试同步」传 ctx → runCycle(ctx) → runner 非空时同一 runWiredCycle。

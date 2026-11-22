@@ -1,0 +1,12 @@
+{
+  "request": {
+    "host": "gitee.com",
+    "status": 401,
+    "contentType": "application/json; charset=utf-8",
+    "body": "{\"message\":\"Unauthorized\"}"
+  },
+  "expected": {
+    "ok": false,
+    "code": "E_REPO_AUTH"
+  }
+}

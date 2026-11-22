@@ -1,0 +1,12 @@
+{
+  "request": {
+    "host": "github.com",
+    "status": 200,
+    "contentType": "application/json; charset=utf-8",
+    "body": "{\"id\":820004,\"full_name\":\"bob/no-visibility\",\"name\":\"no-visibility\",\"fork\":false}"
+  },
+  "expected": {
+    "ok": false,
+    "code": "E_REPO_BAD_RESPONSE"
+  }
+}

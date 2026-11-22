@@ -1,0 +1,12 @@
+{
+  "request": {
+    "host": "github.com",
+    "status": 200,
+    "contentType": "application/json; charset=utf-8",
+    "body": "{\"id\":820001,\"full_name\":\"bob/dsh-sync\",\"name\":\"dsh-sync\",\"private\":true,\"html_url\":\"https://github.com/bob/dsh-sync\"}"
+  },
+  "expected": {
+    "ok": true,
+    "code": "OK"
+  }
+}

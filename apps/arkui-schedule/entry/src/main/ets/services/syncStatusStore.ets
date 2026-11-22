@@ -42,9 +42,15 @@ import type {
   StatusSurface,
   SyncStatusState
 } from '../model/syncStatusPersist';
+// mod-repo-privacy-gate：推送被拒的两条**独立**状态文案只在这里渲染（不在任何 pane）。
+import { E_REPO_PUBLIC, E_REPO_VISIBILITY_UNKNOWN, repoBlockStatusText } from '../model/repoVisibility';
 
-/** 三态 + 两个启动-only 中性标记（`past_failed` / `never` 不由实时周期产出）。 */
-export type SyncState = SyncStatusState;
+/**
+ * 三态 + 两个启动-only 中性标记 + 两条仓库可见性阻塞态。
+ * `repo_public` / `repo_unknown` 只由真实推送前置门禁产出：它们是「已停止上传」，
+ * 不是「失败：…（可重试）」，也不冒充「已同步」。
+ */
+export type SyncState = SyncStatusState | 'repo_public' | 'repo_unknown';
 
 /** 页面 @State 镜像的只读视图（显式接口：ArkTS 禁止对象字面量当类型）。 */
 export interface SyncStatusView {
@@ -65,10 +71,14 @@ const KEY_STATE: string = 'timeline.sync.state';
 const KEY_REASON: string = 'timeline.sync.reason';
 const KEY_PENDING: string = 'timeline.sync.pending';
 const KEY_LAST_AT: string = 'timeline.sync.lastAt';
+/** 仓库可见性阻塞的最近**尝试**时刻（HH:MM），单独存，不复用 lastAt（后者只能由真实成功写）。 */
+const KEY_REPO_BLOCK_AT: string = 'timeline.sync.repoBlockAt';
 
 const SYNCED_LABEL: string = '已同步';
 const SYNCING_LABEL: string = '同步中';
 const FAILED_LABEL: string = '失败';
+const REPO_PUBLIC_LABEL: string = '仓库已公开';
+const REPO_UNKNOWN_LABEL: string = '可见性未确认';
 const SYNCED_PREFIX: string = '已同步 · ';
 const SYNCING_TEXT: string = '同步中…';
 const FAILED_PREFIX: string = '失败：';
@@ -195,10 +205,28 @@ export class SyncStatusStore {
   /** 从周期结果刷新状态：成功且无待同步=已同步；否则如实显示 typed 失败原因。 */
   fromCycle(outcome: CycleResult, now: Date): SyncStatusView {
     if (!outcome.ok || outcome.pending > 0 || outcome.failed > 0) {
+      // 仓库可见性拒绝有两条独立文案 + 最近尝试时刻，绝不折叠进「失败：…（可重试）」。
+      if (outcome.code === E_REPO_PUBLIC || outcome.code === E_REPO_VISIBILITY_UNKNOWN) {
+        return this.setRepoBlocked(outcome.code, now);
+      }
       const reason: string = outcome.message.length > 0 ? outcome.message : UNKNOWN_REASON;
       return this.setFailed(reason, outcome.pending + outcome.failed);
     }
     return this.setSynced(now);
+  }
+
+  /**
+   * 推送被可见性门禁挡住：状态行显示「已停止上传」+ 最近尝试 HH:MM。
+   * `reason` 保留 typed 码（不是长文案）；`lastSyncAt` 一律不写，所以永远不会出现「已同步」。
+   */
+  setRepoBlocked(code: string, now: Date): SyncStatusView {
+    this.live = true;
+    const at: string = hhmm(now);
+    AppStorage.setOrCreate<string>(KEY_STATE, code === E_REPO_PUBLIC ? 'repo_public' : 'repo_unknown');
+    AppStorage.setOrCreate<string>(KEY_REASON, code);
+    AppStorage.setOrCreate<number>(KEY_PENDING, 0);
+    AppStorage.setOrCreate<string>(KEY_REPO_BLOCK_AT, at);
+    return this.snapshot();
   }
 
   /** 周期在途（创建记录后的自动周期 / 下拉刷新均已发起）。**不写盘**：被杀不留下在途态。 */
@@ -271,7 +299,8 @@ export class SyncStatusStore {
     let state: SyncState = 'failed';
     try {
       const raw: string | undefined = AppStorage.get<string>(KEY_STATE);
-      if (raw === 'synced' || raw === 'syncing' || raw === 'failed') {
+      if (raw === 'synced' || raw === 'syncing' || raw === 'failed' ||
+        raw === 'repo_public' || raw === 'repo_unknown') {
         state = raw;
       }
     } catch (error) {
@@ -283,6 +312,18 @@ export class SyncStatusStore {
     const lastAt: string = this.textOf(KEY_LAST_AT);
     let label: string = FAILED_LABEL;
     let text: string = `${FAILED_PREFIX}${reason.length > 0 ? reason : UNKNOWN_REASON}`;
+    if (state === 'repo_public' || state === 'repo_unknown') {
+      const attempted: string = this.textOf(KEY_REPO_BLOCK_AT);
+      label = state === 'repo_public' ? REPO_PUBLIC_LABEL : REPO_UNKNOWN_LABEL;
+      // 唯一渲染点：文案来自纯模型，时间来自最近一次尝试（不是上次成功时刻）。
+      text = repoBlockStatusText(reason, attempted);
+      if (text.length === 0) {
+        text = state === 'repo_public'
+          ? repoBlockStatusText(E_REPO_PUBLIC, attempted)
+          : repoBlockStatusText(E_REPO_VISIBILITY_UNKNOWN, attempted);
+      }
+      return { state: state, label: label, text: text, pending: pending, reason: reason, lastAt: attempted };
+    }
     if (state === 'synced') {
       if (lastAt.length > 0) {
         // 唯一合法成功文案：真完成过周期并落盘的 HH:MM。
