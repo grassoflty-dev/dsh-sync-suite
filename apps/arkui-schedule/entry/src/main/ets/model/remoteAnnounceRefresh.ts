@@ -81,12 +81,25 @@ function held(
 }
 
 /**
- * 公告里的 scheme/host/port → 实例 base URL。
+ * URL 拼装所需的最小字段。
+ *
+ * 公告（scheme/host/port 来自签名公告）与手动配对（scheme 固定 http，host/port 来自配对串）
+ * 都满足这个结构；把入参从 `Announcement` 收窄到这里，是为了让两端**共用同一份**拼装逻辑，
+ * 而不是在配对模块里再写第二份 `${scheme}://${host}:${port}`。
+ */
+export interface BaseUrlParts {
+  scheme: string;
+  host: string;
+  port: number;
+}
+
+/**
+ * scheme/host/port → 实例 base URL（公告刷新与手动配对共用的唯一拼装出口）。
  * IPv6 字面量必须加方括号，才能被 `normalizeRemoteUrl` 当作合法 authority。
- * 公告字段已被 `normalizeAnnouncement` 校验（scheme ∈ http/https、host 无 /?@# 空白、端口合法），
+ * 入参字段在各自上游已校验（scheme ∈ http/https、host 无 /?@# 空白、端口合法），
  * 因此这里只做方括号包裹，不重新解析，避免二次归一改变字节。
  */
-export function announcementBaseUrl(ann: Announcement): string {
+export function announcementBaseUrl(ann: BaseUrlParts): string {
   const host: string = ann.host.indexOf(':') >= 0 ? `[${ann.host}]` : ann.host;
   return `${ann.scheme}://${host}:${ann.port}`;
 }

@@ -120,6 +120,13 @@ export class RemoteAnnounceRefreshService {
     if (instance.lastSeen !== undefined) {
       next.lastSeen = instance.lastSeen;
     }
+    // 手动配对的 TLS pin 不能因公告刷新而丢失（否则下一次配对会被误判成首次）。
+    if (instance.pairingInstanceId !== undefined) {
+      next.pairingInstanceId = instance.pairingInstanceId;
+    }
+    if (instance.tlsFingerprint !== undefined) {
+      next.tlsFingerprint = instance.tlsFingerprint;
+    }
     instanceStore.upsert(next);
     remoteAnnounceStore.applyUpdatedAt(instance.id, updatedAt);
   }

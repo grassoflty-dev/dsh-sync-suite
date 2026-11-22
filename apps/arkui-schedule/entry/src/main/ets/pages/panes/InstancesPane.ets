@@ -110,6 +110,10 @@ export struct InstancesPane {
   @State announceNoticeId: string = '';
   /** 结果行种类（显式设置，决定颜色 / 后果说明 / CTA，绝不由其它字段猜）。 */
   @State announceNoticeKind: AnnounceNoticeKind = '';
+  /** 手动配对粘贴框原文（bearer secret，只在 addByPairing() 内交给 store，不进日志 / 不回显）。 */
+  @State pairingText: string = '';
+  /** 手动配对的 typed 错误中文文案（固定原因，永不含 token / 地址 / 指纹的值）。 */
+  @State pairingError: string = '';
 
   /**
    * 首配提案（非 @State：候选地址是 capability，绝不进页面响应式状态 / 日志）。
@@ -396,6 +400,29 @@ export struct InstancesPane {
     this.reload();
   }
 
+  /**
+   * 手动配对（与签名公告的两步同意是**不同路径**）：粘贴电脑面板给出的
+   * `DSHDOTS1|…` 或规范 JSON，端口 / 令牌随串带好，不用手输。
+   * 写入统一走 store 的 TOFU 门禁：冲突时逐字上屏 refusal 文案，旧 pin 与旧地址不动；
+   * 成功时只清粘贴框并刷新列表，绝不把 token 拼进任何提示 / 日志。
+   */
+  private addByPairing(): void {
+    const text: string = this.pairingText.trim();
+    if (text.length === 0) {
+      this.pairingError = '请先粘贴电脑面板生成的配对串';
+      return;
+    }
+    const result = instanceStore.addByPairing(text);
+    if (!result.ok) {
+      this.pairingError = result.reason;
+      return;
+    }
+    this.pairingText = '';
+    this.pairingError = '';
+    promptAction.showToast({ message: result.reason, duration: 3000 });
+    this.reload();
+  }
+
   /** 删除任意远程行（没有受保护的本机行）；删完立刻重读内存镜像，空表不回补实例。 */
   private deleteInstance(view: RedactedInstance): void {
     instanceStore.remove(view.id);
@@ -657,6 +684,18 @@ export struct InstancesPane {
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .textAlign(TextAlign.Start)
 
+      // 手动配对固定过证书指纹的行：只展示前缀 + 已固定标记，完整指纹 / 令牌都不上屏。
+      if (view.fingerprintPrefix !== undefined && view.fingerprintPrefix.length > 0) {
+        Text(`指纹 ${view.fingerprintPrefix} · 已固定指纹`)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .textAlign(TextAlign.Start)
+      }
+
       Row({ space: SPACING.sm }) {
         // 地址不再应答（reachable=fail，由「打开」跳转失败标记）才出现的显式恢复动作。
         // 没有 pin 时是首配：标签 / 后果说明都与普通刷新刻意不同，且这一下只生成提案，
@@ -732,6 +771,63 @@ export struct InstancesPane {
     .alignItems(HorizontalAlign.Start)
     .padding({ top: SPACING.md, bottom: SPACING.md })
     .borderRadius(RADIUS.none)
+  }
+
+  /**
+   * 手动配对面板（仅 configurable=true）：粘贴电脑面板的配对串即可添加实例。
+   * 与下面的地址 / 令牌 / 方式表单是两条独立路径：配对串自带端口与令牌，不走两步公告同意。
+   * 错误区只显示 store 返回的固定中文 reason，绝不回显粘贴原文（token）。
+   */
+  @Builder
+  PairingPanel() {
+    if (this.configurable) {
+      Column({ space: SPACING.sm }) {
+        Text('手动配对（粘贴配对串）')
+          .fontSize(FONT.body)
+          .lineHeight(LINE_HEIGHT.body)
+          .fontColor($r('app.color.text_primary'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+        Text('在电脑 DSH 面板点「显示配对信息」，复制配对串粘到下方；端口和令牌会一起带好，不用手输。')
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+        TextInput({ text: this.pairingText, placeholder: 'DSHDOTS1|… 或 {…} 配对 JSON' })
+          .width('100%')
+          .height(TOUCH_MIN)
+          .fontSize(FONT.body)
+          .onChange((value: string) => {
+            this.pairingText = value;
+            this.pairingError = '';
+          })
+        if (this.pairingError.length > 0) {
+          Text(this.pairingError)
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.danger'))
+            .width('100%')
+            .textAlign(TextAlign.Start)
+        }
+        ActionButton({
+          label: '添加实例',
+          actionEnabled: true,
+          disabledReason: '',
+          busy: false,
+          variant: 'primary',
+          block: false,
+          onTap: (): void => {
+            this.addByPairing();
+          },
+          onBlockedTap: null
+        })
+      }
+      .width('100%')
+      .padding(SPACING.md)
+      .backgroundColor($r('app.color.surface'))
+      .borderRadius(RADIUS.sm)
+    }
   }
 
   /** 添加 / 编辑面板：每个远程实例都给名称 + 地址 + 方式（六选一）。仅 configurable=true 装配。 */
@@ -825,6 +921,7 @@ export struct InstancesPane {
         this.ProblemRow()
         this.AnnounceNoticeRow()
         if (this.configurable) {
+          this.PairingPanel()
           this.FormPanel()
         }
         if (this.loading) {

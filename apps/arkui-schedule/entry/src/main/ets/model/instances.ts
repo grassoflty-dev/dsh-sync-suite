@@ -100,6 +100,10 @@ export interface DsInstance {
   reachable: Reachability;
   /** 派生能力集，不落盘。 */
   capabilities: InstanceCapabilities;
+  /** 手动配对的电脑实例 id（与公告 instanceId 同语义）；仅配对路径写入。 */
+  pairingInstanceId?: string;
+  /** 手动配对钉住的 TLS 证书指纹（规范 `AA:BB:…`）；仅配对路径写入。 */
+  tlsFingerprint?: string;
 }
 
 /** 给渲染 / 导出的只读视图：**结构上没有 token 字段**，只有 `tokenSet`。 */
@@ -113,6 +117,8 @@ export interface RedactedInstance {
   lastSeen?: number;
   reachable: Reachability;
   capabilities: InstanceCapabilities;
+  /** 已固定指纹时的安全前缀（前 6 组，如 `AA:BB:CC:DD:EE:FF…`）；无 pin 时不出现该字段。 */
+  fingerprintPrefix?: string;
 }
 
 /** 反序列化输入；全部可选，坏字段一律 typed 拒绝而不是抛错。 */
@@ -125,6 +131,8 @@ export interface RawInstance {
   lastSeen?: number;
   /** 兼容设计稿 §2 的 `true/false/null` 三态。 */
   reachable?: string | boolean | null;
+  pairingInstanceId?: string;
+  tlsFingerprint?: string;
 }
 
 /** 归一结果：`ok=false` 时 `instance=null` + typed problem + 中文 reason。 */
@@ -149,6 +157,30 @@ type LooseValue = string | number | boolean | null | undefined | object;
 /** 只接受字符串，去首尾空白；其余类型按空串。 */
 function readText(value: LooseValue): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+/**
+ * 手动配对钉住的 TLS 指纹的落盘形态：64 位十六进制或 32 段冒号分隔。
+ * 这里只做「不让坏值进信封」的轻校验；规范归一发生在 `model/pairingPayload.ts`。
+ * 不 import 那个模块是为了避免实例模型与配对模型之间出现循环依赖。
+ */
+const PINNED_FINGERPRINT_RE: RegExp = /^(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){31})$/;
+
+/**
+ * 指纹展示前缀：只取前 6 组（`AA:BB:CC:DD:EE:FF…`），永不回显完整指纹。
+ * 配对模型与渲染视图共用这一份，避免两处格式漂移。
+ */
+export function pinnedFingerprintPrefix(value: unknown): string {
+  const text: string = typeof value === 'string' ? value.trim() : '';
+  if (!PINNED_FINGERPRINT_RE.test(text)) {
+    return '';
+  }
+  const hex: string = text.replace(/:/g, '').toUpperCase();
+  const groups: string[] = [];
+  for (let i = 0; i < 12; i += 2) {
+    groups.push(hex.slice(i, i + 2));
+  }
+  return `${groups.join(':')}…`;
 }
 
 /** 从 query 里找第一个非空的 `token` / `k`（键名大小写不敏感，与 `remoteUrl` 同口径）。 */
@@ -394,6 +426,15 @@ export function normalizeInstance(raw: RawInstance | null | undefined): Instance
   if (token.length > 0) {
     instance.token = token;
   }
+  // 手动配对的 TOFU 元数据：坏指纹直接丢弃（不进信封、不进渲染），不因此拒绝整行。
+  const pairingId: string = readText(raw.pairingInstanceId);
+  if (pairingId.length > 0 && pairingId.length <= 64) {
+    instance.pairingInstanceId = pairingId;
+  }
+  const fingerprint: string = readText(raw.tlsFingerprint);
+  if (PINNED_FINGERPRINT_RE.test(fingerprint)) {
+    instance.tlsFingerprint = fingerprint;
+  }
   if (typeof raw.lastSeen === 'number' && Number.isFinite(raw.lastSeen) && raw.lastSeen > 0) {
     instance.lastSeen = Math.trunc(raw.lastSeen);
   }
@@ -438,6 +479,10 @@ export function redactInstance(inst: DsInstance | null | undefined): RedactedIns
   };
   if (inst.lastSeen !== undefined && inst.lastSeen > 0) {
     view.lastSeen = inst.lastSeen;
+  }
+  const prefix: string = pinnedFingerprintPrefix(inst.tlsFingerprint === undefined ? '' : inst.tlsFingerprint);
+  if (prefix.length > 0) {
+    view.fingerprintPrefix = prefix;
   }
   return view;
 }
@@ -541,6 +586,13 @@ export function applyReachability(
       if (item.token !== undefined && item.token.length > 0) {
         updated.token = item.token;
       }
+      // 手动配对的 TOFU pin 必须跨可达性更新存活，否则下一次配对会被误判成首配。
+      if (item.pairingInstanceId !== undefined && item.pairingInstanceId.length > 0) {
+        updated.pairingInstanceId = item.pairingInstanceId;
+      }
+      if (item.tlsFingerprint !== undefined && item.tlsFingerprint.length > 0) {
+        updated.tlsFingerprint = item.tlsFingerprint;
+      }
       if (status === 'ok' && validNow) {
         updated.lastSeen = Math.trunc(nowMs);
       } else if (item.lastSeen !== undefined && item.lastSeen > 0) {
@@ -563,6 +615,9 @@ interface EnvelopeItem {
   token?: string;
   lastSeen?: number;
   reachable: Reachability;
+  /** 手动配对的 TOFU 元数据；仅有配对来源的行才写这两个键。 */
+  pairingInstanceId?: string;
+  tlsFingerprint?: string;
 }
 
 /** 版本化信封：`{v:1, items:[...]}`，整串一次性写入 = 原子替换。 */
@@ -587,6 +642,12 @@ export function encodeInstances(list: DsInstance[]): string {
     }
     if (inst.lastSeen !== undefined && inst.lastSeen > 0) {
       item.lastSeen = inst.lastSeen;
+    }
+    if (inst.pairingInstanceId !== undefined && inst.pairingInstanceId.length > 0) {
+      item.pairingInstanceId = inst.pairingInstanceId;
+    }
+    if (inst.tlsFingerprint !== undefined && PINNED_FINGERPRINT_RE.test(inst.tlsFingerprint)) {
+      item.tlsFingerprint = inst.tlsFingerprint;
     }
     items.push(item);
   }

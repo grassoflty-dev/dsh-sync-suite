@@ -31,6 +31,8 @@ import {
 import type { DsInstance, InstanceProblem, RedactedInstance } from '../model/instances';
 import { seedInstances } from '../model/instanceSeed';
 import type { LegacyInstanceSettings } from '../model/instanceSeed';
+import { addPairedInstance } from '../model/pairingPayload';
+import type { PairingAddResult } from '../model/pairingPayload';
 
 /** 唯一持久键：JSON 字符串信封。 */
 const INSTANCE_STORAGE_KEY: string = 'instances.json';
@@ -133,6 +135,19 @@ export class InstanceStore {
   /** 插入或按 id 替换（同 id 更新，不产生第二条），写回后返回排序后的新表。 */
   upsert(inst: DsInstance): DsInstance[] {
     return this.commit(upsertInstance(this.load(), inst));
+  }
+
+  /**
+   * 手动配对落表：纯模型 `addPairedInstance()` 先做 schema 校验与 TOFU 比对，
+   * 只有它返回 ok 才整表替换；冲突 / 坏载荷一次都不写盘（pin 与旧地址字节不变）。
+   * 返回给页面的是 typed code + 固定中文文案，reason 永不含令牌值。
+   */
+  addByPairing(text: string): PairingAddResult {
+    const result: PairingAddResult = addPairedInstance(this.load(), text);
+    if (result.ok) {
+      this.commit(result.items);
+    }
+    return result;
   }
 
   /** 按 id 删除任意远程行（没有受保护的本机行）；删空后保持空表，不重新播种。 */
