@@ -5,6 +5,9 @@
  * 摘要一律来自已持久化的真实状态：仓库主机 / 上次同步成败 / 上次导出导入 / 服务·模型。
  * 拿不到数据时给「未同步 / 未导出」这类确定文案，不编造状态、不伪造时间。
  */
+import type { PersistedOutcome } from './syncStatusPersist';
+import { syncStatusLineOf } from './syncStatusLine';
+
 /** 上次导出 / 导入时刻的 AppStorage 键（由导入导出页面在落盘成功后写入）。 */
 export const LAST_EXPORT_AT_KEY: string = 'settings.lastExportAt';
 export const LAST_IMPORT_AT_KEY: string = 'settings.lastImportAt';
@@ -36,15 +39,24 @@ export function clockOf(iso: string): string {
   return `${hours}:${minutes}`;
 }
 
-/** 同步仓库行摘要：失败优先（原因取第一行），否则 `已同步·HH:MM`，从未同步给「未同步」。 */
-export function syncRowSummary(lastSyncAt: string, lastSyncError: string): string {
-  const error: string = typeof lastSyncError === 'string' ? lastSyncError.trim() : '';
-  if (error.length > 0) {
-    const firstLine: string = error.split(/\r?\n/, 1)[0].trim();
-    return `失败：${firstLine}`;
-  }
-  const clock: string = clockOf(lastSyncAt);
-  return clock.length > 0 ? `已同步·${clock}` : '未同步';
+/**
+ * 同步仓库行摘要（mod-status-honesty-regression）：只做薄适配，文案由唯一渲染器给出。
+ *
+ * `lastSyncAt` / `lastSyncError` 只作为比较证据传入，**不再插值成「已同步」**：
+ * 最新一次尝试由 `latest`（git_sync_status / syncStatusStore）独家决定。
+ * 旧装机上 `latest` 为空时宁可给「尚未同步」，也不拿昨天的 ISO 串冒充当前成功。
+ */
+export function syncRowSummary(lastSyncAt: string,
+                               lastSyncError: string,
+                               latest: PersistedOutcome | null = null): string {
+  return syncStatusLineOf({
+    latest: latest,
+    legacyLastSyncAt: lastSyncAt,
+    legacyLastSyncError: lastSyncError,
+    config: { configured: true, missing: [], reason: '' },
+    blocked: false,
+    blockAt: ''
+  });
 }
 
 /** 数据行摘要：最近一次导出 / 导入的 `HH:MM`，都没做过给「未导出」。 */

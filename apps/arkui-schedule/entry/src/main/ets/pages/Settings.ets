@@ -75,7 +75,10 @@ struct Settings {
         return;
       }
       const host: string = repoHostOf(settings.repoUrl);
-      const syncText: string = syncRowSummary(settings.lastSyncAt, settings.lastSyncError);
+      // 状态文案只看权威最新尝试（git_sync_status）；lastSyncAt 只是比较证据，不渲染。
+      const syncText: string = syncRowSummary(
+        settings.lastSyncAt, settings.lastSyncError, syncStatusStore.latestAttempt()
+      );
       // 阻断是独立问题：已配置但仓库公开 / 不可确认 → 「已配置（可见性阻断…）」，不是「未配置」。
       const blocked: boolean = isRepoBlockedStatus(syncStatusStore.snapshot());
       this.repoSummary = repoRowSummary(host, syncText, repoConfigStateOf(settings), blocked);

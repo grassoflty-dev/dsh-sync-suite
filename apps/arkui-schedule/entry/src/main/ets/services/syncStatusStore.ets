@@ -32,6 +32,7 @@ import {
   TEXT_NEVER,
   bootSurface,
   commitStatus,
+  decodeStatus,
   readStatus
 } from '../model/syncStatusPersist';
 import type {
@@ -213,6 +214,23 @@ export class SyncStatusStore {
       return E_REPO_VISIBILITY_UNKNOWN;
     }
     return '';
+  }
+
+  /**
+   * 唯一权威「最新一次已完成尝试」，供设置页状态行消费（mod-status-honesty-regression）。
+   *
+   * 只读、不写盘：优先取本进程最后一次提交（commit / restore 都会刷新 `lastWritten`），
+   * 坏值回落到启动读盘结果；永远只返回最新一次，不存在「旧成功 + 新失败」并存的视图。
+   * 页面因此不可能再拿 settingsStore 的 lastSyncAt 拼出假成功。
+   */
+  latestAttempt(): PersistedOutcome | null {
+    try {
+      const live: PersistedOutcome | null = decodeStatus(this.lastWritten);
+      return live === null ? this.restore() : live;
+    } catch (error) {
+      void error;
+      return null;
+    }
   }
 
   /**

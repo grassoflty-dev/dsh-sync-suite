@@ -148,7 +148,9 @@ test('C2 中性区块标题 + 数据组只有一个导入/导出入口', () => {
   assert.match(syncPage, /syncMessage: this\.honestStatus\(\)/, '状态行唯一来源是 honestStatus()');
   assert.doesNotMatch(syncPage, /syncRowSummary\(/, '根页摘要函数不得出现在同步页');
   assert.doesNotMatch(syncPage, /nowIso\(\), this\.lastSyncError/, '保存 / 普通事件不得伪造成功时刻');
-  assert.match(syncPage, /'同步中…'/, '忙碌态文案');
+  // mod-status-honesty-regression：忙碌文案收敛到纯模型常量，页面只委托唯一渲染器。
+  assert.match(readSettingsFile('model/syncStatusPersist.ts'), /TEXT_SYNCING: string = '同步中…'/, '忙碌态文案');
+  assert.match(syncPage, /syncStatusLineOf\(\{/, '页面委托唯一渲染器');
   for (const action of ['查看状态', '测试连接', '重试']) {
     assert.match(syncPage, new RegExp(`Text\\('${action}'\\)`), `失败出口「${action}」必须在真页面上`);
   }
@@ -248,7 +250,9 @@ test('C5 根页恰好四行菜单：标题 / 摘要来源 / 页脚版本号', ()
       `缺少「${title}」行或其摘要接线`);
   }
   // 摘要来源必须读真实持久化状态，不允许写死文案。
-  assert.match(root, /syncRowSummary\(settings\.lastSyncAt, settings\.lastSyncError\)/, '同步行摘要来源');
+  // mod-status-honesty-regression：严格化——必须带权威最新尝试。
+  assert.match(root, /syncRowSummary\(\s*settings\.lastSyncAt, settings\.lastSyncError, syncStatusStore\.latestAttempt\(\)\s*\)/,
+    '同步行摘要来源必须是权威最新尝试');
   assert.match(root, /repoHostOf\(settings\.repoUrl\)/, '同步行的仓库主机来源');
   assert.match(root, /instanceStore\.list\(\)\.length/, '实例行计数来源');
   assert.match(root, /dataRowSummary\(/, '数据行摘要来源');
@@ -293,7 +297,9 @@ test('C7 四个子路由 + Instances 在两份页面清单都登记（main 12 / 
 const SYNC_SURFACE_FILES = [
   'pages/SettingsSync.ets',
   'components/settings/SyncSection.ets',
-  'services/GitSyncService.ets'
+  'services/GitSyncService.ets',
+  // mod-status-honesty-regression：三态文案只在纯模型常量里定义，守卫跟到唯一来源。
+  'model/syncStatusPersist.ts'
 ];
 /** 只扫可执行字符串字面量（literalsOf 已跳过注释与模板插值）。 */
 function syncLiterals(file) {

@@ -76,8 +76,12 @@ import {
   resolvePlatformSelection
 } from '../model/gitAuth';
 import type { PlatformResolution } from '../model/gitAuth';
-import { clockOf } from '../model/settingsMenu';
 import { gitExtrasStore } from '../services/syncController';
+// mod-status-honesty-regression：状态文案只由唯一渲染器给出，事实只来自 syncStatusStore。
+import { syncStatusStore } from '../services/syncStatusStore';
+import { syncStatusLineOf } from '../model/syncStatusLine';
+import { repoConfigStateOf } from '../model/repoConfigured';
+import { isRepoBlockedStatus } from '../model/homeGlobalRefresh';
 import type { GitSyncExtras } from '../services/syncController';
 import { PageLayout } from '../components/PageLayout';
 import { describeIdentityConflict } from '../model/deviceIdentity';
@@ -580,17 +584,27 @@ struct SettingsSync {
   /**
    * 用户可见状态行只有三态（mod-sync-silent-autoinit）：
    * `同步中…` / `已同步 · HH:MM` / `失败：<原因>（可重试）`。
+   * mod-status-honesty-regression 后，权威失败态写作 `上次失败 · HH:MM`（同样是失败，不是成功）；
+   * 文案的唯一定义在 `model/syncStatusLine.ts` 与 `model/syncStatusPersist.ts`，本页只委托、不插值。
    * 仓库是否已克隆、分支 / HEAD / 领先落后 / outbox 等待数一律只在诊断区出现。
    */
   private honestStatus(): string {
-    if (this.syncBusy) {
-      return '同步中…';
-    }
-    if (this.lastSyncError.length > 0) {
-      return `失败：${this.lastSyncError}（可重试）`;
-    }
-    const clock: string = clockOf(this.lastSyncAt);
-    return clock.length > 0 ? `已同步 · ${clock}` : '尚未同步';
+    // 页面不再持有状态文案：同步中… / 已同步 · HH:MM / 上次失败 · HH:MM / 尚未同步
+    // 一律由唯一渲染器从 syncStatusStore 的最新一次尝试现算。
+    // lastSyncAt / lastSyncError 只作比较证据传入，绝不插值成「已同步」。
+    const view = syncStatusStore.snapshot();
+    return syncStatusLineOf({
+      latest: syncStatusStore.latestAttempt(),
+      legacyLastSyncAt: this.lastSyncAt,
+      legacyLastSyncError: this.lastSyncError,
+      config: repoConfigStateOf({
+        repoUrl: this.repoUrl,
+        token: this.savedToken,
+        authMode: this.authMode
+      }),
+      blocked: isRepoBlockedStatus(view),
+      blockAt: view.lastAt
+    });
   }
 
   /** 失败时点状态行即重放上次动作（不可重放则点不动、不假重试）。 */
@@ -627,8 +641,10 @@ struct SettingsSync {
    */
   private async applySyncFailure(code: string, message: string): Promise<void> {
     const info: SyncErrorInfo = classifySyncError(code, message);
-    // 只写 typed 原因；文案由 honestStatus() 折成第三态，页面不持有状态字符串。
-    this.lastSyncError = `${info.title}：${info.detail}`;
+    // 只写 typed 原因；文案由唯一渲染器从 syncStatusStore 现算，页面不持有状态字符串。
+    const reason: string = `${info.title}：${info.detail}`;
+    this.lastSyncError = reason;
+    syncStatusStore.setFailed(reason);
     await this.persistSyncState();
   }
 
@@ -698,6 +714,8 @@ struct SettingsSync {
       this.lastSyncError = '';
       if (op === 'pull') {
         this.lastSyncAt = nowIso();
+        // 真实拉取成功才推进权威最新尝试；纯 status 查询绝不写成功。
+        syncStatusStore.setSynced(new Date());
       }
       succeeded = true;
       await this.persistSyncState();

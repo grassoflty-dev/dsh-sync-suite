@@ -188,7 +188,11 @@ test('R5 static: 查看状态 / 测试连接 / 重试 all re-run silent init, no
   assert.ok(service.indexOf('async ensureRepoInitialised()') < service.indexOf('this.callBridge(\'pull\''),
     '静默前置在 pull 之前定义并统一调用');
   // 失败文案只有第三态 + 可重试后缀；旧「先拉取 / 首次克隆」死结绝迹。
-  assert.match(page, /失败：\$\{this\.lastSyncError\}（可重试）/, '失败文案由唯一来源 honestStatus() 给出');
+  // mod-status-honesty-regression：失败文案不再由页面插值，页面只把 typed 原因交给权威 store，
+  // 文案由 model/syncStatusLine.ts 唯一渲染（「上次失败 · HH:MM」，永不回落旧 lastSyncAt）。
+  assert.match(page, /syncStatusStore\.setFailed\(reason\)/, '失败必须落进权威最新尝试');
+  assert.match(page, /syncStatusLineOf\(\{/, '状态行委托唯一渲染器');
+  assert.doesNotMatch(page, /clockOf\(this\.lastSyncAt\)/, '页面不得再拿旧成功时刻拼文案');
   assert.doesNotMatch(page, /syncMessage\s*=\s*`❌/,
     '状态行不再写 ❌ 前缀（诊断区 connectionText 的 ❌ 不在状态行）');
   for (const banned of [/尚未初始化/, /首次克隆/, /先执行「拉取」/]) {

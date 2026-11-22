@@ -278,7 +278,9 @@ describe('B2 设置根页 Settings.ets（四行菜单）：行级路由跳转的
 
   test('B2-22 摘要来自持久化状态，不是写死的假状态', () => {
     assert.match(PAGE, /await settingsStore\.load\(\)/, '根页必须读 settingsStore 才能给同步 / API 摘要');
-    assert.match(PAGE, /syncRowSummary\(settings\.lastSyncAt, settings\.lastSyncError\)/, '同步摘要来源');
+    // mod-status-honesty-regression：摘要必须带权威最新尝试，lastSyncAt 只作比较证据。
+    assert.match(PAGE, /syncRowSummary\(\s*settings\.lastSyncAt, settings\.lastSyncError, syncStatusStore\.latestAttempt\(\)\s*\)/,
+      '同步摘要来源必须是权威最新尝试');
     assert.match(PAGE, /instanceStore\.list\(\)\.length/, '实例计数来源');
     assert.match(PAGE, /dataRowSummary\(/, '数据行摘要来源');
     assert.match(PAGE, /apiRowSummary\(/, 'API 行摘要来源');

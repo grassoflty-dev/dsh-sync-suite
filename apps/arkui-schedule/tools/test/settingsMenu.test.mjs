@@ -1,8 +1,23 @@
 // mod-settings-root：设置根页四行摘要的纯函数契约。
 // 前置：node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json
 import assert from 'node:assert/strict';
+import { registerHooks } from 'node:module';
 import test from 'node:test';
 import { readApiPage, readExportPage, readSettingsFile, readSettingsPage, readSyncPage, readSyncSection } from './settingsSources.mjs';
+
+// tsc 产物里的相对 import 不带扩展名（settingsMenu → syncStatusLine / syncStatusPersist）。
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    try {
+      return nextResolve(specifier, context);
+    } catch (error) {
+      if (error && error.code === 'ERR_MODULE_NOT_FOUND' && specifier.startsWith('.') && !specifier.endsWith('.js')) {
+        return nextResolve(`${specifier}.js`, context);
+      }
+      throw error;
+    }
+  }
+});
 
 const {
   LAST_EXPORT_AT_KEY,
@@ -37,12 +52,21 @@ test('M-03 clockOf：本机时区 HH:MM，非法 / 空值返回空串', () => {
   assert.equal(clockOf('garbage'), '');
 });
 
-test('M-04 syncRowSummary：失败优先、成功 HH:MM、从未同步', () => {
-  const at = new Date(2026, 10, 16, 9, 5, 0).toISOString();
-  assert.equal(syncRowSummary(at, ''), '已同步·09:05');
-  assert.equal(syncRowSummary('', '认证失败（401）\n第二行'), '失败：认证失败（401）');
-  assert.equal(syncRowSummary('', ''), '未同步');
-  assert.equal(syncRowSummary('garbage', ''), '未同步');
+test('M-04 syncRowSummary：文案只由权威最新尝试决定，旧 lastSyncAt 永不冒充当前成功', () => {
+  const staleSuccess = '2026-11-21T19:47:20+08:00';
+  // 旧行为（今天会失败）：syncRowSummary(staleSuccess, '') === '已同步·19:47'。
+  assert.equal(
+    syncRowSummary(staleSuccess, '', { kind: 'failed', at: '16:26', reason: 'E_NO_MAIN' }),
+    '上次失败 · 16:26 · E_NO_MAIN'
+  );
+  assert.equal(
+    syncRowSummary(staleSuccess, '', { kind: 'synced', at: '09:05', reason: '' }),
+    '已同步 · 09:05'
+  );
+  assert.equal(syncRowSummary('', '', { kind: 'synced', at: '09:05', reason: '' }), '已同步 · 09:05');
+  assert.equal(syncRowSummary(staleSuccess, '旧错误', null), '已配置 · 尚未同步');
+  assert.equal(syncRowSummary('', '', null), '已配置 · 尚未同步');
+  assert.equal(syncRowSummary('garbage', '', null), '已配置 · 尚未同步');
 });
 
 test('M-05 dataRowSummary：未导出 / 上次导出 / 上次导入，取更近的一次', () => {
@@ -76,7 +100,10 @@ test('M-07 同步子页渲染真实正文：两个字段 + 诚实状态行 + 失
   // mod-sync-silent-autoinit：状态行只有 honestStatus() 一个来源；syncRowSummary 只属根页摘要。
   assert.match(page, /syncMessage: this\.honestStatus\(\)/, '状态行唯一来源是 honestStatus()');
   assert.doesNotMatch(page, /syncRowSummary\(/, '同步页不得调用根页摘要函数');
-  assert.match(page, /'同步中…'/, '忙碌态文案');
+  // mod-status-honesty-regression：忙碌文案已收敛到纯模型常量，页面只委托唯一渲染器。
+  const constants = readSettingsFile('model/syncStatusPersist.ts');
+  assert.match(constants, /TEXT_SYNCING: string = '同步中…'/, '忙碌态文案由唯一模型定义');
+  assert.match(page, /syncStatusLineOf\(\{/, '页面委托唯一渲染器');
   for (const action of ['查看状态', '测试连接', '重试']) {
     assert.match(page, new RegExp(`Text\\('${action}'\\)`), `失败出口「${action}」`);
   }

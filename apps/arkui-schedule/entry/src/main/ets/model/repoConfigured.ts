@@ -12,6 +12,7 @@
  *    扁平键优先、信封 values 兜底；本模块不关心值来自哪一层，只看值本身。
  */
 import { decodeEnvelope } from './configSchema';
+import { REPO_BLOCKED_TEXT } from './syncStatusLine';
 
 /** 判定所需的配置切片（不依赖 ScheduleSettings，便于服务层 / 页面 / 单测复用）。 */
 export interface RepoConfigInput {
@@ -157,7 +158,7 @@ export function repoRowSummary(
   }
   const head: string = hostText;
   if (blocked) {
-    return `${head} · 已配置（可见性阻断，禁止推送）`;
+    return `${head} · ${REPO_BLOCKED_TEXT}`;
   }
   return `${head} · ${text(timeSummary)}`;
 }

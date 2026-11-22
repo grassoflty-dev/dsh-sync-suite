@@ -82,9 +82,17 @@ describe('mod-settings-sync-min：同步组只留仓库地址 + 访问令牌', (
     // mod-sync-silent-autoinit（old→new，只加不删）：状态行文案改成三态；失败态按「失败：」着色，
     // 仓库事实（HEAD / 分支 / 领先落后）退到标注为诊断的区块，不再是无下一步的死结提示。
     assert.match(form, /this\.syncMessage\.startsWith\('失败：'\)/, '失败态按三态词汇着色');
-    assert.match(SYNC_PAGE, /return '同步中…'/, '忙碌态三态文案');
-    assert.match(SYNC_PAGE, /失败：\$\{this\.lastSyncError\}（可重试）/, '失败态三态文案 + 可重试');
-    assert.match(SYNC_PAGE, /已同步 · \$\{clock\}/, '成功态三态文案 HH:MM');
+    // mod-status-honesty-regression（old→new，收紧）：三态文案不再由页面各自插值，
+    // 全部收敛到 model/syncStatusLine.ts + model/syncStatusPersist.ts 的常量；页面只做委托。
+    const renderer = readSettingsFile('model/syncStatusLine.ts');
+    const constants = readSettingsFile('model/syncStatusPersist.ts');
+    assert.match(SYNC_PAGE, /syncStatusLineOf\(\{/, '页面委托唯一渲染器');
+    assert.match(SYNC_PAGE, /syncStatusStore\.latestAttempt\(\)/, '事实来自权威最新尝试');
+    assert.match(constants, /TEXT_SYNCING: string = '同步中…'/, '忙碌态三态文案只在纯模型定义');
+    assert.match(constants, /TEXT_PAST_FAILED_PREFIX: string = '上次失败 · '/, '失败态三态文案只在纯模型定义');
+    assert.match(constants, /TEXT_SYNCED_PREFIX: string = '已同步 · '/, '成功态三态文案只在纯模型定义');
+    assert.match(renderer, /switch \(state\.kind\)/, '文案渲染是对五态联合类型的 total function');
+    assert.match(renderer, /syncStatusText\(statusStateOf\(facts\)\)/, '事实先收敛为五态再渲染');
     assert.match(form, /诊断（仅排查用）/, '正文有诊断区标注');
     assert.match(form, /Text\(this\.statusLine\)/, '诊断区仍展示真实仓库事实（只换位置不删信息）');
     for (const banned of [/尚未初始化/, /首次克隆/, /先执行「拉取」/]) {

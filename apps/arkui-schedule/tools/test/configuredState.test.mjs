@@ -163,7 +163,8 @@ test('C6 源码形状：UI 判据与周期 guard 读同一个函数，不存在�
   assert.doesNotMatch(SETTINGS_PAGE, /repoUrl\.trim\(\)\.length === 0/, 'UI 里不得再写第二份 repoUrl 空判据');
   // 旧断言仍成立：摘要来源依旧是已持久化字段（本模块只是包了一层）。
   assert.match(SETTINGS_PAGE, /repoHostOf\(settings\.repoUrl\)/);
-  assert.match(SETTINGS_PAGE, /syncRowSummary\(settings\.lastSyncAt, settings\.lastSyncError\)/);
+  // mod-status-honesty-regression：严格化——摘要必须同时带权威最新尝试，杜绝旧成功盖住新失败。
+  assert.match(SETTINGS_PAGE, /syncRowSummary\(\s*settings\.lastSyncAt, settings\.lastSyncError, syncStatusStore\.latestAttempt\(\)\s*\)/);
 });
 
 test('C7 过期缓存类：初值不再是「未配置」，周期每次入环前冷读刷新缓存', () => {

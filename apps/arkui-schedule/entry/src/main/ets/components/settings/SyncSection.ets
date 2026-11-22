@@ -380,7 +380,9 @@ export struct SyncSection {
         Text(this.syncMessage)
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)
-          .fontColor(this.syncMessage.startsWith('失败：') ? $r('app.color.danger') : $r('app.color.text_secondary'))
+          // 失败态含实时「失败：…」与启动/权威「上次失败 · HH:MM」两种同源文案，都要红色。
+          .fontColor(this.syncMessage.startsWith('失败：') || this.syncMessage.startsWith('上次失败 · ')
+            ? $r('app.color.danger') : $r('app.color.text_secondary'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
