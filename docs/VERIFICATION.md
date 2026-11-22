@@ -2175,3 +2175,81 @@ WARNING: [sign-hap] WARNING -AllowLegacyV1Key: using LEAKED v1 signing key (comp
 - ⑫ 的 PASS 仅指「竖屏日程列表下拉可用」；新增的「首页全局下拉刷新」作为新需求单独立项，不计入本行 PASS。
 
 以上 12 项结论均来自用户在安装版 `1000006` 上的实测（2026-11-22）；未观察项一律保持 `待用户`，不预先标 PASS。
+
+### 15.21 静默同步落真：1000009 —— 空仓库首跑真建 main 并推送 + 状态行单一渲染 + 设置页不再闪退（2026-11-22，planner-b7；append-only）
+
+> 本节紧接 §15.20 之后**追加**，不改写 §15.1–§15.20 任何一行。数字均为 Designer 实测；
+> 用户实测口径**仅限下列四项**（原话「都可以了」），其余一律未证。
+
+**一句话结论：** 用户在装机版 `1000009` 上给出的四项检查全部通过（原话「都可以了」）——
+设置页同步仓库打开正常并显示真实的 `已同步 · HH:MM`、冷启动自动同步、新建记录立即入列、
+Gitee 上看得到 `main` 分支及对应提交时间；**除这四项外，本节不宣称任何其它功能通过**，其余仍未证。
+
+**四项用户实测（来源：用户原话「都可以了」；逐项为用户目视/操作确认，故 `用户实测` 一律 PASS）**
+
+| 编号 | 复验项 | 用户实测 | 依据（可观测事实） |
+| --- | --- | --- | --- |
+| ① | 设置 → 同步仓库**打开正常**，并显示**真实的** `已同步 · HH:MM` | **PASS** | 用户确认打开正常并显示真实 `已同步 · HH:MM`（原话「都可以了」）；同一构建状态存档 `git_sync_status = {"v":1,"kind":"synced","at":"17:17","reason":""}` 中有真实同步时间（at=17:17）可供显示。 |
+| ② | **冷启动自动同步**（不做任何操作） | **PASS** | 用户确认冷启动不做任何操作即完成同步（原话「都可以了」）；同一构建设备侧证据：冷启动后 `git_sync_status.kind:"synced", at:"17:17"`，且本地与远端 `main` 指向同一提交。 |
+| ③ | **新建记录立即出现在列表**（无需切换筛选） | **PASS** | 用户目视确认新建记录立即出现在列表、无需切换筛选（原话「都可以了」）—— 依据即用户自身原话，本节未另做自动化断言。 |
+| ④ | **Gitee 仓库里看得到 `main` 分支与对应的提交时间** | **PASS** | 用户确认 Gitee 上可见 `main` 分支及提交时间（原话「都可以了」）；同一构建设备侧 `refs/heads/main` 与 `refs/remotes/origin/main` 同为 `a762ec94757ac37d10f092823c53c3aff5bf843c`，该提交已推送至远端。 |
+
+> `用户实测` 列的 **PASS 仅代表用户当日实测通过**，不是本节对功能完备性的背书；
+> 依据列中的设备侧读数用于佐证用户所见，不替代用户判断。
+
+**仍然未证（不据本节宣称通过）**
+
+- §15.19 ①–⑦、§15.20 ①–⑫ 中**除上述四项以外**的全部未回填项 —— 未证；不在本次四项确认范围内，不回填、不标 PASS。
+- **Phase B（三按钮删除 / 双触发器）** —— 未证；不得视为可用。
+- **配对与远程控制** —— 未接线，未证。
+- **插件面板** —— lean 版本已提交，但 GUI 未验，未证。
+- **R3 DSH 首页** —— 未证。
+
+**构建与安装**
+
+- 装机前后应用级字段：`versionCode` **1000008 → 1000009**，`updateTime` **1795335965770 → 1795339010426**
+  （= **2026-11-22 17:16:50.426 +08:00**，即 2026-11-22 17:16:50 +08:00）。
+- 已签名 HAP **5,458,004 B**；未签名 HAP **5,397,719 B**，SHA-256 前缀 `b00a7091…`；
+  包内 `module.json` 的 `versionCode` = **1000009**（产物级证据，不只是源码）。
+- `ets/modules.abc` **3,094,992 B**，SHA-256 前缀 `b9b4693a…`，相对 1000008 **+3,784 B**。
+- 构建日志 `apps/arkui-schedule/.build-logs/build-20261122-171306.log`：**42/42 executed**，
+  `CompileArkTS` **1 min 8 s 93 ms** EXECUTED，`BUILD SUCCESSFUL in 1 min 28 s 530 ms`；
+  控制台尾 `✓ 产物验收通过`、`[overlay] applied=false`（这两行只在控制台出现，不进入 `.build-logs`）。
+
+**空仓库 bootstrap 证据（本次里程碑）**
+
+- 冷启动 → `git_sync_status = {"v":1,"kind":"synced","at":"17:17","reason":""}`。
+- 本地 `refs/heads/main` == `refs/remotes/origin/main` == **`a762ec94757ac37d10f092823c53c3aff5bf843c`**
+  —— 即空仓库首跑真的建了 `main` 并推送到远端，与 §15.20 中「空仓库 init 未触发 / 远端非空但无 main」的失败态不同。
+- 隔离目录 **18 → 18**（没有新增 `.git.clone-failed-*`）—— 首跑没有走失败隔离路径。
+
+**根因与为何前三次绿灯没抓到**
+
+- 四次失败尝试的根因（如实陈述）：**空路径确实赢了、分支闸门也通过了**，失败发生在**首次提交之前读取 `origin/main`**：
+  `bootstrapEmptyRemote` → `readDay` → `showMain` → `v2OidOf('origin/main')` → `resolveRef` 抛 `NotFound` →
+  被归类为 `no-main`。即问题不在 init/clone 判定，而在读边界。
+- 修复：在读边界引入 `DayReader(date, remote?)`，使 bootstrap 读取**仅本地**（`syncCycle.ts` 中 `readDay(date,false)`）；
+  并新增 `probeRemoteRefs` 过滤，**不把** `HEAD` / `EOF` / 非 `refs/**` / 零 oid 条目计入远端引用。
+- 为何前三次 Node 绿灯没抓到：它们的 fake 对缺失的 `origin/main` **返回 `''`** 而不是**抛错**；
+  真实 bridge 是**抛错**的，于是假实现掩盖了真实路径上的 `NotFound`。
+
+**状态行诚实性（同一构建）**
+
+- 全量状态行收敛为**单一渲染器** `model/syncStatusLine.ts`（5 态 union，`statusStateOf` 优先级
+  `unconfigured > blocked > latest > never`），页面侧 composer 已移除 —— 陈旧成功文案**从构造上不可能**再出现。
+- 旧文案「已同步 · 19:47」实为 **2026-11-21 持久化下来的 `lastSyncAt`** 被当作当前值显示，**不是时区缺陷**。
+
+**闪退修复（在 1000008 已修）**
+
+- 设置页闪退：`readdir` 在页面构建期抛 **`13900018 ENOTDIR`**。
+- 修复：与调用方无关的守卫 `settingsBuildSafety.ts` + `fsSafetyLog.ets`，并把 bridge 契约改为
+  **以 ENOENT 拒绝（reject）**，而不是 resolving 一个空列表。
+
+**两处诚实声明**
+
+1. **构建溯源**：`1000009` 的 HAP 来自一棵**已包含（当时尚未提交的）Phase A 变更**的树；git 里的
+   `versionCode` diff 读作 **1000007 → 1000009**，因为 **1000008 的 bump 从未提交**（1000008 是构建并装机了的）。
+   请勿据此把 registry 误读为跳号或缺失 1000008。
+2. **证据粒度**：HAP / abc 哈希是**与并行 lane 共享的树级产物**，不能单独归功于本模块；
+   按模块的证据是**源码 diff 加 abc 名称命中**（`[sync-trigger] pull` 命中 1 次，
+   `syncStatusLine` / `statusStateOf` / `syncStatusText` / `DayReader` / `readDay` 均在）。
