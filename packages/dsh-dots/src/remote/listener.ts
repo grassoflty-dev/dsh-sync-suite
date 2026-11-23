@@ -24,6 +24,20 @@
  *      userinfo 一律打码（`safeUrlText` / `scrubSecrets`），日志只写 errno 码（`codeOf`）。
  *   4. **TLS 准入不可降级**（mod-remote-tls-termination）：`tls` 入参必填且必须是可用密钥材料；
  *      失败只抛 typed `RemoteStartError`，不开明文监听、不写 certificate 内容到日志。
+ *   5. **实时隧道上限按「占用」计数，不按「已建立」计数**（`maxUpgradeTunnels`，默认 **16**）：
+ *      一个槽位在**拨上游 upgrade 请求的那一刻**就被预约（不是等上游 101 到达），准入判据是
+ *      `已建立 + 已预约 >= 上限`。预约在每条失败路径上**恰好归还一次**（`release()` 幂等，
+ *      重复调用没有任何副作用）：`http.request` 抛错、上游 `error`、上游用普通响应拒绝升级
+ *      （`response`）、客户端 socket 在 101 之前 close/error、以及监听 `close()` 时（同步归还，
+ *      `close()` 返回后 `reservedTunnels === 0`）。101 到达时预约**转正**成该隧道的槽位，
+ *      此后只由隧道 teardown 归还（不会重复扣）。因此「上游接了 TCP 却永不应答」的半开握手
+ *      最多占到上限，第 N+1 条直接 503 `E_UPGRADE_TUNNELS_FULL` —— 不存在「上限只约束已建立
+ *      隧道、半开握手可以无限放行」的缺口。
+ *      **`close()` 之后不再接受任何新占用**（`reserveTunnelSlot()` 先看 `closed`），
+ *      `runUpgrade()` 在**每个 `await` 之后**复检 `closed`（门禁与上游头解析都可能是异步的），
+ *      `shutdown()` 还会同步销毁"已拨出、还没转正"的上游请求 —— 于是
+ *      「`close()` 返回后 `reservedTunnels === 0` 且没有在飞的上游连接」是**无条件**成立的，
+ *      不依赖出厂接线恰好只传同步钩子。
  *
  * 认证与路由**不在本文件**：本文件只提供 `authorize` 这一个门禁钩子，**HTTP 请求与
  * WebSocket upgrade 都必须过它**（upgrade 若绕过授权，等于开一条免令牌通道 —— DSH 的
@@ -173,6 +187,10 @@ export interface RemoteListenerOptions {
    * **并发实时隧道上限**（默认 16）：每条 WebSocket 占一条独立上游连接，不封顶就会被
    * 一个页面/一台设备把本机端口和上游连接数吃光。到顶后的新升级请求回 503 +
    * typed `E_UPGRADE_TUNNELS_FULL`，并计入 `stats().rejected`（不是静默丢弃）。
+   *
+   * **口径（P2-A）**：上限按「**占用**」计，判据是 `已建立 + 已预约 >= 上限`；预约从
+   * **拨上游 upgrade 请求之前**就占住（不等 101），失败或 `close()` 时恰好归还一次。
+   * 于是 N 条「上游接了 TCP 却永不应答」的半开握手最多占到上限，不可能突破它。
    */
   maxUpgradeTunnels?: number
   /**
@@ -203,10 +221,36 @@ export interface RemoteListenerHandle {
   address: string
   /** 释放端口：关闭 server 并断掉所有活动 socket（含已升级的隧道）。幂等。 */
   close(): Promise<void>
-  /** 运行计数（不含任何敏感信息）。 */
-  stats(): { active: number; total: number; rejected: number }
+  /**
+   * 运行计数（不含任何敏感信息）。
+   *
+   * 两个隧道字段**含义不同、不要混用**：
+   *   · `tunnels` = 已经拿到上游 101 的**已建立**隧道数（旧口径，含义未变）；
+   *   · `reservedTunnels` = **已拨出上游 upgrade、还没拿到 101** 的预约槽数（含半开握手）。
+   * 真正占用 `maxUpgradeTunnels` 的是 `tunnels + reservedTunnels`。
+   */
+  stats(): {
+    active: number
+    total: number
+    rejected: number
+    /** 已建立（101 已到手）的实时隧道数。 */
+    tunnels: number
+    /** 已拨上游但尚未转正的预约槽数（半开握手也算）；`close()` 之后恒为 0。 */
+    reservedTunnels: number
+  }
   /** 最近一次运行期错误（上游不可达/握手失败等）；错误消息已脱敏，不含 token。 */
   readonly lastError: { code: string; message: string } | null
+}
+
+/**
+ * 一条**握手中的隧道预约**（见 `RemoteListenerOptions.maxUpgradeTunnels`）。
+ *
+ * 生命周期：拨上游 upgrade 之前占位 → 101 到达时转正（改为登记进已建立集合）或
+ * 任一失败路径归还。`release()` **幂等**：只有第一次调用真的归还槽位，重复调用无害 ——
+ * 这是「恰好归还一次」的实现方式（客户端 socket 的 close 与失败分支会都调它）。
+ */
+interface TunnelSlotReservation {
+  release(): void
 }
 
 export type RemoteStartErrorCode =
@@ -1067,6 +1111,51 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
    * 监听关闭时必须两侧都断，否则会留下半开的上游连接（端口/句柄泄漏）。
    */
   const tunnels = new Set<{ client: Duplex; upstream: Duplex }>()
+  /**
+   * **握手中的预约槽**（P2-A）：从"拨出上游 upgrade 请求"那一刻占用，101 到达时转正为
+   * `tunnels` 里的一条；失败（`http.request` 抛错 / 上游 `error` / 上游用普通响应拒绝升级 /
+   * 客户端在 101 之前断开 / 监听 `close()`）时归还。
+   *
+   * 为什么必须单独数：上限如果只数 `tunnels`，N 条"上游接了 TCP 却永不应答"的半开握手
+   * 全都能过准入检查（101 之前集合里没有条目），实际占用的上游连接于是可以突破上限。
+   */
+  const reservations = new Set<TunnelSlotReservation>()
+  /**
+   * **握手中（已拨上游、还没转正）的上游请求**：`close()` 时必须一起销毁。
+   *
+   * 为什么单独登记：`upstreamReq` 是 `agent:false` 拨出去的，既不在 `sockets`（那是客户端侧）
+   * 也不在 `tunnels`（那是 101 已到手的）；只在 `runUpgrade` 的闭包里，`shutdown()` 摸不到它。
+   * 不登记的话，`close()` 之后最多还会留一条上游连接活到 15 s 握手兜底（b11b P2-5）。
+   */
+  const handshakes = new Set<http.ClientRequest>()
+
+  /**
+   * 预约一个隧道槽位；到顶返回 `null`（调用方回 503）。
+   *
+   * 返回的 `release()` **幂等**：重复调用只真正归还一次，不会把计数扣成负数，
+   * 也不会误放别人的槽位（槽位身份就是这个对象自己）。
+   *
+   * `closed` 之后一律 `null`（b11b P2-5）：`close()` 是把计数器清零并把「已关闭」写在
+   * 监听对象上的，若这里还允许新增预约，`close()` 返回后 `reservedTunnels` 就不再恒为 0，
+   * 模块头那条不变式也就成了空话。
+   */
+  const reserveTunnelSlot = (): TunnelSlotReservation | null => {
+    // 已关闭的监听不接受任何新占用（必须在准入判据**之前**）。
+    if (closed) return null
+    // 准入判据 = 已建立 + 已预约；**不是**只数已建立的隧道。
+    if (tunnels.size + reservations.size >= maxUpgradeTunnels) return null
+    let released = false
+    const reservation: TunnelSlotReservation = {
+      release: () => {
+        if (released) return
+        released = true
+        reservations.delete(reservation)
+      },
+    }
+    reservations.add(reservation)
+    return reservation
+  }
+
   let total = 0
   let rejected = 0
   let closed = false
@@ -1115,6 +1204,23 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
       destroyQuietly(tunnel.client)
     }
     tunnels.clear()
+    /**
+     * 握手中的预约槽：**同步**归还，不能等客户端 socket 的 `'close'` 事件（那是异步的）。
+     * 这样 `close()` 返回后 `reservedTunnels === 0`，同一进程里立刻按同一上限重建监听
+     * 不会被上一轮遗留的预约卡住。
+     */
+    for (const reservation of reservations) reservation.release()
+    reservations.clear()
+    /**
+     * 握手中的上游请求：**同步**销毁（b11b P2-5）。
+     *
+     * 归还预约只解决了"计数"，那条已经拨出去的上游连接还在（最长活到 15 s 握手兜底），
+     * 且 `runUpgrade` 从 `await` 恢复后还可能再往前走。这里连同请求一起掐掉，
+     * 让 `close()` 之后既没有预约、也没有在飞的上游连接。
+     */
+    for (const request of handshakes) destroyQuietly(request)
+    handshakes.clear()
+
     await new Promise<void>((resolve) => {
       // 兜底：close 回调在极端情况下可能不来，2s 后强制返回（socket 已在上面断掉）
       const timer = setTimeout(() => resolve(), 2_000)
@@ -1535,17 +1641,36 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
       destroyQuietly(socket)
       return
     }
+    /**
+     * 每个 `await` 之后都必须复检 `closed`（b11b P2-5）。
+     *
+     * `authorize` 与上游头解析都可以是异步的（公开类型允许返回 Promise），`close()` 完全可能
+     * 发生在这两处等待期间。若不复检，恢复执行后仍会占槽并 `http.request` —— 于是
+     * `close()` 返回后 `reservedTunnels` 变成 1、还多一条上游连接，模块头那条
+     * 「`close()` 后零预约」的不变式就被打破了。
+     *
+     * 收口方式：只断开客户端 socket，**不**往一个可能已被销毁的 socket 写应答
+     * （`close()` 已经销毁了它），也绝不拨上游。
+     */
+    const bailIfClosed = (): boolean => {
+      if (!closed) return false
+      rejected += 1
+      destroyQuietly(socket)
+      return true
+    }
     let upstreamHeaders: Record<string, string> = {}
     if (typeof options.authorize === 'function') {
       let gate: NormalizedGate
       try {
         gate = normalizeDecision(await options.authorize(buildAuthorizeInput(req), { socket }))
       } catch (error) {
+        if (bailIfClosed()) return
         rejected += 1
         noteFailure('鉴权钩子', error)
         writeRawResponse(socket, 403, 'forbidden\n')
         return
       }
+      if (bailIfClosed()) return
       if (gate.kind === 'respond') {
         // WS 握手必须被门禁挡住：回最小应答后立刻断开，**绝不**建上游隧道
         if (gate.status >= 400) {
@@ -1561,13 +1686,22 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
     try {
       staticHeaders = await resolveUpstreamHeaders(target)
     } catch (error) {
+      if (bailIfClosed()) return
       noteFailure('上游头解析', error)
       writeRawResponse(socket, 502, 'remote upstream unavailable\n')
       return
     }
+    // 解析完上游头之后同样可能已被 close()：这里必须复检，否则下面会占槽并拨上游。
+    if (bailIfClosed()) return
     // S3：并发隧道上限。每条 WS 占一条独立上游连接，不封顶就能被一个页面吃光；
     // 到顶后明确拒绝（503 + typed JSON），并计入 rejected —— 不是静默丢弃。
-    if (tunnels.size >= maxUpgradeTunnels) {
+    //
+    // P2-A：判据按**占用**算（已建立 + 已预约），且预约在下面 `http.request` 之前就占住，
+    // 所以 N 条"上游接了 TCP 却永不应答"的半开握手最多占到上限，第 N+1 条在这里被拒。
+    const reservation = reserveTunnelSlot()
+    if (reservation === null) {
+      // 监听已关闭：不再接受占用，也不谎称"到顶"（两者对客户端是不同的谎）。
+      if (bailIfClosed()) return
       rejected += 1
       log(`[remote] 拒绝升级请求：实时隧道已达上限 ${String(maxUpgradeTunnels)}`)
       writeRawResponse(socket, 503, UPSTREAM_ERROR_BODIES.E_UPGRADE_TUNNELS_FULL, {
@@ -1593,16 +1727,41 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
         agent: false,
       })
     } catch (error) {
+      // 连"发起拨号"都失败：预约槽必须立刻归还（否则每次失败都白占一个槽直到 close）。
+      reservation.release()
       noteFailure('升级握手', error)
       writeRawResponse(socket, 502, 'remote upstream unavailable\n')
       return
     }
+    /**
+     * `false` = 还在握手段（槽位由 `reservation` 持有）；`true` = 101 已到，槽位归属
+     * `tunnels` 里的那条隧道（由 teardown 归还）。所有"握手段失败"的收口都必须先看它，
+     * 否则会把已经建立的隧道掐掉。
+     */
+    let established = false
+    /** 握手段失败收口：先归还预约（幂等），未转正时再把上游请求掐掉。 */
+    const abortHandshake = (): void => {
+      reservation.release()
+      if (!established) destroyQuietly(upstreamReq)
+    }
+    // 登记"在飞的上游请求"，供 `shutdown()` 同步销毁（b11b P2-5）。
+    // 退出登记的三条路：拿到 101、拿到普通响应、出错/关闭 —— 都在这条请求自己的事件里。
+    handshakes.add(upstreamReq)
+    upstreamReq.on('close', () => {
+      handshakes.delete(upstreamReq)
+    })
     // 握手兜底超时：上游既不升级也不应答时，不让 socket 无限挂着
     upstreamReq.setTimeout(15_000, () => {
       upstreamReq.destroy(new Error('upgrade handshake timeout'))
     })
     upstreamReq.on('upgrade', (upRes, rawUpSocket, upHead) => {
+      handshakes.delete(upstreamReq)
       const upSocket = rawUpSocket as Duplex
+      // 预约**转正**：槽位从"已预约"移交给"已建立隧道"，交接只发生一次。
+      // 先置 `established` 再归还预约 —— 从这里开始，槽位归 `tunnels` 里的 teardown，
+      // 之前注册的客户端 close/error 收口（`abortHandshake`）变成 no-op，不会重复扣。
+      established = true
+      reservation.release()
       enableNoDelay(socket)
       enableNoDelay(upSocket)
       // 1) 先回 101（原样字节，保留 Sec-WebSocket-Accept 等）
@@ -1655,8 +1814,11 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
       upSocket.on('close', teardown)
       socket.on('close', teardown)
     })
-    // 上游没同意升级（200/4xx…）：fail-closed，不把 body 当隧道数据转发
+    // 上游没同意升级（200/4xx…）：fail-closed，不把 body 当隧道数据转发。
+    // 这同样是一次握手段失败 ⇒ 预约槽要归还（幂等，重复调用无害）。
     upstreamReq.on('response', (upRes) => {
+      handshakes.delete(upstreamReq)
+      reservation.release()
       noteFailure('升级握手', { name: `HTTP_${String(upRes.statusCode)}` })
       try {
         upRes.resume()
@@ -1666,12 +1828,18 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
       writeRawResponse(socket, 502, 'remote upstream refused upgrade\n')
     })
     upstreamReq.on('error', (error) => {
+      handshakes.delete(upstreamReq)
+      // 上游 error（拒连 / 被重置 / 握手兜底超时 destroy）：归还预约槽。
+      reservation.release()
+      if (established) return // 已转正的隧道由 teardown 收口，绝不往隧道里塞错误页
       noteFailure('升级握手', error)
       writeRawResponse(socket, 502, 'remote upstream unavailable\n')
     })
-    socket.on('error', () => {
-      destroyQuietly(upstreamReq)
-    })
+    // 客户端在 101 之前断开/报错：别等上游（否则那条半开握手要一直占着槽到 15 s 兜底），
+    // 立刻中止握手并归还预约槽。转正之后本监听在这里是 no-op（`established` 守卫）——
+    // 已建立隧道的收口只由 `teardown` 负责，槽位不会被释放两次。
+    socket.on('error', abortHandshake)
+    socket.on('close', abortHandshake)
     upstreamReq.end()
   }
 
@@ -1766,7 +1934,15 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
     port: info.port,
     address: info.address,
     close: shutdown,
-    stats: () => ({ active: sockets.size, total, rejected }),
+    stats: () => ({
+      active: sockets.size,
+      total,
+      rejected,
+      // 已建立（101 已到手）的隧道数：口径不变，仍是"真正在跑的隧道"。
+      tunnels: tunnels.size,
+      // 已拨上游但还没拿到 101 的预约槽数（半开握手也算）；close() 之后恒为 0。
+      reservedTunnels: reservations.size,
+    }),
     get lastError() {
       return lastError
     },

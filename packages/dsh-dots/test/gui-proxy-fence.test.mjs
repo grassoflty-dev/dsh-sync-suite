@@ -15,7 +15,8 @@
  * `http://127.0.0.1:36569` → 401。⇒ 只改写 Host、不改写 Origin，平板上的 GUI 能渲染但点不动。
  *
  * 依赖只有 `node:` 内置模块；监听必须绑非回环 IPv4（listener 的设计约束），且该地址要
- * **既能绑定又能自连**；本机没有这样的地址时相关用例带具名原因跳过（`LAN-E2E-SKIP：…`）。
+ * **既能绑定又能自连**；本机没有这样的地址时相关用例带具名原因跳过（`LAN-E2E-SKIP：…`），
+ * 并由文件末尾的「LAN 台账」用例把 登记/实跑/跳过 三条数钉死（跳过不可能被当成通过）。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -76,6 +77,8 @@ function candidateAcceptsConnect(port, address) {
  * 只按枚举取第一个不够：Wi-Fi Direct / 承载网络这类地址看着合法、`listen()` 会回
  * EADDRNOTAVAIL；虚拟网卡 / VPN 则可能绑得上却连不通 —— 两种都会让整套 e2e 随网卡
  * 状态随机关掉。逐个真绑 + 真连一次再决定，候选数量与自连等待都有上限。
+ *
+ * 返回值带上 `tried`（**真试过**的候选数）：跳过文案必须说清"试了多少个"。
  */
 async function findBindableLanAddress() {
   let tried = 0
@@ -87,7 +90,7 @@ async function findBindableLanAddress() {
       if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(item.address)) continue
       if (item.address.startsWith('169.254.')) continue
       if (!isBindableLanAddress(item.address)) continue
-      if (tried >= LAN_PROBE_MAX_CANDIDATES) return null
+      if (tried >= LAN_PROBE_MAX_CANDIDATES) return { address: null, tried }
       tried += 1
       const probe = net.createServer()
       try {
@@ -101,7 +104,7 @@ async function findBindableLanAddress() {
         })
         const reachable = await candidateAcceptsConnect(probe.address().port, item.address)
         await new Promise((resolve) => probe.close(resolve))
-        if (reachable) return item.address
+        if (reachable) return { address: item.address, tried }
       } catch {
         try {
           probe.close()
@@ -111,14 +114,47 @@ async function findBindableLanAddress() {
       }
     }
   }
-  return null
+  return { address: null, tried }
 }
 
-const LAN = await findBindableLanAddress()
-const SKIP = LAN === null ? 'LAN-E2E-SKIP：本机没有「可绑定且可自连」的非回环 IPv4' : false
+const LAN_PROBE = await findBindableLanAddress()
+const LAN = LAN_PROBE.address
+
+/**
+ * 跳过原因的**唯一**文案（一行中文）：缺什么能力、试过多少候选、每次探测多久、
+ * 以及"套件其余用例照常执行"。
+ */
+function lanSkipReason(totalCases) {
+  return (
+    'LAN-E2E-SKIP：本机无「可绑定且可自连」的非回环 IPv4' +
+    `（已试 ${String(LAN_PROBE.tried)} 个候选，每次自连 ≤${String(LAN_PROBE_CONNECT_TIMEOUT_MS)} ms，` +
+    `候选上限 ${String(LAN_PROBE_MAX_CANDIDATES)} 个）；` +
+    `依赖局域网绑定的 ${String(totalCases)} 条代理用例跳过，套件其余用例照常执行`
+  )
+}
+
+/**
+ * LAN 用例台账（P2-B）：**跳过必须可见，且不可能被当成通过**。
+ *
+ * 静态 `skip` 选项会让人无法从输出里区分"跑过了"与"压根没跑"；这里把每条 `lanTest`
+ * 都登记进台账，由文件末尾的台账用例断言 `ran + skipped === total` 且"只有本机真的
+ * 缺能力时才允许跳过"，并打印具体原因。跳过用运行期的 `t.skip(文案)`，因为只有运行时
+ * 才知道本文件一共登记了多少条 `lanTest`（文案里的条数必须是真实条数）。
+ * 用例体本身的断言与行为**一字未改**：跳过时函数体不会执行（与静态 skip 等价）。
+ */
+const LAN_LEDGER = { total: 0, ran: 0, skipped: 0 }
 
 function lanTest(name, fn) {
-  return test(name, { skip: SKIP }, fn)
+  LAN_LEDGER.total += 1
+  return test(name, async (t) => {
+    if (LAN === null) {
+      LAN_LEDGER.skipped += 1
+      t.skip(lanSkipReason(LAN_LEDGER.total))
+      return
+    }
+    LAN_LEDGER.ran += 1
+    return fn(t)
+  })
 }
 
 async function listenOnce(server, port, host) {
@@ -1137,3 +1173,40 @@ test('F1 上游身份：缓存过期时门禁触发一次后台自愈，下一�
   assert.equal(current.upstreamHeaders.cookie, 'dsh-auth-3f9c11=v1.MINT-1')
   assert.equal(exchange.state.hits, 2, '空/过期缓存只触发**一次**后台换身份')
 })
+
+// ---------------------------------------------------------------------------
+// LAN 台账（P2-B）：跳过必须可见，且不可能被当成通过
+// ---------------------------------------------------------------------------
+
+/**
+ * 台账守卫：`lanTest` 的 登记数 / 实跑数 / 跳过数 必须自洽，且"跳过"只允许出现在
+ * 本机**真的缺能力**的时候。本用例在所有 `lanTest` 之后注册，运行时三条数已经定稿。
+ *
+ * 不真空的三条保证：
+ *   · `total > 0`：一条 `lanTest` 都没登记时本用例直接失败（否则它什么也没证明）；
+ *   · `ran + skipped === total`：跳过与实跑都不许"消失"；
+ *   · `skipped === 缺能力 ? total : 0`：有能力时一条都不许跳过，缺能力时**每一条**
+ *     都要以跳过出现在台账里（不可能有哪条悄悄算成通过）。
+ */
+test('LAN 台账（P2-B）：登记数 = 实跑数 + 跳过数，且跳过只能发生在能力缺失时', (t) => {
+  const { total, ran, skipped } = LAN_LEDGER
+  const capabilityMissing = LAN === null
+  assert.ok(total > 0, '台账里必须有 >= 1 条 LAN 用例：0 条说明登记被绕过，这条守卫就失去意义')
+  assert.equal(ran + skipped, total, `实跑 ${String(ran)} + 跳过 ${String(skipped)} 必须等于登记 ${String(total)}`)
+  assert.equal(
+    skipped,
+    capabilityMissing ? total : 0,
+    `跳过数 ${String(skipped)} 与本机能力（缺失=${String(capabilityMissing)}）不一致：有能力时一条都不许跳过`,
+  )
+  assert.equal(
+    ran,
+    capabilityMissing ? 0 : total,
+    `实跑数 ${String(ran)} 与本机能力（缺失=${String(capabilityMissing)}）不一致：缺能力时一条都不许实跑`,
+  )
+  const reason = capabilityMissing
+    ? lanSkipReason(total)
+    : `能力存在：可绑定且可自连的 ${String(LAN)}（${String(total)} 条 LAN 用例全部实跑，0 跳过）`
+  t.diagnostic(reason)
+  console.log(`[LAN-LEDGER] total=${String(total)} ran=${String(ran)} skipped=${String(skipped)} | ${reason}`)
+})
+

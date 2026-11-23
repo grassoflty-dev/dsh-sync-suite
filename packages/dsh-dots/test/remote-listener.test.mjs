@@ -27,7 +27,8 @@
  *
  * 只依赖 node: 内置模块（仓库不新增 `ws` 依赖：WS 用裸 socket 手写握手）。
  * 绑定地址必须是非回环 IPv4（listener 的设计约束），且要**既能绑定又能自连**；
- * 本机没有这样的地址时相关用例带具名原因跳过（`LAN-E2E-SKIP：…`，绝不静默通过）。
+ * 本机没有这样的地址时相关用例带具名原因跳过（`LAN-E2E-SKIP：…`，绝不静默通过），
+ * 并由文件末尾的「LAN 台账」用例把 登记/实跑/跳过 三条数钉死（跳过不可能被当成通过）。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -88,6 +89,9 @@ function candidateAcceptsConnect(port, address) {
  * 只按网卡枚举挑第一个是不够的：本机会同时存在「Wi-Fi Direct / 承载网络」这类
  * 看着合法、`listen()` 却回 EADDRNOTAVAIL 的地址（或睡一觉醒来就没了）；虚拟网卡 / VPN
  * 还可能绑得上却连不通。所以逐个真绑 + 真连一次再决定，候选数量与自连等待都有上限。
+ *
+ * 返回值带上 `tried`（**真试过**的候选数）：跳过文案必须说清"试了多少个"，否则
+ * "本机没有 → skip" 既没法复核，也不像一条可诊断的结论。
  */
 async function findBindableLanAddress() {
   let tried = 0
@@ -99,7 +103,7 @@ async function findBindableLanAddress() {
       if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(item.address)) continue
       if (item.address.startsWith('169.254.')) continue
       if (!isBindableLanAddress(item.address)) continue
-      if (tried >= LAN_PROBE_MAX_CANDIDATES) return null
+      if (tried >= LAN_PROBE_MAX_CANDIDATES) return { address: null, tried }
       tried += 1
       const probe = net.createServer()
       try {
@@ -113,7 +117,7 @@ async function findBindableLanAddress() {
         })
         const reachable = await candidateAcceptsConnect(probe.address().port, item.address)
         await new Promise((resolve) => probe.close(resolve))
-        if (reachable) return item.address
+        if (reachable) return { address: item.address, tried }
       } catch {
         try {
           probe.close()
@@ -123,15 +127,54 @@ async function findBindableLanAddress() {
       }
     }
   }
-  return null
+  return { address: null, tried }
 }
 
-const LAN = await findBindableLanAddress()
-const SKIP = LAN === null ? 'LAN-E2E-SKIP：本机没有「可绑定且可自连」的非回环 IPv4' : false
+const LAN_PROBE = await findBindableLanAddress()
+const LAN = LAN_PROBE.address
+
+/**
+ * 跳过原因的**唯一**文案（一行中文）：缺什么能力、试过多少候选、每次探测多久、
+ * 以及"套件其余用例照常执行" —— 跳过必须是一条**可诊断的结论**，不是静默失覆盖。
+ *
+ * `totalCases` 由台账在**运行时**给出，因此文案里的条数就是本次真正跳过的 `lanTest` 条数。
+ */
+function lanSkipReason(totalCases) {
+  return (
+    'LAN-E2E-SKIP：本机无「可绑定且可自连」的非回环 IPv4' +
+    `（已试 ${String(LAN_PROBE.tried)} 个候选，每次自连 ≤${String(LAN_PROBE_CONNECT_TIMEOUT_MS)} ms，` +
+    `候选上限 ${String(LAN_PROBE_MAX_CANDIDATES)} 个）；` +
+    `依赖局域网绑定的 ${String(totalCases)} 条代理用例跳过，套件其余用例照常执行`
+  )
+}
+
+/**
+ * LAN 用例台账（P2-B）：**跳过必须可见，且不可能被当成通过**。
+ *
+ * 为什么不用静态 `skip` 选项：那会让人无法从测试输出里区分"跑过了"与"压根没跑"。
+ * 这里把每条 `lanTest` 都登记进台账，由文件末尾的台账用例断言
+ * `ran + skipped === total` 且"只有本机真的缺能力时才允许跳过"，并把具体原因打出来。
+ *
+ * 跳过时用运行期的 `t.skip(文案)`（而不是注册期的 `skip` 选项），因为只有运行时才知道
+ * 本文件一共登记了多少条 `lanTest` —— 文案里的条数必须是真实条数。
+ * 用例体本身的断言与行为**一字未改**：跳过时函数体不会执行（与静态 skip 等价）。
+ */
+const LAN_LEDGER = { total: 0, ran: 0, skipped: 0, reason: '' }
 
 function lanTest(name, fn) {
-  return test(name, { skip: SKIP }, fn)
+  LAN_LEDGER.total += 1
+  return test(name, async (t) => {
+    if (LAN === null) {
+      LAN_LEDGER.skipped += 1
+      LAN_LEDGER.reason = lanSkipReason(LAN_LEDGER.total)
+      t.skip(LAN_LEDGER.reason)
+      return
+    }
+    LAN_LEDGER.ran += 1
+    return fn(t)
+  })
 }
+
 
 /**
  * 全局 `fetch` 是否会被系统代理接管（被接管时 fetch 的错误码不可用于端口释放断言）。
@@ -216,6 +259,23 @@ async function freePortOn(host) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * 轮询等一个异步状态到位（默认 2 s 上限）。
+ *
+ * 为什么要它：槽位归还、"第 N 条真的拨到上游"这类事情发生在事件循环里，固定 `sleep`
+ * 要么白等要么不够；轮询到条件成立就立刻返回，超时则**点名**是哪条断言没等到。
+ */
+async function waitFor(check, label, timeoutMs = 2_000) {
+  const startedAt = Date.now()
+  for (;;) {
+    if (check()) return
+    if (Date.now() - startedAt > timeoutMs) {
+      assert.fail(`等待超时（${String(timeoutMs)} ms）：${label}`)
+    }
+    await delay(10)
+  }
 }
 
 /**
@@ -1394,6 +1454,257 @@ lanTest('隧道纪律（S3）：并发隧道到顶 ⇒ 503 typed E_UPGRADE_TUNNE
   }
 })
 
+lanTest('隧道上限（P2-A）：上限按「已建立 + 已预约」计，半开握手最多占到上限', async (t) => {
+  // 哑上游：接受 TCP 连接、一个字节都不回 ⇒ 握手永远到不了 101（= 半开握手）。
+  const silent = await startSilentUpstream()
+  const handle = await startRemoteListener({
+    port: 0,
+    bindAddress: LAN,
+    upstream: { baseUrl: silent.baseUrl },
+    tls: TEST_TLS,
+    authorize: () => ({ kind: 'allow' }),
+    maxUpgradeTunnels: 2,
+  })
+  const opened = []
+  let fourth = null
+  try {
+    // 前两条半开握手：它们永远收不到 101，但**必须**各自占掉一个槽位
+    opened.push(await openWs(handle.port, LAN, { path: '/api/remote.mux?half=0' }))
+    opened.push(await openWs(handle.port, LAN, { path: '/api/remote.mux?half=1' }))
+    await waitFor(
+      () => handle.stats().reservedTunnels === 2 && silent.state.connections === 2,
+      '两条半开握手必须先各占一个预约槽，并且真的拨到上游',
+    )
+
+    // 第 3 条：上限 2 已满 ⇒ 503 typed，且**绝不**再打上游
+    const third = await openWs(handle.port, LAN, { path: '/api/remote.mux?half=2' })
+    try {
+      const head = await third.reader.readHead()
+      assert.match(head, /^HTTP\/1\.1 503 /, head)
+      assert.match(head, /content-type: application\/json/i, head)
+      const expected = Buffer.from('{"ok":false,"error":{"code":"E_UPGRADE_TUNNELS_FULL"}}')
+      const body = await third.reader.readAtLeast(expected.length)
+      assert.deepEqual(Buffer.from(body), expected, '到顶必须是 typed 正文')
+    } finally {
+      third.socket.destroy()
+    }
+    await delay(50)
+    assert.equal(silent.state.connections, 2, '第 3 条被拒的握手绝不能打到上游（上游最多见过 2 条尝试）')
+    assert.equal(handle.stats().tunnels, 0, '没有一条握手转正，已建立隧道必须是 0')
+    assert.equal(handle.stats().reservedTunnels, 2, '占用只看「已建立 + 已预约」：这里 2 个预约')
+    assert.equal(handle.stats().rejected, 1, '到顶拒绝必须计入 stats().rejected')
+
+    // 掐掉前两条 ⇒ 槽位归还（幂等释放，不会多扣也不会不扣）
+    for (const item of opened) item.socket.destroy()
+    await waitFor(() => handle.stats().reservedTunnels === 0, '半开握手断开后预约必须归零（槽位不泄漏）')
+
+    // 第 4 条必须被放行，并且真的拨到上游（连接数 2 → 3）
+    fourth = await openWs(handle.port, LAN, { path: '/api/remote.mux?half=3' })
+    await waitFor(() => handle.stats().reservedTunnels === 1, '第 4 条必须重新占到一个预约槽')
+    await waitFor(() => silent.state.connections === 3, '第 4 条必须真的拨到上游')
+    assert.equal(fourth.reader.buffer.length, 0, '上游沉默，此时客户端不应收到任何字节（既非 503 也非 101）')
+    assert.equal(fourth.reader.ended, false, '第 4 条是放行后的半开握手，连接必须还开着')
+
+    // close() 必须**同步**把还在握手中的预约清零（不依赖客户端 socket 的 close 事件）
+    await handle.close()
+    assert.equal(handle.stats().reservedTunnels, 0, 'close() 之后 reserved 必须是 0')
+    assert.equal(handle.stats().tunnels, 0, 'close() 之后已建立隧道必须是 0')
+  } finally {
+    if (fourth !== null) fourth.socket.destroy()
+    for (const item of opened) item.socket.destroy()
+    await handle.close()
+    await silent.close()
+  }
+})
+
+lanTest('隧道上限（P2-A）：close() 归还握手中的预约，同上限的新监听立刻可用', async (t) => {
+  const silent = await startSilentUpstream()
+  const fake = await startFakeUpstream()
+  let first = null
+  let second = null
+  const halfOpen = []
+  try {
+    // 第一个监听：2 条半开握手挂着，然后**直接 close()**（握手还在飞）
+    first = await startRemoteListener({
+      port: 0,
+      bindAddress: LAN,
+      upstream: { baseUrl: silent.baseUrl },
+      tls: TEST_TLS,
+      authorize: () => ({ kind: 'allow' }),
+      maxUpgradeTunnels: 2,
+    })
+    halfOpen.push(await openWs(first.port, LAN, { path: '/api/remote.mux?half=0' }))
+    halfOpen.push(await openWs(first.port, LAN, { path: '/api/remote.mux?half=1' }))
+    await waitFor(() => first.stats().reservedTunnels === 2, '两条半开握手必须先各占一个预约槽')
+    await first.close()
+    assert.equal(first.stats().reservedTunnels, 0, 'close() 时握手中的预约必须同步归还')
+    assert.equal(first.stats().tunnels, 0)
+
+    // 第二个监听：同一上限、正常上游 ⇒ 第一条升级必须 101（说明没有跨监听遗留的占用）
+    second = await startRemoteListener({
+      port: 0,
+      bindAddress: LAN,
+      upstream: { baseUrl: fake.baseUrl },
+      tls: TEST_TLS,
+      authorize: () => ({ kind: 'allow' }),
+      maxUpgradeTunnels: 2,
+    })
+    const tunnel = await openWs(second.port, LAN, { path: '/api/remote.mux' })
+    try {
+      const head = await tunnel.reader.readHead()
+      assert.match(head, /^HTTP\/1\.1 101 /, head)
+      assert.equal(second.stats().tunnels, 1, '101 到手即为已建立隧道')
+      assert.equal(second.stats().reservedTunnels, 0, '101 到达后预约必须转正（不许滞留在预约里）')
+      assert.equal(second.stats().rejected, 0, '新监听一开始不该有拒绝')
+    } finally {
+      tunnel.socket.destroy()
+    }
+  } finally {
+    for (const item of halfOpen) item.socket.destroy()
+    if (second !== null) await second.close()
+    if (first !== null) await first.close()
+    await silent.close()
+    await fake.close()
+  }
+})
+
+lanTest('隧道上限（P2-5）：close() 时正卡在异步门禁 / 上游头解析里的握手，不得再占槽或拨上游', async (t) => {
+  /*
+   * b11b P2-5：`runUpgrade` 以前只在**入口**查 `closed`，`await options.authorize()` 与
+   * `await resolveUpstreamHeaders()` 之后都不再查，`reserveTunnelSlot()` 也不看 `closed`。
+   * 公开类型允许这两个钩子返回 Promise（`RemoteAuthorize` 与 `RemoteUpstreamHeaders`），
+   * 所以「握手悬着时 close()」是可达路径：恢复执行后会新占一个槽并 http.request，
+   * 于是 `close()` 返回后 `reservedTunnels` 变成 1、还多一条活到 15 s 的上游连接。
+   *
+   * 本用例把两个 await 点都真的悬起来：① 悬在 `await authorize`；② 悬在 `await headers()`。
+   */
+  const phases = ['authorize', 'headers']
+  for (const phase of phases) {
+    const silent = await startSilentUpstream()
+    let releaseGate = () => {}
+    let entered = false
+    const suspended = new Promise((resolve) => {
+      releaseGate = resolve
+    })
+    const gate = async () => {
+      entered = true
+      await suspended
+    }
+    const listenerOptions = {
+      port: 0,
+      bindAddress: LAN,
+      upstream: { baseUrl: silent.baseUrl },
+      tls: TEST_TLS,
+    }
+    if (phase === 'authorize') {
+      // 异步门禁：握手停在 `await options.authorize(...)` 上
+      listenerOptions.authorize = async () => {
+        await gate()
+        return { kind: 'allow' }
+      }
+    } else {
+      // 同步门禁 + 异步上游头：握手停在 `await resolveUpstreamHeaders(...)` 上
+      listenerOptions.authorize = () => ({ kind: 'allow' })
+      listenerOptions.upstream = {
+        baseUrl: silent.baseUrl,
+        headers: async () => {
+          await gate()
+          return { 'x-dyn': '1' }
+        },
+      }
+    }
+    const handle = await startRemoteListener(listenerOptions)
+    let client = null
+    try {
+      client = await openWs(handle.port, LAN, { path: `/api/remote.mux?async=${phase}` })
+      await waitFor(() => entered, `${phase}：钩子必须已经被调用（握手真的停在 await 上）`)
+      // 前提：还没走到预约，也没有拨上游 —— 这两条让后面的断言不是空转。
+      assert.equal(handle.stats().reservedTunnels, 0, `${phase}：门禁未过时不该有预约`)
+      assert.equal(silent.state.connections, 0, `${phase}：门禁未过之前绝不许拨上游`)
+
+      // 握手悬着的时候关监听
+      await handle.close()
+      assert.equal(handle.stats().reservedTunnels, 0, `${phase}：close() 之后预约必须是 0`)
+
+      // 放行：runUpgrade 从 await 恢复，必须发现已关闭并立刻收口
+      releaseGate()
+      await waitFor(() => client.reader.ended === true, `${phase}：close() 之后恢复的握手必须干净收口客户端`)
+      await delay(100)
+      assert.equal(handle.stats().reservedTunnels, 0, `${phase}：close() 之后恢复的握手不许再占槽（P2-5）`)
+      assert.equal(handle.stats().tunnels, 0, `${phase}：不许凭空转正出一条隧道`)
+      assert.equal(silent.state.connections, 0, `${phase}：close() 之后恢复的握手绝不能拨上游`)
+      const received = client.reader.buffer.toString('latin1')
+      assert.equal(/HTTP\/1\.1 101/.test(received), false, `${phase}：不许出现 101（那意味着真的建了隧道）`)
+      assert.equal(received.length, 0, `${phase}：监听已关闭，客户端只能看到连接被断开（干净收口，不是半个应答）`)
+    } finally {
+      if (client !== null) client.socket.destroy()
+      await handle.close()
+      await silent.close()
+    }
+  }
+})
+
+lanTest('隧道上限（P2-A）：握手失败的两条路径都恰好归还一次（上游不可达 / 上游拒绝升级）', async (t) => {
+  // 路径 1：上游端口没人听（`upstreamReq.on('error')` ⇒ 502）
+  const deadPort = await freePortOn('127.0.0.1')
+  const dead = await startRemoteListener({
+    port: 0,
+    bindAddress: LAN,
+    upstream: { baseUrl: `http://127.0.0.1:${deadPort}` },
+    tls: TEST_TLS,
+    authorize: () => ({ kind: 'allow' }),
+    maxUpgradeTunnels: 1,
+  })
+  // 路径 2：上游用**普通响应**拒绝升级（`upstreamReq.on('response')` ⇒ 502）
+  const refuser = http.createServer((_req, res) => {
+    res.writeHead(404)
+    res.end()
+  })
+  refuser.on('upgrade', (_req, socket) => {
+    socket.on('error', () => {})
+    socket.end('HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n')
+  })
+  await listenOnce(refuser, 0, '127.0.0.1')
+  const refused = await startRemoteListener({
+    port: 0,
+    bindAddress: LAN,
+    upstream: { baseUrl: `http://127.0.0.1:${refuser.address().port}` },
+    tls: TEST_TLS,
+    authorize: () => ({ kind: 'allow' }),
+    maxUpgradeTunnels: 1,
+  })
+  try {
+    // 上限只有 1：若失败路径漏还槽位，第 2 次就会变成 503 而不是 502
+    for (let i = 0; i < 3; i += 1) {
+      const tunnel = await openWs(dead.port, LAN, { path: '/api/remote.mux' })
+      try {
+        const head = await tunnel.reader.readHead()
+        assert.match(head, /^HTTP\/1\.1 502 /, `第 ${String(i + 1)} 次必须 502 收口（不是被上限拒成 503）：${head}`)
+      } finally {
+        tunnel.socket.destroy()
+      }
+      await waitFor(() => dead.stats().reservedTunnels === 0, '上游不可达后预约必须归还')
+    }
+    assert.equal(dead.stats().rejected, 0, '失败的握手不是"到顶拒绝"，不许计入 rejected')
+
+    for (let i = 0; i < 3; i += 1) {
+      const tunnel = await openWs(refused.port, LAN, { path: '/api/remote.mux' })
+      try {
+        const head = await tunnel.reader.readHead()
+        assert.match(head, /^HTTP\/1\.1 502 /, `上游拒绝升级也必须 502 收口：${head}`)
+      } finally {
+        tunnel.socket.destroy()
+      }
+      await waitFor(() => refused.stats().reservedTunnels === 0, '上游拒绝升级后预约必须归还')
+    }
+    assert.equal(refused.stats().rejected, 0, '上游拒绝升级不算"到顶拒绝"')
+  } finally {
+    await dead.close()
+    await refused.close()
+    await new Promise((resolve) => refuser.close(resolve))
+  }
+})
+
 lanTest('隧道纪律（S3）：监听 close() 时所有隧道两侧都被销毁', async (t) => {
   const fake = await startFakeUpstream()
   const handle = await startRemoteListener({
@@ -1543,3 +1854,40 @@ lanTest('协议错误（S1）：上游回的不是 HTTP ⇒ 502 typed E_UPSTREAM
   assert.equal(response.json?.error?.code, 'E_UPSTREAM_PROTOCOL')
   assert.equal(response.text, '{"ok":false,"error":{"code":"E_UPSTREAM_PROTOCOL"}}')
 })
+
+// ---------------------------------------------------------------------------
+// 5. LAN 台账（P2-B）：跳过必须可见，且不可能被当成通过
+// ---------------------------------------------------------------------------
+
+/**
+ * 台账守卫：`lanTest` 的 登记数 / 实跑数 / 跳过数 必须自洽，且"跳过"只允许出现在
+ * 本机**真的缺能力**的时候。本用例在所有 `lanTest` 之后注册，因此运行时三条数已经定稿。
+ *
+ * 不真空的三条保证：
+ *   · `total > 0`：一条 `lanTest` 都没登记时本用例直接失败（否则它什么也没证明）；
+ *   · `ran + skipped === total`：跳过与实跑都不许"消失"；
+ *   · `skipped === 缺能力 ? total : 0`：有能力时一条都不许跳过，缺能力时**每一条**
+ *     都要以跳过出现在台账里（不可能有哪条悄悄算成通过）。
+ */
+test('LAN 台账（P2-B）：登记数 = 实跑数 + 跳过数，且跳过只能发生在能力缺失时', (t) => {
+  const { total, ran, skipped } = LAN_LEDGER
+  const capabilityMissing = LAN === null
+  assert.ok(total > 0, '台账里必须有 >= 1 条 LAN 用例：0 条说明登记被绕过，这条守卫就失去意义')
+  assert.equal(ran + skipped, total, `实跑 ${String(ran)} + 跳过 ${String(skipped)} 必须等于登记 ${String(total)}`)
+  assert.equal(
+    skipped,
+    capabilityMissing ? total : 0,
+    `跳过数 ${String(skipped)} 与本机能力（缺失=${String(capabilityMissing)}）不一致：有能力时一条都不许跳过`,
+  )
+  assert.equal(
+    ran,
+    capabilityMissing ? 0 : total,
+    `实跑数 ${String(ran)} 与本机能力（缺失=${String(capabilityMissing)}）不一致：缺能力时一条都不许实跑`,
+  )
+  const reason = capabilityMissing
+    ? lanSkipReason(total)
+    : `能力存在：可绑定且可自连的 ${String(LAN)}（${String(total)} 条 LAN 用例全部实跑，0 跳过）`
+  t.diagnostic(reason)
+  console.log(`[LAN-LEDGER] total=${String(total)} ran=${String(ran)} skipped=${String(skipped)} | ${reason}`)
+})
+
