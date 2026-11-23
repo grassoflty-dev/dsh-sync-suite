@@ -2,7 +2,7 @@
 
 > 目的：让 Lead **自己**验证端到端，而不是接受执行者的报告。
 > 本文件只写「怎么做」与「看什么」，**不含任何「已验证通过」的结论**。
-> 状态标记：`[现成]` = 今天就能查；`[待 RC-4]` = 等对应模块落地后再补的空位。
+> 状态标记：`[现成]` = 今天就能查。原「待 RC-4」占位标记已于 2026-11-23 RC 车道闭合时退役；§4 变更记录里保留其历史出现。
 
 ---
 
@@ -76,7 +76,7 @@ hdc -t <serial> shell "cat /data/app/el2/100/base/com.itwill.schedule/haps/entry
 
   输出 `OPEN` 才算端口可用；`CLOSED <code>` 说明监听没起来，先回去核对 `enabled` 与实际端口。
 - 读当前端口：`payload` 里的 `port`（见 2.2），或 `remote-pairing-state.json` / remote 设置里的 `port`。
-- `[待 RC-4]` 若 TLS 落地后端口或协议有变，在此处补一行。
+- **TLS 已落地、端口 / 协议已定稿（2026-11-23）**：插件侧强制 HTTPS-only、单一 `https.createServer` 终止 TLS；端口仍由配对引擎自动挑选并记录（默认 44996，占用则扫描后写回 remote 设置）。本行断言：此后端口与协议就是定稿，没有待补项；将来若真的变化，本行是唯一需要更新的位置。
 
 ### 2.2 配对 payload 在哪里读
 
@@ -99,19 +99,26 @@ hdc -t <serial> shell "cat /data/app/el2/100/base/com.itwill.schedule/haps/entry
 | d | **无 pin** 时连 | **拒绝**，且是「从未配对（无 pin）」那条文案（不是 a，也不是成功） |
 | e | 错误 token / 正确 token | 前者拒绝，后者放行 |
 
-`[待 RC-4]` 三条拒绝文案的**逐字**内容（a/b/c 三态）在 TLS 模块冻结时补进下表：
+三条拒绝文案的**逐字**内容（a/b/c 三态）已于 2026-11-23（RC-4 闭合）从唯一事实源
+`apps/arkui-schedule/entry/src/main/ets/model/tlsPin.ts` 抄进下表，并标注各自产生位置：
 
-| 场景 | 文案（待补） |
-| --- | --- |
-| (a) 指纹不匹配 | `[待 RC-4]` |
-| (b) 从未配对（无 pin） | `[待 RC-4]` |
-| (c) 证书链无法获取/校验 | `[待 RC-4]`（fail closed，不得当成 a 或成功） |
+| 场景 | 文案（逐字，源自 `model/tlsPin.ts`） | 产生位置 / 说明 |
+| --- | --- | --- |
+| (a) 指纹不匹配 | `证书指纹与配对时固定的一致才能连接：当前证书指纹不匹配，已拒绝连接（可能是换了机器、换了证书或中间人）` | `TLS_PIN_MISMATCH_WORDING`；由 `onSslErrorEventReceive` 链上 `verifyPinnedCertificate(chain, pin)` 判出 `mismatch` 时产生 |
+| (b) 从未配对（无 pin） | `该实例从未配对过（无 pin），没有固定的证书指纹，已拒绝连接；请先回设置页用二维码配对，连接本身不会自动信任证书` | `TLS_NO_PIN_WORDING`；`pages/RemoteControl.ets` 在**任何 Web 加载之前**的预检查产生（pin 为空 / 损坏 / 老实例无该字段） |
+| (c) 证书链无法获取/校验 | `无法校验证书链，已拒绝连接` | `TLS_CHAIN_UNVERIFIABLE_WORDING`；`pages/RemoteControl.ets` 预检查与 `onSslErrorEventReceive` 链共同产生；**fail-closed——绝不报成 (a)，也绝不报成成功** |
 
 ### 2.4 我不会替你预审的东西（按你的要求）
 
 - **文案审计**：请你自己 `grep` 新连接路径里的 「防中间人」/MITM/「已加密」 等字样，我不预先给结论。
 - **token 泄漏面**：请你自己检查日志 / 错误串 / payload 之外的任何落盘位置；我只提供「应当不存在」的位置清单（1.1 表里标「不要打印内容」的四个文件，以及 `.tmp/**` 快照）。
 - **面板与平板 UI**：我给的是**路径与代码位置**，不是「我看到过」。
+
+### 2.5 指令通道拒绝文案指针（2026-11-23，RC-4）
+
+- **唯一事实源**：`apps/arkui-schedule/entry/src/main/ets/model/remoteCommandGate.ts` 的 `COMMAND_WORDING`（8 个 typed 码），由 `components/RemoteCommandComposer.ets` **逐字渲染**，不手写任何拒绝句；8 码为 `E_COMMAND_TARGET_MISSING` / `E_COMMAND_TOOL_NOT_ALLOWED` / `E_COMMAND_TEXT_EMPTY` / `E_COMMAND_TEXT_TOO_LONG` / `E_COMMAND_NOT_GRANTED` / `E_COMMAND_UNCONFIRMED` / `E_COMMAND_CONFIRM_STALE` / `E_COMMAND_REMOTE_UNVERIFIED`。最后一档 `E_COMMAND_REMOTE_UNVERIFIED` 的文案是 `安全连接尚未通过真机校验，未发送任何内容`。
+- **没有投递通道**：`sessionPrompt` 延后（pending `mod-chat-lease` + 设备门禁），`REMOTE_CHANNEL_VERIFIED = false`；「发送指令」动作**永久禁用**，其可见原因就是闸自己的 `wording`。
+- **任何测试都不得断言一次发送**：不存在 in-flight / 成功状态；真机渲染、交互与真实投递一律 `unverified`。
 
 ---
 
@@ -126,3 +133,4 @@ hdc -t <serial> shell "cat /data/app/el2/100/base/com.itwill.schedule/haps/entry
 ## 4. 变更记录（本文件随模块更新）
 
 - 2026-11-22 初版：覆盖插件克隆路径 / hash 推导 / outbox 判据 / 平板只读命令 / 监听端口 / payload 与指纹位置 / 五项连接检查；TLS 三态文案与 RC-4 细节标 `[待 RC-4]`。
+- 2026-11-23 RC-4 闭合：§2.3 三条拒绝文案以 `model/tlsPin.ts` 三常量逐字替换 `[待 RC-4]` 占位，并标注产生位置与 (c) 的 fail-closed 语义；新增 §2.5 指令通道拒绝文案指针（`COMMAND_WORDING` 8 码 / composer 逐字渲染 / `sessionPrompt` 延后 / 发送动作永久禁用 / 不得断言发送）。构建与门闸证据见 `docs/MODULES.md` §5；未发明任何设备结果，真机渲染 / 交互与真实投递仍 `unverified`。

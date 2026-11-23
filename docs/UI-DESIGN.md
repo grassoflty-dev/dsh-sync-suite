@@ -625,3 +625,5 @@ API Key 密码框、自定义源才显示接口地址，没有「高级」控制
 `tools/test/homeGlobalRefresh.test.mjs`（真 spy 计数 / 顺序 / 共享 Promise / 单一失败落点 6 例 + 源码形状 4 例）与 `shellLayout` L-26 / `paneLayout` P-28 / `indexHeader` H-7 / `uiTokens` U-S9（旧断言一条未删）钉住上述契约；ArkUI 手势、真机横竖屏观感与 ArkTS 编译**只能静态断言 / unverified**（安装版 `1000006`；设备检查随 `1000007`；本批不构建、不装机）。
 
 刷新失败时列表仍会被重新读取，失败只在状态行显示一次。
+
+**远程控制页的指令 composing 面（`mod-remote-command-wire`，2026-11-23）**：用户在远程控制页看到两样东西——(i) 既有拒绝句「安全连接尚未启用，未向电脑发送凭据。」**逐字不变**（仍在 HTTPS-with-pin 分支上渲染）；(ii) 其下方针对当前已打开实例的指令 composer：目标 + 工具 `session.prompt` + 正文 + 「确认发送」勾选 + 一个**永久禁用**的「发送指令」动作，其可见原因就是闸自己的 `wording`（`COMMAND_WORDING`）。让它诚实的规则：原因**绝不手写**，草稿一改（正文或目标）之前的确认立即失效，且没有 in-flight / 成功态——因为**什么都不会被发出**（`REMOTE_CHANNEL_VERIFIED=false`，`sessionPrompt` 延后）。真机渲染与交互 `unverified`。**可达性徽章由另一 lane 负责，本节不描述。**
