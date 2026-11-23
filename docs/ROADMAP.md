@@ -787,3 +787,15 @@ B 批 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
 > - `mod-plugin-lean-panel` 三轮（r1 / r2 / r3-d1d2）合并为 `docs/MODULES.md` §1 一行，提交 `cd78008`（tag `module/mod-plugin-lean-panel`）；逐轮迭代保留在 §5。
 
 - **2026-11-23 RC-4 交付交接（`mod-remote-command-gate` / `mod-remote-command-wire` / `mod-plugin-local-pending-cause`）**：本批两笔提交 = `1f57c0a`（tag `module/mod-remote-command-wire`，annotated tag `1e1eda7`，4 路径：改 `pages/RemoteControl.ets` + 新增 `components/RemoteCommandComposer.ets` / `model/remoteCommandDraft.ts` / `tools/test/remoteCommandComposer.test.mjs`）与 `ce4c70e`（tag `module/mod-plugin-local-pending-cause`，annotated tag `cf59613`，3 路径：改 `packages/dsh-dots/src/sync/cycle.ts` / `dist/sync/cycle.js` + 新增 `test/plugin-pending-ownership.test.mjs`）；此前 owed 的 `mod-remote-command-gate` 行属更早的 `3e46bc3`（当时未接线，由 `1f57c0a` 接线）。独立只读评审 `docs/REVIEW-rc4-wiring-and-pending-cause.md`（r1 CONDITIONAL PASS / 0 Major → r2 DELTA CONDITIONAL / 1 Major → r3 **MAJOR CLOSED / survivors 0/38**），该评审文件未跟踪、随本提交一起交付且保持字节不变。**延后项**：`sessionPrompt` 待 `mod-chat-lease` + 设备门禁；发送动作永久禁用、可见原因取闸自身 `COMMAND_WORDING`，不手写文案。**blocked 决策**：`mod-grant-vocab-parity`——插件 `packages/dsh-dots/src/remote/grants.ts` 的 10 工具表 canonical，App `apps/arkui-schedule/entry/src/main/ets/model/instanceGrant.ts` 的 5 工具表只是客户端近似；无代码、无提交。**裁定记录**：trailer-less commit 按决定保持 "not ours"（不为其改判归属）。**在途未交付**：批次 2 的 `mod-pairing-badge-truth` 不属于本提交。真机渲染 / 交互与任何真实投递 `unverified`；证据与回滚路径见 `docs/MODULES.md` §1/§2/§5。
+
+## 交接：2026-11-24 04:30（HEAD `bb92616`）
+
+**这一轮解决的问题**（每一条都有真机或活体证据，详见 `docs/VERIFICATION.md` §15.22）：
+
+1. **平板 git 同步首次真正双向跑通**：平板 fast-forward → 提交本地 11 处改动 → 推送，`origin/main` 前进到 `6db5b2c`。根因是 `git-bridge.js` 的 `git.merge({ oid })` 应为 `{ theirs }`（isomorphic-git 1.25.3）；并加 `E_BRIDGE` 边界，主状态行不再出现原始 JS 报错。
+2. **推送失败不再被误分类**：askpass 解释器曾指向 `DeepSeek Harness.exe`（Electron 单文件）而非 node；分类曾用宽泛正则把 Gitee 403 说成「网络不可达」。现在按 HTTP 状态码优先分类（401/403/407/429/5xx/404 各有原因与下一步），push 独享 120 s 预算，并禁止回显行携带传输证据。
+3. **远程页（B 方案）落地**：平板只连已配对的 HTTPS 监听，插件在电脑本机用 `ctx.connection.authenticatedUrl()` 合法取得 DSH 的 `?token=`，代理真实的 DSH GUI。此前「页面能开但点不动」的根因是 `Host` 被改写而 `Origin` 原样转发，DSH 的信任栅栏对所有 `/api` POST 与 WS 握手一律 403；修法是**仅同源才改写 Origin**。
+
+**当前唯一阻塞**：平板上 15 条断言（`docs/SELF-TEST-REMOTE.md` §2.6 七条 + §2.7 八条）需要两件外部动作 —— **解锁平板** 与 **重启 DSH**（插件是 junction 链接，重启即加载新代码）。两者都不由代理代做。
+
+**已知未关项**（都已登记，不静默丢弃）：`remote:` 回显里的**句子形状**仍可被识别（判为取舍）；`proxy-auth` 仍写 `reachable:false`（代理其实答了）；`clone` 没有网络预算；真实代理 / 真实远端 401/403/404/302/DNS 一律未跑；Windows 孙进程 `SIGTERM` 结算未验；`mod-remote-command-live`（平板翻闸）在真机门禁前仍是 no-op，不排期。
