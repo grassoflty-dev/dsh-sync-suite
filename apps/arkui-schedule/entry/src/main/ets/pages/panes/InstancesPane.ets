@@ -44,6 +44,12 @@ import { mergeRemoteToken, normalizeRemoteUrl, routeToRemote, stripRemoteToken }
 import { FIRST_PAIRING_DETAIL, FIRST_PAIRING_WORDING } from '../../model/remoteAnnounceRefresh';
 import type { AnnounceRefreshOutcome, AnnounceRefreshState } from '../../model/remoteAnnounceRefresh';
 import { PAIRING_REACHABLE_WORDING } from '../../model/pairingPayload';
+import {
+  REMOTE_OUTCOME_KEY,
+  decodeRemoteOutcome,
+  shouldApplyOutcome
+} from '../../model/remoteOutcome';
+import type { RemoteOutcome } from '../../model/remoteOutcome';
 import { instanceStore } from '../../services/instanceStore';
 import { tcpConnectProbe } from '../../services/pairingProbeService';
 import { remoteAnnounceRefreshService } from '../../services/remoteAnnounceRefresh';
@@ -118,6 +124,12 @@ export struct InstancesPane {
   @State pairingError: string = '';
   /** 正在做 ≤3 s 的 TCP 探活：按钮进入 busy，防重复点击；探针全程异步不卡 UI 线程。 */
   @State pairingBusy: boolean = false;
+  /**
+   * mod-pairing-badge-truth：远程打开终局的**唯一消费者**。
+   * 本面板是保活 @Component，`onPageShow()` 永远不会被框架调用，Home 也不传刷新 tick，
+   * 所以必须靠 AppStorage 绑定 + @Watch 在面板存活期间直接驱动；一次性标记读后即清。
+   */
+  @StorageLink(REMOTE_OUTCOME_KEY) @Watch('onRemoteOutcome') lastOutcome: string = '';
 
   /**
    * 首配提案（非 @State：候选地址是 capability，绝不进页面响应式状态 / 日志）。
@@ -143,6 +155,32 @@ export struct InstancesPane {
     if (!this.disposed) {
       this.reload();
     }
+  }
+
+  /**
+   * 远程结果标记的一次性消费者（mod-pairing-badge-truth）。
+   *
+   * 与 `onPageShow()` 无关：本面板保活，框架不会调用它自己的 `onPageShow`，
+   * Home 也没有传 tick；结果一到 AppStorage，@StorageLink + @Watch 就会在这里触发。
+   * 空串直接返回——这同时挡住「清空标记」回写引起的二次 watch。
+   * 坏 / 异 id / 陈旧标记 fail-closed：清掉标记、不动任何行。
+   */
+  onRemoteOutcome(): void {
+    const raw: string = this.lastOutcome;
+    if (raw.length === 0) {
+      return;
+    }
+    const outcome: RemoteOutcome | null = decodeRemoteOutcome(raw);
+    // 坏信封 / 异 id（行不在本面板实例表里）⇒ fail-closed，不落任何标记
+    if (outcome !== null && this.fullOf(outcome.instanceId) !== null) {
+      const nowMs: number = Date.now();
+      if (shouldApplyOutcome(outcome, outcome.instanceId, nowMs)) {
+        instanceStore.markReachable(outcome.instanceId, outcome.status, nowMs);
+        this.reload();
+      }
+    }
+    // 恰好清一次：无论应用与否都收口，重复 watch 不会重复处理（与 home.lastSaved 同口径）
+    AppStorage.setOrCreate<string>(REMOTE_OUTCOME_KEY, '');
   }
 
   // ------------------------------------------------------------------ 数据
@@ -296,7 +334,10 @@ export struct InstancesPane {
   /**
    * 打开：复用 `RemoteControl` 的内嵌 Web。所有实例都是远程，把 base 与一次性 token 现拼；
    * 真身缺失时不塞空地址（不再有回退到旧设置的本机分支）。
-   * 跳转成功记 ok、跳转抛错记 fail；Web 加载失败由 RemoteControl 自己的错误卡负责。
+   *
+   * mod-pairing-badge-truth：**导航成功不是可达性**，因此 pushUrl 成功不再写 ok，
+   * 行保持 unknown，直到 `RemoteControl` 的一次性结果标记经 `onRemoteOutcome` 回写；
+   * 跳转本身抛错仍立即记 fail（这不是「页面加载完成」的证据，是连接尝试失败的证据）。
    */
   private openInstance(view: RedactedInstance): void {
     const full: DsInstance | null = this.fullOf(view.id);
@@ -310,10 +351,6 @@ export struct InstancesPane {
     }
     router
       .pushUrl({ url: routeToRemote(), params: params })
-      .then((): void => {
-        instanceStore.markReachable(view.id, 'ok', Date.now());
-        this.reload();
-      })
       .catch((): void => {
         instanceStore.markReachable(view.id, 'fail', Date.now());
         this.reload();
@@ -705,7 +742,8 @@ export struct InstancesPane {
 
       // 手动配对行的文案只陈述**传输层事实**：探针通过也说「地址可达，尚未校验证书」，
       // 绝不把 TCP 可达写成身份真实性（证书指纹由 TLS lane gate）。之后监听器停了，
-      // 「打开」失败会把同一行降为不可达（复用既有三态，不另造状态机）。
+      // 远程打开的一次性结果标记（连接/加载失败等）经 onRemoteOutcome 把同一行降为不可达
+      // （复用既有三态，不另造状态机）；导航成功本身不再把行标成可达。
       if (view.fingerprintPrefix !== undefined && view.fingerprintPrefix.length > 0) {
         Text(view.reachable === 'ok'
           ? PAIRING_REACHABLE_WORDING
@@ -729,7 +767,7 @@ export struct InstancesPane {
       }
 
       Row({ space: SPACING.sm }) {
-        // 地址不再应答（reachable=fail，由「打开」跳转失败标记）才出现的显式恢复动作。
+        // 地址不再应答（reachable=fail，由远程打开结果标记 / 跳转失败标记）才出现的显式恢复动作。
         // 没有 pin 时是首配：标签 / 后果说明都与普通刷新刻意不同，且这一下只生成提案，
         // 不写 pin / 地址；真正确认走结果行的「确认信任该公告」。不轮询、不后台定时器。
         if (view.reachable === 'fail') {

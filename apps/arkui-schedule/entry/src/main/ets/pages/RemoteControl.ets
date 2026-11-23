@@ -64,6 +64,13 @@ import { Rc3GatePanel, rc3GateRequested } from '../components/Rc3GatePanel';
 import { canPrompt } from '../model/instanceGrant';
 import { instanceGrantStore } from '../services/instanceGrantStore';
 import { RemoteCommandComposer } from '../components/RemoteCommandComposer';
+import {
+  REMOTE_OUTCOME_KEY,
+  encodeRemoteOutcome,
+  outcomeForLoadSuccess,
+  outcomeForRefusal
+} from '../model/remoteOutcome';
+import type { RemoteOutcome, RemoteRefusalKind } from '../model/remoteOutcome';
 
 /** 页面状态：加载中 / 没有地址 / 已挂载 Web。 */
 const PHASE_LOADING: string = 'loading';
@@ -112,6 +119,12 @@ struct RemoteControl {
 
   private controller: webview.WebviewController = new webview.WebviewController();
   private disposed: boolean = false;
+  /**
+   * mod-pairing-badge-truth：本次打开尝试是否已经写过结果标记。
+   * 一次尝试只会有一个终局；重渲染 / 多个 Web 回调不得重复写 AppStorage。
+   * 新尝试（applyAddress / 真正执行的 refresh）先清回 false。
+   */
+  private outcomeWritten: boolean = false;
 
   aboutToAppear(): void {
     this.rc3Gate = rc3GateRequested();
@@ -171,6 +184,8 @@ struct RemoteControl {
    * 用 `model/remoteUrl` 的同一份规则：非法地址绝不挂 Web（否则用户看到一个注定打不开的白屏）。
    */
   private applyAddress(raw: string): void {
+    // 新的一次打开尝试：结果标记允许重新写一次（mod-pairing-badge-truth）
+    this.outcomeWritten = false;
     const check: RemoteUrlCheck = normalizeRemoteUrl(raw);
     if (check.ok) {
       this.url = check.url;
@@ -184,13 +199,16 @@ struct RemoteControl {
       if (pin.length === 0) {
         this.tlsBlocked = true;
         this.loadError = TLS_NO_PIN_WORDING;
+        this.reportRefusal('no-pin');
       } else if (!check.url.toLowerCase().startsWith('https://')) {
         this.tlsBlocked = true;
         this.loadError = TLS_CHAIN_UNVERIFIABLE_WORDING;
+        this.reportRefusal('not-https');
       } else {
         // 原生客户端尚未通过设备验收；不能回退到只在证书报错时才校验的 WebView。
         this.tlsBlocked = true;
         this.loadError = '安全连接尚未启用，未向电脑发送凭据。';
+        this.reportRefusal('permanent-refusal');
       }
       this.phase = PHASE_READY;
       return;
@@ -212,6 +230,39 @@ struct RemoteControl {
    */
   private targetInstanceId(): string {
     return instanceIdFromUrl(this.url);
+  }
+
+  // ------------------------------------------------------------ 结果标记（mod-pairing-badge-truth）
+
+  /**
+   * 一次打开尝试只写一次结果标记（guard 在 writeOutcome 内）：
+   * 被拒绝 / 未建立起来的通道一律 fail，只有页面真正加载完成才写 ok。
+   * 无法从地址派生实例 id 时不写（没有可归属的行，fail-closed）。
+   */
+  private writeOutcome(outcome: RemoteOutcome): void {
+    if (this.outcomeWritten || outcome.instanceId.length === 0) {
+      return;
+    }
+    AppStorage.setOrCreate<string>(REMOTE_OUTCOME_KEY, encodeRemoteOutcome(outcome));
+    this.outcomeWritten = true;
+  }
+
+  /** 六种拒绝终局的统一出口；文字 / 状态机语义不变，只追加一次性结果标记。 */
+  private reportRefusal(kind: RemoteRefusalKind): void {
+    const id: string = this.targetInstanceId();
+    if (id.length === 0) {
+      return;
+    }
+    this.writeOutcome(outcomeForRefusal(kind, id, Date.now()));
+  }
+
+  /** 真正的主文档加载完成（`onPageEnd`）才可能把行提升为 ok。 */
+  private reportLoadSuccess(): void {
+    const id: string = this.targetInstanceId();
+    if (id.length === 0) {
+      return;
+    }
+    this.writeOutcome(outcomeForLoadSuccess(id, Date.now()));
   }
 
   /** 发指令目标展示名：有实例行用其名字，缺行退回 id（不编造名字）。 */
@@ -285,6 +336,11 @@ struct RemoteControl {
     }
     this.tlsBlocked = true;
     this.loadError = outcome.wording;
+    // 没有 pin / 指纹不匹配 / 链无法校验都是未建立起来的通道 ⇒ fail（不是可达性）
+    const refusalKind: RemoteRefusalKind = outcome.outcome === 'mismatch'
+      ? 'tls-mismatch'
+      : outcome.outcome === 'no-pin' ? 'no-pin' : 'chain-unverifiable';
+    this.reportRefusal(refusalKind);
     try {
       event.handler.handleCancel(true);
     } catch (error) {
@@ -328,6 +384,8 @@ struct RemoteControl {
     if (this.url.length === 0) {
       return;
     }
+    // 真正会重新加载 = 新的一次尝试，允许再写一条结果标记
+    this.outcomeWritten = false;
     try {
       this.controller.refresh();
     } catch (error) {
@@ -562,6 +620,8 @@ struct RemoteControl {
         .onPageEnd(() => {
           // 主文档加载完成 → 记下「最近一次成功」（失败路径由 onErrorReceive 标 loadError，不写）
           this.recordLastOk();
+          // 只有真正加载完成才是可达性 ok（今天常规构建 Web 不挂载，此回调实际不可达）
+          this.reportLoadSuccess();
         })
         .onSslErrorEventReceive((event: OnSslErrorEventReceiveEvent) => {
           // 只有这里能看到平台给的 DER 证书链；pin 命中才确认，否则中止加载并显示固定文案。
@@ -578,6 +638,7 @@ struct RemoteControl {
             return;
           }
           this.loadError = this.describeLoadError(event.error.getErrorCode(), event.error.getErrorInfo());
+          this.reportRefusal('web-load-error');
         })
         .onHttpErrorReceive((event: OnHttpErrorReceiveEvent) => {
           if (this.tlsBlocked || !event.request.isMainFrame()) {
@@ -585,6 +646,7 @@ struct RemoteControl {
           }
           const status: number = event.response.getResponseCode();
           this.loadError = `电脑上的 DSH 返回 HTTP ${status}：地址或 token 可能不对，请回设置页检查`;
+          this.reportRefusal('web-load-error');
         })
       if (this.loadError.length > 0) {
         Column() {

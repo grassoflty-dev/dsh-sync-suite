@@ -363,11 +363,15 @@ describe('静态断言：页面、入口与存储接线', () => {
     assert.match(config, /Select\(this\.modeSelectOptions\(\)\)/, '方式下拉对所有实例可见');
   });
 
-  test('U-05 打开复用内嵌 Web 并记可达：routeToRemote + mergeRemoteToken + markReachable(ok|fail, Date.now())', () => {
+  // mod-pairing-badge-truth（old→new，不删断言，只改钉住的事实）：router.pushUrl 成功
+  // 不是可达性，原先的 ok-on-navigation 调用已删除；可达性改由 RemoteControl 的一次性标记
+  // 经 @StorageLink/@Watch 回写。跳转抛错的 fail 分支逐字保留。
+  test('U-05 打开复用内嵌 Web：routeToRemote + mergeRemoteToken；导航不记 ok，失败仍记 fail', () => {
     assert.match(PAGE, /routeToRemote\(\)/);
     assert.match(PAGE, /mergeRemoteToken\(full\.url, token\)/);
-    assert.match(PAGE, /markReachable\(view\.id, 'ok', Date\.now\(\)\)/);
+    assert.doesNotMatch(PAGE, /markReachable\(view\.id, 'ok', Date\.now\(\)\)/);
     assert.match(PAGE, /markReachable\(view\.id, 'fail', Date\.now\(\)\)/);
+    assert.match(PAGE, /@StorageLink\(REMOTE_OUTCOME_KEY\)/);
   });
 
   // mod-instances-pane-readonly（old→new，收紧）：typed 原因两种模式都渲染；
