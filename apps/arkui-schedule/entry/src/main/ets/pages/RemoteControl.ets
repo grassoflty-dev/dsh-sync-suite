@@ -23,11 +23,20 @@
  * - 除 `domStorageAccess` 外不加实验属性：DSH 是纯前端 SPA，需要 JS + localStorage
  *   （token/偏好落在这里），这两项是功能必需，其余一律用默认值。
  *
- * mod-remote-tls-termination（证书 pin）：插件旁挂监听已改为 HTTPS（自签证书）。本页只接受
- * 「配对时固定过证书指纹的实例」：进入页面先查 pin（没有 = 从未配对，拒绝；地址不是 https =
- * 没有可校验的证书链，拒绝，绝不加载明文页）；TLS 报错时用平台回调里的 DER 证书链取 leaf
- * 算 SHA-256，与 pin 相同才 `handleConfirm()`，不同就 `handleCancel(true)` 并显示固定中文文案。
- * 三种拒绝（不匹配 / 无 pin / 无法校验链）分开，任何分支都不写 pin、不回显 URL 或 token。
+ * mod-remote-page-webview（本批次）：地址归一、传输分类、标签与一次性放行凭据分别收在纯模型
+ * `model/remoteAddress.ts` / `model/pageTransport.ts` / `model/sslAllowance.ts`，本页只做接线：
+ * 1. `normalizeHostPort` → `classifyTransport`（chip）→ `pageDecision`（标签 + load/refuse）；
+ * 2. http ⇒ 直接 load，标签逐字取「明文传输，令牌随地址明文发送，仅在你信任的网络内使用」；
+ * 3. https ⇒ 查实例的配对 pin；无 pin / 不匹配在 `pageDecision` 处拒绝，绝不挂 Web；
+ *    pin 存在时经 `services/remotePinnedClient.ets` 发**一条不带凭证**的预检请求，
+ *    用 `verifyLeafPin` 比对叶证书指纹；通过才 `sslAllowance.grant()` 并挂 Web；
+ * 4. `onSslErrorEventReceive` 只在 `sslAllowance.consume()` 为真时 `handleConfirm()`，
+ *    否则 `handleCancel(true)` + typed 原因。**这里不写 pin、不改实例表**。
+ * 预检是一次连接，WebView 握手是另一次独立连接：页面逐字显示这条残留 TOCTOU 风险，
+ * 不假装两次连接是同一条，也不写任何过度承诺的安全形容词（禁用词见 pageTransport 模型头）。
+ *
+ * 旧页面级「安全已启用才发凭据」式拒绝句已从页面路径删除：页面本身不发送任何来自 App 的
+ * 敏感数据，那条话只属于命令通道（composer 的 `E_COMMAND_REMOTE_UNVERIFIED`）。
  *
  * 明文 HTTP：`module.json5` 已声明 `ohos.permission.INTERNET`；HarmonyOS 的明文策略由可选的
  * `network_config.json` 决定，**默认允许**（SDK `@ohos.net.networkSecurity.d.ts` 的
@@ -47,12 +56,20 @@ import type { DiagnosticsInput } from '../model/stateView';
 import { findInstance, instanceIdFromUrl } from '../model/instances';
 import type { DsInstance } from '../model/instances';
 import { instanceStore } from '../services/instanceStore';
+import { http } from '@kit.NetworkKit';
+import { normalizeHostPort, classifyTransport, transportChip, hostPortKey } from '../model/remoteAddress';
+import type { HostPortCheck } from '../model/remoteAddress';
+import { pageDecision, TOCTOU_SENTENCE } from '../model/pageTransport';
+import type { PageDecision, PinState } from '../model/pageTransport';
 import {
-  TLS_CHAIN_UNVERIFIABLE_WORDING,
-  TLS_NO_PIN_WORDING,
-  verifyPinnedCertificate
-} from '../model/tlsPin';
-import type { TlsPinResult } from '../model/tlsPin';
+  grant as sslGrant,
+  consume as sslConsume,
+  clear as sslClear,
+  SSL_ALLOWANCE_REFUSAL_WORDING
+} from '../model/sslAllowance';
+import { normalizePin, verifyLeafPin, PIN_REFUSAL_WORDING } from '../model/remotePinnedClient';
+import type { PinnedRefusalCode } from '../model/remotePinnedClient';
+import { collectLeafCandidates, requestWithValidation } from '../services/remotePinnedClient';
 import { ActionButton } from '../components/ActionButton';
 import { EmptyState } from '../components/state/EmptyState';
 import { ErrorState } from '../components/state/ErrorState';
@@ -112,8 +129,19 @@ struct RemoteControl {
   @State emptyReason: string = '';
   /** 页面状态（见文件头状态机）。 */
   @State phase: string = PHASE_LOADING;
-  /** 证书 pin 拒绝后为 true：不挂 Web（页面从未加载），刷新也不再重试。 */
+  /** 拒绝终态：不挂 Web（页面从未加载），刷新也不再重试。 */
   @State tlsBlocked: boolean = false;
+
+  /** mod-remote-page-webview：归一后的 host/port/scheme；null = 地址非法。 */
+  private address: HostPortCheck | null = null;
+  /** 分类 chip 文案（只从 TRANSPORT_LABELS 取，不在组件里写死）。 */
+  @State transportLabel: string = '';
+  /** pageDecision 的标签（唯一决策文案出口）。 */
+  @State pageLabel: string = '';
+  /** 只有决策 action='load' 才为 true；Web 只在此为真时挂载。 */
+  @State webMounted: boolean = false;
+  /** https 预检通过过：刷新时需要重新发放一次性放行凭据。 */
+  @State httpsVerified: boolean = false;
 
   @State rc3Gate: boolean = false;
 
@@ -179,47 +207,159 @@ struct RemoteControl {
   }
 
   /**
-   * 归一地址并决定状态：合法 → 挂 Web；空/非法 → 空状态（非法时把原因写进 `emptyReason`）。
+   * 地址解析 → 纯分类 → 纯决策 →（https 时）pin 预检。
    *
-   * 用 `model/remoteUrl` 的同一份规则：非法地址绝不挂 Web（否则用户看到一个注定打不开的白屏）。
+   * 全部判定都由纯模型给出：本页没有一行 IP/域名嗅探、没有一份内联文案。
+   * http 直接 load；https 无 pin / 预检失败 → refuse 且不挂 Web。
    */
   private applyAddress(raw: string): void {
-    // 新的一次打开尝试：结果标记允许重新写一次（mod-pairing-badge-truth）
+    // 新的一次打开尝试：结果标记与一次性放行凭据都允许重置（mod-pairing-badge-truth）
     this.outcomeWritten = false;
-    const check: RemoteUrlCheck = normalizeRemoteUrl(raw);
-    if (check.ok) {
-      this.url = check.url;
-      this.emptyReason = '';
+    sslClear();
+    this.address = null;
+    this.transportLabel = '';
+    this.pageLabel = '';
+    this.webMounted = false;
+    this.httpsVerified = false;
+
+    const addr: HostPortCheck = normalizeHostPort(raw);
+    if (!addr.ok) {
+      this.url = '';
       this.loadError = '';
       this.tlsBlocked = false;
-      // 预检：pin 只从实例（配对写入）读，连接本身永不写 pin。
-      // 没有 pin = 从未配对/老实例 ⇒ 直接拒绝，不挂 Web；
-      // 不是 https = 没有证书链可 pin ⇒ 按「无法校验」拒绝，绝不加载明文页。
-      const pin: string = this.storedPin();
-      if (pin.length === 0) {
-        this.tlsBlocked = true;
-        this.loadError = TLS_NO_PIN_WORDING;
-        this.reportRefusal('no-pin');
-      } else if (!check.url.toLowerCase().startsWith('https://')) {
-        this.tlsBlocked = true;
-        this.loadError = TLS_CHAIN_UNVERIFIABLE_WORDING;
-        this.reportRefusal('not-https');
-      } else {
-        // 原生客户端尚未通过设备验收；不能回退到只在证书报错时才校验的 WebView。
-        this.tlsBlocked = true;
-        this.loadError = '安全连接尚未启用，未向电脑发送凭据。';
-        this.reportRefusal('permanent-refusal');
+      this.phase = PHASE_EMPTY;
+      if (raw.trim().length > 0 && this.emptyReason.length === 0) {
+        this.emptyReason = addr.reason;
       }
-      this.phase = PHASE_READY;
       return;
     }
-    this.url = '';
+
+    this.address = addr;
+    // Web 的 src 沿用既有归一规则（保留原始 query token 以维持 DSH 鉴权行为）；
+    // 裸 IPv6 host:port 的配对载荷由 normalizeHostPort 补出带方括号的 URL。
+    const check: RemoteUrlCheck = normalizeRemoteUrl(raw);
+    this.url = check.ok ? check.url : addr.url;
+    this.emptyReason = '';
     this.loadError = '';
-    this.phase = PHASE_EMPTY;
-    // 用户明确填过东西但不可用：保留具体原因（比只写「先到设置里填写」更能定位问题）
-    if (raw.trim().length > 0 && this.emptyReason.length === 0) {
-      this.emptyReason = check.reason;
+    this.tlsBlocked = false;
+    this.transportLabel = transportChip(classifyTransport(addr.host, addr.port));
+    this.phase = PHASE_READY;
+
+    if (addr.scheme === 'http') {
+      this.applyDecision(addr.scheme, 'absent');
+      return;
     }
+
+    const pin: string = normalizePin(this.storedPin());
+    if (pin.length === 0) {
+      this.applyDecision(addr.scheme, 'absent');
+      this.refuse('no-pin');
+      return;
+    }
+    // pin 存在：发一条不带凭证的预检请求，握手期比对叶证书指纹。
+    this.preflight(addr, pin);
+  }
+
+  /** 取决策表的一行并落到状态；Web 只在 action='load' 时挂载。 */
+  private applyDecision(scheme: string, state: PinState): PageDecision {
+    const decision: PageDecision = pageDecision({ scheme: scheme, pinState: state });
+    this.pageLabel = decision.label;
+    this.webMounted = decision.action === 'load';
+    return decision;
+  }
+
+  /** 统一拒绝终局：typed 原因 + 不挂 Web + 一次性结果标记。 */
+  private refuse(kind: RemoteRefusalKind): void {
+    this.tlsBlocked = true;
+    this.webMounted = false;
+    this.reportRefusal(kind);
+  }
+
+  /** 预检的 typed 拒绝码 → 决策标签 + 固定文案 + 结果标记。 */
+  private refusePreflight(code: PinnedRefusalCode, state: PinState, kind: RemoteRefusalKind): void {
+    this.applyDecision('https', state);
+    this.loadError = PIN_REFUSAL_WORDING[code];
+    this.refuse(kind);
+  }
+
+  /**
+   * 只归一「观察到」的 host：SDK 的 ValidationContext.host 对 IPv6 可能带方括号
+   *（如 `[fd7a:…:1]`），而配对记录里的 addr.host 是不带括号的小写字面量。
+   * 只在预检调用点剥一层括号，避免逐字比对时误判 E_HOST_MISMATCH 而让 IPv6 永远 fail-closed。
+   * 不改模型、不改实例表、不改预期值。
+   */
+  private normalizeObservedHost(rawHost: string): string {
+    let host: string = rawHost;
+    if (host.startsWith('[')) {
+      host = host.substring(1);
+    }
+    if (host.endsWith(']')) {
+      host = host.substring(0, host.length - 1);
+    }
+    return host;
+  }
+
+  /**
+   * 唯一的 pin 预检：一条不带凭证的请求，握手期用 verifyLeafPin 比对叶证书。
+   *
+   * leafOrderProven 不是常量 true：它只在**观察到单证书链**（pemCerts===1 且 x509<=1）时为真——
+   * 链条里只有一张证书时，那张就是 leaf，不存在「链首顺序」的歧义；多证书继续 fail-closed。
+   * 任何异常 / 回调未触发 / 指纹不符都拒绝，绝不回退到「只在报错时放行」的 WebView 路径。
+   */
+  private async preflight(addr: HostPortCheck, pin: string): Promise<void> {
+    let callbackInvoked: boolean = false;
+    let pinOk: boolean = false;
+    const validation: http.ValidationCallback = async (context: http.ValidationContext): Promise<boolean> => {
+      callbackInvoked = true;
+      const pemCount: number = Array.isArray(context.pemCerts) ? context.pemCerts.length : 0;
+      const x509Count: number = Array.isArray(context.x509Certs) ? context.x509Certs.length : 0;
+      // 只在这里归一观察到的 host：SDK 对 IPv6 可能给 `[ipv6]`，预期值不带括号。
+      const observedHost: string = this.normalizeObservedHost(context.host);
+      const outcome = verifyLeafPin({
+        host: observedHost,
+        ip: context.ip,
+        expectedHost: addr.host,
+        expectedIp: '',
+        expectedPin: pin,
+        leaves: collectLeafCandidates(context),
+        chainShape: { x509Count: x509Count, pemCount: pemCount },
+        leafOrderProven: pemCount === 1 && x509Count <= 1
+      });
+      pinOk = outcome.ok;
+      return outcome.ok;
+    };
+    try {
+      const response = await requestWithValidation(addr.url, validation);
+      if (this.disposed) {
+        return;
+      }
+      if (!callbackInvoked) {
+        const code: PinnedRefusalCode = response.errorCode !== 0
+          ? 'E_TRANSPORT_FAILURE' : 'E_API_UNSUPPORTED';
+        this.refusePreflight(code, 'preflight-failed', 'permanent-refusal');
+        return;
+      }
+      if (!pinOk) {
+        this.refusePreflight('E_PIN_MISMATCH', 'mismatch', 'tls-mismatch');
+        return;
+      }
+      this.applyDecision(addr.scheme, 'verified');
+      sslGrant(hostPortKey(addr.host, addr.port), true, Date.now());
+      this.httpsVerified = true;
+      this.loadError = '';
+    } catch (error) {
+      if (!this.disposed) {
+        this.refusePreflight('E_TRANSPORT_FAILURE', 'preflight-failed', 'permanent-refusal');
+      }
+    }
+  }
+
+  /** 当前 host:port 的一次性放行键（IPv6 带方括号）。 */
+  private allowanceKey(): string {
+    if (this.address === null) {
+      return '';
+    }
+    return hostPortKey(this.address.host, this.address.port);
   }
 
   /**
@@ -317,30 +457,26 @@ struct RemoteControl {
   }
 
   /**
-   * `onSslErrorEventReceive`：平台把 DER 证书链放在 `event.certChainData`（leaf 第一项）。
+   * `onSslErrorEventReceive`（SDK 契约：只报主文档）：
    *
-   * - match ⇒ `handleConfirm()`，按 pin 放行这张自签证书；
-   * - mismatch / no-pin / unverifiable ⇒ `handleCancel(true)` 中止加载（页面根本没打开），
-   *   并把三种固定文案之一写进错误卡；任何分支都不记录 event（URL 带 token）。
+   * - `sslConsume(host:port, now)` 为真 ⇒ 这是预检通过后的那一次握手，`handleConfirm()`；
+   * - 否则（无授权 / 过期 / 已消费 / 换主机）⇒ `handleCancel(true)`，渲染固定拒绝文案。
+   *
+   * 这里**不再**重复读 pin，也绝不写 pin；pin 只在 applyAddress 的预检里比对过一次。
+   * 任何分支都不记录 event（URL 可能带 token）。
    */
   private handleSslError(event: OnSslErrorEventReceiveEvent): void {
-    const outcome: TlsPinResult = verifyPinnedCertificate(event.certChainData, this.storedPin());
-    if (outcome.outcome === 'match') {
+    if (sslConsume(this.allowanceKey(), Date.now())) {
       this.loadError = '';
       try {
         event.handler.handleConfirm();
       } catch (error) {
-        // handler 已失效（页面正在销毁）：忽略，下一次加载会重新触发校验
+        // handler 已失效（页面正在销毁）：忽略，下一次加载会重新走预检
       }
       return;
     }
-    this.tlsBlocked = true;
-    this.loadError = outcome.wording;
-    // 没有 pin / 指纹不匹配 / 链无法校验都是未建立起来的通道 ⇒ fail（不是可达性）
-    const refusalKind: RemoteRefusalKind = outcome.outcome === 'mismatch'
-      ? 'tls-mismatch'
-      : outcome.outcome === 'no-pin' ? 'no-pin' : 'chain-unverifiable';
-    this.reportRefusal(refusalKind);
+    this.refuse('tls-mismatch');
+    this.loadError = SSL_ALLOWANCE_REFUSAL_WORDING;
     try {
       event.handler.handleCancel(true);
     } catch (error) {
@@ -376,7 +512,8 @@ struct RemoteControl {
 
   /** 刷新：先清错误态，再让 Web 重新加载（错误卡片上的「重试」与标题栏「刷新」共用）。 */
   private refresh(): void {
-    // 证书拒绝是一次性终态：不静默重试、不借刷新绕过 pin；要恢复必须先回设置页重新配对。
+    // 拒绝是一次性终态：不静默重试、不借刷新绕过校验；恢复需重新进入本页
+    //（无 pin 的情形仍须先回设置页配对）。
     if (this.tlsBlocked) {
       return;
     }
@@ -384,8 +521,11 @@ struct RemoteControl {
     if (this.url.length === 0) {
       return;
     }
-    // 真正会重新加载 = 新的一次尝试，允许再写一条结果标记
+    // 真正会重新加载 = 新的一次尝试：结果标记与一次性放行凭据都重新发放
     this.outcomeWritten = false;
+    if (this.httpsVerified) {
+      sslGrant(this.allowanceKey(), true, Date.now());
+    }
     try {
       this.controller.refresh();
     } catch (error) {
@@ -586,9 +726,9 @@ struct RemoteControl {
       Row() {
         ActionButton({
           label: OPEN_BROWSER_LABEL,
-          // 证书被拒时禁用兜底：系统浏览器没有我们的 pin 校验，点了也不能绕过
+          // 拒绝态禁用兜底：系统浏览器没有我们的预检 + 一次性放行，点了等于绕过
           actionEnabled: !this.tlsBlocked,
-          disabledReason: this.tlsBlocked ? '证书未通过校验，不能用浏览器绕过' : '',
+          disabledReason: this.tlsBlocked ? '当前连接未通过校验，不能用浏览器绕过' : '',
           busy: false,
           variant: 'secondary',
           block: false,
@@ -608,7 +748,33 @@ struct RemoteControl {
     .alignItems(HorizontalAlign.Start)
   }
 
-  /** 主体：内嵌 Web + 错误卡片遮罩（Web 始终挂着，重试不丢会话）。 */
+  /**
+   * 传输信息行：分类 chip + 决策标签 + 残留 TOCTOU 风险各一行（第三行只在预检真正通过后显示）。
+   * 文案全部来自纯模型（TRANSPORT_LABELS / PAGE_TRANSPORT_TABLE / TOCTOU_SENTENCE），
+   * 组件里没有任何内联分类/IP 嗅探；Tailscale 不额外加任何形容词。
+   */
+  @Builder
+  TransportInfo() {
+    Column({ space: SPACING.xs }) {
+      Text(`传输分类：${this.transportLabel}`)
+        .fontSize(FONT.caption)
+        .fontColor($r('app.color.text_secondary'))
+      Text(this.pageLabel)
+        .fontSize(FONT.caption)
+        .fontColor($r('app.color.text_secondary'))
+      // 只有预检真正通过（verifyLeafPin 命中且已放行）才显示；无 pin / 拒绝 / http 都没发生过预检。
+      if (this.httpsVerified) {
+        Text(TOCTOU_SENTENCE)
+          .fontSize(FONT.caption)
+          .fontColor($r('app.color.text_secondary'))
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .padding({ left: SPACING.lg, right: SPACING.lg, top: SPACING.sm })
+  }
+
+  /** 主体：内嵌 Web + 错误卡片遮罩（决策成功后才挂，重试不丢会话）。 */
   @Builder
   RemoteBody() {
     Stack({ alignContent: Alignment.TopStart }) {
@@ -620,11 +786,11 @@ struct RemoteControl {
         .onPageEnd(() => {
           // 主文档加载完成 → 记下「最近一次成功」（失败路径由 onErrorReceive 标 loadError，不写）
           this.recordLastOk();
-          // 只有真正加载完成才是可达性 ok（今天常规构建 Web 不挂载，此回调实际不可达）
+          // 只有真正加载完成才是可达性 ok（拒绝路径不挂 Web，此回调不会触发）
           this.reportLoadSuccess();
         })
         .onSslErrorEventReceive((event: OnSslErrorEventReceiveEvent) => {
-          // 只有这里能看到平台给的 DER 证书链；pin 命中才确认，否则中止加载并显示固定文案。
+          // SDK 契约只对主文档触发；只按一次性放行凭据决定是否确认，不再读 pin。
           // 不打印 event：url 里带 token。
           this.handleSslError(event);
         })
@@ -682,12 +848,16 @@ struct RemoteControl {
       } else if (this.phase === PHASE_READY) {
         if (this.rc3Gate) {
           Rc3GatePanel({ endpoint: this.url })
+        }
+        this.TransportInfo()
+        // 决策 action='load' 才挂 Web；拒绝路径只有错误卡，没有「静默 WebView」。
+        if (this.webMounted) {
+          this.RemoteBody()
         } else {
-          // 不挂旧 WebView；常规路径必须等原生客户端通过设备验收。
           this.RefusedView()
         }
-        // mod-remote-command-wire：单次确认闸的真实界面，挂在今天唯一可达的 PHASE_READY 态
-        // （证书未启用 ⇒ tlsBlocked=true ⇒ RefusedView）。目标派生与 storedPin() 共用一处。
+        // mod-remote-command-wire：单次确认闸的真实界面，挂在唯一可达的 PHASE_READY 态；
+        // 目标派生与 pin 预检共用一处 storedPin() 派生源，composer 的 props / reason 未改。
         RemoteCommandComposer({
           instanceId: this.targetInstanceId(),
           instanceName: this.targetDisplayName(),

@@ -300,9 +300,19 @@ describe('G. RemoteControl.ets 接线形状', () => {
     assert.match(remoteSrc, /commandGranted: this\.targetCommandGranted\(\)/);
   });
 
-  test('G2 原有硬拒绝文案逐字保留且只出现一次', () => {
-    const line = '安全连接尚未启用，未向电脑发送凭据。';
-    assert.equal(remoteSrc.split(line).length - 1, 1, '原文案必须保持且计数不变');
+  // retarget（mod-remote-page-webview）：页面路径不再显示「未向电脑发送凭据」——页面本身
+  // 不发送任何来自 App 的凭据；该语义只属于命令通道，且 composer 自己的 E_COMMAND_REMOTE_UNVERIFIED
+  // 已逐字覆盖。旧断言「页面必须出现该句一次」因此转红，改为正向钉住「页面 0 命中 +
+  // 命令路径原因仍逐字等于闸门 wording」，不是删断言、不是放宽。
+  test('G2 旧页面级凭据拒绝句绝迹；命令路径原因仍来自 E_COMMAND_REMOTE_UNVERIFIED', () => {
+    assert.equal(remoteSrc.includes('安全连接尚未启用'), false, '页面路径不得再出现旧拒绝句');
+    assert.equal(remoteSrc.includes('未向电脑发送凭据'), false, '页面路径不得再出现旧拒绝句');
+    assert.equal(
+      COMMAND_WORDING.E_COMMAND_REMOTE_UNVERIFIED.includes('未发送任何内容'), true,
+      '命令通道的诚实原因仍由闸门 wording 承载');
+    assert.equal(componentSrc.includes(COMMAND_WORDING.E_COMMAND_REMOTE_UNVERIFIED), false,
+      'composer 仍不得复制文案（只经 composerReason 取值）');
+    assert.match(componentSrc, /composerReason\(this\.currentState\(\), this\.commandGranted\)/);
   });
 
   test('G3 实例 id 派生只有一处，授权只读且 fail-closed', () => {

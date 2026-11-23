@@ -235,27 +235,40 @@ describe('E. RemoteControl：每次尝试只写一次，失败一律 fail', () =
     assert.match(refresh, /this\.outcomeWritten = false;/, '真正 reload 才算新尝试');
   });
 
-  test('E3 无 pin / 非 https / 永久拒绝三条分支都报 fail', () => {
+  // retarget（mod-remote-page-webview）：http 现在按明文标签正常 load，「非 https 永久拒绝」
+  // 分支不存在了；https 的失败终局改为「无 pin（applyAddress 内）」与「预检失败（preflight 内）」
+  // 两条，二者仍统一经 refuse()→reportRefusal() 落到 fail。旧断言逐条改为钉新位置，未删。
+  test('E3 无 pin / 预检失败两条分支都报 fail（旧「非 https」分支已不存在）', () => {
     const apply = methodBody(REMOTE, 'private applyAddress(raw: string): void');
-    assert.match(apply, /this\.reportRefusal\('no-pin'\)/);
-    assert.match(apply, /this\.reportRefusal\('not-https'\)/);
-    assert.match(apply, /this\.reportRefusal\('permanent-refusal'\)/);
+    assert.match(apply, /this\.refuse\('no-pin'\)/);
+    assert.equal(apply.includes('not-https'), false, 'http 明文现在正常 load，不再有非 https 拒绝分支');
+    const preflight = methodBody(REMOTE, 'private async preflight(addr: HostPortCheck, pin: string): Promise<void>');
+    assert.match(preflight, /'permanent-refusal'/, '预检请求失败仍是永久拒绝');
+    assert.match(preflight, /'tls-mismatch'/, '指纹不匹配仍是 TLS 拒绝');
+    assert.match(REMOTE, /private refuse\(kind: RemoteRefusalKind\): void[\s\S]*this\.reportRefusal\(kind\)/,
+      '两条分支共用一个 reportRefusal 出口');
   });
 
+  // retarget（同上）：SSL 回调不再重复读 pin，只消费一次性放行凭据；终局仍 fail。
   test('E4 TLS / Web 终局报 fail，只有 onPageEnd 报 ok', () => {
     const ssl = methodBody(REMOTE, 'private handleSslError(event: OnSslErrorEventReceiveEvent): void');
-    assert.match(ssl, /'tls-mismatch'[\s\S]*'no-pin'[\s\S]*'chain-unverifiable'/);
-    assert.match(ssl, /this\.reportRefusal\(refusalKind\)/);
+    assert.match(ssl, /sslConsume\(this\.allowanceKey\(\), Date\.now\(\)\)/,
+      '只有一次性放行凭据命中才 handleConfirm');
+    assert.match(ssl, /this\.refuse\('tls-mismatch'\)/, '放行凭据失效按 tls-mismatch 落 fail');
+    assert.match(ssl, /handleConfirm\(\)/);
+    assert.match(ssl, /handleCancel\(true\)/);
     const count = (REMOTE.match(/this\.reportRefusal\('web-load-error'\)/g) ?? []).length;
     assert.equal(count, 2, 'onErrorReceive + onHttpErrorReceive 都报 web-load-error');
     assert.match(REMOTE, /\.onPageEnd\(\(\) => \{[\s\S]{0,300}this\.reportLoadSuccess\(\);/,
       'ok 只来自真正的页面加载完成');
   });
 
-  test('E5 batch-1 的 composer 挂载与硬拒绝文案逐字保留且各恰好一次（regression guard）', () => {
+  // retarget（同上）：旧「页面必须出现硬拒绝句一次」转红，改为「页面 0 命中 +
+  // composer 挂载仍恰好一次」。命令通道的诚实原因由 composer 的闸门 wording 承载。
+  test('E5 batch-1 的 composer 挂载逐字保留；旧页面级凭据拒绝句已绝迹', () => {
     assert.equal((REMOTE.match(/RemoteCommandComposer\(\{/g) ?? []).length, 1, 'composer 只能挂载一次');
-    const line = '安全连接尚未启用，未向电脑发送凭据。';
-    assert.equal(REMOTE.split(line).length - 1, 1, '原文案必须保持且计数不变');
+    assert.equal(REMOTE.includes('安全连接尚未启用'), false);
+    assert.equal(REMOTE.includes('未向电脑发送凭据'), false);
     assert.match(REMOTE,
       /import \{ RemoteCommandComposer \} from '\.\.\/components\/RemoteCommandComposer';/);
     assert.match(REMOTE, /instanceIdFromUrl\(this\.url\)/, '唯一 URL→id 派生仍在');
