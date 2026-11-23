@@ -244,13 +244,16 @@ Known limitations:
 - `insert:` blocks merge as a whole keyed by their first inner id; keep one row per `insert:` entry
   (see 4.1).
 - `getState` reads local state only and never uses the network; `reachable` is `true | false | null`
-  (null = not probed). Network probes happen only on "test connection" / "push" / "preview", and each
-  git network operation has an explicit budget, named by its constant rather than repeated here:
-  `NETWORK_TIMEOUT_MS` for read commands (`ls-remote` / `fetch`), `FIRST_NETWORK_TIMEOUT_MS` for the
-  process's **first** call (covers the askpass interpreter cold start), and `PUSH_TIMEOUT_MS` for push
-  (it uploads local objects, so its cost grows with the work). The budget actually used is carried in
+  (null = not probed). Network probes happen only on "test connection" / "push" / "preview". Read
+  commands (`ls-remote` / `fetch`) and push each have an explicit budget, named by its constant rather
+  than repeated here: `NETWORK_TIMEOUT_MS` for reads, `FIRST_NETWORK_TIMEOUT_MS` for the process's
+  **first** call (covers the askpass interpreter cold start), and `PUSH_TIMEOUT_MS` for push (it
+  uploads local objects, so its cost grows with the work). The budget actually used is carried in
   `details.budgetMs` and quoted in the error text; "timed out" and "unreachable" are distinct results
-  with distinct next steps. See `src/engine/git.ts` for the three constants.
+  with distinct next steps. **Not covered by these constants:** the initial `clone` that creates the
+  working copy — it currently runs with no budget of its own (see `src/engine/git.ts` `cloneArgs`), so
+  a dead remote can make the *first* setup wait on the OS/transport timeouts. See `src/engine/git.ts`
+  for the three constants.
 - `apply` returns `fileSha256` for the whole post-write profile patch and `blockSha256` for one entry's
   text; they serve different purposes (write verification vs. entry tracking).
 
