@@ -2253,3 +2253,55 @@ Gitee 上看得到 `main` 分支及对应提交时间；**除这四项外，本�
 2. **证据粒度**：HAP / abc 哈希是**与并行 lane 共享的树级产物**，不能单独归功于本模块；
    按模块的证据是**源码 diff 加 abc 名称命中**（`[sync-trigger] pull` 命中 1 次，
    `syncStatusLine` / `statusStateOf` / `syncStatusText` / `DayReader` / `readDay` 均在）。
+
+### 15.22 远程页与同步的活体验收：1000014 —— 平板首次真正推送到远端、平板 TypeError 根因、电脑侧 GUI 代理（2026-11-23～24，Lead 亲测；append-only，不改写 §15.1–§15.21）
+
+本节只记 Lead 亲手在真机 / 活体仓库上跑出来的东西；凡未经设备或活体观测的，一律在「未验」里列明。
+
+#### A. 装机（1000014）与构建证据
+
+- 构建：`apps/arkui-schedule/.build-logs/build-20261123-212449.log` —— `CompileArkTS` **EXECUTED** 1 min 6 s 337 ms、该任务 `UP-TO-DATE` **0** 条、`BUILD SUCCESSFUL in 1 min 45 s 828 ms`；控制台 `✓ 产物验收通过`，`[overlay] applied=false`。
+- 签名：`dist-harmony/arkui-schedule-harmony-debug-signed.hap` **2,484,433 B** / SHA256 `EA58DFEC…A62B94B`（v1 泄漏密钥，`-AllowLegacyV1Key`，仅本地复现，**never ship**）。
+- 安装：`hdc -t <serial> install -r …` → `install bundle successfully`；首次为 USB `6MFBB25C27205131`，其后切到无线 `192.168.1.11:33023`。
+- **装机内容证明**：`bm dump` 给的 `codePath` 在 shell 下 **permission denied**，无法 recv 比对；改从**签名 HAP 内部**取 `ets/modules.abc` **1,830,164 B** / SHA256 `B0312622…AD44358`，与 grant-parity 构建的参考产物**逐字节一致**，故安装的确实是 HEAD 源码编译结果。`bm dump` 的 `versionCode` 恒为 0/空，**不能**作为装机证据（与其后 `1000013/1000014` 的基线提交一致）。
+
+#### B. 平板三个界面缺陷的设备断言（全部 `uitest dumpLayout`，非读图主观判断）
+
+| 断言 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 发指令按钮 | `enabled:"true"`、`clickable:"true"`、仅 `opacity:0.4` 装灰 | **`enabled:"false"`、`clickable:"false"`**，原因行仍可见 |
+| dots 面板文案 | 含「指令确认闸尚未接线」（假话，闸已接） | 该串 **0 命中**，原因由 `COMMAND_WORDING` 派生 |
+| 实例徽章 | 手动地址行也显示「已配对」 | 「地址不可达（未配对）」/「地址可达（未配对）」，全文「已配对」**0 命中** |
+
+#### C. 同步真的跑通了（本仓库首次双向）
+
+1. 修复前设备状态：`上次失败 · 20:43 · Git 操作失败：Cannot read properties of undefined (reading 'length')`；诊断行「落后远端 3 个提交｜本地改动 11 处（上传失败）」。
+2. 根因（见 §15.22 D）：`git.merge({ oid })` 应为 `{ theirs }`。
+3. 修复后设备状态：**「已同步 · 21:35」**，诊断行 `分支 main｜HEAD 6db5b2c｜与远端一致｜本地改动 11 处（待上传）`，全文 `Cannot read` **0 命中**、`桥诊断` **0 命中**。
+4. 远端证据：`origin/main` 由 `a762ec9` 前进到 **`6db5b2c`（平板提交并推送的）**；电脑侧一度**落后 1**，即平板 → 远端这条方向**已被活体证明**。
+5. 电脑侧再推一条（`7390e8f`）：手动推同一提交 **1.2 s 成功**（同一凭据、禁用凭据助手），证明令牌与用户名有效；插件那次失败属 §15.22 E 的误分类。
+
+#### D. 平板 `Cannot read properties of undefined (reading 'length')` 的确切根因
+
+- `rawfile/git/git-bridge.js` 的 `opV2Git('fastForward')` 调用 `git.merge({ oid: target, fastForwardOnly: true })`；isomorphic-git 1.25.3 的 `merge()` 只认 **`theirs`**，传 `oid` 时内部 `ref` 为 `undefined`，`GitRefManager.expand` 读 `ref.length` 即抛该 V8 报错（行号见 `mod-tablet-git-bridge-diagnostics` 的 §1 登记）。
+- 修复：改为 `theirs`；并加 `E_BRIDGE` 边界，原始 JS 消息只进诊断行（前缀 `｜桥诊断：`），主状态行固定为中文可操作句。离线复现测试：`test/gitBridgeDiagnostics.test.mjs:145-161`（断言旧调用抛原文、新序列为绿）。
+
+#### E. 推送失败被误报成「网络不可达」的根因
+
+- 插件把 `DSH_GIT_SYNC_NODE` 设为 `process.execPath`；在 DSH 里它是 `DeepSeek Harness.exe`（Electron 单文件），askpass 等于去启动一个 DSH 实例，凭据读不出来 → `auth-prompt`。
+- 另一层：失败分类用宽泛正则匹配「超时」文本，且首次调用要在预算内付 askpass 冷启动（实测 3.1 s），于是真实原因被写成「网络不可达或远端响应超时」。
+- 已修：解释器解析（显式 → PATH 的 `node` → 应用二进制 + `ELECTRON_RUN_AS_NODE=1` → typed `E_ASKPASS_NODE_MISSING`）；结构优先分类 + push 独享 120 s 预算 + 读 8 s / 首次 20 s + askpass 预热；文案带真实预算。**另**：`gitAuthEnv` 对每个 askpass 子进程注入 `credential.helper=''` + `GCM_INTERACTIVE=Never` —— 因为本机那次「成功推送」可能仅由 Windows 凭据缓存带过，**不能**当作我们 token 路径的证据。
+
+#### F. 远程页（B 方案）的可行性结论与已修根因
+
+- DSH 的 Web GUI **只监听 `127.0.0.1`**（本机 `36569`），且**必须带 `dsh web` 打印的 `?token=`**：未认证请求返回 401，正文 `dsh web authentication required; reopen the URL printed by dsh web.`。裸端口转发因此**不够**。
+- 令牌：每进程随机 32 字节 base64url，只在内存 `WeakMap`，仅经 `connection.authenticatedUrl()` 暴露；插件 `inject:['connection']` 即可**合法**取得（**不**读持久密钥伪造 cookie —— 那条黑路已被否）。
+- 页面为何「能开不能用」：监听把 `Host` 改写为上游回环、却把平板 `Origin` 原样转发；DSH 的栅栏要求带 Origin 时 authority 与 Host 相同 ⇒ `Origin: https://<平板>` 一律 **403**，`/api` 全部 POST 与 WS 握手被拒。修法：**仅同源**（入站 Origin 的 authority == 入站 Host 的 authority）才改写，外来/缺失/不可解析一律保留让上游拒。
+- 四条被否路线（详见 `docs/RESEARCH-B-dsh-gui-proxy.md` §6）：Liveshare（需自建带 OAuth/DB 的服务器 = 中继）、平板内 Typert Peer 客户端（等同重写一个协议客户端）、桌面壳的原生 `--host`（桌面版硬编码回环并自行兑换 token）、裸端口转发。
+
+#### G. 未验（本节**不主张**已验）
+
+- 平板实际加载电脑 DSH 页面、页内发消息收到回复、设置页可达 —— **均未观测**（需 DSH 重启加载新插件 + 平板复连）。
+- 电脑侧 GUI 代理的 120 s 推送预算、空闲预算只用注入值跑过；Windows 上 `git-remote-https` 孙进程可能延迟 `SIGTERM` 结算。
+- 离线推送是否真的变成「超时（预算 N ms）」文案 —— 待真机复核。
+- 所有渲染像素类结论（插件面板、ArkUI 布局）仍为源码级/单测级证据。
