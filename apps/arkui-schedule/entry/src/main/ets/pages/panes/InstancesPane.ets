@@ -43,7 +43,7 @@ import { REMOTE_MODE_LAN, REMOTE_MODE_ORDER, findRemoteMode } from '../../model/
 import { mergeRemoteToken, normalizeRemoteUrl, routeToRemote, stripRemoteToken } from '../../model/remoteUrl';
 import { FIRST_PAIRING_DETAIL, FIRST_PAIRING_WORDING } from '../../model/remoteAnnounceRefresh';
 import type { AnnounceRefreshOutcome, AnnounceRefreshState } from '../../model/remoteAnnounceRefresh';
-import { PAIRING_REACHABLE_WORDING } from '../../model/pairingPayload';
+import { badgeOf, canShowFingerprint } from '../../model/pairingBadge';
 import {
   REMOTE_OUTCOME_KEY,
   decodeRemoteOutcome,
@@ -217,7 +217,7 @@ export struct InstancesPane {
     this.loading = false;
   }
 
-  /** 按 id 取真身（只为拼一次性打开地址 / 保留令牌，不参与渲染）。 */
+  /** 按 id 取真身（拼打开地址 / 令牌；徽章只读它的 pin / 可达 / scheme，绝不读令牌）。 */
   private fullOf(id: string): DsInstance | null {
     for (const item of this.rows) {
       if (item.id === id) {
@@ -225,6 +225,18 @@ export struct InstancesPane {
       }
     }
     return null;
+  }
+
+  /** 徽章唯一出口：把真身交给纯函数，视图不自己拼「已配对 / 未配对」文案。 */
+  private badgeFor(view: RedactedInstance): string {
+    const full: DsInstance | null = this.fullOf(view.id);
+    return full === null ? '' : badgeOf(full);
+  }
+
+  /** 指纹行与徽章共用判据：http 行即便误存 pin 也不展示「已固定指纹」。 */
+  private hasPinFor(view: RedactedInstance): boolean {
+    const full: DsInstance | null = this.fullOf(view.id);
+    return full !== null && canShowFingerprint(full);
   }
 
   /**
@@ -447,7 +459,7 @@ export struct InstancesPane {
    *
    * mod-pairing-reachability：写表前先做一次真实短超时 TCP 探活（≤3 s，Promise 异步不卡 UI）。
    * 探针失败 ⇒ typed 原因逐字上屏、**粘贴框原文保留**供改端口重试，整表零写入、不产行、不写 pin；
-   * 探针通过才由 store 的 TOFU 门禁落表，成功提示逐字说明「已配对（地址可达，尚未校验证书）」：
+   * 探针通过才由 store 的 TOFU 门禁落表，成功提示逐字说明「地址可达、证书未校验」：
    * TCP 可达只是传输层事实，不冒充证书指纹已校验的身份真实性。
    * 绝不把 token 拼进任何提示 / 日志；冲突时旧 pin 与旧地址不动。
    */
@@ -740,14 +752,11 @@ export struct InstancesPane {
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .textAlign(TextAlign.Start)
 
-      // 手动配对行的文案只陈述**传输层事实**：探针通过也说「地址可达，尚未校验证书」，
-      // 绝不把 TCP 可达写成身份真实性（证书指纹由 TLS lane gate）。之后监听器停了，
-      // 远程打开的一次性结果标记（连接/加载失败等）经 onRemoteOutcome 把同一行降为不可达
-      // （复用既有三态，不另造状态机）；导航成功本身不再把行标成可达。
-      if (view.fingerprintPrefix !== undefined && view.fingerprintPrefix.length > 0) {
-        Text(view.reachable === 'ok'
-          ? PAIRING_REACHABLE_WORDING
-          : view.reachable === 'fail' ? '已配对（当前不可连接）' : '已配对（尚未探测地址可达性）')
+      // D3 徽章：文案只由 model/pairingBadge.ts 的 badgeOf(真身) 给出——pin × reachable × scheme。
+      // 有 pin 才可能说「已配对」；手动地址（无 pin）/ http 明文行一律「未配对」口径。
+      // 监听器停了 / 打开失败时 reachable 由 onRemoteOutcome 降为 fail，同一纯函数自然改文案。
+      if (this.badgeFor(view).length > 0) {
+        Text(this.badgeFor(view))
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)
           .fontColor(view.reachable === 'fail' ? $r('app.color.danger') : $r('app.color.text_secondary'))
@@ -755,15 +764,17 @@ export struct InstancesPane {
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .textAlign(TextAlign.Start)
-        // 只展示前缀 + 已固定标记，完整指纹 / 令牌都不上屏。
-        Text(`指纹 ${view.fingerprintPrefix} · 已固定指纹`)
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .width('100%')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .textAlign(TextAlign.Start)
+        // 只展示前缀 + 已固定标记，完整指纹 / 令牌都不上屏；http 行不显示（无 TLS 可固定）。
+        if (this.hasPinFor(view)) {
+          Text(`指纹 ${view.fingerprintPrefix} · 已固定指纹`)
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.text_secondary'))
+            .width('100%')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .textAlign(TextAlign.Start)
+        }
       }
 
       Row({ space: SPACING.sm }) {

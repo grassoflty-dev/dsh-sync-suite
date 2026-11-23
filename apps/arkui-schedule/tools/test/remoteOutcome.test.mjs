@@ -197,10 +197,15 @@ describe('D. InstancesPane：保活安全的消费者（不是 onPageShow）', (
       '跳转抛错的 fail 分支必须保留');
   });
 
-  test('D5 三条徽章文案逐字不变；过度承诺文案绝迹', () => {
-    assert.equal(PANE.includes('PAIRING_REACHABLE_WORDING'), true);
-    assert.equal(PANE.includes('已配对（当前不可连接）'), true);
-    assert.equal(PANE.includes('已配对（尚未探测地址可达性）'), true);
+  test('D5 三条 pinned 徽章文案逐字不变（迁到纯模型）；过度承诺文案绝迹', () => {
+    // mod-pairing-badge-pin-guard（retarget，不放宽）：文案从面板内联映射迁到 model/pairingBadge.ts，
+    // 三条 pinned 逐字节不变；面板改为调用 badgeOf，且不再复制任何一条（无第二份拷贝）。
+    const badgeSrc = readFileSync(new URL('../../entry/src/main/ets/model/pairingBadge.ts', import.meta.url), 'utf8');
+    assert.equal(badgeSrc.includes('PAIRING_REACHABLE_WORDING'), true);
+    assert.equal(badgeSrc.includes('已配对（当前不可连接）'), true);
+    assert.equal(badgeSrc.includes('已配对（尚未探测地址可达性）'), true);
+    assert.match(PANE, /badgeOf\(full\)/, '面板必须经纯函数取徽章');
+    assert.equal(PANE.includes('已配对（'), false, '面板不得复制任何 pinned 文案');
     for (const [label, text] of [['InstancesPane.ets', PANE], ['RemoteControl.ets', REMOTE],
       ['remoteOutcome.ts', MODEL]]) {
       for (const bad of ['已配对（已校验可连接）', '防中间人', '已验证身份', '已配对（已验证可连接）']) {

@@ -227,7 +227,13 @@ describe('R7 源码形状：探针在写盘之前 / 粘贴框保留 / 真实 soc
     const clearAt = body.indexOf('this.pairingText = \'\'');
     assert.ok(failureAt >= 0 && clearAt > failureAt, '失败分支在前，且粘贴框清空只发生在成功之后');
     assert.match(body, /return;/, '失败分支必须直接返回，不清空粘贴框');
-    assert.match(PAGE, /PAIRING_REACHABLE_WORDING/, '成功提示必须引用「已配对（地址可达，尚未校验证书）」常量');
+    // mod-pairing-badge-pin-guard（retarget，不放宽）：成功提示仍逐字用 store 返回的 typed 原因；
+    // 常量继续由配对模型持有，面板不再内联引用它（徽章已交给纯函数 badgeOf）。
+    assert.match(body, /promptAction\.showToast\(\{ message: result\.reason/,
+      '成功提示必须逐字用 store 的 typed 原因，不在页面里另写文案');
+    assert.equal(P.PAIRING_REACHABLE_WORDING, '已配对（地址可达，尚未校验证书）',
+      '成功文案常量必须仍由 pairingPayload.ts 持有且逐字节不变');
+    assert.match(PAGE, /badgeOf\(full\)/, '配对行徽章必须交由纯函数，不再内联取常量');
     assert.equal(PAGE.includes('已配对（已验证可连接）'), false, '旧的裸「已验证」成功文案必须绝迹');
     assert.equal(PAGE.includes('已配对（尚未验证可连接）'), false, '旧的裸「未验证」文案必须绝迹');
     assert.match(PAGE, /busy: this\.pairingBusy/, '探测期间按钮进入 busy，防重复点击');
