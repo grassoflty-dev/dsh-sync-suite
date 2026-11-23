@@ -19,6 +19,7 @@
  * `buildRecordsText` 的空串哨兵同样致命：union 产出空文本即抛错，绝不落盘。
  */
 import { SyncError } from '../engine/errors.js'
+import { ASKPASS_NODE_MISSING_CODE } from '../engine/nodePath.js'
 import {
   FRESH_SCHEMA_TEXT,
   byteCompare,
@@ -939,6 +940,48 @@ function typedError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** node 解释器缺失的下一步：全文件唯一一份，push / branchName / fetch 共用。 */
+export const ASKPASS_NODE_NEXT_STEP = '；下一步：安装 Node.js 或把 DSH_GIT_SYNC_NODE 指向 node.exe 后重试'
+
+/** 其它 typed 码（含既有 E_PUSH_REJECTED）沿用原来的远端分叉建议，文案逐字节不变。 */
+const DEFAULT_GIT_NEXT_STEP = '；下一步：检查远端是否被其他设备推进，下一次同步会做有界重试，仍未成功请人工协调'
+
+/**
+ * typed 码判定：只有 SyncError 且 code 为 E_ 前缀才保留；其余一律走调用方兜底文案。
+ * push / branchName / fetch 三处共用，杜绝任何一处把 typed 码误标成别的类别。
+ */
+export function typedCodeOf(error: unknown): string {
+  return error instanceof SyncError && typeof error.code === 'string' && /^E_[A-Z0-9_]+$/.test(error.code)
+    ? error.code
+    : ''
+}
+
+/**
+ * git 阶段失败的统一解释：E_ typed 码原样保留（附诚实下一步），
+ * 其它异常用调用方给的兜底码与文案（保持既有 byte-stable 行为）。
+ */
+export function gitStageFailure(
+  error: unknown,
+  fallback: { code: string; message: string },
+): { code: string; message: string } {
+  const code = typedCodeOf(error)
+  if (code === '') return fallback
+  const nextStep = code === ASKPASS_NODE_MISSING_CODE ? ASKPASS_NODE_NEXT_STEP : DEFAULT_GIT_NEXT_STEP
+  return { code, message: `${code}: ${typedError(error)}${nextStep}` }
+}
+
+/**
+ * typed 失败时把可重放意图停放并落盘：绝不留在 syncing、绝不报成功。
+ * 非 typed 的既有失败路径不调用它，以保持原文案与落盘行为逐字节不变。
+ */
+async function parkTypedFailure(
+  all: OutboxIntent[], outbox: OutboxPort, reason: string,
+): Promise<OutboxIntent[]> {
+  const parked = all.map((entry) => replayable([entry]).length > 0 ? markAttempt(entry, reason) : entry)
+  await outbox.save(parked)
+  return parked
+}
+
 /** 终态消息允许出现的推送原因上限（字符）：只放白名单短语，不放原始 git stderr。 */
 const MAX_TERMINAL_PUSH_REASON = 96
 
@@ -995,9 +1038,21 @@ export async function runV2Cycle(options: CycleOptions): Promise<CycleResult> {
 
   // ── 阶段 0（只读）：schema 文本 → 门禁事实。schema 读取发生在任何 timeline 写句柄之前。
   const schemaText = (await fs.read(SCHEMA_MARKER_PATH)) ?? ''
+  let branchName = ''
+  try {
+    branchName = await git.branchName()
+  } catch (error) {
+    // typed（例如 node 解释器缺失）必须原样带出并停放意图，绝不让异常逃出周期把 syncing 卡死。
+    const decided = gitStageFailure(error, {
+      code: 'E_GIT',
+      message: `读取分支失败：${typedError(error)}`,
+    })
+    if (typedCodeOf(error) !== '') all = await parkTypedFailure(all, outbox, decided.message)
+    return failure(decided.code, decided.message, all, 0)
+  }
   const facts = {
     schemaText,
-    branch: await git.branchName(),
+    branch: branchName,
     head: '',
     origin: '',
   }
@@ -1010,11 +1065,16 @@ export async function runV2Cycle(options: CycleOptions): Promise<CycleResult> {
     return failure(preGate.code, preGate.message, all, 0)
   }
 
-  // fetch 先于 HEAD 断言；传输失败不吞、不伪装成功。
+  // fetch 先于 HEAD 断言；传输失败不吞、不伪装成功；typed 码原样带出并停放意图。
   try {
     await git.fetchMain()
   } catch (error) {
-    return failure(V2_ERROR.PULL_FAILED, `拉取远端失败：${typedError(error)}`, all, 0)
+    const decided = gitStageFailure(error, {
+      code: V2_ERROR.PULL_FAILED,
+      message: `拉取远端失败：${typedError(error)}`,
+    })
+    if (typedCodeOf(error) !== '') all = await parkTypedFailure(all, outbox, decided.message)
+    return failure(decided.code, decided.message, all, 0)
   }
   facts.head = await git.headSha()
   facts.origin = await git.originMainSha()
@@ -1146,11 +1206,17 @@ export async function runV2Cycle(options: CycleOptions): Promise<CycleResult> {
     try {
       await git.pushMain(PUSH_ARGS)
     } catch (error) {
-      const reason = `E_PUSH_REJECTED: ${typedError(error)}；下一步：检查远端是否被其他设备推进，下一次同步会做有界重试，仍未成功请人工协调`
+      // 与 branchName / fetch 共用 gitStageFailure()：typed 码与下一步只有这一份判定。
+      // E_ASKPASS_NODE_MISSING 来自 nodePath.ts 的 fail-closed 门禁，不能冒充远端分叉。
+      const decided = gitStageFailure(error, {
+        code: V2_ERROR.PUSH_REJECTED,
+        message: `E_PUSH_REJECTED: ${typedError(error)}${DEFAULT_GIT_NEXT_STEP}`,
+      })
+      const reason = decided.message
       // 失败只停放意图（预算跨会话累计），绝不把未推送的本地提交报成成功。
       all = all.map((entry) => replayable([entry]).length > 0 ? markAttempt(entry, reason) : entry)
       await outbox.save(all)
-      return failure(V2_ERROR.PUSH_REJECTED, reason, all, attempts)
+      return failure(decided.code, reason, all, attempts)
     }
   }
 

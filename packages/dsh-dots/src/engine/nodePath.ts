@@ -1,0 +1,252 @@
+/**
+ * askpass 子进程所用的 node 解释器解析（mod-plugin-askpass-node-resolution）。
+ *
+ * 解析顺序（ fail-closed，任何一步都不静默降级）：
+ *   1. 显式覆盖变量 DSH_GIT_SYNC_NODE（历史名称，保持不变）；
+ *   2. PATH 上可发现的 node / node.exe（Windows 看 .exe，路径大小写不敏感；POSIX 精确匹配）；
+ *   3. DSH / Electron 应用二进制 —— 仅当给子进程注入 ELECTRON_RUN_AS_NODE=1 时它才等价于 node；
+ *   4. 以上都不可用 → 抛 typed E_ASKPASS_NODE_MISSING，绝不退化成 auth-prompt。
+ *
+ * 候选必须逐个通过有界探针（默认 spawnSync 打印固定标记，按进程缓存）。探针函数可注入，
+ * 因此本模块的解析逻辑可在不 spawn 的前提下纯单测。
+ */
+import { spawnSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { SyncError } from './errors.js'
+
+/** 显式覆盖变量名（沿用历史名称，文档未描述该变量，故不新增文档）。 */
+export const ASKPASS_NODE_OVERRIDE_ENV = 'DSH_GIT_SYNC_NODE'
+
+/** typed 拒绝码：与 git 自身的鉴权失败码严格区分。 */
+export const ASKPASS_NODE_MISSING_CODE = 'E_ASKPASS_NODE_MISSING'
+
+/** 面向用户的一行固定文案：给出修复办法，不含任何凭据值。 */
+export const ASKPASS_NODE_MISSING_REASON =
+  '找不到可用的 node 解释器：请安装 Node.js，或把 DSH_GIT_SYNC_NODE 设为 node.exe 的路径；否则 HTTPS 推送无法通过鉴权'
+
+/** 探针打印的固定标记（非秘密，仅用于确认候选真的是可执行的 node）。 */
+export const ASKPASS_PROBE_MARKER = 'DSH_DOTS_ASKPASS_NODE_OK'
+
+const PROBE_JS = `process.stdout.write(${JSON.stringify(ASKPASS_PROBE_MARKER)})`
+const PROBE_TIMEOUT_MS = 2000
+
+export type NodeCandidateSource = 'override' | 'path' | 'electron'
+
+export interface NodeCandidate {
+  /** 交给子进程的解释器路径。 */
+  path: string
+  /** 命中顺序来源，便于诊断。 */
+  source: NodeCandidateSource
+  /**
+   * true 仅当候选是 DSH/Electron 应用二进制；此时子进程必须注入
+   * ELECTRON_RUN_AS_NODE=1，否则它只会启动应用而不是执行脚本。
+   */
+  electronRunAsNode: boolean
+}
+
+export interface ResolvedAskpassNode extends NodeCandidate {}
+
+export interface ProbeResult {
+  ok: boolean
+  detail?: string
+}
+
+/** 探针拿到的上下文：env 就是真实 askpass 子进程会继承的那一份（已净化）。 */
+export interface AskpassProbeContext {
+  env: NodeJS.ProcessEnv
+}
+
+/** 探针可注入：true / {ok:true} 视为通过，false / 抛错视为拒绝。 */
+export type AskpassProbe = (candidate: NodeCandidate, context: AskpassProbeContext) => boolean | ProbeResult
+
+export interface NodePathInputs {
+  /** 被读取的 env（覆盖变量 / PATH / PATHEXT）。缺省 process.env。 */
+  env?: NodeJS.ProcessEnv
+  /** 当前进程 execPath；与 electronVersion 一起判定「这是应用二进制而非 node」。 */
+  execPath?: string
+  /** process.versions.electron；非空表示 execPath 是 Electron 二进制。 */
+  electronVersion?: string
+  /** 注入的平台（用于纯单测，不影响真实机器）。 */
+  platform?: NodeJS.Platform
+  /** PATH 分隔符；缺省按平台取。 */
+  pathDelimiter?: string
+  /** Windows PATHEXT；缺省取 env.PATHEXT 或 '.EXE'。 */
+  pathExt?: string
+  /** 注入的文件存在判定（用于纯单测，不碰真实文件系统）。 */
+  fileExists?: (p: string) => boolean
+  /** 注入的探针（用于纯单测，不 spawn）。 */
+  probe?: AskpassProbe
+}
+
+const probeCache = new Map<string, boolean>()
+
+/** 按平台比较路径：Windows 大小写不敏感且把 / 视为 \ ，POSIX 精确匹配。 */
+function samePath(a: string, b: string, win: boolean): boolean {
+  const norm = (value: string) => (win ? value.replace(/\//g, '\\').toLowerCase() : value)
+  return norm(a) === norm(b)
+}
+
+/** 自己拼路径而不用 node:path，保证注入的 platform 在任意宿主上都生效。 */
+function joinPath(dir: string, name: string, win: boolean): string {
+  if (dir.endsWith('/') || (win && dir.endsWith('\\'))) return `${dir}${name}`
+  return `${dir}${win ? '\\' : '/'}${name}`
+}
+
+function readPathValue(env: NodeJS.ProcessEnv, win: boolean): string {
+  if (win) {
+    const key = Object.keys(env).find((name) => name.toLowerCase() === 'path')
+    return key === undefined ? '' : env[key] ?? ''
+  }
+  return env.PATH ?? ''
+}
+
+/**
+ * 列出候选，顺序即优先级；只做纯判定，不 spawn、不抛错。
+ * 同一路径只保留第一次出现的来源（override > path > electron）。
+ */
+export function listAskpassNodeCandidates(inputs: NodePathInputs = {}): NodeCandidate[] {
+  const env = inputs.env ?? process.env
+  const execPath = typeof inputs.execPath === 'string' ? inputs.execPath : process.execPath
+  const electronVersion = inputs.electronVersion ?? process.versions.electron
+  const platform = inputs.platform ?? process.platform
+  const win = platform === 'win32'
+  const delimiter = inputs.pathDelimiter ?? (win ? ';' : ':')
+  const fileExists = inputs.fileExists ?? existsSync
+  const seen = new Set<string>()
+  const candidates: NodeCandidate[] = []
+
+  const push = (raw: string | undefined, source: NodeCandidateSource): void => {
+    if (typeof raw !== 'string' || raw.trim() === '') return
+    // 去掉 PATH 里可能存在的引号；不解析为绝对路径，保持注入测试的可预测性。
+    const value = raw.trim().replace(/^"|"$/g, '')
+    const key = win ? value.replace(/\//g, '\\').toLowerCase() : value
+    if (seen.has(key)) return
+    seen.add(key)
+    // 诚实判定「这是应用二进制而非 node」：仅当 electronVersion 存在且路径与 execPath 相同。
+    const isAppBinary = typeof electronVersion === 'string' && electronVersion !== '' && samePath(value, execPath, win)
+    candidates.push({ path: value, source, electronRunAsNode: isAppBinary })
+  }
+
+  // 1. 显式覆盖优先。
+  push(env[ASKPASS_NODE_OVERRIDE_ENV], 'override')
+
+  // 2. PATH 上的解释器。Windows 遵循 PATHEXT 的 .EXE 规则并按大小写不敏感查找，
+  //    POSIX 只认精确文件名 'node'。
+  const pathext = inputs.pathExt ?? env.PATHEXT ?? '.EXE'
+  const exeAllowed = win && /\.EXE/i.test(String(pathext))
+  if (exeAllowed || !win) {
+    const names = win
+      ? ['node.exe', 'Node.exe', 'NODE.EXE', 'Node.EXE', 'NODE.exe', 'node.EXE', 'node.Exe', 'Node.Exe']
+      : ['node']
+    for (const dir of String(readPathValue(env, win)).split(delimiter)) {
+      const clean = dir.trim().replace(/^"|"$/g, '')
+      if (clean === '') continue
+      for (const name of names) {
+        const candidate = joinPath(clean, name, win)
+        if (fileExists(candidate)) push(candidate, 'path')
+      }
+    }
+  }
+
+  // 3. Electron 应用二进制兜底：只有带着 ELECTRON_RUN_AS_NODE=1 才是可用解释器。
+  if (typeof electronVersion === 'string' && electronVersion !== '') push(execPath, 'electron')
+
+  return candidates
+}
+
+/**
+ * 探针环境与真实 askpass 子进程的共享净化规则（就地修改传入的副本）：
+ * 去掉 NODE_OPTIONS / NODE_PATH 这类会劫持 node 启动的变量。
+ * 不变量：探针环境 = 真实 askpass 环境 —— 这里与 src/engine/git.ts 的 ASKPASS_CMD
+ * （`set NODE_OPTIONS=` / `set NODE_PATH=`）一一对应，都是「启动 node 那一刻」的同一份规则；
+ * git 子进程自身保留原 env，避免干扰 git 本身。
+ */
+export function sanitizeNodeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  delete env.NODE_OPTIONS
+  delete env.NODE_PATH
+  return env
+}
+
+/**
+ * 探针只需要证明这个解释器能跑 node，不需要任何凭据。
+ * 在 node 启动净化（sanitizeNodeEnv）之上再剥掉所有凭据类变量：DSH_GIT_SYNC_TOKEN、
+ * DSH_GIT_SYNC_ASKPASS_COUNTER 等 DSH_GIT_*（保留解释器路径变量，由 withElectronFlag 删除）、
+ * GIT_ASKPASS / GIT_CONFIG_* / GCM_INTERACTIVE，以及任何 *_TOKEN / *_PASSWORD。
+ * 否则 PATH 上任一能回显标记的假 node.exe 在探针阶段就拿到了真实令牌。
+ */
+export function probeOnlyEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out = sanitizeNodeEnv({ ...env })
+  for (const key of Object.keys(out)) {
+    const upper = key.toUpperCase()
+    if (
+      (upper.startsWith('DSH_GIT_') && upper !== 'DSH_GIT_SYNC_NODE') ||
+      upper.startsWith('GIT_CONFIG_') ||
+      upper === 'GIT_ASKPASS' ||
+      upper === 'GCM_INTERACTIVE' ||
+      upper.endsWith('_TOKEN') ||
+      upper.endsWith('_PASSWORD')
+    ) {
+      delete out[key]
+    }
+  }
+  return out
+}
+
+/** 按候选决定 ELECTRON_RUN_AS_NODE：只有应用二进制候选为 '1'，真实 node 必须没有。 */
+export function withElectronFlag(env: NodeJS.ProcessEnv, candidate: NodeCandidate): NodeJS.ProcessEnv {
+  const out = { ...env }
+  delete out.DSH_GIT_SYNC_NODE // 解释器变量本身不参与探针
+  if (candidate.electronRunAsNode) out.ELECTRON_RUN_AS_NODE = '1'
+  else delete out.ELECTRON_RUN_AS_NODE
+  return out
+}
+
+/**
+ * 默认有界探针：只跑一次 `-e` 打印固定标记，短超时，结果按进程缓存。
+ * 探针环境 = 真实 askpass 环境的 node 启动部分（由 probeOnlyEnv 去掉所有凭据）。
+ */
+export function defaultAskpassProbe(candidate: NodeCandidate, context?: AskpassProbeContext): boolean {
+  const key = `${candidate.electronRunAsNode ? 'electron' : 'node'}|${candidate.path}`
+  const cached = probeCache.get(key)
+  if (cached !== undefined) return cached
+  let ok = false
+  try {
+    const childEnv = withElectronFlag(context?.env ?? probeOnlyEnv(process.env), candidate)
+    const result = spawnSync(candidate.path, ['-e', PROBE_JS], {
+      env: childEnv,
+      encoding: 'utf8',
+      timeout: PROBE_TIMEOUT_MS,
+      windowsHide: true,
+      maxBuffer: 64 * 1024,
+    })
+    ok =
+      result.status === 0 &&
+      typeof result.stdout === 'string' &&
+      result.stdout.includes(ASKPASS_PROBE_MARKER)
+  } catch {
+    ok = false
+  }
+  probeCache.set(key, ok)
+  return ok
+}
+
+/** 按顺序探测候选，第一个通过者胜出；全部失败则 typed 拒绝，不返回任何假解释器。 */
+export function resolveAskpassNode(inputs: NodePathInputs = {}): ResolvedAskpassNode {
+  const probe = inputs.probe ?? defaultAskpassProbe
+  const candidates = listAskpassNodeCandidates(inputs)
+  const probeEnv = probeOnlyEnv(inputs.env ?? process.env)
+  for (const candidate of candidates) {
+    let ok = false
+    try {
+      const outcome = probe(candidate, { env: withElectronFlag(probeEnv, candidate) })
+      ok = outcome === true || (typeof outcome === 'object' && outcome !== null && outcome.ok === true)
+    } catch {
+      ok = false
+    }
+    if (ok) return { ...candidate }
+  }
+  throw new SyncError(ASKPASS_NODE_MISSING_CODE, ASKPASS_NODE_MISSING_REASON, {
+    code: ASKPASS_NODE_MISSING_CODE,
+    tried: candidates.map((candidate) => candidate.path),
+  })
+}

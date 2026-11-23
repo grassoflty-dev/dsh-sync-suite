@@ -8,6 +8,7 @@
 import { execFile } from 'node:child_process'
 import { GitRepo } from '../engine/git.js'
 import { SyncError } from '../engine/errors.js'
+import { ASKPASS_NODE_MISSING_CODE } from '../engine/nodePath.js'
 import type { GitRepoOptions } from '../engine/git.js'
 import type { AheadCommit, PushArgs, V2GitPort } from './cycle.js'
 
@@ -206,7 +207,12 @@ export class GitRepoV2Port implements V2GitPort {
     })
   }
 
-  /** push 失败的稳定原因分类：只输出白名单短语，绝不回显 git stderr / askpass 正文 / token。 */
+  /**
+   * push 失败的稳定原因分类：只输出白名单短语，绝不回显 git stderr / askpass 正文 / token。
+   *
+   * 注意：node 解释器缺失是 buildEnv() 阶段的 typed 配置错误，由 pushMain() 在调用本函数前
+   * 原样抛出；本函数下面的 auth-prompt 分类只处理真正的 git 鉴权失败，语义保持不变。
+   */
   private pushFailure(text: string): SyncError {
     let reason: 'auth-prompt' | 'non-fast-forward' | 'network' | 'git-failed' = 'git-failed'
     if (/User cancelled dialog|\/dev\/tty|could not read (Username|Password)|terminal prompts disabled|Authentication failed|prompt script|askpass/i.test(text)) {
@@ -231,6 +237,9 @@ export class GitRepoV2Port implements V2GitPort {
     try {
       await this.git(pushArgs)
     } catch (error) {
+      // node 解释器缺失在 git 执行之前就被 fail-closed：保留 typed 码与固定中文文案，
+      // 绝不经过 pushFailure() 的 auth-prompt 分类（那会把配置问题误报成鉴权问题）。
+      if (error instanceof SyncError && error.code === ASKPASS_NODE_MISSING_CODE) throw error
       // typed 错误 + 固定文案：原文可能含 tty 对话框堆栈、askpass 正文甚至 token，一律不带出。
       throw this.pushFailure(error instanceof Error ? error.message : String(error))
     }

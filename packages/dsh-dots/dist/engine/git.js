@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { SyncError } from './errors.js';
 import { GITEE_USERNAME_REQUIRED, resolveGitUsername, scrubAuthValue } from './gitUsername.js';
+import { resolveAskpassNode } from './nodePath.js';
 /**
  * 网络命令（ls-remote / fetch / push）的单次超时上限。
  *
@@ -38,10 +39,27 @@ export function gitAuthEnv(config) {
         GIT_MERGE_AUTOEDIT: 'no',
     };
     if (usesGitAskpass(config)) {
+        // 不变量：探针环境 = 真实 askpass 环境 —— 两边都在「启动 node 的那一刻」用同一份规则清掉
+        // NODE_OPTIONS / NODE_PATH（askpass.cmd 的 set / nodePath.ts 的 sanitizeNodeEnv），
+        // git 子进程本身保留原 env，避免改变 git 自身的行为。
+        // 禁用本机 credential.helper（如 Git Credential Manager 的缓存）：唯一凭据来源 = askpass + token。
+        // 走 env 而非 argv，gitPort 的固定 push argv 不必改，clone/fetch/ls-remote/push 全部一致生效。
+        env.GIT_CONFIG_COUNT = '1';
+        env.GIT_CONFIG_KEY_0 = 'credential.helper';
+        env.GIT_CONFIG_VALUE_0 = '';
+        env.GCM_INTERACTIVE = 'Never';
         env.GIT_ASKPASS = config.askpassPath ?? undefined;
         env.DSH_GIT_SYNC_TOKEN = config.token ?? undefined;
         env.DSH_GIT_SYNC_USER = config.username;
-        env.DSH_GIT_SYNC_NODE = process.execPath;
+        // node 解释器必须经解析 + 探针验证，不能直接用 process.execPath（DSH 里它是应用二进制）。
+        // 解析失败在这里 typed 抛出，早于任何 git 子进程；不涉及 token，也不退化成 auth-prompt。
+        const node = resolveAskpassNode({ ...config.nodePath, env: config.nodePath?.env ?? env });
+        env.DSH_GIT_SYNC_NODE = node.path;
+        // ELECTRON_RUN_AS_NODE 只在真正使用应用二进制时出现；真实 node.exe 必须没有这个 Electron 变量。
+        if (node.electronRunAsNode)
+            env.ELECTRON_RUN_AS_NODE = '1';
+        else
+            delete env.ELECTRON_RUN_AS_NODE;
         env.DSH_GIT_SYNC_ASKPASS_COUNTER = config.askpassCounter ?? undefined;
         env.SSH_ASKPASS_REQUIRE = 'never';
     }
@@ -66,6 +84,9 @@ const ASKPASS_SH = [
 const ASKPASS_CMD = [
     '@echo off',
     'rem token 只由 node 从环境变量读取；本文件不含 token，也不做 %VAR% 展开（& | < > % 都安全）。',
+    'rem 探针也按同一份规则清掉这两项：探针环境 = 真实 askpass 环境。',
+    'set NODE_OPTIONS=',
+    'set NODE_PATH=',
     '"%DSH_GIT_SYNC_NODE%" "%~dp0askpass.mjs"',
     'exit /b %ERRORLEVEL%',
     '',
@@ -215,6 +236,7 @@ export class GitRepo {
     token;
     allowLocalRepo;
     extraEnv;
+    nodePath;
     networkTimeoutMs;
     askpassDir = null;
     askpassPath = null;
@@ -241,6 +263,7 @@ export class GitRepo {
         this.token = options.token !== undefined && options.token !== null && options.token !== '' ? options.token : null;
         this.allowLocalRepo = options.allowLocalRepo === true;
         this.extraEnv = options.env ?? {};
+        this.nodePath = options.nodePath;
         const configured = options.networkTimeoutMs;
         this.networkTimeoutMs =
             typeof configured === 'number' && Number.isFinite(configured) && configured > 0
@@ -288,6 +311,7 @@ export class GitRepo {
             askpassPath: this.askpassPath,
             askpassCounter: this.askpassCounter,
             extraEnv: this.extraEnv,
+            nodePath: this.nodePath,
         });
     }
     failure(args, result, network = false) {
