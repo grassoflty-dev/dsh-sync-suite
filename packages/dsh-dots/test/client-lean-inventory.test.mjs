@@ -3,8 +3,9 @@
  *
  * 钉住用户定版：一页 = 2 个折叠组；控件恰好 4 个 input + 1 个 select = 5 个
  * （规范里「五个控件 / 6 inputs/selects」的自相矛盾按实现实数 5 收敛，逐项列名）；
- * 按钮恰好 5 个（3 个动作 保存 / 测试连接 / 自检 + 远程令牌上的 2 个按钮式
- * affordance 生成 / 复制，明确计入）；二维码恰好 1 个。
+ * 按钮恰好 6 个（2 个动作 保存 / 自检 + 远程令牌上的 4 个按钮式
+ * affordance 显示二维码 / 复制 / 重新生成 / 停止接受连接，明确计入）；「测试连接」已按 Lead 决定删除；
+ * 二维码恰好 1 个。
  *
  * review M1 修正：**本文件不再注入 seedLink**。二维码 / 复制 / 令牌只能由真实 RPC
  * (`remoteShowLink` / `remoteSaveSettings` / `remoteRotateToken`) 产生；这里用有状态的
@@ -342,15 +343,16 @@ test('清单：pairing-client 后恰好 2 input + 1 select（远程组没有端�
   assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 0, '同步范围复选框不得复活')
 })
 
-test('清单：按钮恰好 7 个 = 同步 2 + 远程 5（显示二维码 / 复制 / 重新生成 / 自检 / 停止接受）', async () => {
+test('清单：按钮恰好 6 个 = 同步 1 + 远程 5（显示二维码 / 复制 / 重新生成 / 自检 / 停止接受）', async () => {
   const { nodes } = await renderReal()
   const labels = nodes.filter((node) => node.type === 'button').map((node) => textOf(node.props.children))
   assert.deepEqual(
     labels,
-    ['保存', '测试连接', '显示二维码', '复制配对串', '重新生成', '自检', '停止接受连接'],
-    '远程组只多出二维码 / 复制 / 重新生成 / 自检 / 停止接受，没有端口 / 令牌输入'
+    ['保存', '显示二维码', '复制配对串', '重新生成', '自检', '停止接受连接'],
+    '同步组只剩 保存；远程组二维码 / 复制 / 重新生成 / 自检 / 停止接受仍在，没有端口 / 令牌输入'
   )
-  assert.equal(labels.length, 7)
+  assert.equal(labels.length, 6)
+  assert.equal(labels.includes('测试连接'), false, 'DARK：shipped 面板不得有测试连接按钮')
 })
 
 test('M1：真实 props（无 seedLink）下二维码由显式 pairingShow 产生，恰好 1 个', async () => {

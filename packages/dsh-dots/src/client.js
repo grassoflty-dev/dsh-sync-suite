@@ -347,7 +347,6 @@ window.__ModuleLoader__.load({
       "lean.missing.url": "仓库地址",
       "lean.missing.token": "访问令牌",
       "lean.actions.save": "保存",
-      "lean.actions.test": "测试连接",
       "lean.status.synced": "已同步 · {time}",
       "lean.status.syncing": "同步中…",
       "lean.status.failed": "失败：{reason}",
@@ -699,7 +698,6 @@ window.__ModuleLoader__.load({
       "lean.missing.url": "repository URL",
       "lean.missing.token": "access token",
       "lean.actions.save": "Save",
-      "lean.actions.test": "Test connection",
       "lean.status.synced": "Synced · {time}",
       "lean.status.syncing": "Syncing…",
       "lean.status.failed": "Failed: {reason}",
@@ -4275,7 +4273,7 @@ window.__ModuleLoader__.load({
     function leanStatusText(translate, settings, status, tokenPresent, busy, failure) {
       const cfg = settings && typeof settings === 'object' ? settings : {}
       const st = status && typeof status === 'object' ? status : {}
-      if (busy === 'save' || busy === 'test' || busy === 'probe') return translate('lean.status.syncing')
+      if (busy === 'save' || busy === 'probe') return translate('lean.status.syncing')
       const missing = []
       if (asText(cfg.repoUrl).trim() === '') missing.push(translate('lean.missing.url'))
       if (tokenPresent !== true) missing.push(translate('lean.missing.token'))
@@ -4380,26 +4378,9 @@ window.__ModuleLoader__.load({
         }
       }
 
-      async function doTest() {
-        if (busy) return
-        setBusy('test')
-        setFailure('')
-        try {
-          const result = await rpcCall('testConnection', {})
-          if (!result.ok) {
-            if (leanIsAuthFailure(result)) setNeedLogin(true)
-            setFailure(localizeError(tr, result.error).message)
-            return
-          }
-          // 鉴权成功 → 收起可编辑字段；值仍在本机 settings.username 里（不再打扰用户）。
-          setNeedLogin(false)
-          // 测试连接只是探测，绝不是同步：不写 lastSyncAt，不伪造「已同步」。
-          const fresh = await rpcCall('getState', {})
-          if (fresh.ok) setState(fresh.data)
-        } finally {
-          setBusy('')
-        }
-      }
+      // mod-plugin-sync-probe-removal：lean 同步组的「测试连接」按钮与 doTest() 已删除。
+      // 鉴权失败的登录名展开改由 doSave() 的 401/403 分支承担；RPC testConnection 仍保留
+      // 为服务端内部 / dormant 动作（当前 shipped UI 无任何控件可达）。
 
       const view = leanStateView(state, hasToken)
       const line = leanStatusText(tr, view.settings, view.status, view.tokenPresent, busy, failure)
@@ -4461,11 +4442,6 @@ window.__ModuleLoader__.load({
             primary: true,
             disabled: Boolean(busy),
             onClick: doSave
-          }),
-          h(Btn, {
-            label: tr('lean.actions.test'),
-            disabled: Boolean(busy),
-            onClick: doTest
           })
         )
       )

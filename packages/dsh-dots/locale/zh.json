@@ -286,7 +286,6 @@
   "lean.missing.url": "仓库地址",
   "lean.missing.token": "访问令牌",
   "lean.actions.save": "保存",
-  "lean.actions.test": "测试连接",
   "lean.status.synced": "已同步 · {time}",
   "lean.status.syncing": "同步中…",
   "lean.status.failed": "失败：{reason}",

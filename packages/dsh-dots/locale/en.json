@@ -286,7 +286,6 @@
   "lean.missing.url": "repository URL",
   "lean.missing.token": "access token",
   "lean.actions.save": "Save",
-  "lean.actions.test": "Test connection",
   "lean.status.synced": "Synced · {time}",
   "lean.status.syncing": "Syncing…",
   "lean.status.failed": "Failed: {reason}",

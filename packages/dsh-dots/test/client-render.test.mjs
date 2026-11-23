@@ -294,7 +294,7 @@ test('merged panel：同步组精简为地址/令牌/状态/两动作（旧断�
   assert.equal(counts.input, 2, '同步组只有仓库地址 + 访问令牌两个输入')
   assert.deepEqual(inputs.map((p) => p.type), ['text', 'password'])
   assert.equal(inputs.filter((p) => p.type === 'checkbox').length, 0, '同步范围复选框已删除入口')
-  assert.deepEqual(buttonLabels, ['T:lean.actions.save', 'T:lean.actions.test'], '只剩 保存 / 测试连接')
+  assert.deepEqual(buttonLabels, ['T:lean.actions.save'], '只剩 保存（测试连接按钮已按 Lead 决定删除）')
 
   for (const key of ['lean.repo.url', 'lean.repo.token']) {
     assert.ok(labels.some((label) => label.includes(`T:${key}`)), `合并后缺少字段 ${key}`)

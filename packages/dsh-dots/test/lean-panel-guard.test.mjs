@@ -3,7 +3,7 @@
  *
  * This file deliberately does NOT re-test what existing guards already own:
  *   - `client-lean-inventory.test.mjs`: exact flat inventory (2 details groups,
- *     2 inputs + 1 select, exact 7-button label set), QR/copy/rotate RPC paths,
+ *     2 inputs + 1 select, exact 6-button label set), QR/copy/rotate RPC paths,
  *     d1/d2 transport selection, forbidden-word list `DELETED_LABELS`, M2 status truth.
  *   - `pairing-client-wiring.test.mjs`: real pairing RPC wiring (QR from pairingShow,
  *     rotate, redacted audit, stop/start, announce marker) and engine-level token schema.
@@ -364,11 +364,12 @@ test('G3: login field appears only on E_AUTH / 401 / 403 and collapses on succes
   await click(b.mount, '保存')
   assert.equal(marked(nodesOf(b.mount.tree), 'sync-login-field').length, 0, '网络失败不是鉴权失败')
 
-  // Numeric 403 on the testConnection path (regex branch) also reveals it.
+  // Numeric 403 on the save path (regex branch) also reveals it; the shipped
+  // UI has no testConnection button after mod-plugin-sync-probe-removal.
   const c = await renderReal({
-    routes: { testConnection: () => ({ ok: false, error: { code: 'E_UNKNOWN', message: 'HTTP 403' } }) }
+    routes: { saveSettings: () => ({ ok: false, error: { code: 'E_UNKNOWN', message: 'HTTP 403' } }) }
   })
-  await click(c.mount, '测试连接')
+  await click(c.mount, '保存')
   assert.equal(marked(nodesOf(c.mount.tree), 'sync-login-field').length, 1, '403 文案分支也必须展开')
 })
 
@@ -407,9 +408,21 @@ test('G5: exact per-group button sets; no button triggers a git sync; remoteProb
   const first = await renderReal()
   const syncLabels = buttonsOf(nodesBelow(detailsOf(first.nodes, 'dots'))).map((n) => textOf(n.props.children))
   const remoteLabels = buttonsOf(nodesBelow(detailsOf(first.nodes, 'dots-remote'))).map((n) => textOf(n.props.children))
-  // 测试连接 is a connectivity probe (does not write lastSyncAt), not a git sync.
-  assert.deepEqual(syncLabels, ['保存', '测试连接'], '同步组恰好是 shipped 的两按钮；新增「重试/查看状态/同步」即失败')
+  // DARK absence guard (mod-plugin-sync-probe-removal): shipped 同步组只剩 保存。
+  assert.deepEqual(syncLabels, ['保存'], '同步组恰好只有一个 保存 按钮；「测试连接」回归即失败')
   assert.deepEqual(remoteLabels, ['显示二维码', '复制配对串', '重新生成', '自检', '停止接受连接'])
+  assert.equal(
+    buttonsOf(first.nodes).map((n) => textOf(n.props.children)).includes('测试连接'),
+    false,
+    '面板树任何位置都不得再渲染「测试连接」按钮'
+  )
+  assert.equal(zh['lean.actions.test'], undefined, '已删除的文案键不得仍留在 locale')
+  const clientSrc = readFileSync(clientSrcPath, 'utf8')
+  assert.equal(clientSrc.includes('lean.actions.test'), false, 'shipped 客户端不得再引用已删文案键')
+  // RPC 仍是 public/dormant action（内部可达，UI 不可达）。
+  const rpcSrc = readFileSync(rpcSrcPath, 'utf8')
+  assert.ok(rpcSrc.includes('async function testConnection('), '服务端 testConnection 实现仍保留')
+  assert.ok(rpcSrc.includes("case 'testConnection':"), 'testConnection 仍注册为 RPC action')
 
   const probeFrom = []
   for (const label of [...syncLabels, ...remoteLabels]) {
@@ -420,6 +433,11 @@ test('G5: exact per-group button sets; no button triggers a git sync; remoteProb
       actions.some((a) => SYNC_TRIGGER_ACTIONS.includes(a)),
       false,
       `按钮「${label}」触发了手动同步动作：${actions.join(',')}`
+    )
+    assert.equal(
+      actions.includes('testConnection'),
+      false,
+      `shipped UI 控件「${label}」不得触达 dormant RPC testConnection`
     )
     if (actions.includes('remoteProbe')) probeFrom.push(label)
   }

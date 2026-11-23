@@ -298,7 +298,11 @@ export function createRpcService(options = {}) {
         }
         return { settings: next, hasToken: store.hasToken() };
     }
-    /** testConnection 是"显式网络动作"：成功记 true，网络失败记 false（并继续向上抛错）。 */
+    /**
+     * testConnection 是"显式网络动作"：成功记 true，网络失败记 false（并继续向上抛错）。
+     * mod-plugin-sync-probe-removal：本 action 现为**内部 / dormant**——shipped lean 面板已删
+     * 「测试连接」按钮，没有任何可达的 UI 控件会调用它；仅为 public RPC 与 reachable 三态保留。
+     */
     async function testConnection() {
         const settings = requireConfigured();
         try {

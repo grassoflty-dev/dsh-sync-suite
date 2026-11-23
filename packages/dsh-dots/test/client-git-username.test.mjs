@@ -1,7 +1,8 @@
 /**
  * mod-plugin-git-username —— 面板渐进披露守卫。
  *
- * 默认只有 地址 + 令牌 + 只读派生行 + 状态 + 保存/测试连接（不新增常驻输入）；
+ * 默认只有 地址 + 令牌 + 只读派生行 + 状态 + 保存（不新增常驻输入；测试连接按钮已删除）；
+ * 401/403 的登录名展开由 doSave 触发（原 doTest 分支已随按钮移除）；
  * 仅 401/403（E_AUTH）才追加「登录名」输入与指定文案；失焦即落 settings.username，
  * 鉴权成功即收起字段。复用 lean 面板同一套有状态 React 桩 + fetch 桩。
  */
@@ -187,11 +188,11 @@ test('C2：组织仓库 401 → 登录名字段出现，文案逐字一致，输
   const { mount, calls, nodes } = await renderSync({
     state: { settings: { repoUrl: GITEE_ORG_URL } },
     routes: {
-      testConnection: () => ({ ok: false, error: { code: 'AUTH_ERROR', message: 'HTTP 401' } }),
-      saveSettings: (body) => ({ ok: true, data: { settings: { repoUrl: GITEE_ORG_URL, username: body.settings.username, hasToken: true }, hasToken: true } }),
+      // 登录名展开改由保存路径的 401 触发（shipped UI 已无测试连接按钮）。
+      saveSettings: (body) => ({ ok: false, error: { code: 'AUTH_ERROR', message: 'HTTP 401' } }),
     },
   })
-  await button(nodesOf(mount.tree), '测试连接').props.onClick()
+  await button(nodesOf(mount.tree), '保存').props.onClick()
   await settle()
   const after = nodesOf(mount.tree)
   assert.equal(dataNode(after, 'sync-login-field').length, 1, '401 后必须出现登录名输入')
@@ -211,11 +212,11 @@ test('C2：组织仓库 401 → 登录名字段出现，文案逐字一致，输
   // 刷新页面（重新挂载）后值仍在：来自 getState 的 settings.username。
   const reloaded = await renderSync({
     state: { settings: { repoUrl: GITEE_ORG_URL, username: 'my-login' } },
-    routes: { testConnection: () => ({ ok: false, error: { code: 'AUTH_ERROR', message: 'HTTP 401' } }) },
+    routes: { saveSettings: () => ({ ok: false, error: { code: 'AUTH_ERROR', message: 'HTTP 401' } }) },
   })
   // 新挂载默认不展开字段，但状态里的值已被记住；再次 401 时应直接带出。
   assert.equal(dataNode(nodesOf(reloaded.mount.tree), 'sync-login-field').length, 0, '新挂载不常驻字段')
-  await button(nodesOf(reloaded.mount.tree), '测试连接').props.onClick()
+  await button(nodesOf(reloaded.mount.tree), '保存').props.onClick()
   await settle()
   const persisted = nodesOf(reloaded.mount.tree).filter((n) => n.type === 'input')[2]
   assert.equal(persisted.props.value, 'my-login', '刷新后登录名值仍在')
@@ -224,10 +225,10 @@ test('C2：组织仓库 401 → 登录名字段出现，文案逐字一致，输
 test('C3：鉴权成功 → 没有额外字段；DOM 里也不出现令牌', async () => {
   const { mount, calls, nodes } = await renderSync({
     routes: {
-      testConnection: (body) => ({ ok: false, error: { code: 'AUTH_ERROR', message: 'HTTP 403' } }),
+      saveSettings: () => ({ ok: false, error: { code: 'AUTH_ERROR', message: 'HTTP 403' } }),
     },
   })
-  await button(nodesOf(mount.tree), '测试连接').props.onClick()
+  await button(nodesOf(mount.tree), '保存').props.onClick()
   await settle()
   assert.equal(dataNode(nodesOf(mount.tree), 'sync-login-field').length, 1)
   // 改成成功后再测一次：新挂载直接成功，字段不得出现。
@@ -239,12 +240,12 @@ test('C3：鉴权成功 → 没有额外字段；DOM 里也不出现令牌', asy
   assert.equal(calls.length >= 2, true)
 })
 
-test('C4：lean 清单守卫复检——两组 / 仅地址令牌两输入 / 保存 + 测试连接两按钮', async () => {
+test('C4：lean 清单守卫复检——两组 / 仅地址令牌两输入 / 同步组只剩保存按钮', async () => {
   const { nodes } = await renderSync()
   assert.deepEqual(nodes.filter((n) => n.type === 'input').map((n) => n.props.type), ['text', 'password'])
   assert.deepEqual(
     nodes.filter((n) => n.type === 'button').map((n) => textOf(n.props.children)),
-    ['保存', '测试连接'],
+    ['保存'],
   )
   assert.equal(dataNode(nodes, 'sync-status').length, 1)
   assert.equal(nodes.filter((n) => n.type === 'select').length, 0, '同步组没有下拉框（方式在远程组）')
