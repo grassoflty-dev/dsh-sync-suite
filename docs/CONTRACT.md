@@ -252,7 +252,10 @@ export function createHttpHandler(service: RpcService, connection?: { requestRej
 `error` 只表示本地读取失败。`conflict` 为远端分叉（ahead>0 且 behind>0）。
 `apply.applied[]`：`fileSha256` 是写后整个 profile patch 的 SHA-256（落盘校验），`blockSha256` 是该 entry 合并后文本的
 SHA-256（条目追踪），两者语义不同、不得混用。
-网络操作只在 `testConnection`/`push`/`preview` 发生，单次 git 网络调用 ≤8s 超时。
+网络操作只在 `testConnection`/`push`/`preview` 发生，单次 git 网络调用有**明确预算**（`mod-plugin-git-timeout-classification`，2026-11-23）：
+读命令（`ls-remote`/`fetch`）8 s、本进程**首次**调用放宽到 20 s（覆盖 askpass 解释器冷启动）、推送 120 s（要上传本地对象）；
+预算数字进 `details.budgetMs` 与错误正文。**「超时」与「网络不可达」是两类 typed 结果**（`reason: 'timeout' | 'unreachable'`），
+各有独立中文文案与下一步，不得互相冒充。
 `saveSettings` 校验：repoUrl（仅 https/ssh/git@，`custom` 平台同样受限）、deviceId `^[a-z0-9][a-z0-9-]{0,31}$`、
 branch 非空；token 空字符串表示保留现有 token，`null` 表示清除。
 所有错误 code 至少包含：`E_VALIDATION`、`E_CONFIRM_REQUIRED`、`E_UNKNOWN_ACTION`、`E_NOT_FOUND`、

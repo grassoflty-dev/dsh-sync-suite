@@ -60,7 +60,7 @@
 | 用户看到 | 一行"识别结果"（`GitHub · octocat/dsh-data · 分支 main`）+ 一张"仓库里已有什么"的卡片（设备数 / chats 数 / 是否有 DSH 配置快照）+ `继续` |
 | 识别规则（本地，零网络） | **platform**：host 是 `github.com` → `github`，`gitee.com` → `gitee`，其它 → `custom`（枚举只有这三值，`packages/dsh-dots/src/engine/types.ts:12`）。**owner**：`repoUrl` 解析出的 `repoPath` 第一段（`repoUrl.ts:36-37` 已去掉 `.git`，`:164-168` 已保证非空）。**默认分支**：见下 |
 | 默认分支的三级推导 | ① 远端 `refs/heads` 里有 `main` → `main`；② 否则有 `master` → `master`；③ 只有一个 head → 用它；④ 空仓库（refs 为空）→ `main`（`docs/DATA-CONTRACT.md:8` 约定唯一远端、main 分支） |
-| 试连 | `lsRemote()`（`engine/git.ts:452-477`）：`git ls-remote --heads <url>`，超时 `NETWORK_TIMEOUT_MS = 8000`（`:55`；外部配置会被夹到该值，`:265-269`）。**只读、不动工作树** |
+| 试连 | `lsRemote()`（`engine/git.ts`，函数名 `lsRemote`）：`git ls-remote --heads <url>`，超时 `NETWORK_TIMEOUT_MS = 8000`（读命令预算；**本进程首次**调用放宽到 `FIRST_NETWORK_TIMEOUT_MS = 20_000` 以覆盖 askpass 解释器冷启动；显式配置会被夹到 8000）。**只读、不动工作树** |
 | 展示现有内容 | `lsRemote` 只给 refs，不给文件列表；要"现有内容"必须 `listTree`（`engine/git.ts:673-679`），而它需要一个 rev → 首次接入要 `ensureWorkTree`（clone）后再 `listTree`。既有先例的顺序就是 `ensureWorkTree → fetch → listTree`（`engine/preview.ts:261-266`），**照抄这个顺序**，全程只读 |
 | 三个数字的口径 | 设备数 = `listTree('devices/')` 里 `devices/<x>/` 去重计数（同 `engine/preview.ts:164-171` 的 `devicesInTree`）；chats 数 = `listTree('chats/')` 里 `chats/<id>/` 的目录数（布局见 `docs/DATA-CONTRACT.md:334-340`）；是否有 DSH 配置快照 = 是否存在 `devices/<任意>/cordis.patch.yml`（`:14`）。顺带显示 `devices/registry.jsonl` 的行数（编号登记表，`:374`） |
 | 失败停在哪 | 停在 Step 2；Step 1 的输入全部保留。文案见 §A.4 |
@@ -124,7 +124,7 @@
 | **401** | 远端说"需要认证"，token 被拒。<br>首行文案：`token 没通过：请重新复制一次，注意不要带空格` | 私有仓库把 token 当密码用；Gitee 还要求"用户名 = 登录名、令牌只作密码"，用户名填昵称也会 401（`engine/git.ts:223-230`）；token 过期 / 被撤销 / 复制时少字符同样 401（`:211-215`） | 重新生成一个对该仓库有读写权限的 token（GitHub: `repo`；Gitee: `projects`），粘进 token 框；Gitee 先确认高级里的"用户名"是登录名 |
 | **403** | 认证过了，但**没有这个仓库**的权限。<br>首行文案：`这个 token 能登录，但没有这个仓库的写权限` | token 的 scope 不含该仓库（只给了公开范围）、你只是只读协作者、组织仓库开了 SSO 未授权；平台限流也会回 403/429（`engine/git.ts:212` 把 `403 Forbidden` 一并归到 `E_AUTH`） | 换一个有写权限的 token；组织仓库要在 token 上授权该组织；顺手确认 `main` 没有被分支保护锁住 |
 | **404** | 仓库"不存在"。<br>首行文案：`没找到这个仓库：核对一下用户名和仓库名` | 私有仓库在**无凭据时故意回 404**（`repoUrl.ts:202-203` 已写明这一点，不要重新发明解释）；owner/repo 拼错、仓库已改名或删除同样是 404 | 用浏览器登录后打开同一地址确认存在；核对大小写与是否多写了 `.git`；确认 token 对它有读权限（否则仍会 404） |
-| **超时** | 8 秒内没拿到任何响应。<br>首行文案：`连不上仓库地址：检查网络、代理或防火墙` | 超时上限就是 `NETWORK_TIMEOUT_MS = 8000`（`engine/git.ts:55`，外部配置会被夹到该值，`:265-269`）；常见原因：DNS 解析失败、公司代理没配、防火墙拦 443、IPv6-only 网络访问 v4 域名（`repoUrl.ts:205-207` 走"没拿到响应"这一支） | 用浏览器打开仓库地址确认能进；配 `HTTPS_PROXY` 后重试；换网络（手机热点）重试；连续 3 次都超时再考虑改地址 |
+| **超时** | 预算内没拿到任何响应。<br>首行文案：`连不上仓库地址：检查网络、代理或防火墙` | 预算不是单一数字（`mod-plugin-git-timeout-classification`，2026-11-23）：读命令 `NETWORK_TIMEOUT_MS = 8000`、**本进程首次**调用 `FIRST_NETWORK_TIMEOUT_MS = 20_000`（覆盖 askpass 解释器冷启动）、推送 `PUSH_TIMEOUT_MS = 120_000`（上传本地对象）；实际用掉的数字进错误正文与 `details.budgetMs`。**「超时」与「网络不可达」是两类不同结果**，只有出现 DNS/连接失败的正面证据才判后者。常见原因：DNS 解析失败、公司代理没配、防火墙拦 443、IPv6-only 网络访问 v4 域名（`repoUrl.ts` 走"没拿到响应"这一支） | 用浏览器打开仓库地址确认能进；配 `HTTPS_PROXY` 后重试；换网络（手机热点）重试；连续 3 次都超时再考虑改地址 |
 | **非空仓库无写权限** | 读得到（`lsRemote` 成功）、第一次 push 被拒。<br>首行文案：`仓库能读，但推不上去：分支受保护，或 token 只是只读` | 分支保护禁止直推 `main`；token 是 read-only；仓库是别人的、你只是协作者。本插件**永不 force push**、也不会替你开 PR（`engine/git.ts:643-655`），所以推不上去就是推不上去 | 在仓库设置里放开 `main` 的保护，或换一个自己的空仓库；确认 token 是 read-write。判定顺序：先排除"非快进"（`isNonFastForward`，`:207-209`），剩下的鉴权类才归到这一行（`:211-215`） |
 
 补充：非快进（分叉）不在本表，因为它的处置是"先 rebase 一次再试"（`engine/git.ts:643-652`），
