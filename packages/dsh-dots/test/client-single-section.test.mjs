@@ -211,6 +211,9 @@ test('运行时：单页里两组都在，dots-remote 只是页内分组 id', as
   assert.ok(summaries.includes('配置同步'), '缺少「配置同步」分组标题')
   assert.ok(summaries.includes('远程控制'), '缺少「远程控制」分组标题')
   assert.equal(sectionIds.filter(Boolean).length, 0, '不得出现第二个 section 的 UI 入口')
-  assert.ok(section.component.SettingsPanel, '同步面板必须仍可单独挂载')
-  assert.ok(section.component.RemotePanel, '远程面板必须仍可单独挂载')
+  // retarget（mod-plugin-dormant-panel-removal）：旧 dormant 接缝已删除，改钉 shipped 接缝存在 + 旧接缝不存在。
+  assert.equal(section.component.SettingsPanel, undefined, 'dormant SettingsPanel 接缝必须已删除')
+  assert.equal(section.component.RemotePanel, undefined, 'dormant RemotePanel 接缝必须已删除')
+  assert.equal(typeof section.component.LeanSyncGroup, 'function', '同步组接缝必须仍可单独挂载')
+  assert.equal(typeof section.component.LeanRemoteGroup, 'function', '远程组接缝必须仍可单独挂载')
 })

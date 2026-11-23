@@ -23,8 +23,16 @@ test('client registers the settings section and locale module', () => {
 
 test('client talks to the documented RPC endpoint and actions', () => {
   assert.match(source, /\/dsh-dots\/rpc/)
-  for (const action of ['getState', 'saveSettings', 'testConnection', 'push', 'preview', 'apply', 'listSnapshots', 'rollback']) {
-    assert.ok(source.includes(action), `client.js 未使用 RPC action: ${action}`)
+  // retarget（mod-plugin-dormant-panel-removal）：原清单含 dormant 旧面板独占的
+  // testConnection / push / preview / apply / listSnapshots / rollback；旧面板删除后
+  // shipped 客户端只调用下面这些 action，逐项钉住调用点而不是裸字符串。
+  for (const action of ['getState', 'saveSettings', 'remoteGetState', 'pairingProvision',
+    'pairingTransports', 'pairingConnections', 'pairingShow', 'pairingRotateToken',
+    'remoteProbe', 'remoteStart', 'remoteStop']) {
+    assert.ok(source.includes("rpcCall('" + action + "'"), `client.js 未调用 RPC action: ${action}`)
+  }
+  for (const dead of ['testConnection', 'push', 'preview', 'apply', 'listSnapshots', 'rollback']) {
+    assert.equal(source.includes("rpcCall('" + dead + "'"), false, `dormant RPC 调用点不得复活: ${dead}`)
   }
 })
 

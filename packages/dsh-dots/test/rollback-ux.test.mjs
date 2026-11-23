@@ -5,8 +5,8 @@
  *   1. RPC 只读性：previewDiff / rollbackPreview 不建快照、不写 profile、不写 state.json；
  *   2. fail-closed：provider 目录缺失 / 快照不存在 / manifest sha 不匹配 → `{ok:false}` + 中文原因，
  *      且 `rollback` 的 confirm 门禁保持原样（回归）；
- *   3. 客户端渲染（沿用 test/client-render.test.mjs 的桩思路）：新按钮、空差异文案、
- *      hunk 展开、回滚两步状态机与失败停留。
+ *   3. 客户端渲染回归已随 mod-plugin-dormant-panel-removal 删除（它只挂载 dormant SettingsPanel）；
+ *      本文件保留的 RPC 只读性 / fail-closed / confirm 门禁断言一字未动。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -457,8 +457,8 @@ function registerPanel(mod) {
   }
   mod.apply(ctx)
   assert.ok(Panel, '必须注册 id=dots 的 settings.section 组件')
-  // 单页组件把原同步面板暴露在 .SettingsPanel 上；本文件的交互回归仍只挂同步面板。
-  return Panel.SettingsPanel || Panel
+  // 旧 dormant 面板已删除：只返回注册的 shipped DotsPanel。
+  return Panel
 }
 
 function walk(node, visit) {
@@ -604,104 +604,6 @@ const ROLLBACK_PLAN = {
   willRestore: ['C:\\tmp\\profile\\cordis.patch.yml'],
 }
 
-test('客户端：新入口存在、空差异文案、hunk 展开与回滚两步确认', async (t) => {
-  const mod = await loadClient()
-  const Panel = registerPanel(mod)
-  const routes = {
-    getState: () => ({ ok: true, data: STATE_DATA }),
-    listSnapshots: () => ({ ok: true, data: { snapshots: STATE_DATA.snapshots } }),
-    previewDiff: () => ({ ok: true, data: EMPTY_DIFF }),
-    rollbackPreview: () => ({ ok: true, data: ROLLBACK_PLAN }),
-    rollback: () => ({ ok: true, data: { restored: ['C:\\tmp\\profile\\cordis.patch.yml'], verified: true } }),
-  }
-  const calls = makeFetch(routes)
-  const mount = mountPanel(Panel)
-  activeMount = mount
-  mount.render()
-  await tick()
-
-  // 新入口：两个按钮都在同步 section 里。
-  const labels = buttonsOf(mount.tree).map((item) => item.label)
-  assert.ok(labels.includes('T:actions.diff'), `缺少「查看差异」按钮：${labels.join('|')}`)
-  assert.ok(labels.includes('T:actions.rollbackLatest'), `缺少「回滚到上次快照」按钮：${labels.join('|')}`)
-  assert.ok(labels.includes('T:rollback.check') === false, '第 1 步之前不应出现「查看这次回滚会改什么」')
-  // 空态文案（不是空白区域）。
-  assert.ok(treeText(mount.tree).includes('T:diff.emptyHint'), '差异卡片必须有引导文案')
-  assert.ok(treeText(mount.tree).includes('T:rollback.hint'), '回滚卡片必须说明两步确认')
-
-  // 空差异：结论是「没有差异」。
-  click(mount.tree, 'T:actions.diff')
-  await tick()
-  assert.ok(treeText(mount.tree).includes('T:diff.empty'), '空差异必须显示「没有差异」而不是空白')
-  assert.equal(calls.filter((call) => call.action === 'previewDiff').length, 1)
-
-  // 有差异：分组 + hunk 展开（truncated 时提示只显示前 N 行）。
-  routes.previewDiff = () => ({ ok: true, data: CHANGED_DIFF })
-  click(mount.tree, 'T:actions.diff')
-  await tick()
-  const changedText = treeText(mount.tree)
-  assert.ok(changedText.includes('T:diff.summary'), '必须有 summarize 结论')
-  assert.ok(changedText.includes('T:diff.source.local'), '本机差异要标注数据来源')
-  assert.ok(changedText.includes('cordis.patch.yml'), '必须列出变更文件路径')
-  assert.ok(changedText.includes('providers.json') && changedText.includes('mcp.json'), '新增/删除文件都要列出')
-  assert.ok(changedText.includes('T:diff.group.added'), '必须按 kind 分组（新增）')
-  assert.ok(changedText.includes('T:diff.group.deleted'), '必须按 kind 分组（删除）')
-  assert.ok(changedText.includes('T:diff.deletedNote'), '「删除」需要中性说明（回滚不删文件）')
-  const beforeExpand = treeText(mount.tree)
-  assert.ok(!beforeExpand.includes('@@ -1,3 +1,3 @@'), '未展开时不应渲染 hunk 正文')
-
-  click(mount.tree, 'T:diff.expand')
-  await tick()
-  const expanded = treeText(mount.tree)
-  assert.ok(expanded.includes('@@ -1,3 +1,3 @@'), '展开后必须显示 hunk header')
-  assert.ok(expanded.includes('-  value: 2') && expanded.includes('+  value: 22'), 'hunk 正文必须包含增删行')
-  assert.ok(expanded.includes('T:diff.truncated'), 'truncated 的 hunk 必须提示只显示前 N 行')
-  click(mount.tree, 'T:diff.collapse')
-  await tick()
-  assert.ok(!treeText(mount.tree).includes('@@ -1,3 +1,3 @@'), '收起后 hunk 正文应消失')
-
-  // 回滚第 1 步：只列最近一份快照，等待用户点「查看这次回滚会改什么」。
-  click(mount.tree, 'T:actions.rollbackLatest')
-  await tick()
-  const step1 = treeText(mount.tree)
-  assert.ok(step1.includes('T:rollback.step1'), '必须先进入第 1 步')
-  assert.ok(step1.includes(SNAPSHOT.id), '第 1 步要显示最近一份快照 id')
-  assert.ok(step1.includes('T:rollback.check'), '第 1 步要提供预览入口')
-  assert.equal(calls.filter((call) => call.action === 'rollbackPreview').length, 0, '未点预览前不得请求回滚预览')
-  assert.equal(calls.filter((call) => call.action === 'rollback').length, 0)
-
-  // 预览失败：停在当前步骤 + ErrorBox(code+message)，绝不发 rollback。
-  routes.rollbackPreview = () => ({ ok: false, error: { code: 'E_SHA_MISMATCH', message: '快照校验失败' } })
-  click(mount.tree, 'T:rollback.check')
-  await tick()
-  const failedText = treeText(mount.tree)
-  assert.ok(failedText.includes('E_SHA_MISMATCH'), '失败必须显示错误码')
-  assert.ok(failedText.includes('快照校验失败'), '失败必须显示错误消息')
-  assert.ok(failedText.includes('T:rollback.step1'), '失败后必须停在当前步骤')
-  assert.ok(!failedText.includes('T:rollback.confirm'), '预览失败不得出现确认按钮')
-  assert.equal(calls.filter((call) => call.action === 'rollback').length, 0, '预览失败绝不写盘（不发 rollback）')
-
-  // 预览成功 → 第 2 步；确认前不发 rollback。
-  routes.rollbackPreview = () => ({ ok: true, data: ROLLBACK_PLAN })
-  click(mount.tree, 'T:rollback.check')
-  await tick()
-  const step2 = treeText(mount.tree)
-  assert.ok(step2.includes('T:rollback.step2'), '预览成功后进入第 2 步')
-  assert.ok(step2.includes('C:\\tmp\\profile\\cordis.patch.yml'), '第 2 步要展示将写入的文件')
-  assert.ok(step2.includes('T:rollback.summary'), '第 2 步要展示文件级 diff 结论')
-  assert.ok(step2.includes('T:rollback.confirm'), '第 2 步必须有「确认回滚（不可撤销）」')
-  assert.equal(calls.filter((call) => call.action === 'rollback').length, 0, '确认之前绝不调用 rollback')
-
-  click(mount.tree, 'T:rollback.confirm')
-  await tick()
-  const rollbackCalls = calls.filter((call) => call.action === 'rollback')
-  assert.equal(rollbackCalls.length, 1, '确认后只发一次 rollback')
-  assert.equal(rollbackCalls[0].confirm, true, 'confirm 必须显式为 true')
-  assert.equal(rollbackCalls[0].snapshotId, SNAPSHOT.id)
-  assert.ok(treeText(mount.tree).includes('T:notice.rolledBack'), '成功后要有 notice')
-  assert.equal(calls.filter((call) => call.action === 'listSnapshots').length >= 1, true, '成功后要刷新快照列表')
-  assert.ok(treeText(mount.tree).includes('T:rollback.hint'), '成功后回到空态（可再次发起）')
-})
 
 test('rollbackPreview（M4）：文本文件给出内容级 hunk，且与 files 统计同方向（当前 → 快照）', async (t) => {
   const { profileDir, patchFile, service } = await setup(t, { patch: PATCH_V2 })
@@ -756,82 +658,4 @@ test('rollbackPreview（M4）：hunk 预算不足（正文 > 200 行）时 trunc
   assert.deepEqual(readFileSync(patchFile), beforeBytes, '只读：不得写 profile')
 })
 
-test('客户端（M4 + M1）：回滚第 2 步可展开内容差异，并按顶层 truncated 提示"还有更多"', async (t) => {
-  const mod = await loadClient()
-  const Panel = registerPanel(mod)
-  const plan = Object.assign({}, ROLLBACK_PLAN, {
-    hunks: [
-      {
-        path: 'cordis.patch.yml',
-        header: '@@ -1,4 +1,4 @@',
-        lines: [' # profile patch', '-    value: 22', '+    value: 2', ' # end'],
-        truncated: false,
-      },
-      { path: 'cordis.patch.yml', header: '@@ -20,2 +20,2 @@', lines: [' ctx', '-new', '+old'], truncated: true },
-    ],
-    truncated: true,
-  })
-  const routes = {
-    getState: () => ({ ok: true, data: STATE_DATA }),
-    listSnapshots: () => ({ ok: true, data: { snapshots: STATE_DATA.snapshots } }),
-    rollbackPreview: () => ({ ok: true, data: plan }),
-    rollback: () => ({ ok: true, data: { restored: ['C:\\tmp\\profile\\cordis.patch.yml'], verified: true } }),
-  }
-  const calls = makeFetch(routes)
-  const mount = mountPanel(Panel)
-  activeMount = mount
-  mount.render()
-  await tick()
 
-  click(mount.tree, 'T:actions.rollbackLatest')
-  await tick()
-  click(mount.tree, 'T:rollback.check')
-  await tick()
-
-  const step2 = treeText(mount.tree)
-  assert.ok(step2.includes('T:rollback.step2'), '预览成功后进入第 2 步')
-  assert.ok(step2.includes('T:rollback.summary'), '第 2 步仍要给文件级结论')
-  assert.ok(step2.includes('T:diff.expand'), '第 2 步必须能展开 hunk（M4）')
-  assert.ok(!step2.includes('@@ -1,4 +1,4 @@'), '默认收起，不渲染 hunk 正文')
-  assert.ok(step2.includes('T:diff.truncated'), '顶层 truncated 必须显示提示（M1）')
-  assert.match(step2, /more remain|还有更多/, '提示必须说明"还有更多、请缩小区间或直接看文件"')
-
-  click(mount.tree, 'T:diff.expand')
-  await tick()
-  const expanded = treeText(mount.tree)
-  assert.ok(expanded.includes('@@ -1,4 +1,4 @@'), '展开后必须显示 hunk header')
-  assert.ok(
-    expanded.includes('-    value: 22') && expanded.includes('+    value: 2'),
-    'hunk 正文：- 当前内容 / + 快照内容（与统计同方向）',
-  )
-  assert.ok(expanded.includes('@@ -20,2 +20,2 @@'), '第二个 hunk 也要渲染')
-  click(mount.tree, 'T:diff.collapse')
-  await tick()
-  assert.ok(!treeText(mount.tree).includes('@@ -1,4 +1,4 @@'), '收起后正文消失')
-
-  assert.equal(calls.filter((call) => call.action === 'rollback').length, 0, '只读：确认前绝不调用 rollback')
-})
-
-test('客户端：没有快照时「回滚到上次快照」给出明确提示，不发任何写请求', async (t) => {
-  const mod = await loadClient()
-  const Panel = registerPanel(mod)
-  const routes = {
-    getState: () => ({ ok: true, data: Object.assign({}, STATE_DATA, { snapshots: [] }) }),
-    listSnapshots: () => ({ ok: true, data: { snapshots: [] } }),
-    rollbackPreview: () => ({ ok: true, data: ROLLBACK_PLAN }),
-    rollback: () => ({ ok: true, data: { restored: [], verified: true } }),
-  }
-  const calls = makeFetch(routes)
-  const mount = mountPanel(Panel)
-  activeMount = mount
-  mount.render()
-  await tick()
-
-  const button = buttonsOf(mount.tree).find((item) => item.label === 'T:actions.rollbackLatest')
-  assert.ok(button !== undefined)
-  // 没有快照时按钮是 disabled（禁用态不绑 onClick）。
-  assert.equal(button.props.disabled, true, '没有快照时按钮必须禁用')
-  assert.equal(button.props.onClick, undefined)
-  assert.equal(calls.filter((call) => call.action === 'rollback').length, 0)
-  assert.equal(calls.filter((call) => call.action === 'rollbackPreview').length, 0)
-})

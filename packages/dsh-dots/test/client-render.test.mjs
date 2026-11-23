@@ -11,7 +11,6 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { defaultSettings } from '../dist/engine/settings.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const pkgDir = path.resolve(here, '..')
@@ -119,7 +118,7 @@ function renderPanel(mod, which) {
   }
   mod.apply(ctx)
   assert.ok(Panel, '必须注册 settings.section 组件')
-  // 单页组件通过 .SettingsPanel / .RemotePanel 暴露原面板，供既有面板级回归单独挂载。
+  // 只挂载注册的 shipped DotsPanel（旧 dormant 面板已删除）。
   const target = which && Panel[which] ? Panel[which] : Panel
   return { tree: target({ t: (key) => 'T:' + key, close: function () {} }), registered }
 }
@@ -194,93 +193,8 @@ test('Card/Field 不得再用 arguments 取 children（React 不会这样传）'
   assert.match(source, /React\.Children\.toArray\(/)
 })
 
-test('设置面板真实渲染出仓库表单、同步范围与操作按钮', async () => {
-  const { mod } = await loadClient()
-  const { tree, registered } = renderPanel(mod, 'SettingsPanel')
-  // 全插件只有一个 section；远程控制是同一页内的折叠分组，不再是第二个 section。
-  assert.equal(registered.length, 1, '只允许一个 settings.section')
-  const sync = registered[0]
-  assert.equal(sync.id, 'dots', '唯一 section 的 id 必须仍是 dots')
-  assert.equal(sync.name, 'settings.section')
-  assert.equal(sync.order, 70)
-  assert.equal(sync.locale, 'dots')
-  assert.equal(typeof sync.label, 'function')
-  assert.equal(sync.label(), 'DSH-dots', '单一条目的名称必须是 DSH-dots')
 
-  const { counts, labels, buttonLabels, inputs, selects } = collect(tree)
-
-  // Card/Field 的子节点必须真的渲染出来，而不是只剩标题。
-  assert.equal(counts.select, 2, '平台与认证方式两个下拉框必须渲染')
-  assert.equal(counts.input, 9, '5 个文本/密码输入（含用户名） + 4 个 scope 勾选框')
-  assert.equal(inputs.filter((p) => p.type === 'checkbox').length, 4, '同步范围 4 个勾选框')
-  assert.equal(inputs.filter((p) => p.type === 'password').length, 1, 'Token 必须是 password')
-  assert.ok(counts.button >= 8, `操作按钮至少 8 个，实际 ${counts.button}`)
-
-  for (const key of [
-    'repo.platform',
-    'repo.auth',
-    'repo.username',
-    'repo.url',
-    'repo.device',
-    'repo.branch',
-    'repo.token',
-    'scope.config',
-    'scope.providers',
-    'scope.plugins',
-    'scope.mcp'
-  ]) {
-    assert.ok(
-      labels.some((label) => label.includes(`T:${key}`)),
-      `缺少字段标签 ${key}（labels: ${labels.join('|')}）`
-    )
-  }
-  for (const key of [
-    'repo.save',
-    'actions.test',
-    'actions.push',
-    'actions.preview',
-    'actions.apply',
-    'actions.refresh'
-  ]) {
-    assert.ok(
-      buttonLabels.some((label) => label.includes(`T:${key}`)),
-      `缺少按钮 ${key}（buttons: ${buttonLabels.join('|')}）`
-    )
-  }
-
-  // 下拉选项来自 host 枚举：平台 3 项、认证方式 2 项。
-  const optionCounts = selects
-    .map((select) => {
-      const kids = Array.isArray(select.children) ? select.children : [select.children]
-      return kids.filter((kid) => kid && kid.type === 'option').length
-    })
-    .sort()
-  assert.deepEqual(optionCounts, [2, 3], '认证方式 2 项、平台 3 项')
-})
-
-test('卡片字段默认值与 host settings 定义一致（平台/认证/分支/范围）', async () => {
-  const host = defaultSettings()
-  const { mod } = await loadClient()
-  const { tree } = renderPanel(mod, 'SettingsPanel')
-  const { inputs, selects } = collect(tree)
-
-  const selected = selects.map((select) => select.value).sort()
-  assert.deepEqual(selected, [host.authMode, host.platform].sort(), '平台/认证默认值必须与 host 一致')
-
-  const textValues = inputs.filter((input) => input.type !== 'checkbox').map((input) => input.value)
-  assert.ok(textValues.includes(host.repoUrl), 'repoUrl 默认值必须与 host 一致（空串）')
-  assert.ok(textValues.includes(host.branch), 'branch 默认值必须与 host 一致（main）')
-
-  const checked = inputs.filter((input) => input.type === 'checkbox').map((input) => input.checked)
-  assert.deepEqual(checked, [true, true, true, true], 'scope 四项默认全选')
-  assert.deepEqual(
-    Object.keys(host.scope).sort(),
-    ['config', 'mcp', 'plugins', 'providers'],
-    'host scope 字段必须与卡片四个勾选框一一对应'
-  )
-})
-
-test('merged panel：同步组精简为地址/令牌/状态/两动作（旧断言 retarget，旧能力 UI-dormant）', async () => {
+test('merged panel：同步组精简为地址/令牌/状态/一个动作（旧断言 retarget，旧能力 UI-dormant）', async () => {
   const { mod } = await loadClient()
   const { tree, registered } = renderPanel(mod)
   assert.equal(registered.length, 1, '只允许一个 settings.section')

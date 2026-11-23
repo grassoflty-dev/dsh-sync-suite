@@ -33,19 +33,22 @@
  * | App    | Home.ets:304-370                       | netCapabilitiesChange → runNetworkCycle()| implicit (network regain)          | KEEP (named trigger)| Silent automatic trigger (2 s debounce), no UI control. |
  * | App    | Home.ets:154 / SchedulePane.ets:356    | globalRefreshCoordinator.configure/runOnce + '[sync-trigger] pull' | implicit | KEEP (named trigger) | Single in-flight gate shared by auto + both gestures. |
  * | App    | recordWriter.ets:116-157               | triggerSync() → runConfiguredCycle()      | implicit (after write)             | KEEP (named trigger)| Silent write-time auto-sync through the one coordinator. |
- * | App    | Index.ets:1652 + :1656                 | Text('重试同步') + onClick → retrySync()  | BY REGISTRATION (pages/Index in main_pages.json:3; EntryAbility loads Home, no in-app navigation) | **REMOVE candidate — FINDING, NOT FIXED** | Violates the standing rule. Already positively pinned by apps/.../tools/test/syncWiring.test.mjs:565 and :676, so removal requires retargeting that App-owned guard. App file set is NOT owned by this module; reported only. |
+ * | App    | Index.ets (former :1652 + :1656)        | Text('重试同步') + onClick → retrySync()  | NO — control and its last-caller method deleted by `mod-app-retry-removal` | **CLOSED by mod-app-retry-removal** | Violated the standing rule while `pages/Index` was registered as a fallback route (main_pages.json:3; EntryAbility loads Home, no in-app navigation). Both the control and `retrySync()` (last caller was that control) are gone; the App-owned positive pins at syncWiring.test.mjs:565/:676 were retargeted to absence guards, so a re-added or renamed control now fails. Index is now in APP_REACHABLE_SETTINGS_FILES and actively scanned. |
  * | App    | SettingsHost.ets:965 / :1007 / :1144   | Button('保存'), GroupAnchorChip('同步'), SyncMoreSheet | NO (zero importers; component is unmounted) | KEEP (dormant) | Legacy implementation host, provably unreachable; its sync methods are dead. Deletion owner: the App settings-IA module family, not this audit. |
  * | App    | AiSection.ets:211                      | Button('测试') / '测试中…'                | YES                                | KEEP (out of scope) | AI-provider connectivity test, unrelated to the sync rule. |
  * | Plugin | src/client.js:4440-4445                | Btn tr('lean.actions.save') → doSave() → saveSettings | YES (shipped DotsPanel) | KEEP | The one allowed plugin user action; config save only. |
  * | Plugin | src/client.js:4757-4780                | 5 pairing controls: 显示二维码 / 复制配对串 / 重新生成 / 自检 / 开始或停止接受连接 | YES | KEEP (out of sync rule) | Pairing / QR / listener reachability only; the standing rule explicitly exempts pairing/QR. `自检` is remoteProbe (pairing reachability), not sync testConnection. |
  * | Plugin | src/client.js:4436                     | data-lean='sync-status' status div       | YES                                | KEEP                | Read-only status text; no control. |
- * | Plugin | src/client.js:2711/2716/2721/2727/2730/2736/2745, 3008/3163/3178 | dormant legacy SettingsPanel buttons: 测试连接(doTest) / 推送(doPush) / 拉取预览(doPreview) / 查看差异(doDiff) / 回滚到上次快照 / 执行覆盖(doApply) / 刷新状态 / rollbackPreview / rollback | NO (SettingsPanel never mounted; only a test seam at DotsPanel.SettingsPanel) | KEEP (dormant) / REMOVE-candidate | Not registered by the sole `ctx.slots.register(..., DotsPanel)`. Deletion owner: the lean-panel plugin module family (mod-plugin-lean-panel / mod-plugin-sync-probe-removal follow-up). Internal shapes deliberately NOT asserted here. |
+ * | Plugin | (removed) dormant legacy SettingsPanel/RemotePanel buttons: 测试连接(doTest) / 推送(doPush) / 拉取预览(doPreview) / 查看差异(doDiff) / 回滚到上次快照 / 执行覆盖(doApply) / 刷新状态 / rollbackPreview / rollback | NO | REMOVED by `mod-plugin-dormant-panel-removal` | Classes, helpers, seams and dormant-only i18n keys were deleted from `src/client.js` + `dist/client.js` + `locale/{zh,en}.json`; PLUGIN-4 still pins the sole registration and absence in the shipped body. |
  * | Plugin | src/rpc.ts:1240-1255 (+ impls :478/:498/:554/:598/:632/:741) | RPC-only actions testConnection / push / preview / apply / rollback / listSnapshots / rollbackPreview | server-side only; no shipped control | KEEP (dormant surface) | mod-plugin-sync-probe-removal decided RPC stays internal/dormant because tests and legacy sites call it directly; guard proves no shipped UI reaches it. |
- * | Plugin | locale/zh.json:52/67/87                 | legacy strings 未探测（点击测试连接）/ actions.test / error.retry | NO (shipped tree uses only lean.* keys) | KEEP (dormant copy) | Keep for the dormant panel; guard asserts no shipped node resolves them. |
+ * | Plugin | (removed) locale legacy strings         | 未探测（点击测试连接）/ actions.test / error.retry / 246 dormant-only keys | NO | REMOVED by `mod-plugin-dormant-panel-removal` | 246 dormant-only keys deleted from both locale files and the src dictionaries; the BANNED_I18N_KEYS list below is retained as a revival guard. |
  *
- * FINDING SUMMARY: the only reachable-rule violation found is the App fallback page
- * `pages/Index.ets:1652`. It is reported, not fixed (App files are out of this module's
- * scope, and an existing App guard pins the control as an accepted exception).
+ * FINDING SUMMARY: the only reachable-rule violation found was the App fallback page
+ * `pages/Index.ets` manual retry control. It is CLOSED by `mod-app-retry-removal`: the
+ * control and its `retrySync()` method were deleted from that page, the App-owned pins
+ * (`syncWiring.test.mjs:565` / `:676-679`, `fixSyncRetry.test.mjs:127`) were retargeted
+ * from "button exists" to absence guards, and `pages/Index.ets` joined the reachable
+ * file list below so a re-added control is caught by APP-2 / APP-3 / APP-7.
  *
  * Scope discipline: tests only. No src/, dist/, App, docs/**, AppScope/** or device edits.
  * Source shape is proven; rendered pixels / GUI / device gestures are `unverified`.
@@ -67,6 +70,9 @@ const read = (rel) => readFileSync(path.join(appEts, rel), 'utf8')
 /* THE ONE ALLOWED-CONTROL LIST PER SIDE — the only place to add a control.    */
 /* ========================================================================== */
 const APP_ALLOWED = [
+  // mod-app-retry-removal: `pages/Index.ets` (fallback schedule route) contributes ZERO
+  // allowed controls now — it is scanned by APP-2/APP-3/APP-7 but is intentionally absent
+  // from this whitelist. Adding any sync/retry/test/status control there fails the audit.
   { file: 'pages/SettingsSync.ets', label: '保存', kind: 'Button → saveSettings() (config save; the only user sync-surface action)' },
   { file: 'components/settings/SyncSection.ets', label: '更多', kind: 'ActionButton → onOpenSyncMore() (read-only help sheet)' },
   { file: 'components/settings/SyncSection.ets', label: '改用 HTTPS 令牌', kind: 'ActionButton → onSwitchToHttpsToken() (auth toggle, conditional)' },
@@ -97,8 +103,11 @@ const APP_TRIGGERS = [
   { file: 'services/recordWriter.ets', token: "void globalRefreshCoordinator.runOnce(overrides, 'save')", meaning: 'write-time cycle through the one in-flight gate' }
 ]
 
-/** Reachable settings/pane source files (SettingsHost excluded: zero importers, dormant). */
+/** Reachable settings/pane/schedule-surface source files (SettingsHost excluded: zero importers, dormant). */
 const APP_REACHABLE_SETTINGS_FILES = [
+  // mod-app-retry-removal: the fallback schedule route is now actively scanned; it used
+  // to be excluded because its manual retry control was recorded as an accepted finding.
+  'pages/Index.ets',
   'pages/Settings.ets',
   'pages/SettingsSync.ets',
   'pages/SettingsExportImport.ets',
@@ -126,7 +135,7 @@ const BANNED_HANDLER_CALLS = [
 const BANNED_ACTIONS = [
   'push', 'testConnection', 'preview', 'apply', 'rollback', 'listSnapshots', 'rollbackPreview'
 ]
-/** Banned plugin i18n keys — kept in locale for the dormant panel, never resolved in shipped UI. */
+/** Banned plugin i18n keys — removed from locale with the dormant panel; kept here as a revival guard. */
 const BANNED_I18N_KEYS = [
   'lean.actions.test', 'actions.test', 'actions.push', 'actions.preview',
   'actions.apply', 'actions.rollbackLatest', 'actions.refresh', 'error.retry', 'status.unprobed'
@@ -589,6 +598,17 @@ test('APP-6: named automatic / gesture triggers are still present (silence must 
   }
 })
 
+/** mod-app-retry-removal: the former open finding on the fallback route is now closed. */
+test('APP-7: fallback pages/Index has no manual retry control and no retrySync method', () => {
+  const raw = read('pages/Index.ets')
+  const code = stripComments(raw)
+  assert.ok(!raw.includes('重试同步'), 'fallback Index 不得残留「重试同步」字面量')
+  assert.doesNotMatch(code, /private async retrySync\(\)/, 'fallback Index 的 retrySync 已随最后调用点删除')
+  assert.doesNotMatch(code, /this\.retrySync\(\)/, 'fallback Index 不得有任何 UI 调用点')
+  const row = sliceRegion(code, 'SyncStatusRow() {', '\n  }')
+  assert.doesNotMatch(row, /\.onClick\s*\(|Button\s*\(|ActionButton\s*\(/, 'fallback 状态行必须纯只读')
+})
+
 /* ========================================================================== */
 /* PLUGIN ASSERTIONS                                                           */
 /* ========================================================================== */
@@ -658,6 +678,7 @@ test('PLUGIN-4: dormant legacy SettingsPanel is not registered (its controls are
   const registerHits = allSrc.filter((file) => /\bctx\.slots\.register\s*\(/.test(readFileSync(file, 'utf8')))
   assert.deepEqual(registerHits, [clientSrcPath], '全 src 树只允许 client.js 一处 settings.section 注册')
   // NOTE: dormant internals (doTest/push/preview/apply/rollback buttons, zh.actions.* keys)
-  // are deliberately NOT asserted here. Their deletion belongs to the lean-panel plugin
-  // module family; this guard only proves no shipped registration can reach them.
+  // were deleted by mod-plugin-dormant-panel-removal. This guard still proves no shipped
+  // registration can reach them; their absence is pinned by lean-panel-guard G9 and
+  // client-single-section.test.mjs (seams) + locale.test.mjs (key set).
 })

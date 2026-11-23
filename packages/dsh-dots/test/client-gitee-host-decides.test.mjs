@@ -177,12 +177,14 @@ async function renderComponent(which, repoUrl, routes = {}, username = '') {
 const click = async (tree, label) => { await button(tree, label).props.onClick(); await settle() }
 
 test('G1：Gitee 空登录名 + 可推断 owner ⇒ saveSettings 被调用，客户端不再自造 E_VALIDATION', async () => {
-  const { mount, calls } = await renderComponent('SettingsPanel', DERIVABLE_URL)
-  await click(mount.tree, zh['repo.save'])
+  // retarget（mod-plugin-dormant-panel-removal）：旧 SettingsPanel 已删，改为挂载 shipped LeanSyncGroup，
+  // 断言同一条策略——登录名只由宿主裁决，客户端不得预填/预检。
+  const { mount, calls } = await renderComponent('LeanSyncGroup', DERIVABLE_URL)
+  await click(mount.tree, zh['lean.actions.save'])
   const saved = calls.filter((c) => c.action === 'saveSettings')
   assert.equal(saved.length, 1, '空登录名也必须调用 saveSettings，让宿主推断')
-  assert.equal(saved[0].settings.username, '', '不得在客户端替用户猜一个登录名')
-  assert.equal(textOf(mount.tree).includes(zh['error.giteeUsername']), false, '客户端不得再报旧的预检文案')
+  assert.equal(saved[0].settings.username, undefined, '客户端不得替用户猜一个登录名（请求不带 username）')
+  assert.equal(textOf(mount.tree).includes('Gitee 需要填写用户名（Gitee 登录名）。私人令牌只作密码，不能代替用户名。'), false, '客户端不得再报旧的预检文案')
 })
 
 test('G2：源码守卫——不存在 username.trim() 预检，也没有 tr(error.giteeUsername) 调用', () => {
@@ -192,13 +194,14 @@ test('G2：源码守卫——不存在 username.trim() 预检，也没有 tr(err
 })
 
 test('G3：不可推断 owner ⇒ 显示宿主返回的 typed 错误，而不是客户端预检文案', async () => {
-  const { mount, calls } = await renderComponent('SettingsPanel', NO_OWNER_URL, {
+  // retarget（mod-plugin-dormant-panel-removal）：同上，改挂 shipped LeanSyncGroup。
+  const { mount, calls } = await renderComponent('LeanSyncGroup', NO_OWNER_URL, {
     saveSettings: () => ({ ok: false, error: { code: 'E_VALIDATION', message: HOST_USERNAME_ERROR } }),
   })
-  await click(mount.tree, zh['repo.save'])
+  await click(mount.tree, zh['lean.actions.save'])
   assert.equal(calls.filter((c) => c.action === 'saveSettings').length, 1, '先让宿主裁决')
   assert.ok(textOf(mount.tree).includes(HOST_USERNAME_ERROR), '必须显示宿主的 typed 错误')
-  assert.equal(textOf(mount.tree).includes(zh['error.giteeUsername']), false, '不得被客户端旧文案顶掉')
+  assert.equal(textOf(mount.tree).includes('Gitee 需要填写用户名（Gitee 登录名）。私人令牌只作密码，不能代替用户名。'), false, '不得被客户端旧文案顶掉')
 })
 
 test('G4：宿主 E_AUTH 才展开登录名字段（逐字文案），保存成功后收起', async () => {

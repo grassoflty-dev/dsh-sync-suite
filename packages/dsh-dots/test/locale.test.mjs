@@ -106,15 +106,28 @@ test('every UI string is non-empty', () => {
   }
 })
 
-test('reachable 三态与 apply 双 SHA 的文案 key 双份都在', () => {
+test('shipped 面板的文案 key 双份都在；dormant 旧面板文案已删除', () => {
+  // retarget（mod-plugin-dormant-panel-removal）：原断言钉的是 dormant SettingsPanel 的
+  // status.reachable / status.unreachable / status.unprobed / apply.fileSha / apply.blockSha，
+  // 它们随旧面板一起删除。这里改钉 shipped DotsPanel 真正解析的文案 key（更强：逐条存在且非空）。
+  const shippedKeys = [
+    'meta.title', 'meta.description', 'meta.detail', 'panel.title', 'group.sync', 'group.remote',
+    'error.badResponse', 'error.unknown',
+    'lean.repo.url', 'lean.repo.token', 'lean.actions.save',
+    'lean.remote.qr.show', 'lean.remote.copy', 'lean.remote.generate', 'lean.remote.selfcheck',
+    'lean.status.failed', 'lean.status.synced', 'lean.status.never'
+  ]
   for (const [lang, dict] of [['en', en], ['zh', zh]]) {
-    for (const key of ['status.reachable', 'status.unreachable', 'status.unprobed', 'apply.fileSha', 'apply.blockSha']) {
-      assert.equal(typeof dict[key], 'string', `${lang} 缺少 ${key}`)
+    for (const key of shippedKeys) {
+      assert.equal(typeof dict[key], 'string', `${lang} 缺少 shipped key ${key}`)
+      assert.ok(dict[key].trim().length > 0, `${lang}.${key} 不能为空`)
     }
-    assert.match(dict['status.unprobed'], lang === 'zh' ? /未探测/ : /Not probed/)
-    assert.match(dict['apply.fileSha'], lang === 'zh' ? /文件 SHA-256/ : /File SHA-256/)
+    for (const dead of ['status.unprobed', 'actions.test', 'actions.push', 'actions.preview', 'error.retry']) {
+      assert.equal(Object.hasOwn(dict, dead), false, `${lang} 不得复活 dormant 文案 key ${dead}`)
+    }
   }
-  assert.ok(Object.keys(en).length >= 151, `locale 至少 151 个 key（原 148 + 新增 3），实际 ${Object.keys(en).length}`)
+  // 246 个 dormant-only key 已删除：324 -> 78。精确计数同时阻止整批复活与误删 shipped 文案。
+  assert.equal(Object.keys(en).length, 78, `locale 应恰好 78 个 shipped key，实际 ${Object.keys(en).length}`)
 })
 
 test('src/client.js 内置字典与 locale JSON 完全一致（key 与文案）', () => {

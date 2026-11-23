@@ -576,13 +576,16 @@ test('G8: no token plaintext in tree or console; copy writes only compact DSHDOT
 /* ========================================================================== */
 /* G9 — one DSH-dots entry, no second settings view                             */
 /* ========================================================================== */
-test('G9: single registered view; dormant SettingsPanel/RemotePanel never mounted', async () => {
+test('G9: single registered view; dormant SettingsPanel/RemotePanel deleted (never mountable)', async () => {
   const { registers } = await loadPanel()
   assert.equal(registers.length, 1)
   const Comp = registers[0].component
-  for (const key of ['LeanSyncGroup', 'LeanRemoteGroup', 'leanInferLogin', 'SettingsPanel', 'RemotePanel']) {
+  // retarget（mod-plugin-dormant-panel-removal）：旧面板接缝连同组件已删除；shipped 接缝原样保留。
+  for (const key of ['LeanSyncGroup', 'LeanRemoteGroup', 'leanInferLogin']) {
     assert.equal(typeof Comp[key], 'function', `DotsPanel.${key} 测试接缝应存在`)
   }
+  assert.equal(Comp.SettingsPanel, undefined, 'dormant SettingsPanel 接缝不得复活')
+  assert.equal(Comp.RemotePanel, undefined, 'dormant RemotePanel 接缝不得复活')
   const src = readFileSync(clientSrcPath, 'utf8')
   const dotsBody = src.slice(
     src.indexOf('function DotsPanel(props) {'),
