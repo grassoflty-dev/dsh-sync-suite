@@ -72,10 +72,19 @@ function apply() {
     return 1
   }
   mkdirSync(backupDir, { recursive: true })
-  const files = walk(harmonyDir)
+  const mode = process.argv[3] ?? 'release'
+  if (mode !== 'debug' && mode !== 'release') {
+    console.error('覆盖层模式仅支持 debug / release')
+    return 2
+  }
+  const debugDir = join(root, 'entry/src/harmony-debug')
+  const sources = new Map(walk(harmonyDir).map(rel => [rel, harmonyDir]))
+  if (mode === 'debug') {
+    for (const rel of walk(debugDir)) sources.set(rel, debugDir)
+  }
   const manifest = { replaced: [], created: [], at: new Date().toISOString() }
-  for (const rel of files) {
-    const source = join(harmonyDir, rel)
+  for (const [rel, sourceDir] of sources) {
+    const source = join(sourceDir, rel)
     const target = join(mainDir, rel)
     mkdirSync(dirname(target), { recursive: true })
     if (existsSync(target)) {

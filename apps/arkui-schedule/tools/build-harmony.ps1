@@ -71,6 +71,7 @@ param(
   [ValidateRange(1, 64)][int]$Cores = 4,
   [ValidateSet('Normal', 'BelowNormal', 'Idle')][string]$Priority = 'BelowNormal',
   [string]$Product = 'default',
+  [ValidateSet('debug', 'release')][string]$BuildMode = 'debug',
   [switch]$DryRun,
   [switch]$FailAfterApply
 )
@@ -333,7 +334,7 @@ $mask = [int64]((1 -shl $Cores) - 1)
 $maskHex = '0x{0:X}' -f $mask
 
 Write-Host "Limits  : $Cores/$logical logical cores (affinity $maskHex), priority $Priority"
-Write-Host "Command : devecocli build --product $Product"
+Write-Host "Command : devecocli build --product $Product --build-mode $BuildMode"
 
 if ($DryRun) {
   Write-Host ''
@@ -357,7 +358,7 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 # (hvigor only honors it for HAR/HSP dependencies), so `src/harmony/**` would never be compiled
 # and the HAP would silently ship without the handwriting page.
 Set-BuildingMarker -Phase 'apply'
-& node $overlay apply
+& node $overlay apply $BuildMode
 if ($LASTEXITCODE -ne 0) {
   # `apply` refuses when a manifest already exists: that overlay belongs to somebody else,
   # so we must not claim ownership (otherwise the trap would restore their build).
@@ -387,7 +388,7 @@ $env:NODE_OPTIONS = '--max-old-space-size=1536'
 try {
   # Do not use Start-Process here: this machine has both NO_PROXY and no_proxy in its
   # environment, and PowerShell 5.1 duplicates that dictionary case-insensitively and throws.
-  $arguments = "/c $cli build --product $Product > $log 2>&1"
+  $arguments = "/c $cli build --product $Product --build-mode $BuildMode > $log 2>&1"
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $env:ComSpec
   $psi.Arguments = $arguments

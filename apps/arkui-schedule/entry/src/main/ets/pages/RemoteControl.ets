@@ -23,6 +23,12 @@
  * - 除 `domStorageAccess` 外不加实验属性：DSH 是纯前端 SPA，需要 JS + localStorage
  *   （token/偏好落在这里），这两项是功能必需，其余一律用默认值。
  *
+ * mod-remote-tls-termination（证书 pin）：插件旁挂监听已改为 HTTPS（自签证书）。本页只接受
+ * 「配对时固定过证书指纹的实例」：进入页面先查 pin（没有 = 从未配对，拒绝；地址不是 https =
+ * 没有可校验的证书链，拒绝，绝不加载明文页）；TLS 报错时用平台回调里的 DER 证书链取 leaf
+ * 算 SHA-256，与 pin 相同才 `handleConfirm()`，不同就 `handleCancel(true)` 并显示固定中文文案。
+ * 三种拒绝（不匹配 / 无 pin / 无法校验链）分开，任何分支都不写 pin、不回显 URL 或 token。
+ *
  * 明文 HTTP：`module.json5` 已声明 `ohos.permission.INTERNET`；HarmonyOS 的明文策略由可选的
  * `network_config.json` 决定，**默认允许**（SDK `@ohos.net.networkSecurity.d.ts` 的
  * `isCleartextPermitted()` 注明「默认 true」）。本工程没有该配置文件，因此不做额外声明。
@@ -38,6 +44,15 @@ import { encodeLastOk, normalizeRemoteUrl, stripRemoteToken } from '../model/rem
 import type { LastOkEntry, RemoteUrlCheck } from '../model/remoteUrl';
 import { formatDiagnostics } from '../model/stateView';
 import type { DiagnosticsInput } from '../model/stateView';
+import { findInstance, instanceIdFromUrl } from '../model/instances';
+import type { DsInstance } from '../model/instances';
+import { instanceStore } from '../services/instanceStore';
+import {
+  TLS_CHAIN_UNVERIFIABLE_WORDING,
+  TLS_NO_PIN_WORDING,
+  verifyPinnedCertificate
+} from '../model/tlsPin';
+import type { TlsPinResult } from '../model/tlsPin';
 import { ActionButton } from '../components/ActionButton';
 import { EmptyState } from '../components/state/EmptyState';
 import { ErrorState } from '../components/state/ErrorState';
@@ -45,6 +60,7 @@ import { LoadingState } from '../components/state/LoadingState';
 import { settingsStore } from '../services/settingsStore';
 import { describeError } from '../services/scheduleStore';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
+import { Rc3GatePanel, rc3GateRequested } from '../components/Rc3GatePanel';
 
 /** 页面状态：加载中 / 没有地址 / 已挂载 Web。 */
 const PHASE_LOADING: string = 'loading';
@@ -86,11 +102,16 @@ struct RemoteControl {
   @State emptyReason: string = '';
   /** 页面状态（见文件头状态机）。 */
   @State phase: string = PHASE_LOADING;
+  /** 证书 pin 拒绝后为 true：不挂 Web（页面从未加载），刷新也不再重试。 */
+  @State tlsBlocked: boolean = false;
+
+  @State rc3Gate: boolean = false;
 
   private controller: webview.WebviewController = new webview.WebviewController();
   private disposed: boolean = false;
 
   aboutToAppear(): void {
+    this.rc3Gate = rc3GateRequested();
     this.resolveAddress();
   }
 
@@ -152,6 +173,22 @@ struct RemoteControl {
       this.url = check.url;
       this.emptyReason = '';
       this.loadError = '';
+      this.tlsBlocked = false;
+      // 预检：pin 只从实例（配对写入）读，连接本身永不写 pin。
+      // 没有 pin = 从未配对/老实例 ⇒ 直接拒绝，不挂 Web；
+      // 不是 https = 没有证书链可 pin ⇒ 按「无法校验」拒绝，绝不加载明文页。
+      const pin: string = this.storedPin();
+      if (pin.length === 0) {
+        this.tlsBlocked = true;
+        this.loadError = TLS_NO_PIN_WORDING;
+      } else if (!check.url.toLowerCase().startsWith('https://')) {
+        this.tlsBlocked = true;
+        this.loadError = TLS_CHAIN_UNVERIFIABLE_WORDING;
+      } else {
+        // 原生客户端尚未通过设备验收；不能回退到只在证书报错时才校验的 WebView。
+        this.tlsBlocked = true;
+        this.loadError = '安全连接尚未启用，未向电脑发送凭据。';
+      }
       this.phase = PHASE_READY;
       return;
     }
@@ -161,6 +198,56 @@ struct RemoteControl {
     // 用户明确填过东西但不可用：保留具体原因（比只写「先到设置里填写」更能定位问题）
     if (raw.trim().length > 0 && this.emptyReason.length === 0) {
       this.emptyReason = check.reason;
+    }
+  }
+
+  /**
+   * 读该地址对应实例的配对 pin。
+   *
+   * pin 的唯一来源是 `addPairedInstance` 写入实例信封的 `tlsFingerprint`；
+   * 这里只按 URL 派生的稳定 id 查表，**不写回、不补 pin、不升级老实例**。
+   * 读取失败 / 老实例无此字段 → 空串（= 拒绝，绝不当成"任意证书匹配"）。
+   */
+  private storedPin(): string {
+    try {
+      const id: string = instanceIdFromUrl(this.url);
+      if (id.length === 0) {
+        return '';
+      }
+      const found: DsInstance | null = findInstance(instanceStore.list(), id);
+      if (found === null || found.tlsFingerprint === undefined) {
+        return '';
+      }
+      return found.tlsFingerprint;
+    } catch (error) {
+      return '';
+    }
+  }
+
+  /**
+   * `onSslErrorEventReceive`：平台把 DER 证书链放在 `event.certChainData`（leaf 第一项）。
+   *
+   * - match ⇒ `handleConfirm()`，按 pin 放行这张自签证书；
+   * - mismatch / no-pin / unverifiable ⇒ `handleCancel(true)` 中止加载（页面根本没打开），
+   *   并把三种固定文案之一写进错误卡；任何分支都不记录 event（URL 带 token）。
+   */
+  private handleSslError(event: OnSslErrorEventReceiveEvent): void {
+    const outcome: TlsPinResult = verifyPinnedCertificate(event.certChainData, this.storedPin());
+    if (outcome.outcome === 'match') {
+      this.loadError = '';
+      try {
+        event.handler.handleConfirm();
+      } catch (error) {
+        // handler 已失效（页面正在销毁）：忽略，下一次加载会重新触发校验
+      }
+      return;
+    }
+    this.tlsBlocked = true;
+    this.loadError = outcome.wording;
+    try {
+      event.handler.handleCancel(true);
+    } catch (error) {
+      // 同上：拒绝状态已经落定，页面不会继续加载
     }
   }
 
@@ -192,6 +279,10 @@ struct RemoteControl {
 
   /** 刷新：先清错误态，再让 Web 重新加载（错误卡片上的「重试」与标题栏「刷新」共用）。 */
   private refresh(): void {
+    // 证书拒绝是一次性终态：不静默重试、不借刷新绕过 pin；要恢复必须先回设置页重新配对。
+    if (this.tlsBlocked) {
+      return;
+    }
     this.loadError = '';
     if (this.url.length === 0) {
       return;
@@ -210,7 +301,8 @@ struct RemoteControl {
    * 失败只 toast（例如设备上没有任何浏览器），绝不因为兜底路径失败而崩掉当前页。
    */
   private async openInBrowser(): Promise<void> {
-    if (this.url.length === 0) {
+    // 证书被拒后不允许用系统浏览器绕过 pin（那条路径没有我们的校验回调）。
+    if (this.url.length === 0 || this.tlsBlocked) {
       return;
     }
     try {
@@ -395,8 +487,9 @@ struct RemoteControl {
       Row() {
         ActionButton({
           label: OPEN_BROWSER_LABEL,
-          actionEnabled: true,
-          disabledReason: '',
+          // 证书被拒时禁用兜底：系统浏览器没有我们的 pin 校验，点了也不能绕过
+          actionEnabled: !this.tlsBlocked,
+          disabledReason: this.tlsBlocked ? '证书未通过校验，不能用浏览器绕过' : '',
           busy: false,
           variant: 'secondary',
           block: false,
@@ -429,7 +522,16 @@ struct RemoteControl {
           // 主文档加载完成 → 记下「最近一次成功」（失败路径由 onErrorReceive 标 loadError，不写）
           this.recordLastOk();
         })
+        .onSslErrorEventReceive((event: OnSslErrorEventReceiveEvent) => {
+          // 只有这里能看到平台给的 DER 证书链；pin 命中才确认，否则中止加载并显示固定文案。
+          // 不打印 event：url 里带 token。
+          this.handleSslError(event);
+        })
         .onErrorReceive((event: OnErrorReceiveEvent) => {
+          // 证书拒绝已经给出终态文案，后续的 net::ERR_* 不覆盖（也不带 URL/token 进文案）
+          if (this.tlsBlocked) {
+            return;
+          }
           // 只看主文档：子资源（favicon 之类）失败不该把整页判成打不开
           if (!event.request.isMainFrame()) {
             return;
@@ -437,7 +539,7 @@ struct RemoteControl {
           this.loadError = this.describeLoadError(event.error.getErrorCode(), event.error.getErrorInfo());
         })
         .onHttpErrorReceive((event: OnHttpErrorReceiveEvent) => {
-          if (!event.request.isMainFrame()) {
+          if (this.tlsBlocked || !event.request.isMainFrame()) {
             return;
           }
           const status: number = event.response.getResponseCode();
@@ -455,6 +557,17 @@ struct RemoteControl {
     .layoutWeight(1)
   }
 
+  /** 证书拒绝终态：只渲染错误卡，Web 根本不挂载（页面从未加载）。 */
+  @Builder
+  RefusedView() {
+    Column() {
+      this.ErrorView()
+    }
+    .width('100%')
+    .padding(SPACING.lg)
+    .layoutWeight(1)
+  }
+
   build() {
     Column() {
       this.Header()
@@ -464,7 +577,12 @@ struct RemoteControl {
       if (this.phase === PHASE_LOADING) {
         this.LoadingView()
       } else if (this.phase === PHASE_READY) {
-        this.RemoteBody()
+        if (this.rc3Gate) {
+          Rc3GatePanel({ endpoint: this.url })
+        } else {
+          // 不挂旧 WebView；常规路径必须等原生客户端通过设备验收。
+          this.RefusedView()
+        }
       } else if (this.phase === PHASE_EMPTY) {
         this.EmptyView()
       }
