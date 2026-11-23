@@ -672,6 +672,31 @@ test('40b mod-app-retry-removal self-test: the absence guard fails on a re-added
   assertNoManualSyncRetryControl('self-test clean');
 });
 
+// Review C1 guard gap: the two mutations above prove the label-based checks (identical / renamed
+// retry label). This one proves the third shape — an innocuous label with a click handler wired
+// to a sync capability — is ALSO rejected, and that the rejection comes from the capability
+// check, not from the label. Synthetic source only; no product file is edited.
+test('40c mod-app-retry-removal self-test: innocuous label + sync handler is rejected', () => {
+  const idxRaw = readFileSync(join(ETS, 'pages/Index.ets'), 'utf8');
+  for (const label of ['更多', '详情', '帮助']) {
+    const withSync = idxRaw.replace('this.SyncStatusRow()',
+      `Text('${label}').onClick(() => { this.runConfiguredCycle(); })\n      this.SyncStatusRow()`);
+    assert.notEqual(withSync, idxRaw, `${label}: sync mutation must actually apply`);
+    assert.throws(
+      () => assertNoManualSyncRetryControl('self-test', { 'pages/Index.ets': withSync }),
+      /sync capability/,
+      `${label}: innocuous label + sync handler must fail through the capability check`);
+
+    // Negative control: the very same innocuous label with a non-sync handler must stay legal,
+    // proving the throw above is attributed to the capability and not merely to the label.
+    const benign = idxRaw.replace('this.SyncStatusRow()',
+      `Text('${label}').onClick(() => { this.openHelp(); })\n      this.SyncStatusRow()`);
+    assert.notEqual(benign, idxRaw, `${label}: benign mutation must actually apply`);
+    assertNoManualSyncRetryControl('self-test', { 'pages/Index.ets': benign });
+  }
+  assertNoManualSyncRetryControl('self-test clean');
+});
+
 test('41 static: no force-push / --force / merge / rebase / clean in new wiring', () => {
   const files = [
     'model/syncCycle.ts', 'services/gitRunner.ets', 'services/syncProtocolStore.ets'

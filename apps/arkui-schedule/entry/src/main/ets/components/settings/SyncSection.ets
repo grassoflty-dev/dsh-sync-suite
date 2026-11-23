@@ -233,8 +233,9 @@ export struct SyncSection {
     Column({ space: SPACING.md }) {
       this.SyncHeader()
 
-      // mod-fix-sync-affordance：仓库地址行的 `?` 与组头「更多」曾打开同一个仓库地址帮助弹层，
-      // 是同一入口的两次露脸。只保留组头「更多」（它承载查看状态 / 测试连接 / 重试），
+      // mod-fix-sync-affordance：仓库地址行的 `?` 与组头「更多」曾打开同一个帮助弹层，
+      // 是同一入口的两次露脸。只保留组头「更多」：mod-sync-ui-silence Phase B 后它承载的
+      // 只是仓库地址帮助文案（弹层在页面，见 pages/SettingsSync.ets），手动同步动作已全部删除；
       // 帮助文案并入同一个弹层；本行不再放第二个帮助按钮。
       Text('仓库地址')
         .fontSize(FONT.caption)
