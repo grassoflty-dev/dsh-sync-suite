@@ -1,0 +1,68 @@
+/**
+ * mod-plugin-session-prompt：发指令拒绝文案的**语义键表**（插件侧唯一事实源）。
+ *
+ * 逐字来源：`docs/REFUSAL-WORDING.md`（16 行 join 表）。本文件只登记插件侧的 7 个语义键；
+ * 租约四码继续用 `lease.ts` 的 `LEASE_WORDING`，**绝不**在这里复制第二份。
+ *
+ * 为什么按语义键而不是按错误码索引：同一个 E_VALIDATION 要承载 text.empty 与 text.tooLong
+ * 两条不同文案；按码索引会丢信息。码由 `PROMPT_CODE_BY_KEY` 单一映射给出。
+ *
+ * 纪律：文案不含 token / URL / 路径 / 十六进制串；没有 console，没有 IO。
+ */
+import { LEASE_WORDING } from './lease.js';
+/** 指令正文上限（字符）；与 App `COMMAND_TEXT_LIMIT` 逐字对齐（2000）。 */
+export const PROMPT_TEXT_LIMIT = 2000;
+/** 幂等去重窗口：同一 sessionId 内同一个 requestId 10 分钟内只处理一次。 */
+export const PROMPT_IDEMPOTENCY_WINDOW_MS = 10 * 60 * 1000;
+/** 本模块默认租约 TTL（秒）：与 CHAT-SYNC §2.2 的 10 分钟一致。 */
+export const PROMPT_LEASE_TTL_SEC = 600;
+export const PROMPT_ERROR_CODES = {
+    VALIDATION: 'E_VALIDATION',
+    GRANT_DENIED: 'E_GRANT_DENIED',
+    CHANNEL_UNVERIFIED: 'E_CHANNEL_UNVERIFIED',
+    PROMPT_DUPLICATE: 'E_PROMPT_DUPLICATE',
+    INSTANCE_UNKNOWN: 'E_INSTANCE_UNKNOWN',
+    SESSION_UNAVAILABLE: 'E_SESSION_UNAVAILABLE',
+};
+export const PROMPT_SEMANTIC_KEYS = [
+    'prompt.text.empty',
+    'prompt.text.tooLong',
+    'prompt.grant.denied',
+    'channel.desktop.unverified',
+    'prompt.duplicate',
+    'instance.unknown',
+    'session.unavailable',
+];
+/** 语义键 → typed 错误码（唯一映射点）。 */
+export const PROMPT_CODE_BY_KEY = {
+    'prompt.text.empty': PROMPT_ERROR_CODES.VALIDATION,
+    'prompt.text.tooLong': PROMPT_ERROR_CODES.VALIDATION,
+    'prompt.grant.denied': PROMPT_ERROR_CODES.GRANT_DENIED,
+    'channel.desktop.unverified': PROMPT_ERROR_CODES.CHANNEL_UNVERIFIED,
+    'prompt.duplicate': PROMPT_ERROR_CODES.PROMPT_DUPLICATE,
+    'instance.unknown': PROMPT_ERROR_CODES.INSTANCE_UNKNOWN,
+    'session.unavailable': PROMPT_ERROR_CODES.SESSION_UNAVAILABLE,
+};
+/** 语义键 → 逐字中文（与 REFUSAL-WORDING.md 的插件列逐字节一致）。 */
+export const PROMPT_WORDING = {
+    'prompt.text.empty': '请先输入要发送的指令',
+    'prompt.text.tooLong': `指令过长（上限 ${PROMPT_TEXT_LIMIT} 字）`,
+    'prompt.grant.denied': '该实例未授予发指令权限（查看权限不包含发指令）',
+    'channel.desktop.unverified': '该电脑尚未标记安全通道已验证，未发送任何内容',
+    'prompt.duplicate': '同一条指令已经处理过，未重复写入',
+    'instance.unknown': '找不到该实例，请重新配对',
+    'session.unavailable': '该会话暂时不可写入（投递通道未接入）',
+};
+/** 租约四码 → 文档语义键（文案仍取自 LEASE_WORDING，不在本表复制）。 */
+export const LEASE_SEMANTIC_KEY_BY_CODE = {
+    E_LEASE_NOT_HELD: 'lease.notHeld',
+    E_LEASE_OBSERVING: 'lease.observing',
+    E_LEASE_EXPIRED: 'lease.expired',
+    E_HEAD_MOVED: 'head.moved',
+};
+export function promptRefusal(key) {
+    return { ok: false, key, code: PROMPT_CODE_BY_KEY[key], wording: PROMPT_WORDING[key] };
+}
+export function leaseRefusal(code) {
+    return { ok: false, key: LEASE_SEMANTIC_KEY_BY_CODE[code], code, wording: LEASE_WORDING[code] };
+}

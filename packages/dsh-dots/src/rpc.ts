@@ -66,6 +66,11 @@ import type { RemoteInstance } from './remote/instances.js'
 import { localSessionEvents, localSessionInfo, localSessionList } from './remote/localRead.js'
 import { projectInstanceList, projectReadResult, type RemoteReadAction } from './remote/projection.js'
 import { mapRemoteCode, remoteToolError, REMOTE_TOOL_ERROR_CODES } from './remote/toolErrors.js'
+// mod-plugin-session-prompt：唯一注册的写 action，但本轮 DARK（无投递实现）。
+// RPC 只依赖服务结构类型 + 拒绝文案表；缺省构造出的服务没有标记 ⇒ 一律 E_CHANNEL_UNVERIFIED。
+import { createSessionPromptService } from './remote/sessionPrompt.js'
+import type { PromptDeliveryResult, PromptSendRequest } from './remote/sessionPrompt.js'
+import { PROMPT_ERROR_CODES, PROMPT_WORDING } from './remote/promptWording.js'
 // mod-plugin-pairing：RPC 只依赖配对服务的结构类型，不 import 证书 / QR / 监听实现。
 import type {
   PairingOverride,
@@ -118,6 +123,12 @@ export interface RemoteToolsOptions {
   fetch?: RemoteFetchLike
 }
 
+/** DARK 发指令服务的结构接缝（测试注入带 spy 的服务；生产缺省构造）。 */
+export interface PromptServiceLike {
+  channelVerified(instanceId: string): boolean
+  send(request: PromptSendRequest): Promise<PromptDeliveryResult>
+}
+
 export interface RpcServiceOptions {
   homeDir?: string
   profileDir?: string
@@ -143,6 +154,11 @@ export interface RpcServiceOptions {
    * HTTP 走全局 fetch（与 `remote/service.ts` 同一套，不新建 fetch stack）。
    */
   remoteTools?: RemoteToolsOptions
+  /**
+   * mod-plugin-session-prompt 的 DARK 服务（可注入）。缺省构造时操作员标记缺失，
+   * 每个 sessionPrompt 调用都诚实拒绝 E_CHANNEL_UNVERIFIED，且无投递实现。
+   */
+  prompt?: PromptServiceLike
   /**
    * mod-plugin-pairing 服务（可选）。未注入时所有 `pairing*` action 一律 fail-closed，
    * 返回 `E_INTERNAL 配对服务未挂载`，绝不返回空 payload 让 UI 画出假二维码。
@@ -220,6 +236,10 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
   const remoteFetch: RemoteFetchLike =
     options.remoteTools?.fetch ??
     ((url, init) => fetch(url, init as RequestInit) as unknown as Promise<RemoteFetchResponseLike>)
+  const promptService: PromptServiceLike = options.prompt ?? createSessionPromptService({
+    homeDir: options.homeDir,
+    now: () => now().getTime(),
+  })
   const precheckTransport = createFetchTransport(
     options.repoPrecheckFetch ??
       ((url, init) => fetch(url, init as RequestInit) as unknown as Promise<RepoPrecheckFetchResponseLike>),
@@ -930,7 +950,8 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
   /* 硬纪律：                                                             */
   /*   - 只认 instanceId（从 allow-list 解析），绝不接调用方 URL；           */
   /*   - 每个动作先过 grant 再出网；出网目标只能是清单里登记的 token-free base；*/
-  /*   - 只有四个读 action；prompt / create / lease 写动作一律不注册。       */
+  /*   - 四个读 action + 一个 DARK sessionPrompt（标记缺失即拒绝，无投递实现）；*/
+  /*     session.create / lease.* 写 action 仍不注册。                       */
   /* ------------------------------------------------------------------ */
 
   /** 三个会话读 action（instanceList 不走远端传输，故从投影类型里排除）。 */
@@ -1169,6 +1190,31 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
     })
   }
 
+  /**
+   * mod-plugin-session-prompt：唯一写 action，但本轮 DARK。
+   * 操作员标记检查在所有入参校验与其它依赖之前：标记缺失 ⇒ 每次调用都是
+   * E_CHANNEL_UNVERIFIED（逐字文案来自 PROMPT_WORDING），无回退、无"记住上次"。
+   */
+  async function sessionPrompt(payload: Record<string, unknown>): Promise<PromptDeliveryResult> {
+    // 标记必须与请求实例精确绑定；检查在任何入参形状校验 / store / port 触碰之前。
+    if (!promptService.channelVerified(asString(payload.instanceId).trim())) {
+      throw new SyncError(PROMPT_ERROR_CODES.CHANNEL_UNVERIFIED, PROMPT_WORDING['channel.desktop.unverified'])
+    }
+    const sessionId = asString(payload.sessionId).trim()
+    const requestId = asString(payload.requestId).trim()
+    const instanceId = asString(payload.instanceId).trim()
+    const leaseOwner = asString(payload.leaseOwner).trim()
+    if (sessionId === '') throw new SyncError('E_VALIDATION', 'sessionId 不能为空', { field: 'sessionId' })
+    if (requestId === '') throw new SyncError('E_VALIDATION', 'requestId 不能为空', { field: 'requestId' })
+    if (instanceId === '') throw new SyncError('E_VALIDATION', 'instanceId 不能为空', { field: 'instanceId' })
+    if (leaseOwner === '') throw new SyncError('E_VALIDATION', 'leaseOwner 不能为空', { field: 'leaseOwner' })
+    // text / expectedPrevSha 的类型与边界交给 gate：文本错给 prompt.text.* 的逐字文案，
+    // 头锚错给 E_HEAD_MOVED，避免这里再出现第三份拒绝理由。
+    const text = typeof payload.text === 'string' ? payload.text : ''
+    const expectedPrevSha = typeof payload.expectedPrevSha === 'string' ? payload.expectedPrevSha : ''
+    return await promptService.send({ sessionId, requestId, instanceId, text, expectedPrevSha, leaseOwner })
+  }
+
   async function handleRpc(body: unknown): Promise<RpcResponse> {
     try {
       if (disposed) throw new SyncError('E_INTERNAL', 'RPC 服务已释放')
@@ -1250,6 +1296,9 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
           return ok(await enqueue(() => sessionInfo(payload)))
         case 'sessionEvents':
           return ok(await enqueue(() => sessionEvents(payload)))
+        // ---- mod-plugin-session-prompt：注册但 DARK（无投递实现，标记缺失即拒绝） ----
+        case 'sessionPrompt':
+          return ok(await enqueue(() => sessionPrompt(payload)))
         default:
           throw new SyncError('E_UNKNOWN_ACTION', `未知 action：${action}`, { action })
       }

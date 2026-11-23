@@ -239,10 +239,10 @@ test('拒绝⑤ 不支持的动作（404 / 远端 E_UNKNOWN_ACTION）→ E_REMOT
   assert.equal(r2.error.code, 'E_REMOTE_UNSUPPORTED')
 })
 
-test('显式测试：prompt / create / lease / grant 写动作一个都没注册', async (t) => {
+test('显式测试：create / lease / grant 写动作一个都没注册；sessionPrompt 注册但 DARK', async (t) => {
   const { service } = await setup(t)
   const commandActions = [
-    'sessionPrompt', 'sessionCreate', 'sessionLeaseClaim', 'sessionLeaseHeartbeat',
+    'sessionCreate', 'sessionLeaseClaim', 'sessionLeaseHeartbeat',
     'sessionLeaseRelease', 'grantList', 'grantUpsert', 'grantRevoke',
   ]
   for (const action of commandActions) {
@@ -250,6 +250,13 @@ test('显式测试：prompt / create / lease / grant 写动作一个都没注册
     assert.equal(result.ok, false, `${action} 不应注册`)
     assert.equal(result.error.code, 'E_UNKNOWN_ACTION', action)
   }
+  // mod-plugin-session-prompt：sessionPrompt 现在**已注册**，但操作员标记缺失时
+  // 一律 E_CHANNEL_UNVERIFIED —— 守卫强度不降，只是拒绝码从 E_UNKNOWN_ACTION 变成 DARK 码。
+  const dark = await service.handleRpc({
+    action: 'sessionPrompt', instanceId: INSTANCE, sessionId: 's1',
+  })
+  assert.equal(dark.ok, false)
+  assert.equal(dark.error.code, 'E_CHANNEL_UNVERIFIED')
 })
 
 test('caller 提供的 URL 无法绕过 allow-list：出网目标只来自实例清单', async (t) => {

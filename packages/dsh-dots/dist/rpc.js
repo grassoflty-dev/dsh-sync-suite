@@ -30,6 +30,10 @@ import { InstanceRegistry, redactInstanceUrl } from './remote/instances.js';
 import { localSessionEvents, localSessionInfo, localSessionList } from './remote/localRead.js';
 import { projectInstanceList, projectReadResult } from './remote/projection.js';
 import { mapRemoteCode, remoteToolError, REMOTE_TOOL_ERROR_CODES } from './remote/toolErrors.js';
+// mod-plugin-session-prompt：唯一注册的写 action，但本轮 DARK（无投递实现）。
+// RPC 只依赖服务结构类型 + 拒绝文案表；缺省构造出的服务没有标记 ⇒ 一律 E_CHANNEL_UNVERIFIED。
+import { createSessionPromptService } from './remote/sessionPrompt.js';
+import { PROMPT_ERROR_CODES, PROMPT_WORDING } from './remote/promptWording.js';
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 /**
  * 远端只读响应的字节硬上限 4 MiB（4 * 1024 * 1024）。
@@ -64,6 +68,10 @@ export function createRpcService(options = {}) {
     const grants = options.remoteTools?.grants ?? new GrantStore({ homeDir: options.homeDir, now });
     const remoteFetch = options.remoteTools?.fetch ??
         ((url, init) => fetch(url, init));
+    const promptService = options.prompt ?? createSessionPromptService({
+        homeDir: options.homeDir,
+        now: () => now().getTime(),
+    });
     const precheckTransport = createFetchTransport(options.repoPrecheckFetch ??
         ((url, init) => fetch(url, init)));
     let queue = Promise.resolve();
@@ -951,6 +959,34 @@ export function createRpcService(options = {}) {
             limit: payload.limit,
         });
     }
+    /**
+     * mod-plugin-session-prompt：唯一写 action，但本轮 DARK。
+     * 操作员标记检查在所有入参校验与其它依赖之前：标记缺失 ⇒ 每次调用都是
+     * E_CHANNEL_UNVERIFIED（逐字文案来自 PROMPT_WORDING），无回退、无"记住上次"。
+     */
+    async function sessionPrompt(payload) {
+        // 标记必须与请求实例精确绑定；检查在任何入参形状校验 / store / port 触碰之前。
+        if (!promptService.channelVerified(asString(payload.instanceId).trim())) {
+            throw new SyncError(PROMPT_ERROR_CODES.CHANNEL_UNVERIFIED, PROMPT_WORDING['channel.desktop.unverified']);
+        }
+        const sessionId = asString(payload.sessionId).trim();
+        const requestId = asString(payload.requestId).trim();
+        const instanceId = asString(payload.instanceId).trim();
+        const leaseOwner = asString(payload.leaseOwner).trim();
+        if (sessionId === '')
+            throw new SyncError('E_VALIDATION', 'sessionId 不能为空', { field: 'sessionId' });
+        if (requestId === '')
+            throw new SyncError('E_VALIDATION', 'requestId 不能为空', { field: 'requestId' });
+        if (instanceId === '')
+            throw new SyncError('E_VALIDATION', 'instanceId 不能为空', { field: 'instanceId' });
+        if (leaseOwner === '')
+            throw new SyncError('E_VALIDATION', 'leaseOwner 不能为空', { field: 'leaseOwner' });
+        // text / expectedPrevSha 的类型与边界交给 gate：文本错给 prompt.text.* 的逐字文案，
+        // 头锚错给 E_HEAD_MOVED，避免这里再出现第三份拒绝理由。
+        const text = typeof payload.text === 'string' ? payload.text : '';
+        const expectedPrevSha = typeof payload.expectedPrevSha === 'string' ? payload.expectedPrevSha : '';
+        return await promptService.send({ sessionId, requestId, instanceId, text, expectedPrevSha, leaseOwner });
+    }
     async function handleRpc(body) {
         try {
             if (disposed)
@@ -1034,6 +1070,9 @@ export function createRpcService(options = {}) {
                     return ok(await enqueue(() => sessionInfo(payload)));
                 case 'sessionEvents':
                     return ok(await enqueue(() => sessionEvents(payload)));
+                // ---- mod-plugin-session-prompt：注册但 DARK（无投递实现，标记缺失即拒绝） ----
+                case 'sessionPrompt':
+                    return ok(await enqueue(() => sessionPrompt(payload)));
                 default:
                     throw new SyncError('E_UNKNOWN_ACTION', `未知 action：${action}`, { action });
             }
