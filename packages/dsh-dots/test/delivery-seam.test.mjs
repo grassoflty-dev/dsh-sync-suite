@@ -41,7 +41,7 @@ function port(behavior) {
   }
 }
 
-const SUCCESS = { ok: true, seq: 7, sha256: 'c'.repeat(64) }
+const SUCCESS = { ok: true, accepted: true, payloadSha256: 'c'.repeat(64) }
 
 async function setup(t, options = {}) {
   const dir = await mkdtemp(path.join(TMP_ROOT, 'delivery-'))
@@ -154,12 +154,13 @@ for (const item of refusalCases) {
 
 /* ---------------- 成功与失败分类 ---------------- */
 
-test('D1 成功 ⇒ {seq,sha256,accepted:true}，正文 / owner 不回显', async (t) => {
+test('D1 成功 ⇒ {accepted:true,payloadSha256}（无 seq），正文 / owner 不回显', async (t) => {
   const s = await setup(t)
   const res = await s.rpc.handleRpc(s.request())
   assert.equal(res.ok, true)
-  assert.deepEqual(Object.keys(res.data).sort(), ['accepted', 'seq', 'sha256'])
-  assert.deepEqual(res.data, { seq: 7, sha256: 'c'.repeat(64), accepted: true })
+  assert.deepEqual(Object.keys(res.data).sort(), ['accepted', 'payloadSha256'])
+  assert.deepEqual(res.data, { accepted: true, payloadSha256: 'c'.repeat(64) })
+  assert.equal('seq' in res.data, false, 'seq 已从结果里彻底移除')
   assert.equal(JSON.stringify(res).includes(PROMPT), false)
   assert.equal(JSON.stringify(res).includes(OWNER), false)
   assert.equal(s.deliveryPort.calls.length, 1)

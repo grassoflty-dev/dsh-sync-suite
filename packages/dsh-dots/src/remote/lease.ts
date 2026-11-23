@@ -35,7 +35,7 @@ export const LEASE_WORDING: Readonly<Record<LeaseRefusalCode, string>> = {
   E_LEASE_NOT_HELD: '未持有该会话的写权限，未写入任何内容',
   E_LEASE_OBSERVING: '该会话正被其他人使用（只读），未写入任何内容',
   E_LEASE_EXPIRED: '会话写权限已过期，请重新确认后重试',
-  E_HEAD_MOVED: '会话已被其他人写入，请先刷新再重新确认',
+  E_HEAD_MOVED: '会话头已变化（可能来自其他写者，也可能来自你上一次写入），请先刷新再重新确认',
 }
 
 /* ----------------------------- typed 问题码 ----------------------------- */

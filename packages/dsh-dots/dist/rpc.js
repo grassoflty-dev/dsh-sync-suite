@@ -71,6 +71,9 @@ export function createRpcService(options = {}) {
     const promptService = options.prompt ?? createSessionPromptService({
         homeDir: options.homeDir,
         now: () => now().getTime(),
+        ...(options.promptSessionController !== undefined
+            ? { sessionControllerLookup: options.promptSessionController }
+            : {}),
     });
     const precheckTransport = createFetchTransport(options.repoPrecheckFetch ??
         ((url, init) => fetch(url, init)));

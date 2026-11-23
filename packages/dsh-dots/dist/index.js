@@ -104,6 +104,8 @@ export function apply(ctx, config = {}) {
         allowLocalRepo: config.allowLocalRepo === true,
         pairing,
         ...(remote === null ? {} : { remote: remote.service }),
+        // 每次调用都从 ctx 现取：服务晚到 / 未挂载都不影响插件启动，缺席 ⇒ E_SESSION_UNAVAILABLE。
+        promptSessionController: () => ctx.sessionController ?? null,
     });
     const handler = createHttpHandler(service, ctx.connection);
     ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: RPC_PATH, handler }), 'dsh-dots: /dsh-dots/rpc');

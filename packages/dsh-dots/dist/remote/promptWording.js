@@ -61,7 +61,7 @@ export const PROMPT_WORDING = {
     'prompt.duplicate': '同一条指令已经处理过，未重复写入',
     'instance.unknown': '找不到该实例，请重新配对',
     'session.unavailable': '该会话暂时不可写入（投递通道未接入）',
-    'session.deliveryFailed': '已尝试投递但失败（会话未写入），可用同一请求号重试',
+    'session.deliveryFailed': '投递结果未确认（可能已写入，也可能没有）；用同一请求号重试是安全的（DSH 按请求号去重）',
     'session.recordFailed': '会话已写入但请求记录未落盘，请先刷新会话确认，勿盲目重发',
 };
 /** 租约四码 → 文档语义键（文案仍取自 LEASE_WORDING，不在本表复制）。 */

@@ -10,10 +10,20 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
-/** 一条已见 requestId（会话内局部）。 */
+/** 一条已见 requestId（会话内局部）。可含我们自己的指纹与事后 head 漂移观测，**绝不含正文**。 */
 export interface SeenRequest {
   requestId: string
   atMs: number
+  payloadSha256?: string
+  headDrift?: boolean
+  observedHeadSha?: string
+}
+
+/** 落账时可附带的非文本元数据（hash / 布尔 / head 值，都不是 prompt 正文）。 */
+export interface LedgerRecordMeta {
+  payloadSha256?: string
+  headDrift?: boolean
+  observedHeadSha?: string
 }
 
 /** gate 消费的只读视图：按 sessionId 分组。 */
@@ -85,8 +95,9 @@ export function normalizeLedgerEntry(raw: unknown): LedgerNormalizeResult {
     return { ok: false, entry: null, sessionId: '', problem: 'E_LEDGER_SHAPE', reason: ledgerProblemText('E_LEDGER_SHAPE') }
   }
   const item = raw as Record<string, unknown>
+  const allowed = ['sessionId', 'requestId', 'atMs', 'payloadSha256', 'headDrift', 'observedHeadSha']
   for (const key of Object.keys(item)) {
-    if (key !== 'sessionId' && key !== 'requestId' && key !== 'atMs') {
+    if (allowed.indexOf(key) < 0) {
       return { ok: false, entry: null, sessionId: '', problem: 'E_LEDGER_UNKNOWN_FIELD', reason: ledgerProblemText('E_LEDGER_UNKNOWN_FIELD') }
     }
   }
@@ -98,13 +109,26 @@ export function normalizeLedgerEntry(raw: unknown): LedgerNormalizeResult {
   if (!validTime(atMs) || typeof atMs !== 'number') {
     return { ok: false, entry: null, sessionId: '', problem: 'E_LEDGER_AT_MS', reason: ledgerProblemText('E_LEDGER_AT_MS') }
   }
-  return {
-    ok: true,
-    entry: { requestId, atMs: Math.trunc(atMs) },
-    sessionId,
-    problem: null,
-    reason: '',
+  const entry: SeenRequest = { requestId, atMs: Math.trunc(atMs) }
+  if (item.payloadSha256 !== undefined && item.payloadSha256 !== null) {
+    if (typeof item.payloadSha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(item.payloadSha256)) {
+      return { ok: false, entry: null, sessionId: '', problem: 'E_LEDGER_UNKNOWN_FIELD', reason: ledgerProblemText('E_LEDGER_UNKNOWN_FIELD') }
+    }
+    entry.payloadSha256 = item.payloadSha256
   }
+  if (item.headDrift !== undefined && item.headDrift !== null) {
+    if (typeof item.headDrift !== 'boolean') {
+      return { ok: false, entry: null, sessionId: '', problem: 'E_LEDGER_UNKNOWN_FIELD', reason: ledgerProblemText('E_LEDGER_UNKNOWN_FIELD') }
+    }
+    entry.headDrift = item.headDrift
+  }
+  if (item.observedHeadSha !== undefined && item.observedHeadSha !== null) {
+    if (typeof item.observedHeadSha !== 'string' || item.observedHeadSha === '') {
+      return { ok: false, entry: null, sessionId: '', problem: 'E_LEDGER_UNKNOWN_FIELD', reason: ledgerProblemText('E_LEDGER_UNKNOWN_FIELD') }
+    }
+    entry.observedHeadSha = item.observedHeadSha
+  }
+  return { ok: true, entry, sessionId, problem: null, reason: '' }
 }
 
 function fail(problem: LedgerProblem): LedgerDecodeResult {
@@ -115,7 +139,14 @@ function flatten(view: PromptLedgerView): Array<SeenRequest & { sessionId: strin
   const items: Array<SeenRequest & { sessionId: string }> = []
   for (const sessionId of Object.keys(view).sort()) {
     for (const entry of view[sessionId] ?? []) {
-      items.push({ sessionId, requestId: entry.requestId, atMs: entry.atMs })
+      items.push({
+        sessionId,
+        requestId: entry.requestId,
+        atMs: entry.atMs,
+        ...(entry.payloadSha256 !== undefined ? { payloadSha256: entry.payloadSha256 } : {}),
+        ...(entry.headDrift !== undefined ? { headDrift: entry.headDrift } : {}),
+        ...(entry.observedHeadSha !== undefined ? { observedHeadSha: entry.observedHeadSha } : {}),
+      })
     }
   }
   items.sort((a, b) => {
@@ -183,14 +214,24 @@ export function seenInWindow(
 }
 
 /** 纯返回新视图（不改入参），记录 (sessionId, requestId) 的最新时刻。 */
-export function recordSeen(view: PromptLedgerView, sessionId: string, requestId: string, atMs: number): PromptLedgerView {
+export function recordSeen(
+  view: PromptLedgerView,
+  sessionId: string,
+  requestId: string,
+  atMs: number,
+  meta: LedgerRecordMeta = {},
+): PromptLedgerView {
   const next: Record<string, SeenRequest[]> = {}
   for (const key of Object.keys(view)) next[key] = (view[key] ?? []).map((item) => ({ ...item }))
   const bucket = next[sessionId] ?? (next[sessionId] = [])
   const at = Math.trunc(atMs)
   const existing = bucket.find((item) => item.requestId === requestId)
-  if (existing !== undefined) existing.atMs = at
-  else bucket.push({ requestId, atMs: at })
+  const entry: SeenRequest = existing ?? { requestId, atMs: at }
+  entry.atMs = at
+  if (meta.payloadSha256 !== undefined) entry.payloadSha256 = meta.payloadSha256
+  if (meta.headDrift !== undefined) entry.headDrift = meta.headDrift
+  if (meta.observedHeadSha !== undefined) entry.observedHeadSha = meta.observedHeadSha
+  if (existing === undefined) bucket.push(entry)
   return next
 }
 
@@ -208,7 +249,7 @@ export interface PromptLedgerStoreResult {
 export interface PromptLedgerStore {
   readonly file: string
   load(): Promise<PromptLedgerStoreResult>
-  record(sessionId: string, requestId: string, atMs?: number): Promise<PromptLedgerStoreResult>
+  record(sessionId: string, requestId: string, atMs?: number, meta?: LedgerRecordMeta): Promise<PromptLedgerStoreResult>
   lastProblem(): LedgerProblem | null
 }
 
@@ -271,11 +312,16 @@ export function createPromptLedger(options: PromptLedgerStoreOptions): PromptLed
     return { ok: decoded.ok, view: decoded.view, problem: decoded.problem }
   }
 
-  async function record(sessionId: string, requestId: string, atMs?: number): Promise<PromptLedgerStoreResult> {
+  async function record(
+    sessionId: string,
+    requestId: string,
+    atMs?: number,
+    meta: LedgerRecordMeta = {},
+  ): Promise<PromptLedgerStoreResult> {
     const current = await load()
     if (!current.ok) return { ok: false, view: {}, problem: current.problem ?? 'E_LEDGER_STORAGE_UNAVAILABLE' }
     const stamp = typeof atMs === 'number' ? atMs : now()
-    return commit(recordSeen(current.view, sessionId, requestId, stamp))
+    return commit(recordSeen(current.view, sessionId, requestId, stamp, meta))
   }
 
   return { file, load, record, lastProblem: (): LedgerProblem | null => problem }

@@ -38,8 +38,9 @@ export function normalizeLedgerEntry(raw) {
         return { ok: false, entry: null, sessionId: '', problem: 'E_LEDGER_SHAPE', reason: ledgerProblemText('E_LEDGER_SHAPE') };
     }
     const item = raw;
+    const allowed = ['sessionId', 'requestId', 'atMs', 'payloadSha256', 'headDrift', 'observedHeadSha'];
     for (const key of Object.keys(item)) {
-        if (key !== 'sessionId' && key !== 'requestId' && key !== 'atMs') {
+        if (allowed.indexOf(key) < 0) {
             return { ok: false, entry: null, sessionId: '', problem: 'E_LEDGER_UNKNOWN_FIELD', reason: ledgerProblemText('E_LEDGER_UNKNOWN_FIELD') };
         }
     }
@@ -53,13 +54,26 @@ export function normalizeLedgerEntry(raw) {
     if (!validTime(atMs) || typeof atMs !== 'number') {
         return { ok: false, entry: null, sessionId: '', problem: 'E_LEDGER_AT_MS', reason: ledgerProblemText('E_LEDGER_AT_MS') };
     }
-    return {
-        ok: true,
-        entry: { requestId, atMs: Math.trunc(atMs) },
-        sessionId,
-        problem: null,
-        reason: '',
-    };
+    const entry = { requestId, atMs: Math.trunc(atMs) };
+    if (item.payloadSha256 !== undefined && item.payloadSha256 !== null) {
+        if (typeof item.payloadSha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(item.payloadSha256)) {
+            return { ok: false, entry: null, sessionId: '', problem: 'E_LEDGER_UNKNOWN_FIELD', reason: ledgerProblemText('E_LEDGER_UNKNOWN_FIELD') };
+        }
+        entry.payloadSha256 = item.payloadSha256;
+    }
+    if (item.headDrift !== undefined && item.headDrift !== null) {
+        if (typeof item.headDrift !== 'boolean') {
+            return { ok: false, entry: null, sessionId: '', problem: 'E_LEDGER_UNKNOWN_FIELD', reason: ledgerProblemText('E_LEDGER_UNKNOWN_FIELD') };
+        }
+        entry.headDrift = item.headDrift;
+    }
+    if (item.observedHeadSha !== undefined && item.observedHeadSha !== null) {
+        if (typeof item.observedHeadSha !== 'string' || item.observedHeadSha === '') {
+            return { ok: false, entry: null, sessionId: '', problem: 'E_LEDGER_UNKNOWN_FIELD', reason: ledgerProblemText('E_LEDGER_UNKNOWN_FIELD') };
+        }
+        entry.observedHeadSha = item.observedHeadSha;
+    }
+    return { ok: true, entry, sessionId, problem: null, reason: '' };
 }
 function fail(problem) {
     return { ok: false, view: {}, problem, reason: ledgerProblemText(problem) };
@@ -68,7 +82,14 @@ function flatten(view) {
     const items = [];
     for (const sessionId of Object.keys(view).sort()) {
         for (const entry of view[sessionId] ?? []) {
-            items.push({ sessionId, requestId: entry.requestId, atMs: entry.atMs });
+            items.push({
+                sessionId,
+                requestId: entry.requestId,
+                atMs: entry.atMs,
+                ...(entry.payloadSha256 !== undefined ? { payloadSha256: entry.payloadSha256 } : {}),
+                ...(entry.headDrift !== undefined ? { headDrift: entry.headDrift } : {}),
+                ...(entry.observedHeadSha !== undefined ? { observedHeadSha: entry.observedHeadSha } : {}),
+            });
         }
     }
     items.sort((a, b) => {
@@ -143,17 +164,23 @@ export function seenInWindow(view, sessionId, requestId, nowMs, windowMs) {
     return false;
 }
 /** 纯返回新视图（不改入参），记录 (sessionId, requestId) 的最新时刻。 */
-export function recordSeen(view, sessionId, requestId, atMs) {
+export function recordSeen(view, sessionId, requestId, atMs, meta = {}) {
     const next = {};
     for (const key of Object.keys(view))
         next[key] = (view[key] ?? []).map((item) => ({ ...item }));
     const bucket = next[sessionId] ?? (next[sessionId] = []);
     const at = Math.trunc(atMs);
     const existing = bucket.find((item) => item.requestId === requestId);
-    if (existing !== undefined)
-        existing.atMs = at;
-    else
-        bucket.push({ requestId, atMs: at });
+    const entry = existing ?? { requestId, atMs: at };
+    entry.atMs = at;
+    if (meta.payloadSha256 !== undefined)
+        entry.payloadSha256 = meta.payloadSha256;
+    if (meta.headDrift !== undefined)
+        entry.headDrift = meta.headDrift;
+    if (meta.observedHeadSha !== undefined)
+        entry.observedHeadSha = meta.observedHeadSha;
+    if (existing === undefined)
+        bucket.push(entry);
     return next;
 }
 export function createPromptLedger(options) {
@@ -216,12 +243,12 @@ export function createPromptLedger(options) {
         problem = decoded.problem;
         return { ok: decoded.ok, view: decoded.view, problem: decoded.problem };
     }
-    async function record(sessionId, requestId, atMs) {
+    async function record(sessionId, requestId, atMs, meta = {}) {
         const current = await load();
         if (!current.ok)
             return { ok: false, view: {}, problem: current.problem ?? 'E_LEDGER_STORAGE_UNAVAILABLE' };
         const stamp = typeof atMs === 'number' ? atMs : now();
-        return commit(recordSeen(current.view, sessionId, requestId, stamp));
+        return commit(recordSeen(current.view, sessionId, requestId, stamp, meta));
     }
     return { file, load, record, lastProblem: () => problem };
 }

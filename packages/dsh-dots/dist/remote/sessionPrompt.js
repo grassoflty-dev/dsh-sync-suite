@@ -1,8 +1,16 @@
 /**
  * mod-plugin-session-prompt：DARK 的 sessionPrompt 服务编排（插件侧，零 RPC 实现细节）。
  *
- * 本轮仍**没有真实投递通道**：生产缺省挂载 `createUnavailableDeliveryPort()`，它会拒绝
- * `E_SESSION_UNAVAILABLE` 且完全不读请求正文 / owner；绝不发明 DSH 会话 API、绝不返回假成功。
+ * 投递端口有两种实现：`createUnavailableDeliveryPort()`（DARK 缺省，拒绝且不读正文）与
+ * `createSessionControllerDeliveryPort()`（进程内 `ctx.sessionController.prompt`，同进程 typed 调用，
+ * **没有** JSON-RPC 镜像 / 第二个网络面）。生产服务在宿主晚到时才惰性取服务；服务缺席 ⇒
+ * `E_SESSION_UNAVAILABLE`。API 只回 `{accepted:true}`，没有 seq / sha —— 我们只回自己的
+ * `{accepted, payloadSha256}`（`payloadSha256` 是**我们自己的指纹**：对实际投递的正文逐字节 sha256，
+ * 不是 DSH 的字段），并把 `seq` 从所有结果与投影里彻底移除。
+ *
+ * 调用固定 `mode:'queue'`：绝不 steer、绝不打断正在运行的回合。每次调用新建 AbortController，
+ * **不设定时器**（项目纪律）：挂住的调用只阻塞那一个 RPC 请求。调用返回后会再读一次 head，
+ * 把漂移记进账本；**没有 CAS**，写入不可描述为原子——调用期间的 head 变化只能事后发现，不能阻止。
  *
  * 幂等策略 = **record-on-success**：只有投递成功（port 返回 ok:true）之后才把 (sessionId,
  * requestId) 写进账本。这样投递失败 / 拒绝不会污染账本，同一请求号可以安全重试；代价是
@@ -16,8 +24,13 @@
  * 且指纹与该实例当前叶证书 pin 完全一致；没有 pin 绝不 TOFU。任何拒绝都发生在
  * 其它依赖被触碰之前。
  *
- * 响应永远只有 `{seq, sha256, accepted}`：指令正文与 lease owner 不进返回体。
+ * 响应永远只有 `{accepted, payloadSha256}`：指令正文与 lease owner 不进返回体。
+ *
+ * 新 requestId 策略：某会话一旦有成功账本行，在 10 分钟窗口内用**另一个** requestId 再发会被
+ * 显式拒绝 `E_HEAD_MOVED`（我们自己上一次写入已经移动了 head，必须先刷新）。不把它委托给
+ * DSH 去重，是因为离线无法证明「去重命中」与「首次写入」的区别；显式拒绝是本地可证明的行为。
  */
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { SyncError } from '../engine/errors.js';
@@ -26,10 +39,11 @@ import { defaultDeviceId } from '../engine/settings.js';
 import { INSTANCE_ID_PATTERN, TOOL_SESSION_PROMPT } from './grants.js';
 import { normalisePairingFingerprint } from './pairingPayload.js';
 import { RemoteStore } from './store.js';
+import { LEASE_WORDING } from './lease.js';
 import { decideSessionPrompt } from './promptGate.js';
 import { createLeaseStore } from './leaseStore.js';
 import { createPromptLedger } from './promptLedger.js';
-import { PROMPT_ERROR_CODES, promptRefusal } from './promptWording.js';
+import { PROMPT_ERROR_CODES, PROMPT_IDEMPOTENCY_WINDOW_MS, promptRefusal } from './promptWording.js';
 const MARKER_FILE = 'channel-verified.json';
 const LEASE_FILE = 'session-leases.json';
 const LEDGER_FILE = 'prompt-ledger.json';
@@ -41,6 +55,47 @@ export function createUnavailableDeliveryPort() {
     return {
         async send() {
             return { ok: false, code: 'E_SESSION_UNAVAILABLE', reason: '未接入投递通道' };
+        },
+    };
+}
+/**
+ * 进程内 `ctx.sessionController.prompt` 投递端口：固定 mode:'queue'，每次新建 AbortController，
+ * 无定时器。所有 API 错误（session/not-found、session/agent-busy、gateway/internal、未知码、
+ * 非预期返回、abort）统一映射为 E_SESSION_DELIVERY_FAILED；服务缺席 ⇒ E_SESSION_UNAVAILABLE
+ * （什么都没尝试）。从不把 prompt / leaseOwner 写进 reason、日志或返回值。
+ */
+export function createSessionControllerDeliveryPort(options) {
+    return {
+        async send(request) {
+            let controller;
+            try {
+                controller = options.lookup();
+            }
+            catch {
+                return { ok: false, code: 'E_SESSION_UNAVAILABLE', reason: '会话控制器不可用' };
+            }
+            if (controller === null || controller === undefined || typeof controller.prompt !== 'function') {
+                return { ok: false, code: 'E_SESSION_UNAVAILABLE', reason: '会话控制器未挂载' };
+            }
+            // 我们自己的指纹：对实际投递的正文逐字节 sha256；不是 DSH 的 seq / sha / messageId。
+            const payloadSha256 = createHash('sha256').update(request.text, 'utf8').digest('hex');
+            const signal = new AbortController();
+            try {
+                const value = await controller.prompt({
+                    requestId: request.requestId,
+                    sessionId: request.sessionId,
+                    mode: 'queue',
+                    content: [{ type: 'text', text: request.text }],
+                }, signal.signal);
+                if (value === null || typeof value !== 'object' || value.accepted !== true) {
+                    return { ok: false, code: 'E_SESSION_DELIVERY_FAILED' };
+                }
+                return { ok: true, accepted: true, payloadSha256 };
+            }
+            catch {
+                // 任何声明/未声明的错误与 abort 都收敛到同一 typed 失败，绝不冒原始异常或假成功。
+                return { ok: false, code: 'E_SESSION_DELIVERY_FAILED' };
+            }
         },
     };
 }
@@ -97,11 +152,12 @@ function refusal(key) {
     const typed = promptRefusal(key);
     return new SyncError(typed.code, typed.wording, { key: typed.key });
 }
-/** 成功结果白名单投影：只取 seq / sha256，accepted 恒 true，绝不回显正文或 owner。 */
+/** 成功结果白名单投影：只取 accepted / 我们自己的 payloadSha256，绝不回显正文或 owner。 */
 function projectDelivery(raw) {
-    const seq = typeof raw.seq === 'number' && Number.isFinite(raw.seq) && raw.seq >= 0 ? Math.trunc(raw.seq) : -1;
-    const sha256 = typeof raw.sha256 === 'string' && raw.sha256.trim() !== '' ? raw.sha256 : '';
-    return { seq, sha256, accepted: seq >= 0 && sha256 !== '' };
+    const payloadSha256 = typeof raw.payloadSha256 === 'string' && /^[0-9a-f]{64}$/i.test(raw.payloadSha256)
+        ? raw.payloadSha256
+        : '';
+    return { accepted: raw.accepted === true && payloadSha256 !== '', payloadSha256 };
 }
 export function createSessionPromptService(options = {}) {
     const root = statePaths(options.homeDir).root;
@@ -112,9 +168,11 @@ export function createSessionPromptService(options = {}) {
     const pins = options.pins ?? createPairingPinLookup({ homeDir: options.homeDir });
     const leases = options.leases ?? createLeaseStore({ filePath: path.join(root, LEASE_FILE), now });
     const ledger = options.ledger ?? createPromptLedger({ filePath: path.join(root, LEDGER_FILE), now });
-    // undefined ⇒ 生产缺省「无通道」端口；显式 null 才表示连端口都未挂载。
+    // undefined ⇒ 有宿主控制器查找就走进程内端口，否则缺省「无通道」端口；显式 null 才表示未挂载。
     const delivery = options.delivery === undefined
-        ? createUnavailableDeliveryPort()
+        ? (options.sessionControllerLookup !== undefined
+            ? createSessionControllerDeliveryPort({ lookup: options.sessionControllerLookup })
+            : createUnavailableDeliveryPort())
         : options.delivery;
     const headReader = options.headReader ?? null;
     function channelState(instanceId) {
@@ -174,6 +232,12 @@ export function createSessionPromptService(options = {}) {
         const leaseState = await leases.load();
         const lease = leaseState.leases.find((item) => item.sessionId === request.sessionId) ?? null;
         const ledgerState = await ledger.load();
+        // 新 requestId 策略：本会话在窗口内已有成功账本行 ⇒ 自己上一次写入已移动 head，
+        // 显式拒绝 E_HEAD_MOVED 要求刷新；不把「首次写入 vs DSH 去重命中」留给离线猜测。
+        const prior = (ledgerState.view[request.sessionId] ?? []).filter((entry) => entry.requestId !== request.requestId);
+        if (prior.some((entry) => nowMs - entry.atMs < PROMPT_IDEMPOTENCY_WINDOW_MS)) {
+            throw new SyncError('E_HEAD_MOVED', LEASE_WORDING.E_HEAD_MOVED, { key: 'head.moved' });
+        }
         const head = headReader !== null
             ? await headReader.readHeadSha({ instanceId, sessionId: request.sessionId })
             : (lease?.headSha ?? '');
@@ -225,9 +289,26 @@ export function createSessionPromptService(options = {}) {
         const result = projectDelivery(outcome);
         if (!result.accepted)
             throw refusal('session.deliveryFailed');
+        // 调用返回后再读一次 head：没有 CAS，不能阻止漂移，只能事后记录。
+        // 读取失败按「未观察到漂移」处理（不让辅助观测破坏已确认的投递结果）。
+        let headDrift = false;
+        let observedHeadSha = '';
+        try {
+            observedHeadSha = headReader !== null
+                ? await headReader.readHeadSha({ instanceId, sessionId: request.sessionId })
+                : (lease?.headSha ?? '');
+            headDrift = observedHeadSha !== '' && head !== '' && observedHeadSha !== head;
+        }
+        catch {
+            headDrift = false;
+        }
         // record-on-success：只在投递成功后落账；写失败是独立的 typed 警告，不静默。
         try {
-            const recorded = await ledger.record(request.sessionId, request.requestId, nowMs);
+            const recorded = await ledger.record(request.sessionId, request.requestId, nowMs, {
+                payloadSha256: result.payloadSha256,
+                headDrift,
+                observedHeadSha,
+            });
             if (!recorded.ok)
                 throw refusal('session.recordFailed');
         }

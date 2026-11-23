@@ -69,7 +69,7 @@ import { mapRemoteCode, remoteToolError, REMOTE_TOOL_ERROR_CODES } from './remot
 // mod-plugin-session-prompt：唯一注册的写 action，但本轮 DARK（无投递实现）。
 // RPC 只依赖服务结构类型 + 拒绝文案表；缺省构造出的服务没有标记 ⇒ 一律 E_CHANNEL_UNVERIFIED。
 import { createSessionPromptService } from './remote/sessionPrompt.js'
-import type { ChannelState, PromptDeliveryResult, PromptSendRequest } from './remote/sessionPrompt.js'
+import type { ChannelState, PromptDeliveryResult, PromptSendRequest, SessionControllerLike } from './remote/sessionPrompt.js'
 import { PROMPT_CODE_BY_KEY, PROMPT_WORDING } from './remote/promptWording.js'
 // mod-plugin-pairing：RPC 只依赖配对服务的结构类型，不 import 证书 / QR / 监听实现。
 import type {
@@ -162,6 +162,11 @@ export interface RpcServiceOptions {
    */
   prompt?: PromptServiceLike
   /**
+   * 生产注入点：惰性返回宿主 `ctx.sessionController`（进程内 typed 服务，非 JSON-RPC）。
+   * 只在调用服务内部且所有前置闸通过后才会被解析。
+   */
+  promptSessionController?: () => SessionControllerLike | null | undefined
+  /**
    * mod-plugin-pairing 服务（可选）。未注入时所有 `pairing*` action 一律 fail-closed，
    * 返回 `E_INTERNAL 配对服务未挂载`，绝不返回空 payload 让 UI 画出假二维码。
    */
@@ -241,6 +246,9 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
   const promptService: PromptServiceLike = options.prompt ?? createSessionPromptService({
     homeDir: options.homeDir,
     now: () => now().getTime(),
+    ...(options.promptSessionController !== undefined
+      ? { sessionControllerLookup: options.promptSessionController }
+      : {}),
   })
   const precheckTransport = createFetchTransport(
     options.repoPrecheckFetch ??

@@ -21,6 +21,7 @@ import type { RemoteModule } from './remote/index.js'
 import { createPairingService } from './remote/pairingProvision.js'
 import { createHttpHandler, createRpcService } from './rpc.js'
 import type { ConnectionLike, RpcService } from './rpc.js'
+import type { SessionControllerLike } from './remote/sessionPrompt.js'
 import { registerScheduleTools } from './schedule/tools.js'
 import type { ScheduleToolOptions, ToolsServiceLike } from './schedule/tools.js'
 // v2 写半侧：首跑迁移门禁 + 同步周期接线；与 v1 日程工具完全平行，不重连 schedule_*。
@@ -61,6 +62,11 @@ export interface HostContext {
   effect(effect: () => (() => void) | void, label?: string): unknown
   /** 宿主 `tools` 服务（可选）。 */
   tools?: ToolsServiceLike
+  /**
+   * 宿主 `sessionController`（可选、可能晚挂载）。sessionPrompt 投递端口在每次调用时
+   * 惰性读取它；拿不到就是 E_SESSION_UNAVAILABLE，不在插件启动期崩溃。
+   */
+  sessionController?: SessionControllerLike
   /** Cordis 的服务注入：`ctx.inject(['tools'], (scope) => …)`（可选）。 */
   inject?(deps: string[], callback: (scope: HostContext) => void): unknown
 }
@@ -165,6 +171,8 @@ export function apply(ctx: HostContext, config: PluginConfig = {}): void {
     allowLocalRepo: config.allowLocalRepo === true,
     pairing,
     ...(remote === null ? {} : { remote: remote.service }),
+    // 每次调用都从 ctx 现取：服务晚到 / 未挂载都不影响插件启动，缺席 ⇒ E_SESSION_UNAVAILABLE。
+    promptSessionController: () => ctx.sessionController ?? null,
   })
   const handler = createHttpHandler(service, ctx.connection)
 

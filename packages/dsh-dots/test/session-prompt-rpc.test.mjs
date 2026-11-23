@@ -2,7 +2,7 @@
  * mod-plugin-session-prompt：DARK action 的 RPC 行为测试（临时目录 + 注入 spy）。
  *
  * 覆盖：action 已注册；标记缺失时每次调用都 E_CHANNEL_UNVERIFIED 且零依赖触碰；
- * 标记在但无 grant ⇒ E_GRANT_DENIED；有假端口的 happy path 只回 {seq,sha256,accepted}；
+ * 标记在但无 grant ⇒ E_GRANT_DENIED；有假端口的 happy path 只回 {accepted,payloadSha256}；
  * 端口缺席 ⇒ E_SESSION_UNAVAILABLE；标记文件只读；幂等与入参形状。
  */
 import test from 'node:test'
@@ -81,8 +81,8 @@ async function setup(t, options = {}) {
     // 故意多塞 text / leaseOwner 两个字段，证明服务层只回白名单三字段。
     send: async () => {
       calls.delivery += 1
-      // 故意多塞两个字段，证明服务层只回 {seq,sha256,accepted} 白名单。
-      return { ok: true, seq: 7, sha256: 'c'.repeat(64), text: 'SHOULD-NOT-ECHO', leaseOwner: 'dots' }
+      // 故意多塞两个字段，证明服务层只回 {accepted,payloadSha256} 白名单。
+      return { ok: true, accepted: true, payloadSha256: 'c'.repeat(64), text: 'SHOULD-NOT-ECHO', leaseOwner: 'dots' }
     },
   }
   const headReader = {
@@ -194,12 +194,13 @@ test('R6 标记绑定该实例后，未知实例 ⇒ E_INSTANCE_UNKNOWN（逐字
   assert.equal(res.error.message, PROMPT_WORDING['instance.unknown'])
 })
 
-test('R7 happy path：只回 {seq,sha256,accepted}，正文与 lease owner 不回显', async (t) => {
+test('R7 happy path：只回 {accepted,payloadSha256}，正文与 lease owner 不回显', async (t) => {
   const { rpc, calls } = await setup(t, { marker: true, granted: true })
   const res = await rpc.handleRpc(body())
   assert.equal(res.ok, true)
-  assert.deepEqual(Object.keys(res.data).sort(), ['accepted', 'seq', 'sha256'])
-  assert.equal(res.data.seq, 7)
+  assert.deepEqual(Object.keys(res.data).sort(), ['accepted', 'payloadSha256'])
+  assert.equal('seq' in res.data, false)
+  assert.equal(res.data.payloadSha256, 'c'.repeat(64))
   assert.equal(res.data.accepted, true)
   const text = JSON.stringify(res.data)
   assert.equal(text.includes('查一下 pc-b 的会话'), false)
