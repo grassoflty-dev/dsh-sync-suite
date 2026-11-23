@@ -139,8 +139,8 @@ export interface GitRepoV2PortOptions extends GitRepoOptions {
  * - `proxy-auth`：代理要它自己的凭据（HTTP 407）；
  * - `rate-limited`：远端限流（HTTP 429）；
  * - `remote-error`：远端**或中间代理/网关**出错（HTTP 5xx）；
- * - `not-found`：远端回 404（仓库不存在 / 改名 / 当前凭据看不到它），**不是网络问题**
- *   （评审 b11b P2-1：旧实现把它兜底成「网络不可达」，等于让用户去查网络）；
+ * - `not-found`：远端（**或 CONNECT 代理**）回 404（仓库不存在 / 改名 / 当前凭据看不到它），
+ *   **不是网络问题**（评审 b11b P2-1；b11c P2-2 补上代理来源的措辞）；
  * - `timeout`：预算杀死了子进程；
  * - `unreachable`：解析/连接失败（有**硬**正面证据）；
  * - `non-fast-forward`：远端已前进；
@@ -243,7 +243,10 @@ interface TextFailure {
  *      甚至恰好含 403 字样（被预算杀死的进程没有「远端拒绝」这件事）；
  *   3. **硬传输证据** → unreachable：`Could not resolve host` / `Failed to connect` 一类是真的
  *      链路没通；此时同一段 stderr 里那串 HTTP 文本只是回显，**硬证据优先于状态码**
- *      （评审 b11b P2-4：`remote: … HTTP 403 …` 与 DNS 失败同时出现时必须判不可达）；
+ *      （评审 b11b P2-4：`remote: … HTTP 403 …` 与 DNS 失败同时出现时必须判不可达）。
+ *      证据只在**非 `remote:`/`hint:` 行**上找（评审 b11c P2-1）：回显里的
+ *      `Connection refused` 是别人抄来的字，不能压过同一次失败里真实的 403 —— 那会把令牌被拒
+ *      说成网络问题。行门禁由 `engine/git.ts` 的 `hasTransportEvidence()` 一处提供；
  *   4. 状态码：401/403 → auth-rejected，404 → not-found，407 → proxy-auth，429 → rate-limited，
  *      5xx → remote-error（**先于一切文本匹配**：Gitee 的 403 正文里不含硬证据，所以不会被打断）；
  *   5. 认出了状态码却没映射（3xx / 400 / 405 / 422 …）→ **git-failed**，不落回「不可达」；
@@ -252,7 +255,8 @@ interface TextFailure {
  *   7. 其它 → git-failed（既有文案）。
  */
 function textFailureOf(text: string): TextFailure {
-  // 硬传输证据先跑：链路没通的时候，状态码只是被回显出来的数字。
+  // 硬传输证据先跑（且已按行排除 `remote:`/`hint:` 回显）：链路没通的时候，状态码只是被回显
+  // 出来的数字；反过来，回显里的链路短语也不是这次推送的事实（评审 b11c P2-1）。
   if (hasTransportEvidence(text)) return { reason: 'unreachable' }
   // 状态码只从 git 自己的输出里取，且只认 git 会打印的形状（见 engine/git.ts）。
   const byStatus = httpStatusFailureOf(text)
@@ -437,8 +441,9 @@ export class GitRepoV2Port implements V2GitPort {
       'auth-prompt': '推送失败：HTTPS 鉴权无法通过（git 已禁用交互提示，askpass／用户名或令牌不可用）；请检查鉴权配置后重试',
       // 凭据已送出但被远端拒绝：与 auth-prompt（拿不出凭据）是两件事，不许合并。
       'auth-rejected': '推送失败：远端拒绝了这个用户名或令牌（HTTP 401/403），凭据需要重新核对',
-      // 404：仓库不存在 / 改名 / 当前凭据看不到它——不是网络问题（b11b P2-1）。
-      'not-found': '推送失败：远端返回 404，仓库不存在或当前凭据看不到它',
+      // 404：仓库不存在 / 改名 / 当前凭据看不到它，**也可能来自 CONNECT 代理**——
+      // 不是网络问题（b11b P2-1 + b11c P2-2：不把来源单方面判给仓库）。
+      'not-found': '推送失败：远端或代理返回 404，仓库不存在或当前凭据看不到它',
       'proxy-auth': '推送失败：代理要求它自己的鉴权（HTTP 407），不是仓库凭据的问题',
       'rate-limited': '推送失败：远端限流（HTTP 429），稍后再推',
       // 5xx 不单方面归因给仓库：代理/网关回 502 时 git 的文案与仓库自己回 502 完全相同（b11b P2-3）。

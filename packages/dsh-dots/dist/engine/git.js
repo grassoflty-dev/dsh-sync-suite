@@ -68,6 +68,14 @@ export function gitTimeoutMessage(command, budgetMs, firstCall) {
  *    这类「远端回了话」的失败被说成「网络不可达（无法解析或连接到远端）」，让用户去查网络。
  *    真正的网络失败时 `Could not resolve host` / `Failed to connect` 一定会和它同时出现，
  *    因此丢掉这个前缀**不会丢掉任何证据**（见 `test/push-auth-classification.test.mjs` 的 G1）。
+ *
+ * ③ **行门禁（评审 b11c P2-1，P2-4 的镜像）**：硬证据只在**不是服务器回显**的行上成立。
+ *    `remote:` 是远端钩子 / CI 日志的输出，`hint:` 是配套提示，两者都不是 git 自己的 HTTP
+ *    客户端说的话。于是 `remote: CI log: … Connection refused` 这种**被别人抄进回显**的字不能
+ *    证明这次推送的链路没通——它若压过同一次失败里真实的 `returned error: 403`，用户会被送去
+ *    查网络，而真相是令牌被拒（方向与本模块正好相反）。真实解析 / 连接失败只会出现在 git 自己
+ *    的 `fatal:` 行上，所以按行排除回显**不会丢掉任何真实证据**。
+ *    门禁只此一份：由下面的 `nonEchoLinesOf()` 提供，松形状状态码也用它（评审 b11b P2-4）。
  */
 export const TRANSPORT_HARD_EVIDENCE_PATTERNS = Object.freeze([
     'could not resolve host',
@@ -89,15 +97,40 @@ export const TRANSPORT_HARD_EVIDENCE_PATTERNS = Object.freeze([
  */
 export const TRANSPORT_DROPPED_WRAPPER_PATTERNS = Object.freeze(['unable to access']);
 const TRANSPORT_HARD_EVIDENCE_RE = new RegExp(TRANSPORT_HARD_EVIDENCE_PATTERNS.join('|'), 'i');
+/** 服务器回显行（远端钩子日志 / 提示）的行首前缀：这一行不是 git 的 HTTP 客户端输出。 */
+const ECHO_LINE_PREFIX_RE = /^(?:remote|hint)\s*:/i;
+/**
+ * 「哪些行是 git 自己说的」的**唯一**切行逻辑（评审 b11b P2-4 + b11c P2-1 共用）：
+ * 按 CRLF/LF 切行、剥掉行首空白（含 tab）、丢掉空行，以及 `remote:` / `hint:` 开头的整行。
+ *
+ * 过滤是**结构性**的，不做「看起来像日志」之类的猜测；大小写与冒号前空格都由
+ * `ECHO_LINE_PREFIX_RE` 的 `i` + `\s*:` 覆盖。
+ */
+function nonEchoLinesOf(text) {
+    const lines = [];
+    for (const line of text.split(/\r?\n/)) {
+        const body = line.trimStart();
+        if (body === '' || ECHO_LINE_PREFIX_RE.test(body))
+            continue;
+        lines.push(body);
+    }
+    return lines;
+}
 /** 文本里是否有**硬**传输失败证据（结构性判定的唯一入口，供 gitPort 复用）。 */
 export function hasTransportEvidence(text) {
-    return typeof text === 'string' && TRANSPORT_HARD_EVIDENCE_RE.test(text);
+    if (typeof text !== 'string' || text === '')
+        return false;
+    // 只扫非回显行（评审 b11c P2-1）：`remote:` / `hint:` 里的 `Connection refused` 是别人抄来的字，
+    // 不是这次推送的链路事实；真正连不上时 git 自己那行 `fatal: …` 一定还在。
+    const evidenceLines = nonEchoLinesOf(text);
+    return evidenceLines.length > 0 && TRANSPORT_HARD_EVIDENCE_RE.test(evidenceLines.join('\n'));
 }
 /**
  * 状态码 → 原因的**唯一映射**（`failure()` 与 `sync/gitPort.ts` 共用，绝不各写一份）。
  *
  * - 401 / 403 → `auth-rejected`：远端收到凭据但拒绝（Gitee 令牌过期 / 无写权限就是这一形）；
- * - 404 → `not-found`：仓库不存在 / 改名 / 删了 / 令牌看不到它（**不是**网络问题，评审 b11b P2-1）；
+ * - 404 → `not-found`：仓库不存在 / 改名 / 删了 / 令牌看不到它，**也可能来自 CONNECT 代理**
+ *   （**不是**网络问题，评审 b11b P2-1 + b11c P2-2）；
  * - 407 → `proxy-auth`：代理要它自己的凭据，和仓库登录名无关；
  * - 429 → `rate-limited`：远端限流；
  * - 500–599 → `remote-error`：远端**或中间代理/网关**出错（代理回 502 时 git 的文案与仓库
@@ -151,8 +184,9 @@ const HTTP_STATUS_SENTENCE_SOURCES = Object.freeze([
  * 为什么必须按行过滤（评审 b11b P2-4）：`remote:` 是远端钩子的输出、`hint:` 是配套提示，
  * 它们不是 git 的 HTTP 客户端说的话。一句 `remote: build log: see HTTP 403 section`
  * 会把真正的 DNS 失败判成「凭据被拒」——方向与本模块的目标正好相反。
- * 过滤是**结构性**的：按行切开、剥掉行首空白、跳过 `remote:` / `hint:` 开头的整行，再跑正则；
- * 不做「看起来像日志」之类的猜测。句子形状（上表）不受此过滤影响：那是 git 自己的措辞。
+ * 过滤只此一份（`nonEchoLinesOf()`，硬传输证据也用它）：按行切开、剥掉行首空白、跳过
+ * `remote:` / `hint:` 开头的整行，再跑正则；不做「看起来像日志」之类的猜测。
+ * 句子形状（上表）不受此过滤影响：那是 git 自己的措辞。
  */
 const HTTP_STATUS_LOOSE_SOURCES = Object.freeze([
     // 协议行：`HTTP/1.1 429`
@@ -160,8 +194,6 @@ const HTTP_STATUS_LOOSE_SOURCES = Object.freeze([
     // 兜底：`HTTP 403` / `RPC failed; HTTP 403`
     '\\bHTTP\\s+(\\d{3})\\b',
 ]);
-/** 服务器回显行（远端钩子日志 / 提示）的行首前缀：这一行不是 git 的 HTTP 客户端输出。 */
-const ECHO_LINE_PREFIX_RE = /^(?:remote|hint)\s*:/i;
 /** 把 `sources` 里的所有匹配按顺序追加进 `codes`（去重，只收 100..599）。 */
 function collectStatusCodes(text, sources, codes) {
     for (const source of sources) {
@@ -180,11 +212,8 @@ export function httpStatusCodesOf(text) {
     // 句子形状先跑：同一段 stderr 里既有 `HTTP/1.1 200 Connection established` 又有
     // `returned error: 500` 时，真正的失败码必须先被认领（源顺序 = 可信度）。
     collectStatusCodes(text, HTTP_STATUS_SENTENCE_SOURCES, codes);
-    // 松形状逐行跑，跳过服务器回显行（`remote:` / `hint:`）。
-    for (const line of text.split(/\r?\n/)) {
-        const body = line.trimStart();
-        if (body === '' || ECHO_LINE_PREFIX_RE.test(body))
-            continue;
+    // 松形状逐行跑，跳过服务器回显行（`remote:` / `hint:`）——与硬传输证据同一份行门禁。
+    for (const body of nonEchoLinesOf(text)) {
         collectStatusCodes(body, HTTP_STATUS_LOOSE_SOURCES, codes);
     }
     return codes;
@@ -213,12 +242,15 @@ export function httpStatusFailureOf(text) {
  * 与仓库服务端出错**一模一样**的那句 `returned error: 502`，只说「远端服务器出错」会把
  * 代理故障归因给仓库；只说「代理」又会把真正的服务端 5xx 说错。两个都点名。
  *
- * 404 的措辞（评审 b11b P2-1）只说「远端回了 404」+ 两种真实处境（仓库不存在 / 凭据看不到），
- * 不写「网络」「代理」「防火墙」——那正是旧兜底把用户带偏的方向。
+ * 404 的措辞（评审 b11b P2-1 + b11c P2-2）：只说「远端**或代理**回了 404」+ 两种真实处境
+ * （仓库不存在 / 凭据看不到），不写「网络」「防火墙」——那正是旧兜底把用户带偏的方向。
+ * 为什么要把代理算进来：CONNECT 失败时代理自己也会回 404，而 libcurl 对它的措辞与仓库回 404
+ * 无法从 stderr 上区分；把责任单方面判给仓库，用户就会去核对一个没问题的仓库地址。
+ * 这里**不**尝试从 stderr 分辨来源（那需要真实链路观测），只让文案不再声称来源是仓库。
  */
 export const HTTP_STATUS_CAUSE_ZH = Object.freeze({
     'auth-rejected': '远端拒绝了这个用户名或令牌',
-    'not-found': '远端返回 404，仓库不存在或当前凭据看不到它',
+    'not-found': '远端或代理返回 404，仓库不存在或当前凭据看不到它',
     'proxy-auth': '代理要求它自己的鉴权',
     'rate-limited': '远端限流',
     'remote-error': '远端或代理返回 HTTP 5xx，本地改动与令牌都没有问题',
@@ -598,10 +630,13 @@ export class GitRepo {
      *
      * 判定顺序（本文件与 `sync/gitPort.ts` 的 `textFailureOf()` 共用同一套，不许各自发明）：
      *   0. 超时/预算杀死由结构信号在 `run()` 里先判掉（走不到这里）；
-     *   1. **硬传输证据**（`hasTransportEvidence`：解析不到主机/代理、连接被拒/被重置等）
-     *      → E_GIT + `unreachable`。**它必须先于状态码**：真正的 DNS 失败会同时带一串 HTTP 文本
-     *      （`remote:` 钩子回显、代理抱怨），此时链路根本没通，那些数字不是「远端回的码」
-     *      （评审 b11b P2-4 的收口；`unable to access` 这个 curl 包装前缀已从证据集里删掉）；
+     *   1. **硬传输证据**（`hasTransportEvidence`：解析不到主机/代理、连接被拒/被重置等，
+     *      **且只在非 `remote:`/`hint:` 回显行上找**）→ E_GIT + `unreachable`。
+     *      **它必须先于状态码**：真正的 DNS 失败会同时带一串 HTTP 文本（`remote:` 钩子回显、
+     *      代理抱怨），此时链路根本没通，那些数字不是「远端回的码」（评审 b11b P2-4 的收口；
+     *      `unable to access` 这个 curl 包装前缀已从证据集里删掉）。反过来，回显行里的
+     *      `Connection refused` 也**不算**证据：它压过同一次失败里真实的 403 时，用户会被送去
+     *      查网络，而令牌其实已被拒绝（评审 b11c P2-1，P2-4 的镜像）；
      *   2. stderr 里的 HTTP 状态码（`httpStatusFailureOf`）：401/403 → `auth-rejected`，
      *      404 → `not-found`，407 → `proxy-auth`，429 → `rate-limited`，5xx → `remote-error`；
      *   3. **认出了状态码但没映射**（3xx / 400 / 405 / 422 …）→ E_GIT + `git-failed`，

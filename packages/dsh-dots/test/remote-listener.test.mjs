@@ -214,6 +214,81 @@ function lanLedgerVerdict({ total, ran, skipped, missing, gated = total, staticS
 }
 
 /**
+ * 台账的**第二判据**（评审 b11c P2-5）：独立于被测探测函数，直接读网卡并逐个真绑一次。
+ *
+ * 为什么需要它：`capabilityMissing` 与被注入的 `missing` 原来是**同一个** `LAN === null`，
+ * 于是"能力是否缺失"由被测函数自己说了算——探测恒返回 null 时，36 条 LAN 用例全部跳过，
+ * 台账却仍然全绿（循环论证）。这里只绑**不连**（比 `findBindableLanAddress()` 弱一档）：
+ * 它说"有能力"时，探测函数没有任何理由报缺失；它说"没有"时允许跳过（探测更严，不与其矛盾）。
+ *
+ * 返回可绑定的非回环 IPv4 列表（通常 0 或 1 条）。
+ */
+async function independentLanBindWitness() {
+  const bound = []
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const item of list ?? []) {
+      const family = item.family
+      if (family !== 'IPv4' && family !== 4) continue
+      if (item.internal === true) continue
+      if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(item.address)) continue
+      if (item.address.startsWith('169.254.')) continue
+      const probe = net.createServer()
+      try {
+        await new Promise((resolve, reject) => {
+          probe.once('error', reject)
+          probe.listen(0, item.address, () => {
+            probe.removeListener('error', reject)
+            resolve()
+          })
+        })
+        bound.push(item.address)
+      } catch {
+        /* 绑不上：这个地址不作为见证 */
+      } finally {
+        try {
+          await new Promise((resolve) => probe.close(resolve))
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+  return bound
+}
+
+/**
+ * 见证 + 台账的合成裁决（**纯函数**，评审 b11c P2-5）：把"第二判据"也做成可判红的对象，
+ * 而不是一段散文。`witnessCount` 由 `independentLanBindWitness()` 给出。
+ *
+ * `witnessCount > 0`（外部看得见可绑定的非回环 IPv4）时：
+ *   · `capabilityMissing` 必须为 false —— 探测恒 true 就是"探测坏了"，不许把 LAN 用例静默跳过；
+ *   · 跳过数只能是注册期静态跳过（`staticSkipped`）；
+ *   · 实跑数必须等于 `total - staticSkipped`（没有静态跳过时就是 `ran === total`）。
+ * `witnessCount === 0` 时不下结论（本机确实可能没有 LAN），由调用方打印诊断。
+ */
+function lanLedgerWitnessVerdict({
+  witnessCount, capabilityMissing, ran, total, skipped, staticSkipped = 0,
+}) {
+  const problems = []
+  if (witnessCount > 0) {
+    if (capabilityMissing) {
+      problems.push(
+        `外部见证可绑定 ${String(witnessCount)} 个非回环 IPv4，探测却报缺失（探测坏了：跳过不算通过）`,
+      )
+    }
+    if (skipped !== staticSkipped) {
+      problems.push(`有能力时跳过数 ${String(skipped)} 必须只剩注册期静态跳过 ${String(staticSkipped)}`)
+    }
+    if (ran !== total - staticSkipped) {
+      problems.push(
+        `有能力时实跑数 ${String(ran)} 必须等于登记数 ${String(total)} − 静态跳过 ${String(staticSkipped)}`,
+      )
+    }
+  }
+  return { ok: problems.length === 0, problems }
+}
+
+/**
  * 一条用例的运行期记账（**唯一**记账点）：注册器与离线探针共用同一份代码。
  *
  * 缺能力的 LAN 用例 ⇒ 记一次跳过 + `t.skip(具名原因)`，**用例体不执行**（这是"跳过不会被
@@ -469,6 +544,11 @@ async function startFakeUpstream() {
  *
  * 它模拟的是最坏的那种挂死：端口在听（不是 ECONNREFUSED），但对端进程卡住/被挂起，
  * 于是监听侧如果不设首字节预算，平板就会无限等（G2 的原始缺陷形态）。
+ *
+ * `socket.resume()` 是**夹具正确性**的一部分（评审 b11c §6 的方法学留痕）：不 resume 时，
+ * 对端 FIN 不会把 socket 推到 `'close'`，`state.sockets` 就永远不缩水，于是"close() 之后
+ * 上游还剩几条活连接"这条断言会得到一个假阳性（2 而不是 0）。
+ * resume 后该集合才是"当前存活的上游连接数"，`connections` 仍是累计 accept 数。
  */
 async function startSilentUpstream() {
   const state = { connections: 0, sockets: new Set() }
@@ -477,6 +557,8 @@ async function startSilentUpstream() {
     state.sockets.add(socket)
     socket.on('error', () => {})
     socket.on('close', () => state.sockets.delete(socket))
+    // 只消费、不回应：让 FIN 能被观察（否则 'close' 永不触发，见上面的注释）。
+    socket.resume()
   })
   await listenOnce(server, 0, '127.0.0.1')
   const port = server.address().port
@@ -1626,9 +1708,17 @@ lanTest('隧道上限（P2-A）：close() 归还握手中的预约，同上限�
     halfOpen.push(await openWs(first.port, LAN, { path: '/api/remote.mux?half=0' }))
     halfOpen.push(await openWs(first.port, LAN, { path: '/api/remote.mux?half=1' }))
     await waitFor(() => first.stats().reservedTunnels === 2, '两条半开握手必须先各占一个预约槽')
+    // 前提（评审 b11c P2-4）：两条握手必须**真的拨到**上游，且上游侧此刻有 2 条活连接。
+    // 没有这两条前提，"close() 之后上游为 0"就是"从未拨出"的 0 —— 空证据。
+    await waitFor(() => silent.state.connections === 2, '两条半开握手必须真的拨到上游（上游 accept=2）')
+    assert.equal(silent.state.sockets.size, 2, '前提：上游侧当前有 2 条活连接（否则后面的 0 是空转）')
     await first.close()
     assert.equal(first.stats().reservedTunnels, 0, 'close() 时握手中的预约必须同步归还')
     assert.equal(first.stats().tunnels, 0)
+    // `shutdown()` 必须**销毁在飞的上游 socket**：上游侧活连接从 2 变 0。
+    // 夹具已 `resume()`（见 `startSilentUpstream`），所以这里数的是"当前存活"，不是累计 accept。
+    await waitFor(() => silent.state.sockets.size === 0, 'close() 必须销毁在飞的上游 socket（2 → 0）')
+    assert.equal(silent.state.sockets.size, 0, 'close() 返回后不许再有一条活的上游连接')
 
     // 第二个监听：同一上限、正常上游 ⇒ 第一条升级必须 101（说明没有跨监听遗留的占用）
     second = await startRemoteListener({
@@ -1997,6 +2087,7 @@ test('LAN 台账自检（P2-8）：缺能力分支离线真跑一遍（注入 mi
  */
 test('LAN 台账纯函数（P2-8）：lanLedgerVerdict 的不变式逐条可判红', () => {
   const verdictOf = (input) => lanLedgerVerdict(input)
+  const witnessVerdictOf = (input) => lanLedgerWitnessVerdict(input)
   // 缺能力：ran=0 / skipped=total（这就是本机跑不到的那条分支）。
   assert.deepEqual(verdictOf({ total: 5, ran: 0, skipped: 5, missing: true }).problems, [])
   // 缺能力却有一条实跑 ⇒ 红。
@@ -2015,6 +2106,37 @@ test('LAN 台账纯函数（P2-8）：lanLedgerVerdict 的不变式逐条可判�
   assert.equal(verdictOf({ total: 0, ran: 0, skipped: 0, missing: true }).problems.length > 0, true)
   assert.equal(verdictOf({ total: -1, ran: 0, skipped: 0, missing: false }).problems.length > 0, true)
   assert.equal(verdictOf({ total: 5, ran: 0, skipped: 5, missing: true, gated: 9 }).problems.length > 0, true)
+
+  // 第二判据（b11c P2-5）：外部见证说"有能力"时，**探测恒 true 的台账必须判红**。
+  // 这条就是"探测坏了仍全绿"的场景：45 条登记、36 条 LAN 全跳过、只实跑 8 条非 LAN。
+  assert.equal(
+    witnessVerdictOf({
+      witnessCount: 2, capabilityMissing: true, ran: 8, total: 45, skipped: 37, staticSkipped: 1,
+    }).problems.length > 0,
+    true,
+    '探测恒 true（外部见证却有能力）必须判红',
+  )
+  // 同一场景下有能力的正确账本必须是绿：ran 等于 total 减静态跳过。
+  assert.deepEqual(
+    witnessVerdictOf({
+      witnessCount: 2, capabilityMissing: false, ran: 44, total: 45, skipped: 1, staticSkipped: 1,
+    }).problems,
+    [],
+  )
+  // 有能力却仍跳过一条 LAN 用例 ⇒ 红。
+  assert.equal(
+    witnessVerdictOf({
+      witnessCount: 1, capabilityMissing: false, ran: 43, total: 45, skipped: 2, staticSkipped: 1,
+    }).problems.length > 0,
+    true,
+  )
+  // 没有外部见证时不下结论（本机确实可能没有 LAN），允许跳过。
+  assert.deepEqual(
+    witnessVerdictOf({
+      witnessCount: 0, capabilityMissing: true, ran: 0, total: 45, skipped: 45, staticSkipped: 0,
+    }).problems,
+    [],
+  )
 })
 
 /**
@@ -2030,7 +2152,7 @@ test('LAN 台账纯函数（P2-8）：lanLedgerVerdict 的不变式逐条可判�
  *   · **源码自检**：nodeTest 的直调（带括号）只允许出现一次（唯一包装器里）——这就是"每个用例都经过
  *     登记器"的构造性证明，而不是靠人记得用 `lanTest`。
  */
-test('LAN 台账（P2-B / P2-8）：登记数 = 实跑数 + 跳过数，且跳过只能发生在能力缺失时', (t) => {
+test('LAN 台账（P2-B / P2-8 / b11c P2-5）：登记数 = 实跑数 + 跳过数，且跳过只能发生在能力缺失时', async (t) => {
   const { total, gated, ran, skipped, staticSkipped } = LAN_LEDGER
   const capabilityMissing = LAN === null
   const verdict = lanLedgerVerdict({ total, ran, skipped, missing: capabilityMissing, gated, staticSkipped })
@@ -2054,6 +2176,35 @@ test('LAN 台账（P2-B / P2-8）：登记数 = 实跑数 + 跳过数，且跳�
     `实跑数 ${String(ran)} 与本机能力（缺失=${String(capabilityMissing)}）不一致：缺能力时 LAN 用例一条都不许实跑`,
   )
 
+  // **第二判据**（评审 b11c P2-5）：独立读网卡 + 真绑一次，不再让"能力是否缺失"由被测探测
+  // 函数自证。外部见证说有能力时，探测报缺失 ⇒ 红（36 条 LAN 用例静默跳过不再能蒙混过关）。
+  const witness = await independentLanBindWitness()
+  const witnessVerdict = lanLedgerWitnessVerdict({
+    witnessCount: witness.length, capabilityMissing, ran, total, skipped, staticSkipped,
+  })
+  assert.deepEqual(witnessVerdict.problems, [], `第二判据不通过：${witnessVerdict.problems.join('；')}`)
+  if (witness.length > 0) {
+    assert.equal(capabilityMissing, false, `外部见证可绑定 ${witness.join(',')}，探测却报缺失（探测坏了）`)
+    assert.equal(skipped, staticSkipped, '有能力时跳过必须只剩注册期静态跳过')
+    assert.equal(ran, total - staticSkipped, '有能力时 ran 必须等于 total（减去注册期静态跳过）')
+  }
+
+  // 同一份记账代码再**驱动一遍健康探测**（missing: false）：必须全部实跑，`ran === total`。
+  // 这条与上面的外部见证互为对照：探测若恒 true，真实台账的 ran 就永远到不了 total。
+  const healthyLedger = { total: 0, gated: 0, ran: 0, skipped: 0, staticSkipped: 0, reason: '' }
+  const healthyRan = []
+  for (let index = 0; index < 3; index += 1) {
+    healthyLedger.total += 1
+    healthyLedger.gated += 1
+    await runGatedCase(
+      { skip: () => assert.fail('健康探测下不许跳过') },
+      { fn: () => healthyRan.push(index), gated: true, missing: false, ledger: healthyLedger },
+    )
+  }
+  assert.equal(healthyLedger.ran, healthyLedger.total, '健康探测下 ran 必须等于 total')
+  assert.equal(healthyLedger.skipped, 0, '健康探测下不许有任何跳过')
+  assert.deepEqual(healthyRan, [0, 1, 2], '健康探测下三条用例体必须全部真的执行')
+
   // 源码自检：`node:test` 只允许在唯一包装器里被调用一次。用拼接构造针，避免这段源码自己命中。
   const source = readFileSync(new URL(import.meta.url), 'utf8')
   const needle = `node${'Test'}(`
@@ -2066,6 +2217,6 @@ test('LAN 台账（P2-B / P2-8）：登记数 = 实跑数 + 跳过数，且跳�
   t.diagnostic(reason)
   console.log(
     `[LAN-LEDGER] registered=${String(total)} gated=${String(gated)}`
-    + ` ran=${String(ran)} skipped=${String(skipped)} | ${reason}`,
+    + ` ran=${String(ran)} skipped=${String(skipped)} witness=${String(witness.length)} | ${reason}`,
   )
 })

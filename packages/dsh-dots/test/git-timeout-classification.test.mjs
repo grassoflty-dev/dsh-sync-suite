@@ -608,14 +608,28 @@ test('T14 状态码先于文本：401/403 → auth-rejected、404 → not-found�
     await port.dispose()
   }
 
-  // mod-plugin-push-classify-hardening（b11b P2-4 / P2-1）：三条新裁决，逐条打真 pushMain()。
-  // ① 回显行上的 403 + DNS 失败 ⇒ unreachable（硬证据赢过状态码，且不挂 status）；
-  // ② 404 ⇒ not-found + status=404（仓库不存在，不是网络）；
-  // ③ 302 ⇒ git-failed + 无 status（认出了码但没映射，绝不冒充不可达）。
+  // mod-plugin-push-classify-hardening（b11b P2-4 / P2-1）：四条裁决，逐条打真 pushMain()。
+  // ① `fatal:` 行的 DNS 失败 + `remote:` 回显的 403 ⇒ unreachable（硬证据赢过状态码，且不挂 status）；
+  // ② 404 ⇒ not-found + status=404（仓库不存在或代理回的，不是网络）；
+  // ③ 302 ⇒ git-failed + 无 status（认出了码但没映射，绝不冒充不可达）；
+  // ④ `remote:` 回显里的 `Connection refused` + 真 403 ⇒ auth-rejected/403（b11c P2-1，P2-4 的镜像）。
+  // ① 的形态在第三轮复核后被收窄：整行都是回显时，行内的 DNS 短语与行内的 403 一样不算数
+  // （退化形态由 `push-auth-classification.test.mjs` 的 G3 ⑦ 钉住）；真实形态是链路证据在
+  // git 自己的 fatal 行上。
   const hardening = [
-    ['remote: build log: see HTTP 403 section; Could not resolve host', 'unreachable', undefined],
+    [
+      "fatal: unable to access 'https://gitee.com/acme/repo.git/': Could not resolve host: gitee.com\n"
+      + 'remote: build log: see HTTP 403 section',
+      'unreachable', undefined,
+    ],
     ["fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 404", 'not-found', 404],
     ["fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 302", 'git-failed', undefined],
+    // ④ 回显行里的硬证据不算数（b11c P2-1）：`remote: Connection refused` + 真 403 ⇒ 凭据被拒。
+    [
+      'remote: Connection refused\n'
+      + "fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 403",
+      'auth-rejected', 403,
+    ],
   ]
   for (const [stderr, expected, status] of hardening) {
     const port = portWithRunner(failRunner(stderr))

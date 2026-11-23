@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import {
+  ALLOWED_PUSH_REASONS,
   DEFAULT_V2_INSTANCE_ID,
   MAX_CYCLE_RETRIES,
   V2_ERROR,
@@ -35,6 +36,7 @@ import { GitRepoV2Port, pushTimeoutReason } from '../dist/sync/gitPort.js'
 import { NodeTimelineFs } from '../dist/timeline/write.js'
 import { NodeOutboxPort } from '../dist/sync/outbox.js'
 import { FRESH_SCHEMA_TEXT, buildRecordsText, canonicalRecordLine } from '../dist/timeline/index.js'
+import { countWhitelistEntries, pushCensusVerdict } from './push-census-guard.mjs'
 
 const DAY = '2026-11-19'
 const TS = `${DAY}T01:30:00.000Z`
@@ -476,6 +478,17 @@ function documentedPushPhraseCount() {
   return value
 }
 
+/** 白名单数组的源码切片（`Object.freeze([ … ])`，含闭合）：census 与 hostile 篡改都从这里取。 */
+function allowedPushReasonsBlock() {
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const src = readFileSync(path.resolve(here, '../src/sync/cycle.ts'), 'utf8')
+  const start = src.indexOf('export const ALLOWED_PUSH_REASONS')
+  assert.notEqual(start, -1, 'cycle.ts 必须导出 ALLOWED_PUSH_REASONS（守卫要拿运行时长度）')
+  const end = src.indexOf('])', start)
+  assert.notEqual(end, -1, 'cycle.ts 的白名单数组必须闭合')
+  return src.slice(start, end + 2)
+}
+
 test('PO-09 十个 shipped 短语逐字节存活（防止过度打码）', async () => {
   const reasons = shippedPushReasons()
   // 9 条固定短语 + 1 条超时模板（超时与不可达、凭据被拒与拿不出凭据、404 与 5xx 都是不同结局）。
@@ -516,16 +529,63 @@ test('PO-10 drift guard：cycle.ts 的精确短语表与 gitPort.pushFailure() �
   assert.deepEqual(allowed, shipped)
 })
 
-test('PO-12 census 注释守卫：cycle.ts 注释里写的条数必须等于数组实际长度（注释不许撒谎）', () => {
+test('PO-12 census 守卫：注释 N、运行时 ALLOWED_PUSH_REASONS.length、shipped 条数三方一致（且守卫能判红）', () => {
+  // live：真实值全部交给**同一个纯函数**。allowedLength 来自运行时导入的数组，不是文本重扫。
   const documented = documentedPushPhraseCount()
-  const allowed = cycleAllowedReasons()
-  // 三方一致：注释里的 N、源码里 ALLOWED_PUSH_REASONS 的实际条数、以及 shipped 短语条数常量。
-  assert.equal(documented, allowed.length, '注释里的「白名单共 N 条短语」必须等于数组实际长度')
-  assert.equal(documented, SHIPPED_PUSH_PHRASE_COUNT, '注释里的 N 必须等于 shipped 短语条数常量')
-  // 反向证明这条守卫不是恒真：把注释里的数字换成别的值，就必须与数组长度不等。
-  const here = path.dirname(fileURLToPath(import.meta.url))
-  const src = readFileSync(path.resolve(here, '../src/sync/cycle.ts'), 'utf8')
-  const tampered = src.replace(/白名单共\s*\d+\s*条短语/, '白名单共 5 条短语')
-  const tamperedCount = Number.parseInt(/白名单共\s*(\d+)\s*条短语/.exec(tampered)[1], 10)
-  assert.notEqual(tamperedCount, allowed.length, '篡改后的数字必须被检出（守卫不是恒真）')
+  const live = pushCensusVerdict({
+    documented,
+    allowedLength: ALLOWED_PUSH_REASONS.length,
+    shipped: SHIPPED_PUSH_PHRASE_COUNT,
+  })
+  assert.deepEqual(live.problems, [], `census 不自洽：${live.problems.join('；')}`)
+  // 第二判据（旧口径保留，但降级为旁证）：注释数字与源码文本里逐字取出的短语数一致。
+  // 它只证明"注释没被改花"，**不再**被当作数组长度的证据（评审 b11c P2-3）。
+  assert.equal(documented, cycleAllowedReasons().length, '注释里的 N 必须等于源码文本重扫出的条数（第二判据）')
+
+  // 反向控制：注释数字漂移必须判红（否则纯函数恒真）。
+  for (const bogus of [documented - 5, documented + 1, '十']) {
+    const verdict = pushCensusVerdict({
+      documented: bogus, allowedLength: ALLOWED_PUSH_REASONS.length, shipped: SHIPPED_PUSH_PHRASE_COUNT,
+    })
+    assert.equal(verdict.ok, false, `注释里的 N 改成 ${String(bogus)} 必须判红`)
+  }
+  // 反向控制：数组长度变化（shipped 条数没跟上）也必须判红。
+  const driftedShip = pushCensusVerdict({
+    documented: ALLOWED_PUSH_REASONS.length, allowedLength: ALLOWED_PUSH_REASONS.length,
+    shipped: SHIPPED_PUSH_PHRASE_COUNT + 1,
+  })
+  assert.equal(driftedShip.ok, false, 'shipped 条数与数组长度漂移必须判红')
+
+  // **hostile 输入**（评审 b11c P2-3 的 M1–M3）：这三种第 11 条在旧守卫下全绿，因为旧守卫比较
+  // 的是"单引号、单行、以「推送失败：」开头的字面量重扫数"。现在真值来自运行时数组长度。
+  const block = allowedPushReasonsBlock()
+  // 计数器先行校准：对**真实源码**必须数出与运行时导入一致的长度，否则下面的"11 条"不可信。
+  assert.equal(countWhitelistEntries(block), ALLOWED_PUSH_REASONS.length,
+    '元素计数器对真实源码必须等于运行时数组长度')
+  const hostileEntries = [
+    // M1：第 11 条用**双引号**——旧重扫只认单引号。
+    ['double-quote', '  "推送失败：第十一条（双引号写法）",'],
+    // M2：第 11 条用**模板字面量**——旧重扫只认单引号。
+    ['template-literal', '  `推送失败：第十一条（模板字面量写法）`,'],
+    // M3：第 11 条**不以「推送失败：」开头**——旧重扫按前缀过滤。
+    ['no-push-prefix', "  '别的原因：这一条没有推送失败前缀',"],
+  ]
+  for (const [name, entry] of hostileEntries) {
+    const mutated = `${block.slice(0, block.lastIndexOf('])'))}${entry}\n])`
+    // 旧守卫的度量对象：文本重扫——三条篡改都只数到 documented 条，所以它们当年全绿。
+    assert.equal(quotedPushPhrases(mutated).length, documented,
+      `${name}：文本重扫仍然只数到 ${String(documented)} 条（这正是旧守卫被欺骗的原因）`)
+    // 真实数组：多了一条，长度必须变成 N+1。
+    assert.equal(countWhitelistEntries(mutated), ALLOWED_PUSH_REASONS.length + 1,
+      `${name}：真实数组会变成 ${String(ALLOWED_PUSH_REASONS.length + 1)} 条`)
+    // 守卫裁决：必须红（若这里绿，守卫就又证明了另一个对象）。
+    const verdict = pushCensusVerdict({
+      documented: quotedPushPhrases(mutated).length,
+      allowedLength: countWhitelistEntries(mutated),
+      shipped: SHIPPED_PUSH_PHRASE_COUNT,
+    })
+    assert.equal(verdict.ok, false, `${name}：第 11 条必须让 census 守卫判红`)
+    assert.equal(verdict.problems.some((problem) => problem.includes('ALLOWED_PUSH_REASONS.length')), true,
+      `${name}：判红理由必须点名数组长度（而不是别的不变式）`)
+  }
 })
