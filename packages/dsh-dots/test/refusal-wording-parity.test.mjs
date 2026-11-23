@@ -33,6 +33,7 @@ const EXPECTED_KEYS = [
   'prompt.confirm.stale',
   'channel.tablet.unverified',
   'channel.desktop.unverified',
+  'channel.desktop.leafMismatch',
   'lease.observing',
   'lease.notHeld',
   'lease.expired',
@@ -102,7 +103,7 @@ test('拒绝文案三方对拍：16 行 + App 侧 + 插件侧 +  hygiene', () =>
   const app = parseApp()
 
   // (c) 行数与 key 集合
-  check('row count', rows.length, 16)
+  check('row count', rows.length, 17)
   check('key set', [...new Set(rows.map((row) => row.key))].sort().join(','), [...EXPECTED_KEYS].sort().join(','))
   // prompt.text.tooLong 的模板先决条件
   check('COMMAND_TEXT_LIMIT', app.limit, 2000)
@@ -121,7 +122,7 @@ test('拒绝文案三方对拍：16 行 + App 侧 + 插件侧 +  hygiene', () =>
     if (row.pluginCode !== '') {
       pluginRows += 1
       if (row.pluginConst === 'PROMPT_WORDING') {
-        check(`plugin key registered ${row.key}`, PROMPT_SEMANTIC_KEYS.includes(row.key), true)
+        check(`plugin key registered ${row.key}`, Object.prototype.hasOwnProperty.call(PROMPT_WORDING, row.key), true)
         check(`plugin code ${row.key}`, PROMPT_CODE_BY_KEY[row.key], row.pluginCode)
         check(`plugin wording ${row.key}`, PROMPT_WORDING[row.key], row.wording)
       } else if (row.pluginConst === 'LEASE_WORDING') {
@@ -133,7 +134,7 @@ test('拒绝文案三方对拍：16 行 + App 侧 + 插件侧 +  hygiene', () =>
     }
   }
   check('app row count', appRows, 8)
-  check('plugin row count', pluginRows, 11)
+  check('plugin row count', pluginRows, 12)
 
   // (d) 文案 hygiene（文档 + App 值 + 插件两表）
   const texts = [...allWording, ...Object.values(app.wording), ...Object.values(PROMPT_WORDING), ...Object.values(LEASE_WORDING)]

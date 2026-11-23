@@ -89,6 +89,9 @@ async function setup(t, options = {}) {
   }
   const service = createSessionPromptService({
     markerPath, instances, grants, leases, ledger, delivery, headReader, now: () => NOW,
+    // leaf-binding 后通道闸需要每实例 pin；这里注入与标记一致的假指纹，
+    // 保持本文件原有断言不变，也避免读取任何 live 配对状态。
+    pins: { lookup: () => ({ fingerprint: options.pinFingerprint ?? VALID_MARKER.leafSha256 }) },
   })
   const prompt = {
     channelVerified: (instanceId) => {

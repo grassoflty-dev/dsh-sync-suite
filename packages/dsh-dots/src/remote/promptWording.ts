@@ -25,11 +25,13 @@ export const PROMPT_ERROR_CODES = {
   VALIDATION: 'E_VALIDATION',
   GRANT_DENIED: 'E_GRANT_DENIED',
   CHANNEL_UNVERIFIED: 'E_CHANNEL_UNVERIFIED',
+  CHANNEL_LEAF_MISMATCH: 'E_CHANNEL_LEAF_MISMATCH',
   PROMPT_DUPLICATE: 'E_PROMPT_DUPLICATE',
   INSTANCE_UNKNOWN: 'E_INSTANCE_UNKNOWN',
   SESSION_UNAVAILABLE: 'E_SESSION_UNAVAILABLE',
 } as const
 
+/** gate 层级拒绝的语义键（不含通道指纹状态键，后者由 pin 绑定层单独产生）。 */
 export const PROMPT_SEMANTIC_KEYS = [
   'prompt.text.empty',
   'prompt.text.tooLong',
@@ -40,7 +42,7 @@ export const PROMPT_SEMANTIC_KEYS = [
   'session.unavailable',
 ] as const
 
-export type PromptSemanticKey = (typeof PROMPT_SEMANTIC_KEYS)[number]
+export type PromptSemanticKey = (typeof PROMPT_SEMANTIC_KEYS)[number] | 'channel.desktop.leafMismatch'
 
 export type LeaseSemanticKey = 'lease.notHeld' | 'lease.observing' | 'lease.expired' | 'head.moved'
 
@@ -52,6 +54,7 @@ export const PROMPT_CODE_BY_KEY: Readonly<Record<PromptSemanticKey, string>> = {
   'prompt.text.tooLong': PROMPT_ERROR_CODES.VALIDATION,
   'prompt.grant.denied': PROMPT_ERROR_CODES.GRANT_DENIED,
   'channel.desktop.unverified': PROMPT_ERROR_CODES.CHANNEL_UNVERIFIED,
+  'channel.desktop.leafMismatch': PROMPT_ERROR_CODES.CHANNEL_LEAF_MISMATCH,
   'prompt.duplicate': PROMPT_ERROR_CODES.PROMPT_DUPLICATE,
   'instance.unknown': PROMPT_ERROR_CODES.INSTANCE_UNKNOWN,
   'session.unavailable': PROMPT_ERROR_CODES.SESSION_UNAVAILABLE,
@@ -63,6 +66,7 @@ export const PROMPT_WORDING: Readonly<Record<PromptSemanticKey, string>> = {
   'prompt.text.tooLong': `指令过长（上限 ${PROMPT_TEXT_LIMIT} 字）`,
   'prompt.grant.denied': '该实例未授予发指令权限（查看权限不包含发指令）',
   'channel.desktop.unverified': '该电脑尚未标记安全通道已验证，未发送任何内容',
+  'channel.desktop.leafMismatch': '该实例当前证书与标记时的指纹不同（证书已更换），未发送任何内容',
   'prompt.duplicate': '同一条指令已经处理过，未重复写入',
   'instance.unknown': '找不到该实例，请重新配对',
   'session.unavailable': '该会话暂时不可写入（投递通道未接入）',

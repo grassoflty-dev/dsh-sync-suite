@@ -15,6 +15,7 @@
 | prompt.confirm.stale | E_COMMAND_CONFIRM_STALE | COMMAND_WORDING | — | — | 草稿已改变，请重新确认后发送 | `remoteCommandGate.ts` |
 | channel.tablet.unverified | E_COMMAND_REMOTE_UNVERIFIED | COMMAND_WORDING | — | — | 安全连接尚未通过真机校验，未发送任何内容 | `remoteCommandGate.ts` |
 | channel.desktop.unverified | — | — | E_CHANNEL_UNVERIFIED | PROMPT_WORDING | 该电脑尚未标记安全通道已验证，未发送任何内容 | 插件 `sessionPrompt` |
+| channel.desktop.leafMismatch | — | — | E_CHANNEL_LEAF_MISMATCH | PROMPT_WORDING | 该实例当前证书与标记时的指纹不同（证书已更换），未发送任何内容 | 插件 `sessionPrompt` |
 | lease.observing | — | — | E_LEASE_OBSERVING | LEASE_WORDING | 该会话正被其他人使用（只读），未写入任何内容 | 插件租约 |
 | lease.notHeld | — | — | E_LEASE_NOT_HELD | LEASE_WORDING | 未持有该会话的写权限，未写入任何内容 | 插件租约 |
 | lease.expired | — | — | E_LEASE_EXPIRED | LEASE_WORDING | 会话写权限已过期，请重新确认后重试 | 插件租约 |
@@ -24,6 +25,7 @@
 | session.unavailable | — | — | E_SESSION_UNAVAILABLE | PROMPT_WORDING | 该会话暂时不可写入（投递通道未接入） | 插件 `sessionPrompt` |
 
 > `channel.tablet.unverified` 与 `channel.desktop.unverified` 是**同一个前置条件的两个半边，文案不同、不可互换、不可互相替代**：平板侧证明的是「本机没有通过真机 pin 校验」，桌面侧证明的是「操作员没有标记本机通道已验证」。两侧都成立才允许发送。
+> `channel.desktop.leafMismatch` 表示**操作员确实验证过某个证书，但当前证书已不是那一个**（换证书 / 重装）；它与 `channel.desktop.unverified`（从未验证 / 标记缺失 / 无 pin 可绑）**必须可区分**，两者都拒绝发送，且都绝不 TOFU 补 pin。
 
 > `prompt.text.*` 与 `prompt.grant.denied` 是**同一失败空间的重叠**：平板先拦（本地判定），插件再拦（防御性复检）。**同一语义键在两侧必须逐字相同**；这就是本表存在的原因。
 
@@ -37,4 +39,4 @@
 
 ---
 
-日期 2026-11-23 · owner：总设计师 · 状态：本表随 `mod-plugin-session-prompt` 落地；`mod-chat-lease` 的 `LEASE_WORDING` 先于本表冻结。
+日期 2026-11-23 · owner：总设计师 · 本表共 **17 行**语义键 · 状态：本表随 `mod-plugin-session-prompt` 落地；`mod-chat-lease` 的 `LEASE_WORDING` 先于本表冻结。

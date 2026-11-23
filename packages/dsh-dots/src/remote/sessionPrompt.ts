@@ -6,8 +6,9 @@
  *
  * 操作员标记文件只读：`channel-verified.json` 由操作员在带外写入，载荷
  * `{verifiedAt, instanceId, leafSha256, verifier}`；本服务只 `readFileSync`，从不写它。
- * 缺失 / 坏载荷 / 标记实例与请求实例不符 ⇒ `channelVerified(instanceId): false`，
- * 且 `send()` 在任何其它依赖被触碰之前短路。
+ * 通道判定是三态：verified / unverified / leaf-mismatch —— 标记必须绑定到请求实例
+ * 且指纹与该实例当前叶证书 pin 完全一致；没有 pin 绝不 TOFU。任何拒绝都发生在
+ * 其它依赖被触碰之前。
  *
  * 响应永远只有 `{seq, sha256, accepted}`：指令正文与 lease owner 不进返回体。
  */
@@ -15,7 +16,10 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { SyncError } from '../engine/errors.js'
 import { statePaths } from '../engine/paths.js'
+import { defaultDeviceId } from '../engine/settings.js'
 import { INSTANCE_ID_PATTERN, TOOL_SESSION_PROMPT } from './grants.js'
+import { normalisePairingFingerprint } from './pairingPayload.js'
+import { RemoteStore } from './store.js'
 import { decideSessionPrompt } from './promptGate.js'
 import { createLeaseStore } from './leaseStore.js'
 import type { LeaseStore } from './leaseStore.js'
@@ -62,7 +66,38 @@ export interface HeadReaderPort {
   readHeadSha(request: { instanceId: string; sessionId: string }): Promise<string>
 }
 
+/** 通道三态：verified / unverified（从未验证或无 pin 可绑）/ leaf-mismatch（验证过但证书已换）。 */
+export type ChannelState = 'verified' | 'unverified' | 'leaf-mismatch'
+
+/** 每实例当前叶证书指纹来源（注入；绝不 TOFU 补 pin）。 */
+export interface PinLookup {
+  lookup(instanceId: string): { fingerprint: string } | null
+}
+
+/**
+ * 生产缺省 pin 源：惰性读取插件自己的配对证书（`remote-pairing-cert.json`），
+ * 只针对本机 instanceId；不写、不迁移、不缓存，证书轮换在下一次调用即可被观察到。
+ * 测试一律注入 PinLookup，不会碰到任何 live 状态。
+ */
+export function createPairingPinLookup(options: { homeDir?: string } = {}): PinLookup {
+  return {
+    lookup(instanceId: string): { fingerprint: string } | null {
+      if (typeof instanceId !== 'string' || instanceId.trim() === '') return null
+      if (instanceId !== defaultDeviceId()) return null
+      try {
+        const cert = new RemoteStore({ homeDir: options.homeDir }).readCert()
+        if (cert === null || typeof cert.fingerprint !== 'string') return null
+        return { fingerprint: cert.fingerprint }
+      } catch {
+        return null
+      }
+    },
+  }
+}
+
 export interface SessionPromptServiceOptions {
+  /** 每实例叶证书指纹来源（测试注入；缺省为惰性读取本机配对证书）。 */
+  pins?: PinLookup
   /** 操作员标记的注入路径（测试指向临时目录；缺省为插件状态目录）。 */
   markerPath?: string
   homeDir?: string
@@ -79,9 +114,11 @@ export interface SessionPromptServiceOptions {
 export interface SessionPromptService {
   readonly markerPath: string
   /**
-   * 只读解析操作员标记，并**绑定到请求实例**：任何异常 / 坏载荷 / 空实例 id / 标记实例不符
-   * 都当 false，永不写文件。标记(instanceId/leafSha256)只断言那一个实例的通道。
+   * 三态通道判定：标记坏 / 空实例 / 跨实例 / 没有该实例的 pin 都返回 'unverified'；
+   * pin 存在但与标记指纹不同返回 'leaf-mismatch'；完全相同才 'verified'。绝不 TOFU 补 pin。
    */
+  channelState(instanceId: string): ChannelState
+  /** 兼容旧调用的薄封装：仅 'verified' 为真。 */
   channelVerified(instanceId: string): boolean
   send(request: PromptSendRequest): Promise<PromptDeliveryResult>
 }
@@ -95,12 +132,19 @@ export function validChannelMarker(raw: unknown): boolean {
   for (const key of Object.keys(item)) if (MARKER_FIELDS.indexOf(key) < 0) return false
   if (typeof item.verifiedAt !== 'number' || !Number.isFinite(item.verifiedAt) || item.verifiedAt <= 0) return false
   if (typeof item.instanceId !== 'string' || !INSTANCE_ID_PATTERN.test(item.instanceId)) return false
-  if (typeof item.leafSha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(item.leafSha256)) return false
+  // 指纹形状：接受大小写与冒号分隔，走与配对载荷同一个归一函数（不另造第二套）。
+  if (!normalisePairingFingerprint(item.leafSha256).ok) return false
   if (typeof item.verifier !== 'string' || item.verifier.trim() === '') return false
   return true
 }
 
-function refusal(key: 'channel.desktop.unverified' | 'instance.unknown' | 'session.unavailable'): SyncError {
+/** 归一为裸大写 hex（无冒号）；非法输入返回空串，调用方按「无可用 pin / 坏标记」处理。 */
+export function bareFingerprint(raw: unknown): string {
+  const result = normalisePairingFingerprint(raw)
+  return result.ok ? result.value.replace(/:/g, '') : ''
+}
+
+function refusal(key: 'channel.desktop.unverified' | 'channel.desktop.leafMismatch' | 'instance.unknown' | 'session.unavailable'): SyncError {
   const typed = promptRefusal(key)
   return new SyncError(typed.code, typed.wording, { key: typed.key })
 }
@@ -118,36 +162,55 @@ export function createSessionPromptService(options: SessionPromptServiceOptions 
   const now = options.now ?? ((): number => Date.now())
   const instances = options.instances ?? { get: (): null => null }
   const grants = options.grants ?? { isGranted: (): boolean => false }
+  const pins = options.pins ?? createPairingPinLookup({ homeDir: options.homeDir })
   const leases = options.leases ?? createLeaseStore({ filePath: path.join(root, LEASE_FILE), now })
   const ledger = options.ledger ?? createPromptLedger({ filePath: path.join(root, LEDGER_FILE), now })
   const delivery = options.delivery ?? null
   const headReader = options.headReader ?? null
 
-  function channelVerified(instanceId: string): boolean {
+  function channelState(instanceId: string): ChannelState {
     // 没有可用实例 id ⇒ 连文件都不读，直接按通道未验证拒绝（绝不走形状错误路径）。
-    if (typeof instanceId !== 'string' || instanceId.trim() === '') return false
+    if (typeof instanceId !== 'string' || instanceId.trim() === '') return 'unverified'
     let text: string
     try {
       text = readFileSync(markerPath, 'utf8')
     } catch {
-      return false
+      return 'unverified'
     }
     let parsed: unknown
     try {
       parsed = JSON.parse(text)
     } catch {
-      return false
+      return 'unverified'
     }
-    if (!validChannelMarker(parsed)) return false
+    if (!validChannelMarker(parsed)) return 'unverified'
+    const marker = parsed as { instanceId: string; leafSha256: string }
     // 精确字符串比较：为实例 B 写的标记绝不授权实例 A。
-    return (parsed as { instanceId: string }).instanceId === instanceId.trim()
+    if (marker.instanceId !== instanceId.trim()) return 'unverified'
+    // 没有该实例的 pin ⇒ 从未验证（绝不 TOFU 把标记里的指纹当作 pin）。
+    // pin 源可能抛（注入的实现 / 存储故障）：通道判定必须全函数，任何异常都只是
+    // 「无法证明已验证」⇒ unverified，绝不冒出第五种状态或假 verified。
+    let pinHex = ''
+    try {
+      const pin = pins.lookup(instanceId.trim())
+      pinHex = bareFingerprint(pin?.fingerprint)
+    } catch {
+      return 'unverified'
+    }
+    if (pinHex === '') return 'unverified'
+    return bareFingerprint(marker.leafSha256) === pinHex ? 'verified' : 'leaf-mismatch'
+  }
+
+  function channelVerified(instanceId: string): boolean {
+    return channelState(instanceId) === 'verified'
   }
 
   async function send(request: PromptSendRequest): Promise<PromptDeliveryResult> {
     const instanceId = typeof request.instanceId === 'string' ? request.instanceId.trim() : ''
-    // 标记缺失 / 绑定实例不符 / 空实例 id ⇒ 在任何其它依赖（grant / 租约 / 账本 / 端口）
-    // 被触碰之前拒绝，且保持 E_CHANNEL_UNVERIFIED（不泄漏形状信息）。
-    if (!channelVerified(instanceId)) throw refusal('channel.desktop.unverified')
+    // 三态通道闸在任何其它依赖（实例查询 / grant / 租约 / 账本 / 端口）被触碰之前短路。
+    const state = channelState(instanceId)
+    if (state === 'leaf-mismatch') throw refusal('channel.desktop.leafMismatch')
+    if (state !== 'verified') throw refusal('channel.desktop.unverified')
 
     const nowMs = now()
     if (instances.get(instanceId) === null) throw refusal('instance.unknown')
@@ -196,7 +259,7 @@ export function createSessionPromptService(options: SessionPromptServiceOptions 
     return projectDelivery(delivered)
   }
 
-  return { markerPath, channelVerified, send }
+  return { markerPath, channelState, channelVerified, send }
 }
 
 /** 供 RPC 层做入参形状检查时复用（DARK 纪律：码与文案不另造）。 */

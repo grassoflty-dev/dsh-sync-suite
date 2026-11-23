@@ -33,7 +33,7 @@ import { mapRemoteCode, remoteToolError, REMOTE_TOOL_ERROR_CODES } from './remot
 // mod-plugin-session-prompt：唯一注册的写 action，但本轮 DARK（无投递实现）。
 // RPC 只依赖服务结构类型 + 拒绝文案表；缺省构造出的服务没有标记 ⇒ 一律 E_CHANNEL_UNVERIFIED。
 import { createSessionPromptService } from './remote/sessionPrompt.js';
-import { PROMPT_ERROR_CODES, PROMPT_WORDING } from './remote/promptWording.js';
+import { PROMPT_CODE_BY_KEY, PROMPT_WORDING } from './remote/promptWording.js';
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 /**
  * 远端只读响应的字节硬上限 4 MiB（4 * 1024 * 1024）。
@@ -965,13 +965,18 @@ export function createRpcService(options = {}) {
      * E_CHANNEL_UNVERIFIED（逐字文案来自 PROMPT_WORDING），无回退、无"记住上次"。
      */
     async function sessionPrompt(payload) {
-        // 标记必须与请求实例精确绑定；检查在任何入参形状校验 / store / port 触碰之前。
-        if (!promptService.channelVerified(asString(payload.instanceId).trim())) {
-            throw new SyncError(PROMPT_ERROR_CODES.CHANNEL_UNVERIFIED, PROMPT_WORDING['channel.desktop.unverified']);
+        // 三态通道闸：在任何入参形状校验 / store / port 触碰之前分流两种拒绝。
+        // 文案只取 PROMPT_WORDING，绝不内联字面量。
+        const instanceId = asString(payload.instanceId).trim();
+        const channel = typeof promptService.channelState === 'function'
+            ? promptService.channelState(instanceId)
+            : (promptService.channelVerified(instanceId) ? 'verified' : 'unverified');
+        if (channel !== 'verified') {
+            const key = channel === 'leaf-mismatch' ? 'channel.desktop.leafMismatch' : 'channel.desktop.unverified';
+            throw new SyncError(PROMPT_CODE_BY_KEY[key], PROMPT_WORDING[key]);
         }
         const sessionId = asString(payload.sessionId).trim();
         const requestId = asString(payload.requestId).trim();
-        const instanceId = asString(payload.instanceId).trim();
         const leaseOwner = asString(payload.leaseOwner).trim();
         if (sessionId === '')
             throw new SyncError('E_VALIDATION', 'sessionId 不能为空', { field: 'sessionId' });
