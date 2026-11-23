@@ -743,17 +743,64 @@ export const ASKPASS_NODE_NEXT_STEP = '；下一步：安装 Node.js 或把 DSH_
 export const PUSH_TIMEOUT_NEXT_STEP = '；下一步：稍后重试；连续超时先检查网络与代理是否可用';
 /** 网络不可达的下一步：只有解析/连接失败这一类才给链路排查指令。 */
 export const PUSH_UNREACHABLE_NEXT_STEP = '；下一步：检查网络、代理或防火墙，确认远端地址可访问后重试';
+/*
+ * 四个「HTTP 状态码」原因的下一步：每一条都点名**真实原因**对应的动作，互不借用。
+ * 原因本身由 `engine/git.ts` 的 `httpStatusReasonOf()` 唯一映射，这里只负责动作措辞。
+ */
+/** 远端拒绝了凭据（401/403）：改登录名/令牌，不是查网络。 */
+export const PUSH_AUTH_REJECTED_NEXT_STEP = '；下一步：在设置里核对仓库登录名与私人令牌（需要写权限），令牌过期或被吊销后重新生成，不要把令牌填成登录密码';
+/** 代理要它自己的凭据（407）：改代理配置，不是改仓库凭据。 */
+export const PUSH_PROXY_AUTH_NEXT_STEP = '；下一步：检查 HTTPS_PROXY 的用户名与口令，或先关掉代理再试';
+/** 远端服务器（**或中间代理/网关**）出错（5xx）：本地没有需要修的东西。 */
+export const PUSH_REMOTE_ERROR_NEXT_STEP = '；下一步：稍后重试；连续出现先确认代理是否正常，再去看仓库状态页';
+/** 远端限流（429）：等，别猛推。 */
+export const PUSH_RATE_LIMITED_NEXT_STEP = '；下一步：等几分钟再试；先把多次小提交合并再推';
+/**
+ * 拿不出凭据（本机鉴权环境）：动作是**把登录名/令牌填全**，与 401/403 的「核对令牌」不同。
+ * 旧实现让它共用 `DEFAULT_GIT_NEXT_STEP`（「检查远端是否被其他设备推进」），于是同一句
+ * 「HTTPS 鉴权无法通过」后面跟着一句与鉴权无关的建议——文案自相矛盾（评审 b11b P2-2）。
+ */
+export const PUSH_AUTH_PROMPT_NEXT_STEP = '；下一步：检查登录名/令牌是否填全（设置里仓库登录名与私人令牌都不能空），再重试';
 /** 其它 typed 码（含既有 E_PUSH_REJECTED）沿用原来的远端分叉建议，文案逐字节不变。 */
 const DEFAULT_GIT_NEXT_STEP = '；下一步：检查远端是否被其他设备推进，下一次同步会做有界重试，仍未成功请人工协调';
-/** 下一步只按 typed `details.reason` 与码选一份，不再让超时复用「远端被推进」的建议。 */
+/**
+ * reason → 下一步的**完整表**：`sync/gitPort.ts` 能产出的九类原因在这里一一对应，
+ * 少写一个就会落回 DEFAULT（因此 `test/push-auth-classification.test.mjs` 逐原因断言）。
+ *
+ * - 四个状态码原因各有独立动作（改令牌 / 改代理 / 等 / 等服务端恢复，5xx 那条同时提代理）；
+ * - `timeout` / `unreachable` 各自保留原有措辞（超时与不可达是两种结局）；
+ * - `auth-prompt` 有自己的动作（把登录名/令牌填全）——它的短语只说「鉴权无法通过」，
+ *   不给动作就等于让用户去读那份「远端被推进」的建议（b11b P2-2）；
+ * - `non-fast-forward` / `git-failed` **故意沿用** DEFAULT：这两类的短语本身已经写了动作
+ *   （「下一次同步会做有界重试」），真正的远端分叉建议也正好是 `non-fast-forward` 想要的；
+ *   改它们等于改动已钉死的字节。
+ */
+const PUSH_NEXT_STEP = Object.freeze({
+    timeout: PUSH_TIMEOUT_NEXT_STEP,
+    unreachable: PUSH_UNREACHABLE_NEXT_STEP,
+    network: PUSH_UNREACHABLE_NEXT_STEP, // 旧字段兼容：network = unreachable
+    'auth-rejected': PUSH_AUTH_REJECTED_NEXT_STEP,
+    'proxy-auth': PUSH_PROXY_AUTH_NEXT_STEP,
+    'remote-error': PUSH_REMOTE_ERROR_NEXT_STEP,
+    'rate-limited': PUSH_RATE_LIMITED_NEXT_STEP,
+    'auth-prompt': PUSH_AUTH_PROMPT_NEXT_STEP,
+    'non-fast-forward': DEFAULT_GIT_NEXT_STEP,
+    'git-failed': DEFAULT_GIT_NEXT_STEP,
+});
+/**
+ * 下一步只按 typed `details.reason` 与码选一份，不再让超时复用「远端被推进」的建议。
+ * 查不到（旧数据 / 未知 reason）时 fail-closed 回 DEFAULT，绝不留空。
+ */
 function nextStepOf(error) {
     if (typedCodeOf(error) === ASKPASS_NODE_MISSING_CODE)
         return ASKPASS_NODE_NEXT_STEP;
     const raw = error?.details?.reason;
-    if (raw === 'timeout')
-        return PUSH_TIMEOUT_NEXT_STEP;
-    if (raw === 'unreachable' || raw === 'network')
-        return PUSH_UNREACHABLE_NEXT_STEP;
+    if (typeof raw === 'string') {
+        const step = PUSH_NEXT_STEP[raw];
+        // typeof 守卫同时挡住 `constructor` / `__proto__` 这类原型链键（它们不是 string）。
+        if (typeof step === 'string')
+            return step;
+    }
     return DEFAULT_GIT_NEXT_STEP;
 }
 /**
@@ -788,9 +835,18 @@ async function parkTypedFailure(all, outbox, reason) {
 const MAX_TERMINAL_PUSH_REASON = 96;
 /** 未通过白名单时的固定替代文案：只报类别，不报位置、原文或任何可还原片段。 */
 const GENERIC_PUSH_REASON = '推送失败（原因类别未识别）';
-/** 只接受 pushFailure() 的五个固定短语；任何其它正文都不进终态消息。 */
+/**
+ * 只接受 `gitPort.pushFailure()` 的全部固定短语（8 条 + 1 个超时模板 = 9）；
+ * 任何其它正文都不进终态消息。
+ */
 const ALLOWED_PUSH_REASONS = Object.freeze([
     '推送失败：HTTPS 鉴权无法通过（git 已禁用交互提示，askpass／用户名或令牌不可用）；请检查鉴权配置后重试',
+    // b11 P2-6：凭据被远端拒绝与「拿不出凭据」是两件事，四条短语各自点名真实原因。
+    '推送失败：远端拒绝了这个用户名或令牌（HTTP 401/403），凭据需要重新核对',
+    '推送失败：代理要求它自己的鉴权（HTTP 407），不是仓库凭据的问题',
+    '推送失败：远端限流（HTTP 429），稍后再推',
+    // 5xx 不单方面归因给仓库：代理/网关回 502 时 git 的文案与仓库自己回 502 完全相同（b11b P2-3）。
+    '推送失败：远端或代理返回 HTTP 5xx，本地改动与令牌都没有问题',
     '推送失败：远端分支已前进，下一次同步会做有界重试',
     '推送失败：网络不可达（无法解析或连接到远端）',
     // 超时短语的唯一变量是当次实际预算数字（push 恒为 PUSH_TIMEOUT_MS = 120000）：
@@ -799,7 +855,7 @@ const ALLOWED_PUSH_REASONS = Object.freeze([
     '推送失败：git 拒绝了本次推送，请检查远端状态后重试',
 ]);
 /**
- * 精确短语白名单（fail-closed）：折叠成单行、有界之后，只有逐字等于五个
+ * 精确短语白名单（fail-closed）：折叠成单行、有界之后，只有逐字等于九条
  * pushFailure() 短语之一才通过；其它一切（含 UNC / 相对 / 全角路径、盘符、
  * 令牌、hex、超长串）都整段换成固定短语。不做部分打码、不做占位符替换。
  *

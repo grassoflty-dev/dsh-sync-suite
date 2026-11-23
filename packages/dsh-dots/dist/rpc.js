@@ -53,6 +53,37 @@ function asRecord(body) {
 function asString(value) {
     return typeof value === 'string' ? value : '';
 }
+/**
+ * 网络类失败（只有这类才把 `reachable` 记成 false；本地 git 错误不算"不可达"）。
+ *
+ * `rate-limited` / `remote-error` **不算不可达**（评审 b11b P2-3）：这两个原因意味着
+ * 远端（或中间的代理/网关）**回了话**——429 是限流、5xx 是对方自己坏了。它们从引擎出来时
+ * 往往带 `network: true`（命令本身是网络命令），若据此写 `reachable: false`，状态文件说
+ * 「连不上」，而同一次失败的正文说「远端或代理返回 5xx」，两处事实互相打脸；代理回 502 时
+ * 尤其明显——链路明明是通的。所以这两类先于 `network` 标志判定为「不是链路失败」。
+ *
+ * 导出仅为测试：`test/push-auth-classification.test.mjs` 逐原因钉住「哪些失败可以宣称不可达」。
+ */
+export function isNetworkFailure(error) {
+    if (!isSyncError(error))
+        return false;
+    if (error.code === 'E_AUTH')
+        return true;
+    if (error.code !== 'E_GIT')
+        return false;
+    const details = error.details;
+    if (details !== null && typeof details === 'object') {
+        const record = details;
+        // 「远端回了状态码」不是「链路不通」：这条必须排在 `network === true` 之前。
+        if (record.reason === 'remote-error' || record.reason === 'rate-limited')
+            return false;
+        if (record.network === true)
+            return true;
+        if (record.reason === 'git-missing')
+            return false;
+    }
+    return false;
+}
 export function createRpcService(options = {}) {
     const now = options.now ?? (() => new Date());
     const dshVersion = options.dshVersion ?? detectDshVersion(options.homeDir);
@@ -158,24 +189,6 @@ export function createRpcService(options = {}) {
     }
     function workDirOf(settings) {
         return path.join(paths.workRoot, repoHash(settings.repoUrl));
-    }
-    /** 网络类失败（只有这类才把 reachable 记成 false；本地 git 错误不算"不可达"）。 */
-    function isNetworkFailure(error) {
-        if (!isSyncError(error))
-            return false;
-        if (error.code === 'E_AUTH')
-            return true;
-        if (error.code !== 'E_GIT')
-            return false;
-        const details = error.details;
-        if (details !== null && typeof details === 'object') {
-            const record = details;
-            if (record.network === true)
-                return true;
-            if (record.reason === 'git-missing')
-                return false;
-        }
-        return false;
     }
     /** 记录最近一次网络探测结果；状态文件只是 UI 事实，写失败不影响主流程。 */
     function recordProbe(reachable) {

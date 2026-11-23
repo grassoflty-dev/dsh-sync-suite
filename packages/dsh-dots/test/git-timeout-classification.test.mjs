@@ -336,14 +336,29 @@ test('T4 传输失败的正面证据 → unreachable；文案与下一步都与�
   assert.equal(hasTransportEvidence('Could not resolve host: gitee.com'), true)
 })
 
-test('T5 鉴权失败 → 既有 auth-prompt 文案逐字节不变', async () => {
-  const port = portWithRunner(failRunner("fatal: Authentication failed for 'https://gitee.com/acme/repo.git/'"))
-  const error = await captureRejection(() => port.pushMain(PUSH_ARGS))
-  assert.equal(error.code, V2_ERROR.PUSH_REJECTED)
-  assert.equal(error.details.reason, 'auth-prompt')
-  assert.equal(error.message,
+test('T5 鉴权失败分成两桶：被拒（Authentication failed）→ auth-rejected，拿不出凭据 → auth-prompt', async () => {
+  // b11b P2-2 retarget（**收紧**，不是放宽）：旧版把 `Authentication failed` 钉成 auth-prompt，
+  // 等于把「凭据被远端拒绝」和「本机拿不出凭据」钉成同一件事；现在两者各自钉死，
+  // 并且被拒那条的 `details.status` 必须是 undefined（没看见数字就不编）。
+  const rejected = portWithRunner(failRunner("fatal: Authentication failed for 'https://gitee.com/acme/repo.git/'"))
+  const rejectedError = await captureRejection(() => rejected.pushMain(PUSH_ARGS))
+  assert.equal(rejectedError.code, V2_ERROR.PUSH_REJECTED)
+  assert.equal(rejectedError.details.reason, 'auth-rejected')
+  assert.equal(rejectedError.details.status, undefined, '没有数字状态码就不许挂 status')
+  assert.equal(rejectedError.message,
+    '推送失败：远端拒绝了这个用户名或令牌（HTTP 401/403），凭据需要重新核对')
+  assert.equal(/askpass|不可用/.test(rejectedError.message), false, '被拒绝 ≠ 拿不到凭据')
+  await rejected.dispose()
+
+  // 控制组：真正的「拿不出凭据」仍是 auth-prompt，且文案逐字节不变（旧断言原样保留）。
+  const unavailable = portWithRunner(failRunner(
+    "fatal: could not read Username for 'https://gitee.com': terminal prompts disabled"))
+  const unavailableError = await captureRejection(() => unavailable.pushMain(PUSH_ARGS))
+  assert.equal(unavailableError.code, V2_ERROR.PUSH_REJECTED)
+  assert.equal(unavailableError.details.reason, 'auth-prompt')
+  assert.equal(unavailableError.message,
     '推送失败：HTTPS 鉴权无法通过（git 已禁用交互提示，askpass／用户名或令牌不可用）；请检查鉴权配置后重试')
-  await port.dispose()
+  await unavailable.dispose()
 })
 
 test('T6 非快进拒推 → 既有 non-fast-forward 文案逐字节不变', async () => {
@@ -558,4 +573,80 @@ test('T13 超过 120 秒的推送 → reason=timeout 且 budgetMs=120000，文�
   assert.equal(cycled.result.message.includes(reason), true)
   assert.equal(cycled.result.message.includes('原因类别未识别'), false)
   assert.equal(cycled.outbox.entries[0].attempts, 1, '超时只累加一次尝试，不报成功')
+})
+
+/* -------------------------------------------------------------------------- */
+/* (f) 状态码先于文本（mod-plugin-push-auth-vs-network / 评审 b11 P2-6）           */
+/*     更细的纯函数 / cycle / 引擎侧证据在 test/push-auth-classification.test.mjs    */
+/* -------------------------------------------------------------------------- */
+
+test('T14 状态码先于文本：401/403 → auth-rejected、407 → proxy-auth、429 → rate-limited、5xx → remote-error', async () => {
+  /** [stderr, 期望原因, 期望 details.status] —— 形状全来自 git / libcurl 的实际输出。 */
+  const table = [
+    // 评审 b11 P2-6 的原始形状：Gitee 鉴权失败（旧实现说成「网络不可达」）
+    ["fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 403", 'auth-rejected', 403],
+    ["fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 401", 'auth-rejected', 401],
+    ["fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 407", 'proxy-auth', 407],
+    ["fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 429", 'rate-limited', 429],
+    ["fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 502", 'remote-error', 502],
+    // `error: 403 Forbidden while accessing` 与协议行两种老形态
+    ['error: 403 Forbidden while accessing https://gitee.com/acme/repo.git/info/refs', 'auth-rejected', 403],
+    ['fatal: unable to access remote: HTTP/1.1 429 Too Many Requests', 'rate-limited', 429],
+    ['error: 503 Service Unavailable while accessing https://gitee.com/acme/repo.git/info/refs', 'remote-error', 503],
+    // b11b P1-1：代理 CONNECT 的两种**真实**文案（旧表只有 `returned error: 407`，
+    // 那条不是 CONNECT 代理失败的形状；只钉它会让"407 已覆盖"变成一句空话）。
+    ["fatal: unable to access 'https://gitee.com/acme/repo.git/': Received HTTP code 407 from proxy after CONNECT", 'proxy-auth', 407],
+    ["fatal: unable to access 'https://gitee.com/acme/repo.git/': CONNECT tunnel failed, response 407", 'proxy-auth', 407],
+  ]
+  for (const [stderr, expected, status] of table) {
+    const port = portWithRunner(failRunner(stderr))
+    const error = await captureRejection(() => port.pushMain(PUSH_ARGS))
+    assert.equal(error.code, V2_ERROR.PUSH_REJECTED, stderr)
+    assert.equal(error.details.reason, expected, stderr)
+    assert.equal(error.details.status, status, stderr)
+    assert.equal(/网络不可达/.test(error.message), false, `状态码原因不得说成网络不可达：${stderr}`)
+    await port.dispose()
+  }
+
+  // 控制组：真正的解析 / 连接失败（没有状态码）必须仍是 unreachable，且绝不是 auth-rejected。
+  for (const stderr of [
+    "fatal: unable to access 'https://gitee.com/acme/repo.git/': Could not resolve host: gitee.com",
+    "fatal: unable to access 'https://gitee.com/acme/repo.git/': Failed to connect to gitee.com port 443",
+  ]) {
+    const port = portWithRunner(failRunner(stderr))
+    const error = await captureRejection(() => port.pushMain(PUSH_ARGS))
+    assert.equal(error.details.reason, 'unreachable', stderr)
+    assert.equal(error.details.status, undefined, '没有状态码就没有 status 字段')
+    assert.equal(error.message, '推送失败：网络不可达（无法解析或连接到远端）', stderr)
+    await port.dispose()
+  }
+
+  // 控制组：被预算杀死的进程仍是 timeout，即使 stderr 里恰好含 403（结构信号先于一切文本）。
+  const killed = portWithRunner(async () => {
+    throw Object.assign(new Error('fatal: The requested URL returned error: 403'), { killed: true })
+  })
+  const killedError = await captureRejection(() => killed.pushMain(PUSH_ARGS))
+  assert.equal(killedError.details.reason, 'timeout')
+  assert.equal(killedError.details.status, undefined, '被杀的进程没有等到远端回答，不许挂 403')
+  await killed.dispose()
+})
+
+test('T15 凭据卫生：状态码分支只看数字与固定文案，令牌形态的 stderr 不进 message / details', async () => {
+  const tokenShape = 'ghp_FAKEtoken0123456789ABCDEFGHIJKLMNOPQ'
+  const leaky =
+    `fatal: unable to access 'https://acme:${tokenShape}@gitee.com/acme/repo.git/': `
+    + 'The requested URL returned error: 403'
+  const port = portWithRunner(failRunner(leaky))
+  try {
+    const error = await captureRejection(() => port.pushMain(PUSH_ARGS))
+    assert.equal(error.details.reason, 'auth-rejected')
+    assert.equal(error.details.status, 403)
+    assert.deepEqual(Object.keys(error.details).sort(), ['reason', 'status'])
+    const haystack = [error.message, JSON.stringify(error.details)].join('\n')
+    assert.equal(haystack.includes(tokenShape), false)
+    assert.equal(/ghp_|token/i.test(haystack), false)
+    assert.equal(haystack.includes('acme:'), false, 'URL userinfo 也不许回显')
+  } finally {
+    await port.dispose()
+  }
 })

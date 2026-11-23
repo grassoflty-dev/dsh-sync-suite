@@ -154,7 +154,7 @@ async function hostileReasonResult(pushErrorText) {
   })
 }
 
-// 两侧短语漂移守卫：从源码逐字抽出五个「推送失败：…」短语，不靠人工维护清单。
+// 两侧短语漂移守卫：从源码逐字抽出九个「推送失败：…」短语，不靠人工维护清单。
 // 其中超时短语是模板（唯一变量 = 当次预算数字），单独从 gitPort.ts 的导出常量取出。
 function quotedPushPhrases(block) {
   const out = []
@@ -448,10 +448,20 @@ test('PO-08 16 个 hostile 推送原因全部折叠为固定短语（含 r2 fuzz
   }
 })
 
-test('PO-09 五个 shipped 短语逐字节存活（防止过度打码）', async () => {
+/**
+ * 终态白名单的 shipped 短语条数：8 条固定短语 + 1 个超时模板 = 9。
+ *
+ * retarget 历史：`mod-plugin-git-timeout-classification` 时为 5（4 + 超时模板）；
+ * `mod-plugin-push-auth-vs-network`（b11 P2-6）把「凭据被远端拒绝」与世界状态另立四条
+ * （auth-rejected / proxy-auth / rate-limited / remote-error），于是变成 9。
+ * 断言本身一条未放宽：逐条跑完整 cycle 并逐字比对，条数少一条或多一条都会失败。
+ */
+const SHIPPED_PUSH_PHRASE_COUNT = 9
+
+test('PO-09 九个 shipped 短语逐字节存活（防止过度打码）', async () => {
   const reasons = shippedPushReasons()
-  // 4 个固定短语 + 1 个超时模板（mod-plugin-git-timeout-classification：超时与不可达分开）。
-  assert.equal(reasons.length, 5)
+  // 8 条固定短语 + 1 条超时模板（超时与不可达、凭据被拒与拿不出凭据都是不同结局）。
+  assert.equal(reasons.length, SHIPPED_PUSH_PHRASE_COUNT)
   for (const shipped of reasons) {
     const result = await hostileReasonResult(shipped)
     assert.equal(result.code, V2_ERROR.LOCAL_PENDING, shipped)
@@ -480,8 +490,9 @@ test('PO-11 超时短语带真实预算数字也能穿过白名单；把数字�
 test('PO-10 drift guard：cycle.ts 的精确短语表与 gitPort.pushFailure() 逐字一致', () => {
   const shipped = shippedPushReasons()
   const allowed = cycleAllowedReasons()
-  assert.equal(shipped.length, 5)
-  assert.equal(allowed.length, 5)
+  // 两侧都是 9 条（4 条状态码新原因 + 原有 4 条 + 超时模板）；本断言只改数字，不放宽比较。
+  assert.equal(shipped.length, SHIPPED_PUSH_PHRASE_COUNT)
+  assert.equal(allowed.length, SHIPPED_PUSH_PHRASE_COUNT)
   // 任一侧改写 / 增删短语都会让排序后的数组不同 ⇒ 本测试失败，
   // 不会让重新措辞的正文悄无声息地穿过终态消息。
   assert.deepEqual(allowed, shipped)

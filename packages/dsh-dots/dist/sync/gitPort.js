@@ -6,7 +6,7 @@
  * `{remote:'origin', branch:'main', force:false}`，这里再次断言后执行，绝不拼强制推送参数。
  */
 import { execFile } from 'node:child_process';
-import { GitRepo, PUSH_TIMEOUT_MS, gitTimeoutMessage, hasTransportEvidence, } from '../engine/git.js';
+import { GitRepo, PUSH_TIMEOUT_MS, hasAuthRejectedEvidence, httpStatusFailureOf, gitTimeoutMessage, hasTransportEvidence, } from '../engine/git.js';
 import { SyncError } from '../engine/errors.js';
 import { ASKPASS_NODE_MISSING_CODE } from '../engine/nodePath.js';
 const COMMIT_IDENTITY = ['-c', 'user.name=dsh-dots', '-c', 'user.email=sync@localhost'];
@@ -17,6 +17,7 @@ const COMMIT_IDENTITY = ['-c', 'user.name=dsh-dots', '-c', 'user.email=sync@loca
  *
  * 预算命中时子进程被杀死（结构信号 `killed`）：这条分支与 stderr 有没有内容、
  * 是什么语言无关，因此一律判成 **timeout**，绝不再冒充「网络不可达」（D1）。
+ * 即使 stderr 里恰好含 403 字样，结构信号仍优先（见 `pushFailureReason` 的顺序）。
  *
  * `impl` 默认就是 node:child_process 的 execFile；仅测试注入替身，用来观察
  * 「这次 push 实际用了哪一档预算」，生产路径永远走真实 execFile。
@@ -91,7 +92,16 @@ export function buildSafePushArgs(args, extra = []) {
     return ['push', '--porcelain', 'origin', 'HEAD:main'];
 }
 const PUSH_REASONS = Object.freeze([
-    'auth-prompt', 'non-fast-forward', 'timeout', 'unreachable', 'git-failed',
+    'auth-prompt', 'auth-rejected', 'proxy-auth', 'rate-limited', 'remote-error',
+    'non-fast-forward', 'timeout', 'unreachable', 'git-failed',
+]);
+/**
+ * 只有这四个原因可以带 `details.status`：它们本来就是「远端回了一个状态码」。
+ * timeout / unreachable / auth-prompt 即便正文里恰好有 403 字样也不掺状态码——
+ * 被预算杀死的进程没有等到远端的回答，给它挂一个 403 就是在编故事。
+ */
+const STATUS_REASONS = Object.freeze([
+    'auth-rejected', 'proxy-auth', 'rate-limited', 'remote-error',
 ]);
 /**
  * 超时短语模板：唯一可变量是预算数字（`>N 毫秒`）；终态白名单按这份模板精确匹配。
@@ -116,13 +126,20 @@ function timeoutBudgetOf(error) {
     }
     return PUSH_TIMEOUT_MS;
 }
-/** typed 详情里的 reason（结构信号）；只认五类之一，别的值一律忽略。 */
+/** typed 详情里的 reason（结构信号）；只认白名单里的值，别的值一律忽略。 */
 function typedReasonOf(error) {
     const raw = error?.details?.reason;
     const mapped = raw === 'network' ? 'unreachable' : raw; // 旧字段兼容：network = unreachable
     return typeof mapped === 'string' && PUSH_REASONS.includes(mapped)
         ? mapped
         : null;
+}
+/** typed 详情里的 HTTP 状态码：只认 100..599 的整数，其它（含字符串）一律当没有。 */
+function statusOf(error) {
+    const raw = error?.details?.status;
+    if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 100 || raw > 599)
+        return undefined;
+    return raw;
 }
 /** 子进程被预算杀死 / 明确的超时 errno：与 stderr 语言无关的结构信号。 */
 function killedTimeout(error) {
@@ -135,45 +152,54 @@ function killedTimeout(error) {
 function errorTextOf(error) {
     return error instanceof Error ? error.message : String(error);
 }
-const AUTH_TEXT_RE = /User cancelled dialog|\/dev\/tty|could not read (Username|Password)|terminal prompts disabled|Authentication failed|prompt script|askpass/i;
+/**
+ * 拿不出凭据（本机鉴权环境）：git **没有**把凭据送出去 ⇒ `auth-prompt`。
+ * `Authentication failed` / `HTTP Basic: Access denied` 一类**不在**这里：那两句是
+ * 「凭据已送出、远端拒绝」，由 `hasAuthRejectedEvidence()`（`engine/git.ts` 的同一张表）
+ * 判成 `auth-rejected`（评审 b11b P2-2：被拒绝 ≠ 不可用，两句话不能共用）。
+ */
+const AUTH_TEXT_RE = /User cancelled dialog|\/dev\/tty|could not read (Username|Password)|terminal prompts disabled|prompt script|askpass/i;
 const NON_FAST_FORWARD_TEXT_RE = /non-fast-forward|\[rejected\]|fetch first|stale info|failed to push some refs/i;
 const TIMEOUT_TEXT_RE = /timed? ?out|timeout|ETIMEDOUT/i;
 /**
- * 分类顺序（D1 的核心）：
- *   1. 结构：typed `details.reason`（engine 的 timeout / unreachable 原样透传）；
- *   2. 结构：`killed` / ETIMEDOUT / TimeoutError → **timeout**，哪怕 stderr 为空或是外文；
- *   3. 文本：鉴权 → non-fast-forward → **正面传输证据** → 「不可达」；
- *   4. 文本：只有超时字样、没有传输证据 → 仍是 timeout，不冒充不可达；
- *   5. 其它 → git-failed（既有文案）。
+ * 分类顺序（D1 的核心 + b11 P2-6 的状态码前置 + b11b P2-2 的鉴权两桶）：
+ *   1. 结构：typed `details.reason`（engine 的 timeout / unreachable / 状态码原因原样透传）；
+ *   2. 结构：`killed` / ETIMEDOUT / TimeoutError → **timeout**，哪怕 stderr 为空、是外文，
+ *      甚至恰好含 403 字样（被预算杀死的进程没有「远端拒绝」这件事）；
+ *   3. 状态码：401/403 → auth-rejected，407 → proxy-auth，429 → rate-limited，5xx → remote-error，
+ *      **先于一切文本匹配**——Gitee 的 403 正文里含 `unable to access`，先跑文本就会误报不可达；
+ *   4. 文本：拿不出凭据 → **凭据被拒**（`Authentication failed` 一类，判 auth-rejected，
+ *      与状态码 401/403 同语义）→ non-fast-forward → **正面传输证据** → 「不可达」；
+ *   5. 文本：只有超时字样、没有传输证据 → 仍是 timeout，不冒充不可达；
+ *   6. 其它 → git-failed（既有文案）。
  */
+function textFailureOf(text) {
+    // 状态码只从 git 自己的输出里取，且只认 git 会打印的形状（见 engine/git.ts）。
+    const byStatus = httpStatusFailureOf(text);
+    if (byStatus !== null)
+        return { reason: byStatus.reason, status: byStatus.status };
+    if (AUTH_TEXT_RE.test(text))
+        return { reason: 'auth-prompt' };
+    // 凭据已送出但被拒（没有数字状态码）：说成「拿不到凭据」会让用户去改本机鉴权配置，
+    // 而真相是令牌过期/被吊销 —— 直接判 auth-rejected，与 401/403 同一句文案（不带 status 数字）。
+    if (hasAuthRejectedEvidence(text))
+        return { reason: 'auth-rejected' };
+    if (NON_FAST_FORWARD_TEXT_RE.test(text))
+        return { reason: 'non-fast-forward' };
+    if (hasTransportEvidence(text))
+        return { reason: 'unreachable' };
+    if (TIMEOUT_TEXT_RE.test(text))
+        return { reason: 'timeout' };
+    return { reason: 'git-failed' };
+}
+/** push 失败的原因分类（导出给测试与调用方；只产类别，不产文案）。 */
 export function pushFailureReason(error) {
     const typed = typedReasonOf(error);
     if (typed !== null)
         return typed;
     if (killedTimeout(error))
         return 'timeout';
-    const text = errorTextOf(error);
-    if (AUTH_TEXT_RE.test(text))
-        return 'auth-prompt';
-    if (NON_FAST_FORWARD_TEXT_RE.test(text))
-        return 'non-fast-forward';
-    if (hasTransportEvidence(text))
-        return 'unreachable';
-    if (TIMEOUT_TEXT_RE.test(text))
-        return 'timeout';
-    return 'git-failed';
-}
-/** git 非零退出的文本类别：只产类别，不产文案（正文仍按既有口径截断进 message）。 */
-function gitFailureReasonOf(text) {
-    if (AUTH_TEXT_RE.test(text))
-        return 'auth-prompt';
-    if (NON_FAST_FORWARD_TEXT_RE.test(text))
-        return 'non-fast-forward';
-    if (hasTransportEvidence(text))
-        return 'unreachable';
-    if (TIMEOUT_TEXT_RE.test(text))
-        return 'timeout';
-    return 'git-failed';
+    return textFailureOf(errorTextOf(error)).reason;
 }
 export class GitRepoV2Port {
     repo;
@@ -208,9 +234,12 @@ export class GitRepoV2Port {
         const result = await this.run(this.repo.dir, args);
         if (result.code !== 0 && !allowFailure) {
             const text = (result.stderr || result.stdout).trim();
+            const outcome = textFailureOf(text);
             throw new SyncError('E_GIT', `git ${args[0] ?? ''} 失败：${text.slice(0, 300)}`, {
-                // 只带**类别**进详情（结构化分类用），正文仍按既有口径截断进 message。
-                reason: gitFailureReasonOf(text),
+                // 只带**类别**（与状态码数字）进详情，结构化分类用；正文仍按既有口径截断进 message。
+                // 状态码是纯数字，不含凭据；`auth-rejected` 之类的判定因此能一路传到 pushFailure()。
+                reason: outcome.reason,
+                ...(outcome.status === undefined ? {} : { status: outcome.status }),
                 exitCode: result.code,
             });
         }
@@ -303,22 +332,46 @@ export class GitRepoV2Port {
      * push 失败的稳定原因分类：只输出白名单短语，绝不回显 git stderr / askpass 正文 / token。
      *
      * 注意：node 解释器缺失是 buildEnv() 阶段的 typed 配置错误，由 pushMain() 在调用本函数前
-     * 原样抛出；本函数下面的 auth-prompt 分类只处理真正的 git 鉴权失败，语义保持不变。
+     * 原样抛出；本函数下面的 auth-prompt 分类只处理真正的「拿不到凭据」，语义保持不变。
+     *
+     * 四个状态码原因（b11 P2-6）：`auth-rejected` / `proxy-auth` / `rate-limited` / `remote-error`
+     * 的短语都以「推送失败：」开头、单行、只说原因，动作由 `sync/cycle.ts` 的 `nextStepOf()`
+     * 按 `details.reason` 补一条对应的下一步；`details` 只带 `reason` 与 `status`（数字），
+     * 永远不带 URL / 用户名 / 令牌。
+     *
+     * `auth-rejected` 也覆盖**没有数字状态码**的凭据被拒文本（`Authentication failed` /
+     * `HTTP Basic: Access denied`，b11b P2-2）：那时 `details.status` 不掺数字（没看见数字就
+     * 不编），但原因句与下一步照样是「改登录名/令牌」，不会退回本机鉴权配置。
      */
     pushFailure(error) {
         const reason = pushFailureReason(error);
         const budgetMs = timeoutBudgetOf(error);
-        // 文案表：五个短语都以「推送失败：」开头，终态白名单（cycle.ts）用同一批短语做精确匹配。
+        // 状态码优先取 typed 详情（git() 已带出）；详情没有就再从不含凭据的错误文本里认一次。
+        const status = statusOf(error) ?? httpStatusFailureOf(errorTextOf(error))?.status;
+        // 文案表：九个短语都以「推送失败：」开头，终态白名单（cycle.ts）用同一批短语做精确匹配。
+        // 措辞必须与 `engine/git.ts` 的 HTTP_STATUS_CAUSE_ZH 说的是同一件事（见测试的措辞一致性断言）。
         const message = {
             'auth-prompt': '推送失败：HTTPS 鉴权无法通过（git 已禁用交互提示，askpass／用户名或令牌不可用）；请检查鉴权配置后重试',
+            // 凭据已送出但被远端拒绝：与 auth-prompt（拿不出凭据）是两件事，不许合并。
+            'auth-rejected': '推送失败：远端拒绝了这个用户名或令牌（HTTP 401/403），凭据需要重新核对',
+            'proxy-auth': '推送失败：代理要求它自己的鉴权（HTTP 407），不是仓库凭据的问题',
+            'rate-limited': '推送失败：远端限流（HTTP 429），稍后再推',
+            // 5xx 不单方面归因给仓库：代理/网关回 502 时 git 的文案与仓库自己回 502 完全相同（b11b P2-3）。
+            'remote-error': '推送失败：远端或代理返回 HTTP 5xx，本地改动与令牌都没有问题',
             'non-fast-forward': '推送失败：远端分支已前进，下一次同步会做有界重试',
             timeout: pushTimeoutReason(budgetMs),
             unreachable: '推送失败：网络不可达（无法解析或连接到远端）',
             'git-failed': '推送失败：git 拒绝了本次推送，请检查远端状态后重试',
         }[reason];
         // 超时把当次预算一并带进 typed 详情（`budgetMs`）：调用方能直接看到「这次用掉的是 push 的
-        // 120 秒档」，不必从文案里解析；其它原因与预算无关，详情仍是原来的 `{ reason }`。
-        return new SyncError('E_PUSH_REJECTED', message, reason === 'timeout' ? { reason, budgetMs } : { reason });
+        // 120 秒档」，不必从文案里解析；状态码原因带 `status`（纯数字），其它原因与预算无关。
+        const details = { reason };
+        if (reason === 'timeout')
+            details.budgetMs = budgetMs;
+        if (status !== undefined && STATUS_REASONS.includes(reason)) {
+            details.status = status;
+        }
+        return new SyncError('E_PUSH_REJECTED', message, details);
     }
     async pushMain(args) {
         // 唯一 push 构造口：固定 argv，无强制参数、无 refspec 改写、无远端删除。
