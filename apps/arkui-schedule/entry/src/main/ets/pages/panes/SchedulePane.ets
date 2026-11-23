@@ -391,7 +391,7 @@ export struct SchedulePane {
   /**
    * 失败意图复位 + 一次真实周期的能力保留（mod-sync-ui-silence / PHASE A）。
    *
-   * 用户可见的「重试同步」控件已按需求移除，本方法不再由任何 UI handler 调用；保留它是
+   * 用户可见的手动同步重试控件已按需求移除，本方法不再由任何 UI handler 调用；保留它是
    * 为了支持 / 排障：诊断可复用同一条确定性绑定入口，不必另写第二份重试实现。行为不变——
    * 把 failed 意图原子复位（attempts=0, state=pending）后，用真实 ctx 跑一次周期
    * （runConfiguredCycle(ctx) → runCycle(ctx) → wired 周期），结果交三态行显示。
@@ -1715,7 +1715,7 @@ export struct SchedulePane {
    * 唯一同步状态行（mod-auto-sync / mod-sync-ui-silence PHASE A）：`已同步 · HH:MM` /
    * `同步中…` / `失败：<typed 原因>`。**只读**：三态文案由 syncStatusStore 逐字给出，
    * 这里只负责显示与着色，文案一个字不改；用户不需要也不应该手动发起同步，
-   * 所以失败态不再渲染「重试同步」点击控件（PHASE A 删除，能力仍保留给支持排障）。
+   * 所以失败态不再渲染手动同步重试点击控件（PHASE A 删除，能力仍保留给支持排障）。
    */
   @Builder
   SyncStatusRow() {

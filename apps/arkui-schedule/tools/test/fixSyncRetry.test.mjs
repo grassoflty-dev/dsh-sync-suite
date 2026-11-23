@@ -82,7 +82,11 @@ test('R1 reproduced: unbound retry → typed E_SYNC_UNAVAILABLE with actionable 
   assert.equal(out.result.code, E_SYNC_UNAVAILABLE_CODE);
   assert.equal(out.result.message, E_SYNC_UNAVAILABLE_MESSAGE);
   assert.match(out.result.message, /下一步/);
-  assert.match(E_SYNC_UNAVAILABLE_NEXT_STEP, /重试同步/);
+  // mod-app-retry-removal (old → new): the next step used to point at the now-deleted
+  // manual retry control. It must point only at the still-live silent / gesture paths.
+  assert.doesNotMatch(E_SYNC_UNAVAILABLE_NEXT_STEP, /重试同步/,
+    '手动重试控件已删除，下一步文案不得再把用户指过去');
+  assert.match(E_SYNC_UNAVAILABLE_NEXT_STEP, /自动重试|下拉刷新/);
   assert.deepEqual(out.trace, ['unbound'], 'typed immediately only when genuinely unbound');
   assert.equal(out.result.resultOutbox.length, 1, 'parked intent is never dropped');
   assert.equal(out.result.resultOutbox[0].state, 'failed', 'failed intent stays until user retry');
@@ -120,17 +124,24 @@ test('R3 static: retry + post-create + pull-refresh all bind deterministically b
   assert.match(trig[1], /bindBridgeRunner\(getContext\(\) as common\.UIAbilityContext\)/);
   assert.match(trig[1], /syncProtocolStore\.runConfiguredCycle\(\)/);
 
-  // 真机路径：日程面板「重试同步」与「下拉刷新」；fallback 路由同样接线。
+  // 真机路径：日程面板保留的重试能力与「下拉刷新」；fallback 路由只保留下拉。
+  // mod-app-retry-removal (old → new): `Index.retrySync` was pinned here as a live
+  // deterministically-bound path. Its last caller (the UI control) is gone, so the
+  // method was deleted; that positive pin is replaced by the absence assertions below.
+  // SchedulePane's two pins and Index's onPullRefresh pin are untouched.
   for (const [name, body] of [
     ['SchedulePane.retrySync', /private async retrySync\(\): Promise<void> \{([\s\S]*?)\n  \}/.exec(pane)?.[1]],
     ['SchedulePane.onPullRefresh', /private async onPullRefresh\(\): Promise<void> \{([\s\S]*?)\n  \}/.exec(pane)?.[1]],
-    ['Index.retrySync', /private async retrySync\(\): Promise<void> \{([\s\S]*?)\n  \}/.exec(index)?.[1]],
     ['Index.onPullRefresh', /private async onPullRefresh\(\): Promise<void> \{([\s\S]*?)\n  \}/.exec(index)?.[1]]
   ]) {
     assert.ok(body, `${name} body not found`);
     assert.match(body, /bindBridgeRunner\(getContext\((?:this)?\) as common\.UIAbilityContext\)/,
       `${name} must bind deterministically`);
   }
+  assert.doesNotMatch(index, /private async retrySync\(\)/,
+    'fallback Index: retrySync must be gone with its last caller');
+  assert.doesNotMatch(index, /重试同步/,
+    'fallback Index: the manual retry literal must not reappear');
 
   // 确定性取桥：v2 runner 先认 App 级 syncController 实例，设置页自建服务不能抢走。
   assert.match(runner, /const canonical: GitSyncService \| null = syncController\.readyService\(\)/);

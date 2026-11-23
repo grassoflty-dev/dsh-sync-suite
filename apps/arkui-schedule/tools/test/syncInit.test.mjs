@@ -101,7 +101,9 @@ test('2 typed E_SYNC_UNAVAILABLE copy carries Chinese reason + next step + retry
   assert.match(E_SYNC_UNAVAILABLE_REASON, /GitRunner/);
   assert.match(E_SYNC_UNAVAILABLE_NEXT_STEP, /^下一步/);
   assert.match(E_SYNC_UNAVAILABLE_NEXT_STEP, /下拉刷新/);
-  assert.match(E_SYNC_UNAVAILABLE_NEXT_STEP, /重试同步/);
+  // mod-app-retry-removal (old → new): next step must not name the deleted control.
+  assert.doesNotMatch(E_SYNC_UNAVAILABLE_NEXT_STEP, /重试同步/,
+    '手动重试控件已删除，下一步文案不得再指向它');
   assert.equal(
     E_SYNC_UNAVAILABLE_MESSAGE,
     `${E_SYNC_UNAVAILABLE_CODE}: ${E_SYNC_UNAVAILABLE_REASON}；${E_SYNC_UNAVAILABLE_NEXT_STEP}`

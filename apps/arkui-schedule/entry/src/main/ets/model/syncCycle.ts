@@ -191,9 +191,9 @@ export const E_CORRUPT_MESSAGE: string =
 /** E_SYNC_UNAVAILABLE：GitRunner 未绑定 / 同步内核未就绪的 typed 码、原因与可执行下一步。 */
 export const E_SYNC_UNAVAILABLE_CODE: string = 'E_SYNC_UNAVAILABLE';
 export const E_SYNC_UNAVAILABLE_REASON: string = '同步内核或 GitRunner 未就绪';
-/** 中文下一步：不静默、给可操作动作（页面就绪后自动重试；仍失败则手动重试）。 */
+/** 中文下一步：不静默、给可操作动作（页面就绪后自动重试；仍失败则用下拉手势）。 */
 export const E_SYNC_UNAVAILABLE_NEXT_STEP: string =
-  '下一步：记录已保存在本机，请稍候；页面就绪后会自动重试，若仍未同步请下拉刷新或点状态行「重试同步」';
+  '下一步：记录已保存在本机，请稍候；页面就绪后会自动重试，若仍未同步请下拉刷新';
 /** 面向用户的完整 typed 文案（code + 原因 + 下一步），状态行原样显示。 */
 export const E_SYNC_UNAVAILABLE_MESSAGE: string =
   `${E_SYNC_UNAVAILABLE_CODE}: ${E_SYNC_UNAVAILABLE_REASON}；${E_SYNC_UNAVAILABLE_NEXT_STEP}`;
@@ -415,7 +415,7 @@ function pullFailureOutcome(text: string, outbox: OutboxEntry[]): CycleOutcome {
     ok: false, code: 'E_PULL_FAILED', days: EMPTY_DAYS.slice(),
     applied: 0, dropped: 0, failed: countFailed(outbox),
     pending: replayable(outbox).length,
-    message: `E_PULL_FAILED: 拉取远端失败（${text}）；下一步：检查网络与仓库地址后点「重试同步」`,
+    message: `E_PULL_FAILED: 拉取远端失败（${text}）；下一步：检查网络与仓库地址，稍后会自动重试或下拉刷新`,
     conflicts: 0, added: 0, attempts: 0,
     resultOutbox: outbox.slice(), droppedIds: []
   };
@@ -442,7 +442,7 @@ function probeFailureOutcome(text: string, outbox: OutboxEntry[]): CycleOutcome 
   const code: string = typedProbeCode(text);
   const message: string = code === E_SYNC_UNAVAILABLE_CODE
     ? `远端状态探测失败；${E_SYNC_UNAVAILABLE_MESSAGE}（${text}）`
-    : `${code}: 远端状态探测失败（${text}）；下一步：检查网络与仓库地址后点「重试同步」`;
+    : `${code}: 远端状态探测失败（${text}）；下一步：检查网络与仓库地址，稍后会自动重试或下拉刷新`;
   return {
     ok: false, code: code, days: EMPTY_DAYS.slice(),
     applied: 0, dropped: 0, failed: countFailed(outbox),

@@ -62,6 +62,79 @@ function builderBody(source, name) {
   return source.slice(start + 1, end - 1);
 }
 
+/* ------------------------------------------------------------ mod-app-retry-removal
+ * Schedule-surface absence guard. Phase A removed the manual retry control from the
+ * shipped SchedulePane; this module removes the leftover one on the fallback Index route.
+ * The old pins asserted the control EXISTED (so a re-added or merely renamed button
+ * passed). These helpers scan BOTH surface files and fail on any reintroduced control:
+ * a Text/Button/ActionButton with a retry / test / status label, a clickable handler
+ * reaching a sync capability, and the bare literal 重试同步 anywhere in either file.
+ */
+const SCHEDULE_SURFACE = ['pages/Index.ets', 'pages/panes/SchedulePane.ets'];
+const RETRY_WORDS = ['重试同步', '重试', '立即同步', '测试连接', '查看状态', '同步'];
+const SYNC_CAPABILITY = /retrySync|runConfiguredCycle|runAction\(|retryFromStatus\(|testConnection\(|\brunOnce\(/;
+
+/** Balanced call-body extractor: handlerBodies(code, 'onClick') → each `.onClick(...)` body. */
+function handlerBodies(code, name) {
+  const out = [];
+  const re = new RegExp('\\b' + name + '\\s*\\(', 'g');
+  let m;
+  while ((m = re.exec(code))) {
+    const open = m.index + m[0].length - 1;
+    let i = open + 1;
+    let depth = 1;
+    while (i < code.length && depth > 0) {
+      const c = code[i];
+      if (c === "'" || c === '"' || c === '`') {
+        const q = c;
+        i += 1;
+        while (i < code.length) {
+          if (code[i] === '\\') { i += 2; continue }
+          if (code[i] === q) { i += 1; break }
+          i += 1;
+        }
+        continue;
+      }
+      if (c === '(') depth += 1;
+      else if (c === ')') depth -= 1;
+      i += 1;
+    }
+    out.push(code.slice(open + 1, i - 1));
+  }
+  return out;
+}
+
+function assertNoManualSyncRetryControl(where, overrides = {}) {
+  for (const rel of SCHEDULE_SURFACE) {
+    const raw = overrides[rel] ?? readFileSync(join(ETS, rel), 'utf8');
+    const code = overrides[rel] === undefined ? src(rel) : stripComments(raw);
+    // (a) plain literal absence in BOTH files (raw bytes, comments included).
+    assert.ok(!raw.includes('重试同步'), `${rel}: literal 重试同步 must be absent (${where})`);
+    // (b) no Text / Button / ActionButton carrying a retry / test / status label.
+    const labels = [];
+    for (const m of code.matchAll(/\b(?:Text|Button)\s*\(\s*(['"])([^'"]*)\1/g)) labels.push(m[2]);
+    for (const m of code.matchAll(/\bActionButton\s*\(\s*\{([\s\S]{0,320}?)\}/g)) {
+      for (const l of m[1].matchAll(/\b(?:label|actionLabel|retryLabel)\s*:\s*(['"])([^'"]*)\1/g)) labels.push(l[2]);
+    }
+    const hits = labels.filter((label) => RETRY_WORDS.some((w) => label.includes(w)));
+    assert.deepEqual(hits, [], `${rel}: no retry/test/status-labelled control allowed (${where}); got ${hits.join(' | ')}`);
+    // (c) no clickable handler wired to a sync capability (covers a benign-labelled re-add).
+    for (const handler of ['onClick', 'onTap', 'onAction', 'onRetry']) {
+      for (const body of handlerBodies(code, handler)) {
+        assert.ok(!SYNC_CAPABILITY.test(body),
+          `${rel}: ${handler} must not reach a sync capability (${where}): ${body.slice(0, 120)}`);
+      }
+      const propRe = new RegExp('\\b' + handler + '\\s*:\\s*', 'g');
+      let pm;
+      while ((pm = propRe.exec(code))) {
+        const window = code.slice(pm.index, pm.index + 260);
+        assert.ok(!SYNC_CAPABILITY.test(window),
+          `${rel}: ${handler} prop must not reach a sync capability (${where})`);
+      }
+    }
+  }
+}
+
 const DAY = '2026-11-19';
 const T0930 = `${DAY}T09:30:00+08:00`;
 const T1100 = `${DAY}T11:00:00+08:00`;
@@ -562,7 +635,10 @@ test('40 static: exactly three status states with exact copy, no manual sync but
   assert.match(index, /@State syncStatus: SyncStatusView = syncStatusStore\.snapshot\(\)/);
   assert.match(index, /Text\(this\.syncStatus\.text\)/);
   assert.match(index, /this\.syncStatus\.state === 'failed'/);
-  assert.match(index, /Text\('重试同步'\)/);
+  // mod-app-retry-removal (old → new): was `assert.match(index, /Text\('重试同步'\)/)` —
+  // a positive pin that let a re-added / renamed button pass. Now fail on ANY reachable
+  // manual sync retry across both schedule-surface files.
+  assertNoManualSyncRetryControl('syncWiring test 40');
   const store = src('services/syncStatusStore.ets');
   assert.match(store, /SYNCED_PREFIX: string = '已同步 · '/);
   assert.match(store, /SYNCING_TEXT: string = '同步中…'/);
@@ -573,6 +649,27 @@ test('40 static: exactly three status states with exact copy, no manual sync but
     const text = src(rel);
     assert.doesNotMatch(text, /label: '推送'|label: '立即同步'|Text\('推送'\)/, rel);
   }
+});
+
+test('40b mod-app-retry-removal self-test: the absence guard fails on a re-added control', () => {
+  // Positive control: inject the exact removed shape into the fallback route in memory
+  // (no file write). A guard that only "passes" is worthless; this proves it can fail.
+  const idxRaw = readFileSync(join(ETS, 'pages/Index.ets'), 'utf8');
+  const mutated = idxRaw.replace('this.SyncStatusRow()',
+    "Text('重试同步').onClick(() => { this.runConfiguredCycle(); })\n      this.SyncStatusRow()");
+  assert.notEqual(mutated, idxRaw, 'mutation must actually apply');
+  assert.throws(
+    () => assertNoManualSyncRetryControl('self-test', { 'pages/Index.ets': mutated }),
+    /重试同步/, 'guard must fail on a re-added, identically-named retry control');
+  // A merely RENAMED control with a sync handler must fail too (label word + capability).
+  const renamed = idxRaw.replace('this.SyncStatusRow()',
+    "Text('同步').onClick(() => { this.runConfiguredCycle(); })\n      this.SyncStatusRow()");
+  assert.throws(
+    () => assertNoManualSyncRetryControl('self-test', { 'pages/Index.ets': renamed }),
+    /retry\/test\/status-labelled control|sync capability/,
+    'guard must fail on a renamed retry control wired to a sync capability');
+  // The real tree still passes.
+  assertNoManualSyncRetryControl('self-test clean');
 });
 
 test('41 static: no force-push / --force / merge / rebase / clean in new wiring', () => {
@@ -668,15 +765,17 @@ test('50 P1-2: failed intent → retry reset → cycle replay → drained', asyn
   assert.equal(result.resultOutbox.length, 0, 'drained after user retry');
 });
 
-test('51 static P1-2: outboxStore.retry + Index 重试同步 + real runCycle(ctx) caller', () => {
+test('51 static P1-2: outboxStore.retry reset + NO manual retry control + real runCycle(ctx) caller', () => {
   const outbox = src('services/outboxStore.ets');
   assert.match(outbox, /retry\(intentId: string\): boolean/);
   assert.match(outbox, /resetForRetry\(entry\)/);
-  const index = src('pages/Index.ets');
-  assert.match(index, /重试同步/);
-  assert.match(index, /outboxStore\.retry\(entry\.intentId\)/);
-  assert.match(index, /syncProtocolStore\.wiredContext/);
-  assert.match(index, /syncProtocolStore\.runConfiguredCycle\(ctx\)/);
+  // mod-app-retry-removal (old → new): four positive pins on Index (`重试同步`,
+  // `outboxStore.retry(entry.intentId)`, `syncProtocolStore.wiredContext`,
+  // `syncProtocolStore.runConfiguredCycle(ctx)`) all lived inside the deleted
+  // retrySync(). They are replaced by an absence guard that fails on a re-added
+  // control AND on a renamed one; the outbox reset pin and the store's runCycle
+  // pin below are untouched.
+  assertNoManualSyncRetryControl('syncWiring test 51');
   const store = src('services/syncProtocolStore.ets');
   assert.match(store, /return await this\.runCycle\(ctx\)/);
 });

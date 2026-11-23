@@ -488,7 +488,10 @@ test('13 remoteLayout throws E_AUTH → typed probe failure, outbox intact (M2)'
   assert.equal(result.ok, false);
   assert.equal(result.code, 'E_AUTH');
   assert.match(result.message, /远端状态探测失败/);
-  assert.match(result.message, /检查网络与仓库地址后点「重试同步」/);
+  // mod-app-retry-removal (old → new): was `/检查网络与仓库地址后点「重试同步」/` —
+  // the referenced control no longer exists. The typed code / next-step discipline stays.
+  assert.match(result.message, /检查网络与仓库地址，稍后会自动重试或下拉刷新/);
+  assert.doesNotMatch(result.message, /重试同步/);
   assert.equal(result.attempts, 0, '探测阶段没有推送，不能 bump 跨会话预算');
   assert.equal(fake.commitCount, 0);
   assert.equal(fake.pushCount, 0);

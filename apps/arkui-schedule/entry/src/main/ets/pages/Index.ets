@@ -1,3 +1,4 @@
+// legacy fallback 路由说明：本页不是上架入口（EntryAbility 加载 pages/Home），手动同步重试控件已移除。
 /**
  * 主页：日期条 + 当日全部日程/未完成 两段 + 列表（左勾选 / 中标题+时间 / 右手迹）
  * + 「新建」主操作 + 页头唯一动作「⚙ 设置」。
@@ -288,32 +289,6 @@ struct Index {
     this.loadSummary();
   }
 
-  /**
-   * P1-2 用户「重试同步」：把 failed 意图原子复位（attempts=0, state=pending）后，
-   * 用真实 ctx 跑一次周期（runConfiguredCycle(ctx) → runCycle(ctx) → wired 周期），
-   * 结果交三态行显示。pending 但未 failed 的意图无需复位（预算未耗尽）。
-   */
-  private async retrySync(): Promise<void> {
-    try {
-      bindBridgeRunner(getContext(this) as common.UIAbilityContext);
-      for (const entry of outboxStore.list()) {
-        if (entry.state === 'failed') {
-          outboxStore.retry(entry.intentId);
-        }
-      }
-      const ctx = syncProtocolStore.wiredContext(getContext(this) as common.UIAbilityContext);
-      const result = await syncProtocolStore.runConfiguredCycle(ctx);
-      if (result !== null) {
-        this.syncStatus = syncStatusStore.fromCycle(result, new Date());
-      } else {
-        this.syncStatus = syncStatusStore.snapshot();
-      }
-    } catch (error) {
-      this.syncStatus = syncStatusStore.setPending(
-        0, error instanceof Error ? error.message : String(error));
-    }
-  }
-
   /** 从编辑页/设置页返回时重新加载（追加写语义下必须重读）。 */
   onPageShow(): void {
     // v2-only：没有激活开关，三态行只跟随 syncStatusStore 的最近结果。
@@ -396,7 +371,7 @@ struct Index {
       syncProtocolStore.setRunner(bridgeGitRunner);
       await syncProtocolStore.ensureReadyForBootstrap(getContext(this) as common.UIAbilityContext);
       await outboxStore.ensureReady(getContext(this) as common.UIAbilityContext);
-      // P1-2/P2-5：带残留 outbox 启动时显示「N 条待同步」并暴露「重试同步」入口。
+      // P1-2/P2-5：带残留 outbox 启动时显示「N 条待同步」；手动重试出口已移除（只读状态面）。
       const parked = outboxStore.list();
       if (parked.length > 0) {
         const failed: number = parked.filter((e): boolean => e.state === 'failed').length;
@@ -1632,8 +1607,8 @@ struct Index {
 
   /**
    * 唯一同步状态行（mod-auto-sync）：`已同步 · HH:MM` / `同步中…` / `失败：<typed 原因>`。
-   * 三态文案由 syncStatusStore 逐字给出，这里只负责显示与着色；失败态保留状态行上的
-   * 「点一下」重试（不是按钮），复用 outbox 的 `retry()` 复位失败意图。
+   * 三态文案由 syncStatusStore 逐字给出，这里只负责显示与着色；本 fallback 路由的手动
+   * 同步重试出口已随 mod-app-retry-removal 移除，状态行是纯只读文本。
    */
   @Builder
   SyncStatusRow() {
@@ -1647,16 +1622,6 @@ struct Index {
         .layoutWeight(1)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-      // 失败态的重试：状态行上的一次点击，不新增按钮；契约 §9 P1-1 的用户重试入口。
-      if (this.syncStatus.state === 'failed') {
-        Text('重试同步')
-          .fontSize(FONT.caption)
-          .fontColor($r('app.color.warning'))
-          .padding({ left: SPACING.xs, right: SPACING.xs })
-          .onClick(() => {
-            this.retrySync();
-          })
-      }
     }
     .width('100%')
     .height(TOUCH_MIN)
