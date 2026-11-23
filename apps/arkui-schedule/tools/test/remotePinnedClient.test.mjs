@@ -185,11 +185,14 @@ describe('B. header-only：URL 无凭证，header 是唯一载体', () => {
     assert.equal(JSON.stringify(transportFail).includes(SYNTH), false, '不得把可能带 token 的 error.message 拼进文案');
   });
 
-  test('源码形态：无 handleConfirm / 无 loadUrl 携带凭证 / 唯一请求构造点', () => {
+  // retarget（mod-pinned-view-removal）：本模块删除了 components/PinnedRemoteView.ets（死渲染器，
+  // 零 importer / 从未进 entry 图 / abc 命中 0）。它原是本用例的第三个 source，文件已不存在，
+  // 故从 source 列表移除——stripComments 后它只有 Text/List/ForEach，对下列断言本无贡献。
+  // 安全断言不删、不放宽：adapter + model 仍是被删除后唯一承载「pinned 原生路径不带凭证走 WebView」的源码。
+  test('源码形态：无 handleConfirm / 无 loadUrl 携带凭证 / 唯一请求构造点（含 release 排除锚点）', () => {
     const adapter = stripComments(readFileSync(resolve(SRC, 'services/remotePinnedClient.ets'), 'utf8'));
     const model = stripComments(readFileSync(resolve(SRC, 'model/remotePinnedClient.ts'), 'utf8'));
-    const view = stripComments(readFileSync(resolve(SRC, 'components/PinnedRemoteView.ets'), 'utf8'));
-    const all = adapter + model + view;
+    const all = adapter + model;
     assert.equal(all.includes('handleConfirm('), false, '绝不调用 SSL 错误处理放行接口');
     assert.equal(/loadUrl\([^)]*SYNTH/i.test(all), false);
     assert.equal(all.match(/loadUrl\(/g)?.length ?? 0, 0, 'pinned client 路径不挂 WebView');
@@ -197,6 +200,12 @@ describe('B. header-only：URL 无凭证，header 是唯一载体', () => {
     assert.equal(adapter.match(/\.request\(url, httpOptions\)/g)?.length, 1, '构造点里恰好一次 request 调用');
     assert.equal(adapter.includes('maxRedirects: 0'), true);
     assert.equal(adapter.includes('getEncoded('), false, '同步判定只走 PEM，不在回调里读异步 DER');
+
+    // RC-3 release 排除锚点：release 产物里不得含 debug harness。脚本默认以 absent 断言 sentinel，
+    // 把「release 构建不携带被排除的调试/凭证路径」从意图变成可跑的检查（独立 gate 另验产物）。
+    const exclusion = readFileSync(resolve(APP, 'tools/check-rc3-release-exclusion.mjs'), 'utf8');
+    assert.match(exclusion, /PIN-ATTACK-01/, '排除脚本必须钉住 debug sentinel');
+    assert.match(exclusion, /expect\s*===\s*'absent'\s*\?\s*count\s*===\s*0/, '默认必须断言 sentinel 缺席');
   });
 });
 

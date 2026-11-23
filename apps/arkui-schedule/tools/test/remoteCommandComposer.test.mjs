@@ -3,7 +3,7 @@
 // 前置：node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json
 // 纯模型 `model/remoteCommandDraft.ts` 只 import 纯模型，编译产物可直接被 Node 加载。
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -260,7 +260,18 @@ describe('G. RemoteControl.ets 接线形状', () => {
     assert.match(remoteSrc, /findInstance\(instanceStore\.list\(\), id\) === null/);
   });
 
-  test('G4 对照组：死代码 PinnedRemoteView 仍零 importer，证明扫描能区分「进了入口图」与「只在磁盘上」', () => {
+  // G4 retarget（mod-pinned-view-removal）：旧对照组的前提「死文件 PinnedRemoteView.ets 在磁盘上且零 importer」
+  // 已被本模块删除。删除事实：零 importer、从未进 entry 图、旧产物 abc 命中 0——不可能回归行为，也不省字节。
+  // 新对照组保留同一套 importer 扫描：
+  //   (a) 钉住死文件已不存在；
+  //   (b) 正对照不变——composer 的唯一 importer 仍是入口图里的 RemoteControl.ets；
+  //   (c) 负对照从「磁盘上但零 importer」改写为「删除后无任何悬空 import PinnedRemoteView」——
+  //       仍真实遍历同一套扫描的零分支，且是删除后的真实完整性不变量（悬空 import 会断编译）。
+  // 「编译 vs 仅存在于磁盘」的另一端由 G1（挂载钉在 live PHASE_READY 主体内）证明，未放宽。
+  // 未做全局「每个 .ets 至少 1 importer」不变量：删除后 24 个（删除前 25 个）合法零 importer 源文件
+  //（删除后共 153 个源文件；@Entry 页 / EntryAbility / scaffold 桩 / 纯 model 辅助，例见 .tmp/enumerate-zero-importers.mjs），
+  // 需要一份本模块无法证明合理的白名单，故不引入。
+  test('G4 对照组：死渲染器已删除、无悬空 import，composer 仍恰有一个入口图 importer', () => {
     const etsRoot = resolve(HERE, '../../entry/src/main/ets');
     const sources = [];
     const walk = (dir) => {
@@ -279,14 +290,16 @@ describe('G. RemoteControl.ets 接线形状', () => {
       return new RegExp(`from\\s+['"][^'"]*${name}['"]`).test(text);
     };
 
-    // 负对照：死代码组件在磁盘上存在，但没有任何 import。
+    // (a) 删除事实：PinnedRemoteView.ets 必须已不在磁盘上，也不再被扫描枚举到。
     const pinnedView = resolve(etsRoot, 'components/PinnedRemoteView.ets');
-    assert.ok(sources.includes(pinnedView), 'PinnedRemoteView.ets 应仍在磁盘上（负对照成立的前提）');
-    const pinnedImporters = sources.filter((file) =>
-      file !== pinnedView && importsNamed(file, 'PinnedRemoteView'));
-    assert.deepEqual(pinnedImporters, [], 'PinnedRemoteView 必须仍零 importer（死代码）');
+    assert.equal(existsSync(pinnedView), false, 'PinnedRemoteView.ets 必须已删除');
+    assert.equal(sources.includes(pinnedView), false, '扫描不得再枚举到 PinnedRemoteView.ets');
 
-    // 正对照：同一套扫描必须找到本模块 composer 的唯一 importer = 远程控制页。
+    // (c) 负对照（保留零 importer 扫描分支）：删除后不得留下任何 import PinnedRemoteView 的悬空引用。
+    const pinnedImporters = sources.filter((file) => importsNamed(file, 'PinnedRemoteView'));
+    assert.deepEqual(pinnedImporters, [], '删除后不得有任何文件仍 import PinnedRemoteView（悬空 import）');
+
+    // (b) 正对照：同一套扫描必须找到本模块 composer 的唯一 importer = 远程控制页。
     const composer = resolve(etsRoot, 'components/RemoteCommandComposer.ets');
     const composerImporters = sources.filter((file) =>
       file !== composer && importsNamed(file, 'RemoteCommandComposer'));
