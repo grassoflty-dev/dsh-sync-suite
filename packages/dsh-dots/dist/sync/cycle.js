@@ -91,6 +91,56 @@ export function isOursCommit(commit, instanceId = DEFAULT_V2_INSTANCE_ID) {
         commit.paths.length > 0 &&
         commit.paths.every(isConfinedTimelinePath);
 }
+/** 尾注存在但实例标识不是本模块（与「整条尾注缺失」区分）。 */
+function hasOtherV2Trailer(body, instanceId) {
+    const ours = v2TrailerLine(instanceId);
+    return body.split(/\r?\n/).some((row) => {
+        const line = row.trim();
+        return line.startsWith(`${V2_TRAILER_PREFIX} `) && line !== ours;
+    });
+}
+/**
+ * 纯函数：逐条解释领先提交的归属。复用 isOursCommit / isV2CommitSubject /
+ * hasV2Trailer / isConfinedTimelinePath 同一批严格谓词——本函数只**增解释**，
+ * 不放宽任何一条：尾注缺失、实例不符、subject 非 v2 形状、diff 越界仍一律不算本模块。
+ */
+export function describePendingOwnership(commits, instanceId = DEFAULT_V2_INSTANCE_ID) {
+    const verdicts = commits.map((commit, i) => {
+        const subjectShape = isV2CommitSubject(commit.subject) ? 'v2' : 'other';
+        const trailer = hasV2Trailer(commit.body, instanceId);
+        const outsideScopePaths = commit.paths.filter((p) => !isConfinedTimelinePath(p)).length;
+        const reasons = [];
+        if (subjectShape !== 'v2')
+            reasons.push('subject 不是 [v2] 形状');
+        if (hasOtherV2Trailer(commit.body, instanceId))
+            reasons.push('尾注实例标识不符');
+        else if (!trailer)
+            reasons.push('尾注缺失');
+        if (outsideScopePaths > 0)
+            reasons.push(`diff 越界 ${outsideScopePaths} 条`);
+        if (commit.paths.length === 0)
+            reasons.push('无 timeline 改动');
+        const ours = isOursCommit(commit, instanceId);
+        const verdict = ours
+            ? 'ours'
+            : (subjectShape === 'v2' && trailer && outsideScopePaths > 0 ? 'untrusted' : 'foreign');
+        return {
+            index: i + 1, verdict, subjectShape, trailer, outsideScopePaths,
+            reason: ours ? '尾注与路径均合规' : (reasons.length > 0 ? reasons.join('；') : '归属不明'),
+        };
+    });
+    const ours = commits.length > 0 && verdicts.every((v) => v.verdict === 'ours');
+    const pieces = verdicts.map((v) => {
+        const label = v.verdict === 'ours' ? '本模块' : (v.verdict === 'untrusted' ? '不可信' : '非本模块');
+        return v.verdict === 'ours'
+            ? `第 ${v.index} 条 ${label}`
+            : `第 ${v.index} 条 ${label}（${v.reason}）`;
+    });
+    const summary = commits.length === 0
+        ? '领先提交 0 条'
+        : `领先提交 ${commits.length} 条：${pieces.join('；')}`;
+    return { ours, verdicts, summary };
+}
 /** 意图是否已被某次提交认领（新字段优先；旧 outbox 用 attempts≥1 兜底）。 */
 export function isCommittedIntent(entry) {
     return (typeof entry.commitSha === 'string' && entry.commitSha !== '') || entry.attempts >= 1;
@@ -609,6 +659,9 @@ async function applyUnappliedIntents(ctx, fresh) {
 async function recoverPendingLocalCommit(ctx) {
     let all = ctx.all;
     let attempts = 0;
+    // 最近一次推拒的白名单化 typed 原因：原先只折进 outbox 的 attempts/lastError，
+    // 终态消息完全看不到；这里只在终态读取，不改任何成功路径。
+    let lastPushReason = '';
     for (let retry = 0; retry < MAX_CYCLE_RETRIES; retry += 1) {
         attempts += 1;
         ctx.all = all;
@@ -645,6 +698,7 @@ async function recoverPendingLocalCommit(ctx) {
         }
         catch (error) {
             const reason = typedError(error);
+            lastPushReason = typedPushReason(error);
             // 推拒仍按契约停放（attempts 跨会话累计）；但绝不把未推提交报成成功。
             all = all.map((entry) => replayable([entry]).length > 0 ? markAttempt(entry, reason) : entry);
             ctx.all = all; // 预算累计带入下一轮校验
@@ -664,7 +718,12 @@ async function recoverPendingLocalCommit(ctx) {
         if (!await pendingIsOurs(ctx.git, ctx.instanceId))
             break;
     }
-    return failure(V2_ERROR.LOCAL_PENDING, `${LOCAL_PENDING_MESSAGE}（已重试 ${attempts} 次）`, all, attempts);
+    // 终态只在这里解释：逐条归属 + 最近一次 typed 推拒原因。判定与出队语义一字未动。
+    const ownership = await describeAheadOwnership(ctx.git, ctx.instanceId);
+    const parts = [`已重试 ${attempts} 次`, ownership.summary];
+    if (lastPushReason !== '')
+        parts.push(`最近一次推送失败：${lastPushReason}`);
+    return failure(V2_ERROR.LOCAL_PENDING, `${LOCAL_PENDING_MESSAGE}（${parts.join('；')}）`, all, attempts);
 }
 // ---------------------------------------------------------------- 周期
 function failure(code, message, all, attempts) {
@@ -676,6 +735,45 @@ function failure(code, message, all, attempts) {
 }
 function typedError(error) {
     return error instanceof Error ? error.message : String(error);
+}
+/** 终态消息允许出现的推送原因上限（字符）：只放白名单短语，不放原始 git stderr。 */
+const MAX_TERMINAL_PUSH_REASON = 96;
+/** 未通过白名单时的固定替代文案：只报类别，不报位置、原文或任何可还原片段。 */
+const GENERIC_PUSH_REASON = '推送失败（原因类别未识别）';
+/** 只接受 pushFailure() 的四个固定短语；任何其它正文都不进终态消息。 */
+const ALLOWED_PUSH_REASONS = Object.freeze([
+    '推送失败：HTTPS 鉴权无法通过（git 已禁用交互提示，askpass／用户名或令牌不可用）；请检查鉴权配置后重试',
+    '推送失败：远端分支已前进，下一次同步会做有界重试',
+    '推送失败：网络不可达或远端响应超时，请稍后重试',
+    '推送失败：git 拒绝了本次推送，请检查远端状态后重试',
+]);
+/**
+ * 精确短语白名单（fail-closed）：折叠成单行、有界之后，只有逐字等于四个
+ * pushFailure() 短语之一才通过；其它一切（含 UNC / 相对 / 全角路径、盘符、
+ * 令牌、hex、超长串）都整段换成固定短语。不做部分打码、不做占位符替换。
+ */
+function singleLineSafeReason(text, max = MAX_TERMINAL_PUSH_REASON) {
+    const flat = text.replace(/[\r\n\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const bounded = flat.slice(0, max);
+    return ALLOWED_PUSH_REASONS.includes(bounded) ? bounded : GENERIC_PUSH_REASON;
+}
+/** 从 push 异常提取 typed 原因：优先带出 E_ 码，正文只取白名单化的单行短句。 */
+function typedPushReason(error) {
+    const raw = error?.code;
+    const code = typeof raw === 'string' && /^E_[A-Z0-9_]+$/.test(raw) ? raw : '';
+    const msg = singleLineSafeReason(typedError(error));
+    if (msg === '')
+        return code;
+    return code === '' ? msg : `${code}：${msg}`;
+}
+/** 只读地取当前领先提交并解释归属；读取失败也只降级一句话，不改终态语义。 */
+async function describeAheadOwnership(git, instanceId) {
+    try {
+        return describePendingOwnership(await git.aheadCommits(), instanceId);
+    }
+    catch {
+        return { ours: false, verdicts: [], summary: '领先提交读取失败' };
+    }
 }
 /**
  * 单一 v2 同步周期。零写入的失败路径全部在第一个写句柄之前返回。
