@@ -29,16 +29,25 @@ const {
   TOOL_INSTANCE_LIST,
   TOOL_INSTANCE_INSPECT,
   TOOL_SESSION_LIST,
-  TOOL_SESSION_READ,
+  TOOL_SESSION_INFO,
+  TOOL_SESSION_EVENTS,
   TOOL_SESSION_PROMPT,
+  TOOL_SESSION_CREATE,
+  TOOL_LEASE_CLAIM,
+  TOOL_LEASE_HEARTBEAT,
+  TOOL_LEASE_RELEASE,
+  LEGACY_TOOL_SESSION_READ,
   VIEW_TOOLS,
   COMMAND_TOOLS,
+  PROMPT_TOOLS,
   ALL_GRANT_TOOLS,
   GRANT_ENVELOPE_VERSION,
   emptyTools,
   isKnownTool,
   isViewTool,
   isCommandTool,
+  isPromptTool,
+  isRetiredTool,
   problemText,
   canonicalTools,
   makeGrantKey,
@@ -94,18 +103,30 @@ function refused(raw, code) {
 // ---------------------------------------------------------------- 工具集合 / 分类
 
 describe('工具集合：view 与 command 严格分开', () => {
-  test('T-01 五个工具 id 逐字固定，顺序即 canonical 顺序', () => {
+  test('T-01 插件 10 工具 id 逐字固定，顺序即 canonical 顺序', () => {
     assert.deepEqual(ALL_GRANT_TOOLS, [
-      'instance.list', 'instance.inspect', 'session.list', 'session.read', 'session.prompt'
+      'instance.list', 'instance.inspect', 'session.list', 'session.info', 'session.events',
+      'session.prompt', 'session.create', 'session.lease.claim', 'session.lease.heartbeat',
+      'session.lease.release'
     ]);
     assert.equal(TOOL_SESSION_PROMPT, 'session.prompt');
+    assert.equal(TOOL_SESSION_CREATE, 'session.create');
+    assert.equal(TOOL_LEASE_CLAIM, 'session.lease.claim');
+    assert.equal(TOOL_LEASE_HEARTBEAT, 'session.lease.heartbeat');
+    assert.equal(TOOL_LEASE_RELEASE, 'session.lease.release');
     assert.equal(GRANT_ENVELOPE_VERSION, 1);
     assert.equal(PRINCIPAL_DOTS, 'dots');
+    assert.deepEqual([...VIEW_TOOLS, ...COMMAND_TOOLS], ALL_GRANT_TOOLS);
   });
 
-  test('T-02 view 四个、command 恰好一个，两者不相交', () => {
-    assert.deepEqual(VIEW_TOOLS, ['instance.list', 'instance.inspect', 'session.list', 'session.read']);
-    assert.deepEqual(COMMAND_TOOLS, ['session.prompt']);
+  test('T-02 view 五个、command 五个，两者不相交', () => {
+    assert.deepEqual(VIEW_TOOLS, [
+      'instance.list', 'instance.inspect', 'session.list', 'session.info', 'session.events'
+    ]);
+    assert.deepEqual(COMMAND_TOOLS, [
+      'session.prompt', 'session.create', 'session.lease.claim',
+      'session.lease.heartbeat', 'session.lease.release'
+    ]);
     for (const tool of VIEW_TOOLS) {
       assert.equal(isViewTool(tool), true);
       assert.equal(isCommandTool(tool), false, `${tool} 不能是命令工具`);
@@ -117,13 +138,34 @@ describe('工具集合：view 与 command 严格分开', () => {
     assert.deepEqual(emptyTools(), []);
   });
 
-  test('T-03 isKnownTool 只认精确枚举；未知/大小写/别名一律 false', () => {
+  test('T-03 isKnownTool 只认精确枚举；未知/大小写/别名/retired 一律 false', () => {
     for (const tool of ALL_GRANT_TOOLS) {
       assert.equal(isKnownTool(tool), true);
     }
-    for (const bad of ['sessionPrompt', 'SESSION.PROMPT', 'session.prompt.extra', 'bash', '', null, 7]) {
+    for (const bad of [
+      'sessionPrompt', 'SESSION.PROMPT', 'session.prompt.extra', 'bash', '', null, 7,
+      LEGACY_TOOL_SESSION_READ
+    ]) {
       assert.equal(isKnownTool(bad), false);
     }
+    assert.equal(isRetiredTool(LEGACY_TOOL_SESSION_READ), true);
+    assert.equal(isRetiredTool(TOOL_SESSION_INFO), false);
+    assert.equal(isRetiredTool('session.events'), false);
+  });
+
+  // mod-grant-vocab-parity：composer 的窄谓词必须恰好只认 session.prompt；
+  // 新增的 session.create / lease.* 可授权（isCommandTool=true）但不得进入发送闸。
+  test('T-04 isPromptTool 是窄谓词：仅 session.prompt；其它 4 个命令工具只可授权', () => {
+    assert.deepEqual(PROMPT_TOOLS, ['session.prompt']);
+    assert.deepEqual(ALL_GRANT_TOOLS.filter((t) => isPromptTool(t)), ['session.prompt']);
+    for (const tool of [TOOL_SESSION_CREATE, TOOL_LEASE_CLAIM, TOOL_LEASE_HEARTBEAT, TOOL_LEASE_RELEASE]) {
+      assert.equal(isKnownTool(tool), true, `${tool} 必须可授权`);
+      assert.equal(isCommandTool(tool), true, `${tool} 必须是命令工具`);
+      assert.equal(isPromptTool(tool), false, `${tool} 不得成为 composer 工具`);
+    }
+    assert.equal(isPromptTool('session.read'), false);
+    assert.equal(isPromptTool('bash'), false);
+    assert.equal(isPromptTool(7), false);
   });
 });
 
@@ -202,6 +244,17 @@ describe('normalizeGrant：字段校验与 typed 拒绝', () => {
     assert.equal(g.note, undefined);
     assert.equal(Object.prototype.hasOwnProperty.call(g, 'revokedAt'), false);
   });
+
+  // mod-grant-vocab-parity：旧 App 工具 id session.read 独立 typed 码，不映射、不放大。
+  test('N-10 retired 工具 session.read 给 E_GRANT_TOOL_RETIRED，绝不变体到 view 工具', () => {
+    refused(rawGrant({ tools: ['session.read'] }), 'E_GRANT_TOOL_RETIRED');
+    refused(rawGrant({ tools: [TOOL_SESSION_LIST, LEGACY_TOOL_SESSION_READ] }), 'E_GRANT_TOOL_RETIRED');
+    refused(rawGrant({ tools: [TOOL_SESSION_INFO, LEGACY_TOOL_SESSION_READ, TOOL_SESSION_PROMPT] }),
+      'E_GRANT_TOOL_RETIRED');
+    const info = normalized(rawGrant({ tools: [TOOL_SESSION_INFO, TOOL_SESSION_EVENTS] }));
+    assert.deepEqual(info.tools, [TOOL_SESSION_INFO, TOOL_SESSION_EVENTS]);
+    assert.deepEqual(JSON.stringify(info).includes(LEGACY_TOOL_SESSION_READ), false);
+  });
 });
 
 // ---------------------------------------------------------------- grantKey / 确定性
@@ -215,9 +268,9 @@ describe('grantKey 与确定性', () => {
   });
 
   test('K-02 canonicalTools 去重 + 按合法顺序排序，未知工具被丢弃，入参不被改', () => {
-    const input = [TOOL_SESSION_READ, TOOL_INSTANCE_LIST, TOOL_SESSION_READ, TOOL_SESSION_PROMPT];
+    const input = [TOOL_SESSION_INFO, TOOL_INSTANCE_LIST, TOOL_SESSION_INFO, TOOL_SESSION_PROMPT];
     const out = canonicalTools(input);
-    assert.deepEqual(out, [TOOL_INSTANCE_LIST, TOOL_SESSION_READ, TOOL_SESSION_PROMPT]);
+    assert.deepEqual(out, [TOOL_INSTANCE_LIST, TOOL_SESSION_INFO, TOOL_SESSION_PROMPT]);
     assert.equal(input.length, 4, '不就地修改入参');
     assert.deepEqual(canonicalTools([]), []);
   });
@@ -238,12 +291,12 @@ describe('isGranted：显式命令规则、吊销、过期、per-instance 隔离
     const withPrompt = normalized(rawGrant({ tools: [TOOL_SESSION_PROMPT] }));
     assert.equal(canPrompt([withPrompt], ID_A, 200), true);
     const both = normalized(rawGrant({
-      tools: [TOOL_INSTANCE_LIST, TOOL_SESSION_READ, TOOL_SESSION_PROMPT]
+      tools: [TOOL_INSTANCE_LIST, TOOL_SESSION_INFO, TOOL_SESSION_PROMPT]
     }));
-    assert.equal(isGranted([both], ID_A, TOOL_SESSION_READ, 200), true);
+    assert.equal(isGranted([both], ID_A, TOOL_SESSION_INFO, 200), true);
     assert.equal(canPrompt([both], ID_A, 200), true);
     assert.deepEqual(grantedTools([both], ID_A, 200), [
-      TOOL_INSTANCE_LIST, TOOL_SESSION_READ, TOOL_SESSION_PROMPT
+      TOOL_INSTANCE_LIST, TOOL_SESSION_INFO, TOOL_SESSION_PROMPT
     ]);
   });
 
@@ -308,6 +361,19 @@ describe('isGranted：显式命令规则、吊销、过期、per-instance 隔离
     assert.equal(canPrompt([view, cmd], ID_A, 150), true);
     assert.equal(canPrompt([view, cmd], ID_A, 200), false);
     assert.equal(isGranted([view, cmd], ID_A, TOOL_SESSION_LIST, 200), true);
+  });
+
+  // mod-grant-vocab-parity：五个命令工具都是可授权的；发送闸的窄谓词由 T-04 / 闸测试另行钉住。
+  test('G-10 五个命令工具全可显式授予（含 session.create / lease.*），view 仍不推导任何命令权', () => {
+    const all = normalized(rawGrant({ tools: ALL_GRANT_TOOLS.slice() }));
+    for (const tool of ALL_GRANT_TOOLS) {
+      assert.equal(isGranted([all], ID_A, tool, 200), true, `${tool} 必须可授权`);
+    }
+    assert.deepEqual(grantedTools([all], ID_A, 200), ALL_GRANT_TOOLS);
+    const viewOnly = normalized(rawGrant({ tools: VIEW_TOOLS.slice() }));
+    for (const tool of COMMAND_TOOLS) {
+      assert.equal(isGranted([viewOnly], ID_A, tool, 200), false, `${tool} 不得由 view 推导`);
+    }
   });
 });
 
@@ -531,6 +597,40 @@ describe('持久化信封 {v:1,items:[...]}', () => {
       assert.deepEqual(grantedTools(decoded.items, ID_A, 200), [TOOL_SESSION_LIST]);
     }
   });
+
+  // mod-grant-vocab-parity 迁移语义：选择「整表 fail-closed + 独立 typed 码」。
+  // 旧 App 的 session.read 在插件词表中不存在；含它的信封整表拒绝、空表 + 可见问题码，
+  // 绝不映射成 session.info / session.events（那会静默扩大 view 权）。
+  test('E-08 旧工具 session.read 信封整表 fail-closed 到 E_GRANT_TOOL_RETIRED，绝不映射', () => {
+    const fresh = normalized(rawGrant({ grantId: 'g-valid', tools: [TOOL_SESSION_PROMPT] }));
+    const legacy = rawGrant({ grantId: 'g-legacy', tools: [TOOL_SESSION_LIST, LEGACY_TOOL_SESSION_READ] });
+    const decoded = decodeGrants(JSON.stringify({ v: 1, items: [fresh, legacy] }));
+    assert.equal(decoded.ok, false);
+    assert.deepEqual(decoded.items, [], '整表拒绝，连带有效行也不生效（诚实代价）');
+    assert.equal(decoded.problem, 'E_GRANT_TOOL_RETIRED', '独立 typed 码，不是通用 E_GRANT_ENVELOPE_ITEM');
+    assert.equal(decoded.reason, problemText('E_GRANT_TOOL_RETIRED'));
+    // reason 里出现 session.read 是**可见性证据**（typed 原因点名旧 id），不是落盘回写；
+    // 只看 items：工具表里不得重新出现旧 id，也不得把它映射成新的 view 工具。
+    const items = JSON.stringify(decoded.items);
+    assert.equal(items.includes(LEGACY_TOOL_SESSION_READ), false, '不重新落盘旧工具 id');
+    assert.equal(items.includes(TOOL_SESSION_INFO), false, 'session.read 绝不映射到 session.info');
+    assert.equal(items.includes(TOOL_SESSION_EVENTS), false, 'session.read 绝不映射到 session.events');
+    assert.equal(canPrompt(decoded.items, ID_A, 200), false, '不授予任何权力，含 prompt');
+    // store 的 lastProblem() 直接透传 decode 的 problem，无需改 store：这里钉住该接线形状。
+    assert.match(STORE_SRC, /this\.problem = decoded\.problem;/);
+  });
+
+  test('E-09 合法 10 工具信封 round-trip 逐字节不变，未被迁移逻辑改写', () => {
+    const whole = normalized(rawGrant({ tools: ALL_GRANT_TOOLS.slice(), note: '  逐字节  ' }));
+    const json = encodeGrants([whole]);
+    const decoded = decodeGrants(json);
+    assert.equal(decoded.ok, true);
+    assert.equal(decoded.problem, 'ok');
+    assert.deepEqual(decoded.items[0].tools, ALL_GRANT_TOOLS);
+    assert.equal(encodeGrants(decoded.items), json, '合法信封再编码逐字节相等');
+    assert.equal(JSON.stringify(decoded.items).includes('session.read'), false);
+    assert.equal(JSON.stringify(decoded.items).includes('逐字节'), true);
+  });
 });
 
 // ---------------------------------------------------------------- 脱敏视图
@@ -611,12 +711,29 @@ describe('静态守卫：无凭据 / 无日志 / 存储接线', () => {
   });
 
   test('S-04 模型把 view 与 command 分开，且没有从 view 推导 prompt 的合并路径', () => {
-    assert.match(MODEL_SRC, /export const COMMAND_TOOLS: GrantTool\[\] = \[TOOL_SESSION_PROMPT\]/);
+    assert.match(MODEL_SRC, /export const COMMAND_TOOLS: GrantTool\[\] = \[\s*TOOL_SESSION_PROMPT,/);
     assert.match(MODEL_SRC, /export const TOOL_SESSION_PROMPT: GrantTool = 'session\.prompt'/);
     assert.match(MODEL_SRC, /export function canPrompt\(/);
     // isGranted / grantedTools 只允许「工具显式出现在 tools 里」这一条路径
     assert.match(MODEL_SRC, /g\.tools\.indexOf\(wanted\) >= 0/);
     assert.equal(/VIEW_TOOLS\.indexOf\([^)]*PROMPT/.test(MODEL_SRC), false);
+  });
+
+  test('S-06 composer 用窄谓词；旧 session.read 不在任何 canonical 工具表里', () => {
+    assert.match(MODEL_SRC, /export const PROMPT_TOOLS: GrantTool\[\] = \[TOOL_SESSION_PROMPT\]/);
+    assert.match(MODEL_SRC, /export function isPromptTool\(raw: string\): boolean/);
+    const gateSrc = readFileSync(
+      new URL('../../entry/src/main/ets/model/remoteCommandGate.ts', import.meta.url), 'utf8');
+    assert.match(gateSrc, /import \{ isPromptTool \} from '\.\/instanceGrant'/);
+    assert.equal(/isCommandTool\(/.test(gateSrc), false, 'composer 不得再用宽谓词');
+    assert.match(gateSrc, /if \(!isPromptTool\(draft\.tool\)\)/);
+    for (const table of ['VIEW_TOOLS', 'COMMAND_TOOLS', 'ALL_GRANT_TOOLS', 'PROMPT_TOOLS']) {
+      const start = MODEL_SRC.indexOf(`export const ${table}: GrantTool[] = [`);
+      assert.ok(start >= 0, `找不到工具表 ${table}`);
+      const end = MODEL_SRC.indexOf('];', start);
+      assert.equal(MODEL_SRC.slice(start, end).includes('session.read'), false,
+        `${table} 不得含 retired 工具 session.read`);
+    }
   });
 
   test('S-05 nowMs 先校验后改表；store 拒绝时不写回（store 类 .ets 无法在 Node 运行）', () => {

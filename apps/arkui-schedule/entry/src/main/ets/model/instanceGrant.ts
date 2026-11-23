@@ -9,16 +9,21 @@
  * 六条不变式：
  * 1. **grantKey = (instanceId, principal)**：同一实例同一 principal 只有一条 grant；upsert 按键替换，
  *    不做「一个实例多条并存」的隐式并集。principal 只有 `dots`，与设备 principal 区分。
- * 2. **view 权永不隐含 command 权**：`session.prompt` 是唯一的命令工具，必须在 `tools` 里**显式列出**
- *    才生效；纯 view grant 的 `isGranted(..., 'session.prompt')` 恒 false。本模型没有任何
- *    从 view 工具推导 / 合并出命令工具的路径（§4「只给 view 时发送按钮禁用」的编码保证）。
+ * 2. **view 权永不隐含 command 权**：工具词表与插件对齐为 10 个（5 view + 5 command，见
+ *    `packages/dsh-dots/src/remote/grants.ts`，插件表 canonical）；命令工具（含 `session.prompt` /
+ *    `session.create` / 三个 lease 工具）必须在 `tools` 里**显式列出**才生效；纯 view grant 的
+ *    `isGranted(..., 'session.prompt')` 恒 false。本模型没有任何从 view 工具推导 / 合并出命令工具的
+ *    路径（§4「只给 view 时发送按钮禁用」的编码保证）。**发送闸另用更窄的 `isPromptTool()`**：
+ *    `isCommandTool()` 现在覆盖全部 5 个有副作用工具，但 composer 只接受 `session.prompt`，
+ *    词表变宽不得变成发送权变宽。
  * 3. **per-instance 隔离**：`isGranted` / `grantedTools` 只匹配精确 instanceId；A 的 grant 永不授权 B。
  * 4. **fail-closed 时间语义**：仅在 `grantedAt <= t < (revokedAt|expiresAt)` 时有效；未生效、
  *    已吊销、已过期、时间非法均不授权；吊销后不自动续期、不换令牌重试。
  * 5. **typed 拒绝，不抛异常**：未知工具 / 空工具 / 未知 principal / 坏 instanceId / 非法 nowMs
  *    都返回 typed problem + 中文 reason；变更 API 拒绝时原表不动、绝不落盘会被 normalize 拒收的项；
  *    坏信封整表回落空表（与 `model/instances.ts` 同纪律）。旧 `local` 授权在读取时按字面量丢弃，
- *    不整表判坏、不授予任何权限。
+ *    不整表判坏、不授予任何权限；旧词表工具 `session.read` 则整表 fail-closed 到独立 typed 码
+ *    `E_GRANT_TOOL_RETIRED`（不映射、不静默丢）。
  * 6. **零凭据**：本模型与对应 store **没有任何令牌字段**，也没有日志调用；渲染视图 `RedactedGrant`
  *    结构上不带自由文本 `note`，只给派生的 `active` / `canPrompt`。
  *
@@ -37,39 +42,75 @@ const LEGACY_LOCAL_ID: string = 'local';
 /** dots 的唯一 principal（与设备 principal 区分）。 */
 export const PRINCIPAL_DOTS: string = 'dots';
 
-/** 工具 id：一个 view / inspect 类。 */
+/**
+ * 工具 id：与插件 `packages/dsh-dots/src/remote/grants.ts` 的 10 工具表逐字对齐
+ * （5 view + 5 command，插件表是 canonical；本表是客户端近似但 id 集合与分类必须一致）。
+ */
 export type GrantTool =
   | 'instance.list'
   | 'instance.inspect'
   | 'session.list'
-  | 'session.read'
-  | 'session.prompt';
+  | 'session.info'
+  | 'session.events'
+  | 'session.prompt'
+  | 'session.create'
+  | 'session.lease.claim'
+  | 'session.lease.heartbeat'
+  | 'session.lease.release';
 
+/** 五个 view 工具（read-only）。 */
 export const TOOL_INSTANCE_LIST: GrantTool = 'instance.list';
 export const TOOL_INSTANCE_INSPECT: GrantTool = 'instance.inspect';
 export const TOOL_SESSION_LIST: GrantTool = 'session.list';
-export const TOOL_SESSION_READ: GrantTool = 'session.read';
-/** 唯一的有副作用工具：必须显式授予，view 工具永不隐含它。 */
-export const TOOL_SESSION_PROMPT: GrantTool = 'session.prompt';
+export const TOOL_SESSION_INFO: GrantTool = 'session.info';
+export const TOOL_SESSION_EVENTS: GrantTool = 'session.events';
 
-/** 只读 / 查看类工具（§4 的 view 子集）。 */
+/** 五个 command 工具（有副作用；必须显式授予，view 永不隐含）。 */
+export const TOOL_SESSION_PROMPT: GrantTool = 'session.prompt';
+export const TOOL_SESSION_CREATE: GrantTool = 'session.create';
+export const TOOL_LEASE_CLAIM: GrantTool = 'session.lease.claim';
+export const TOOL_LEASE_HEARTBEAT: GrantTool = 'session.lease.heartbeat';
+export const TOOL_LEASE_RELEASE: GrantTool = 'session.lease.release';
+
+/**
+ * 旧 App 词表独有、插件从未有过的工具 id。只用于识别遗留信封并 typed 拒绝；
+ * **绝不映射到 session.info / session.events**（那会把 view 权静默扩大）。
+ */
+export const LEGACY_TOOL_SESSION_READ: string = 'session.read';
+
+/** 只读 / 查看类工具（与插件 VIEW_TOOLS 同序）。 */
 export const VIEW_TOOLS: GrantTool[] = [
   TOOL_INSTANCE_LIST,
   TOOL_INSTANCE_INSPECT,
   TOOL_SESSION_LIST,
-  TOOL_SESSION_READ
+  TOOL_SESSION_INFO,
+  TOOL_SESSION_EVENTS
 ];
 
-/** 命令类工具（§4 的 command 子集，当前只有 session.prompt）。 */
-export const COMMAND_TOOLS: GrantTool[] = [TOOL_SESSION_PROMPT];
+/** 命令类工具（有副作用；与插件 COMMAND_TOOLS 同序）。 */
+export const COMMAND_TOOLS: GrantTool[] = [
+  TOOL_SESSION_PROMPT,
+  TOOL_SESSION_CREATE,
+  TOOL_LEASE_CLAIM,
+  TOOL_LEASE_HEARTBEAT,
+  TOOL_LEASE_RELEASE
+];
+
+/** composer 唯一可用的工具：发送闸的窄谓词只认这一个，不随命令词表变宽。 */
+export const PROMPT_TOOLS: GrantTool[] = [TOOL_SESSION_PROMPT];
 
 /** 全部合法工具，顺序即规范化 canonical 顺序（确定性信封用）。 */
 export const ALL_GRANT_TOOLS: GrantTool[] = [
   TOOL_INSTANCE_LIST,
   TOOL_INSTANCE_INSPECT,
   TOOL_SESSION_LIST,
-  TOOL_SESSION_READ,
-  TOOL_SESSION_PROMPT
+  TOOL_SESSION_INFO,
+  TOOL_SESSION_EVENTS,
+  TOOL_SESSION_PROMPT,
+  TOOL_SESSION_CREATE,
+  TOOL_LEASE_CLAIM,
+  TOOL_LEASE_HEARTBEAT,
+  TOOL_LEASE_RELEASE
 ];
 
 /** 持久化信封版本（只认 1，未来版本 typed 拒绝，不静默迁移）。 */
@@ -96,12 +137,29 @@ export function isViewTool(raw: string): boolean {
   return VIEW_TOOLS.indexOf(raw as GrantTool) >= 0;
 }
 
-/** 是否命令工具（session.prompt）。 */
+/** 是否命令工具（5 个有副作用工具；用于授权语义，不是发送闸的判据）。 */
 export function isCommandTool(raw: string): boolean {
   if (typeof raw !== 'string') {
     return false;
   }
   return COMMAND_TOOLS.indexOf(raw as GrantTool) >= 0;
+}
+
+/**
+ * 发送闸专用窄谓词：**恰好只有 session.prompt**。
+ * `remoteCommandGate.ts` 用本函数而不是 `isCommandTool()`，因此把命令词表扩到
+ * `session.create` / lease 工具不会放宽 composer（行为保持：仍只接受一个工具）。
+ */
+export function isPromptTool(raw: string): boolean {
+  if (typeof raw !== 'string') {
+    return false;
+  }
+  return PROMPT_TOOLS.indexOf(raw as GrantTool) >= 0;
+}
+
+/** 旧 App 独有工具（当前只有 session.read）：命中即 typed 拒绝，绝不映射 / 不放大词表。 */
+export function isRetiredTool(raw: string): boolean {
+  return typeof raw === 'string' && raw === LEGACY_TOOL_SESSION_READ;
 }
 
 /** typed 问题码：模型拒绝 / 信封损坏 / 存储不可用共用一套，UI 用 problemText 转中文。 */
@@ -114,6 +172,7 @@ export type GrantProblem =
   | 'E_GRANT_TOOLS_SHAPE'
   | 'E_GRANT_TOOLS_EMPTY'
   | 'E_GRANT_TOOL_UNKNOWN'
+  | 'E_GRANT_TOOL_RETIRED'
   | 'E_GRANT_GRANTED_AT'
   | 'E_GRANT_REVOKED_AT'
   | 'E_GRANT_EXPIRES_AT'
@@ -219,6 +278,8 @@ export function problemText(problem: GrantProblem): string {
       return '授权工具列表不能为空';
     case 'E_GRANT_TOOL_UNKNOWN':
       return '授权工具不在允许的工具集合内';
+    case 'E_GRANT_TOOL_RETIRED':
+      return '授权使用旧版工具 id（session.read），整表已拒绝且未授予任何权限';
     case 'E_GRANT_GRANTED_AT':
       return '授权生效时间必须是正整数时间戳';
     case 'E_GRANT_REVOKED_AT':
@@ -387,6 +448,10 @@ export function normalizeGrant(raw: RawGrant | null | undefined): GrantNormalize
   const tools: GrantTool[] = [];
   for (const item of rawTools) {
     const tool: string = readText(item);
+    // 旧 App 的 session.read 是 retired id：显式 typed 拒绝，不映射成 session.info / events。
+    if (isRetiredTool(tool)) {
+      return refused('E_GRANT_TOOL_RETIRED');
+    }
     if (!isKnownTool(tool)) {
       return refused('E_GRANT_TOOL_UNKNOWN');
     }
@@ -665,6 +730,11 @@ function isLegacyLocalGrant(raw: LooseValue): boolean {
  * 遗留数据兼容（读取时过滤，不做迁移）：旧版本可能写过 keyed 到 `local` 的授权。本机实例已从
  * 产品删除，这类授权不可能命中任何真实实例，读取时**只丢弃这一行**——fail-closed、不授予、
  * 不复活、不重写别的远程授权；它也不会把整表判成损坏。
+ *
+ * 旧词表工具（mod-grant-vocab-parity）：`session.read` 是旧 App 独有、插件从未有过的工具 id。
+ * 含该工具的信封**整表 fail-closed** 到空表 + 独立 typed 码 `E_GRANT_TOOL_RETIRED`（经
+ * `lastProblem()` / decode 结果可见），既不映射到 `session.info` / `session.events`，也不悄悄
+ * 丢掉问题；同信封里其它行同样不生效（整表拒绝的诚实代价），但**合法信封逐字节不受影响**。
  */
 export function decodeGrants(raw: string | null | undefined): GrantDecodeResult {
   const text: string = typeof raw === 'string' ? raw.trim() : '';
@@ -700,7 +770,10 @@ export function decodeGrants(raw: string | null | undefined): GrantDecodeResult 
     }
     const result: GrantNormalizeResult = normalizeGrant(rawItem as RawGrant);
     if (!result.ok || result.grant === null) {
-      return decodeFailed('E_GRANT_ENVELOPE_ITEM');
+      // 旧词表工具（session.read）用独立 typed 码整表 fail-closed、由 lastProblem() 可见；
+      // 其它坏记录沿用 E_GRANT_ENVELOPE_ITEM，既有语义一字不变。
+      return decodeFailed(result.problem === 'E_GRANT_TOOL_RETIRED'
+        ? 'E_GRANT_TOOL_RETIRED' : 'E_GRANT_ENVELOPE_ITEM');
     }
     const winner: InstanceGrant = result.grant;
     const key: string = grantKey(winner);

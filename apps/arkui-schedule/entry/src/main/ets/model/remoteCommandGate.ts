@@ -10,7 +10,9 @@
  * 3. 预览与拒绝文案只含目标实例名、工具名与正文摘要，**绝不含 token / 地址凭据 / 指纹**。
  */
 
-import { isCommandTool } from './instanceGrant';
+// mod-grant-vocab-parity：命令授权词表已扩到 5 个工具，但 composer 仍只接受 session.prompt。
+// 用窄谓词 isPromptTool 而不是 isCommandTool，词表变宽不会把发送权一起放宽（行为保持）。
+import { isPromptTool } from './instanceGrant';
 
 /** 指令正文上限（字符）：超过就拒绝，避免把整段对话粘进一次远程写入。 */
 export const COMMAND_TEXT_LIMIT: number = 2000;
@@ -97,7 +99,7 @@ export function decideCommandSend(input: CommandGateInput): CommandGateDecision 
   if (typeof draft.instanceId !== 'string' || draft.instanceId.trim().length === 0) {
     return refuse('E_COMMAND_TARGET_MISSING');
   }
-  if (!isCommandTool(draft.tool)) {
+  if (!isPromptTool(draft.tool)) {
     return refuse('E_COMMAND_TOOL_NOT_ALLOWED');
   }
   const text: string = typeof draft.text === 'string' ? draft.text : '';

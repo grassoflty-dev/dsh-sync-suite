@@ -67,6 +67,25 @@ describe('A. 判定顺序与 typed 拒绝', () => {
   test('A4 未勾选确认不得发送', () => {
     assert.equal(decideCommandSend(input({ confirmed: false })).code, 'E_COMMAND_UNCONFIRMED');
   });
+
+  // mod-grant-vocab-parity：新增 4 个命令工具可授权，但 composer 只接受 session.prompt。
+  // 这是 behaviour-preserving 边界测试：A1..A4 原样不动，本例证明词表变宽没有放大发送权。
+  test('A5 session.create / lease.* 可授权但 composer 仍以 E_COMMAND_TOOL_NOT_ALLOWED 拒绝', async () => {
+    const { isCommandTool, isKnownTool, isPromptTool } = await import('../.build/model/instanceGrant.js');
+    for (const tool of [
+      'session.create', 'session.lease.claim', 'session.lease.heartbeat', 'session.lease.release'
+    ]) {
+      assert.equal(isKnownTool(tool), true, `${tool} 必须是可授权的工具`);
+      assert.equal(isCommandTool(tool), true, `${tool} 必须归入命令工具授权语义`);
+      assert.equal(isPromptTool(tool), false, `${tool} 不得成为 composer 工具`);
+      const out = decideCommandSend(input({ draft: draft({ tool }) }));
+      assert.equal(out.ok, false, `${tool} 不得通过发送闸`);
+      assert.equal(out.code, 'E_COMMAND_TOOL_NOT_ALLOWED', `${tool} 的拒绝码不得改变`);
+      assert.equal(out.wording, gate.COMMAND_WORDING.E_COMMAND_TOOL_NOT_ALLOWED);
+    }
+    // 控制：唯一被接受的工具仍是 session.prompt（A1 未改，这里再独立钉一次）。
+    assert.equal(decideCommandSend(input({ draft: draft({ tool: 'session.prompt' }) })).ok, true);
+  });
 });
 
 describe('B. 确认与草稿绑定（防 TOCTOU）', () => {
