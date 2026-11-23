@@ -51,6 +51,26 @@ export interface RemoteListenerStartOptions {
   authorize?: (input: RemoteAuthorizeInput) => RemoteAuthorizeResult
   /** 入站连接审计钩子（由装配层接到配对服务的脱敏环）。 */
   onConnect?: (info: { at: string; remoteAddress: string }) => void
+  /**
+   * 上游**首字节预算**（毫秒，透传给 listener 的 `firstByteTimeoutMs`）。
+   * 不传 = 用 listener 的默认值（15000）；上游挂死时平板最多等这么久，不会有别的上限。
+   */
+  firstByteTimeoutMs?: number
+  /** 上游**连接预算**（毫秒，透传 listener 的 `connectTimeoutMs`；默认 5000）。 */
+  connectTimeoutMs?: number
+  /** 上游**空闲预算**（毫秒，透传 listener 的 `idleTimeoutMs`；默认 120000）。 */
+  idleTimeoutMs?: number
+  /** 并发实时隧道上限（透传 listener 的 `maxUpgradeTunnels`；默认 16）。 */
+  maxUpgradeTunnels?: number
+  /**
+   * 上游回 401 时的**重新登录**回调（透传 listener 的 `onUpstreamUnauthorized`）：
+   * 换一次身份（single-flight）并返回新头；换不到时返回**旧 cookie**（缓存绝不清空），
+   * 连旧值都没有才返回 null。
+   */
+  onUpstreamUnauthorized?: () =>
+    | Record<string, string>
+    | null
+    | Promise<Record<string, string> | null>
 }
 
 export interface RemoteServiceOptions {
@@ -79,6 +99,18 @@ export interface RemoteServiceOptions {
   now?: () => Date
   /** 上游身份换取超时（毫秒，默认 3000）。 */
   upstreamTimeoutMs?: number
+  /**
+   * 上游首字节预算（毫秒，默认交给 listener 的 15000）。只影响"上游多久还没回响应头"，
+   * 不限制响应正文；上游挂死时反代回 504 typed `E_UPSTREAM_TIMEOUT`，连不上回 502
+   * typed `E_UPSTREAM_DOWN`（见 `listener.ts`）。测试注入小值用。
+   */
+  upstreamFirstByteTimeoutMs?: number
+  /** 上游连接预算（毫秒，默认交给 listener 的 5000）。 */
+  upstreamConnectTimeoutMs?: number
+  /** 上游空闲预算（毫秒，默认交给 listener 的 120000）。 */
+  upstreamIdleTimeoutMs?: number
+  /** 并发实时隧道上限（默认交给 listener 的 16）。 */
+  upstreamMaxTunnels?: number
 }
 
 export const REMOTE_SESSION_COOKIE = 'dsh-remote-session'
@@ -179,6 +211,8 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
   const store = new RemoteStore({ homeDir: options.homeDir })
   const runtime: RuntimeState = { handle: null, startedAt: null, lastError: null, probe: null, rejected: 0 }
   let upstream: UpstreamIdentity | null = null
+  /** 正在进行的换身份 Promise（single-flight）：并发调用共享同一个，绝不并行换两次。 */
+  let minting: Promise<UpstreamIdentity | null> | null = null
   let starting = false
   let refreshTimer: ReturnType<typeof setInterval> | null = null
 
@@ -297,12 +331,79 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
     }
   }
 
+  /**
+   * **换一次身份的唯一入口（single-flight）**：同一时刻最多只有一个在飞的 `fetch`；
+   * 并发的调用方（两个同时撞上 401 的请求、门禁自愈与 6 小时定时器撞车）**共享同一个
+   * Promise**，因此上游只会被访问一次。
+   *
+   * 缓存纪律：**成功才替换槽位**。失败时 `upstream` 保持原值 —— 旧 cookie 可能仍然可用，
+   * 而且清空槽位会让门禁对**所有**请求回 503 `E_UPSTREAM_IDENTITY`（旧实现正是这样把一次
+   * 瞬时失败放大成"最长 6 小时远程访问不可用"）。失败只返回 `null`，由调用方决定应对。
+   */
+  function mintOnce(): Promise<UpstreamIdentity | null> {
+    const inflight = minting
+    if (inflight !== null) return inflight
+    const attempt = (async (): Promise<UpstreamIdentity | null> => {
+      try {
+        return await refreshUpstreamIdentity()
+      } catch {
+        return null
+      }
+    })()
+    const tracked = attempt.then((fresh) => {
+      if (fresh !== null) upstream = fresh
+      minting = null
+      return fresh
+    })
+    minting = tracked
+    return tracked
+  }
+
+  /**
+   * 门禁发现缓存空/过期时的**自愈**：立刻在后台补一次身份。
+   *
+   * fire-and-forget（调用方是同步门禁回调，不能等）、single-flight（`mintOnce` 自带，
+   * 已在飞就不再开第二个）、错误一律吞掉（自愈失败最多让本次请求照旧 503，不许冒到
+   * 请求路径上）。这样**下一个**请求就有身份，不必等 6 小时定时器或重启进程。
+   */
+  function kickIdentityRefresh(): void {
+    if (minting !== null) return
+    void mintOnce().catch(() => {
+      /* 自愈失败不改变本次请求的结论：本次仍按"没有身份"回 503（fail-closed） */
+    })
+  }
+
+  /**
+   * 取一个可用的上游会话 cookie（异步版：缓存过期时现换一次）。
+   *
+   * 换失败**不清缓存**：旧值还留在槽里，本次返回旧 cookie，让请求还能再试一次
+   * （旧值真失效时，上游会再回 401，由 listener 侧 typed 化成 `E_UPSTREAM_SESSION`）。
+   */
   async function upstreamCookie(): Promise<string | null> {
     const current = upstream
     if (current !== null && current.expiresAt > now().getTime()) return current.cookie
-    const refreshed = await refreshUpstreamIdentity()
-    upstream = refreshed
-    return refreshed === null ? null : refreshed.cookie
+    const fresh = await mintOnce()
+    if (fresh !== null) return fresh.cookie
+    const previous = upstream
+    return previous === null ? null : previous.cookie
+  }
+
+  /**
+   * 上游回 401 时由 listener 回调（U1）：**重新换一次身份**（single-flight）。
+   *
+   * 只换一次（"重试恰好一次"由 listener 侧限制）；换不到时**不碰缓存**，把旧 cookie
+   * 交回去让本次重试还能走一次（再 401 就由 listener 收口成中文错误页 / typed JSON，
+   * 绝不把上游的英文 401 正文丢给平板）。只有确实没有任何旧值时才返回 null。
+   * 身份来源与平时完全一致：`connection.authenticatedUrl()`（见 `refreshUpstreamIdentity`）。
+   *
+   * 内存纪律（S5）：这里只有**一个** `upstream` 槽位（覆盖式赋值），没有按请求增长的
+   * map/list；TTL 到期或 401 都只会替换这一份。
+   */
+  async function refreshUpstreamAfter401(): Promise<Record<string, string> | null> {
+    const fresh = await mintOnce()
+    if (fresh !== null) return { cookie: fresh.cookie }
+    const previous = upstream
+    return previous === null ? null : { cookie: previous.cookie }
   }
 
   function status(): RemoteStatus {
@@ -346,7 +447,14 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
           mode: () => readSettings().mode,
           // 上游会话可能已过期：过期就当"没有身份"，让 routes 回 503（fail-closed），
           // 而不是把过期 cookie 直送上游、让客户端收到一个看不懂的 401（评审 M2）。
-          upstreamCookie: () => (upstream === null || upstream.expiresAt <= now().getTime() ? null : upstream.cookie),
+          // 同时**自愈**：缓存空/过期就在后台补一次（fire-and-forget、single-flight、吞错），
+          // 下一个请求就有身份 —— 不必等 6 小时定时器或重启进程。
+          upstreamCookie: () => {
+            const current = upstream
+            if (current !== null && current.expiresAt > now().getTime()) return current.cookie
+            kickIdentityRefresh()
+            return null
+          },
           sessionCookieName,
         })
 
@@ -428,6 +536,16 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
           upstream: { baseUrl: `http://127.0.0.1:${String(port)}` },
           tls: { cert: cert.certPem, key: cert.keyPem },
           authorize: authorizer,
+          ...(options.upstreamFirstByteTimeoutMs === undefined
+            ? {}
+            : { firstByteTimeoutMs: options.upstreamFirstByteTimeoutMs }),
+          ...(options.upstreamConnectTimeoutMs === undefined
+            ? {}
+            : { connectTimeoutMs: options.upstreamConnectTimeoutMs }),
+          ...(options.upstreamIdleTimeoutMs === undefined ? {} : { idleTimeoutMs: options.upstreamIdleTimeoutMs }),
+          ...(options.upstreamMaxTunnels === undefined ? {} : { maxUpgradeTunnels: options.upstreamMaxTunnels }),
+          // U1：上游 401 时重新登录一次（listener 侧保证只重试一次）
+          onUpstreamUnauthorized: refreshUpstreamAfter401,
           ...(options.onConnect === undefined ? {} : { onConnect: options.onConnect }),
         })
       } catch (error) {
@@ -438,12 +556,12 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
       runtime.startedAt = now().toISOString()
       runtime.lastError = null
       // 上游会话 cookie 有 TTL：后台定期刷新，避免"某天突然全 401"。
+      // 走 `mintOnce()`：与 401 重换、门禁自愈共用一个 single-flight，且**成功才替换**
+      // （定时刷新失败绝不会把还在用的旧 cookie 清掉）。
       if (refreshTimer !== null) clearInterval(refreshTimer)
       const interval = options.upstreamRefreshMs ?? 6 * 60 * 60 * 1000
       refreshTimer = setInterval(() => {
-        void refreshUpstreamIdentity().then((fresh) => {
-          if (fresh !== null) upstream = fresh
-        })
+        void mintOnce()
       }, interval)
       if (typeof refreshTimer === 'object' && refreshTimer !== null && 'unref' in refreshTimer) {
         ;(refreshTimer as { unref(): void }).unref()

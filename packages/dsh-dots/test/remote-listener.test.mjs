@@ -4,6 +4,11 @@
  * 覆盖：
  *   - `isBindableLanAddress` 的放行/拒绝表（含 IPv6、保留地址、非法字面量）；
  *   - HTTPS 反代：状态码/正文/`host` 改写/`x-forwarded-*`（外部 https）/POST body/动态上游头；
+ *   - G1：`origin` 只在本监听自己同源时改写成上游 authority，外来 Origin 原样保留；
+ *   - G2：上游连不上 → 502 typed `E_UPSTREAM_DOWN`；上游接了连接不回响应头 → 504 typed
+ *     `E_UPSTREAM_TIMEOUT`（首字节预算，正文不封顶）；
+ *   - 空闲预算（F2）：SSE / multipart 不开表；客户端背压期间挂起；普通响应无字节 → 504
+ *     typed `E_UPSTREAM_STALLED`；
  *   - 响应侧安全：`set-cookie` 必剥、`location` 用**请求 Host** 改写（可关）；
  *   - 门禁：HTTP 拒绝 401、`intercept` 自有接口不转发、放行后注入上游 cookie；
  *   - WebSocket：101 + 双向 echo；**未授权升级必须 401 且无 101、不建上游隧道**；
@@ -21,7 +26,8 @@
  *   另有一条 `fetch` 用例，在本机被代理接管时显式跳过（无代理环境会真跑）。
  *
  * 只依赖 node: 内置模块（仓库不新增 `ws` 依赖：WS 用裸 socket 手写握手）。
- * 绑定地址必须是非回环 IPv4（listener 的设计约束），本机没有局域网 IPv4 时相关用例跳过。
+ * 绑定地址必须是非回环 IPv4（listener 的设计约束），且要**既能绑定又能自连**；
+ * 本机没有这样的地址时相关用例带具名原因跳过（`LAN-E2E-SKIP：…`，绝不静默通过）。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -31,6 +37,7 @@ import net from 'node:net'
 import tls from 'node:tls'
 import os from 'node:os'
 import {
+  DEFAULT_UPSTREAM_FIRST_BYTE_TIMEOUT_MS,
   RemoteStartError,
   isBindableLanAddress,
   scrubSecrets,
@@ -38,12 +45,52 @@ import {
 } from '../dist/remote/listener.js'
 import { generatePairingCertificate } from '../dist/remote/pairingTls.js'
 
+/** DSH 未认证时 index 的**逐字**正文（`browser-auth.ts:385-393`），401 透传用例按它断言。 */
+const DSH_UNAUTHORIZED_BODY = 'dsh web authentication required; reopen the URL printed by dsh web.\n'
+
 /** 测试夹具：每张监听都配一张真实生成的证书；PEM 内容永不写进断言输出。 */
 const TEST_CERT = generatePairingCertificate()
 const TEST_TLS = { cert: TEST_CERT.certPem, key: TEST_CERT.keyPem }
 
-/** 本机第一块非回环 IPv4（没有就跳过关联网用例）。 */
-function findLanAddress() {
+/**
+ * LAN 取址探测的两个上限：候选数量有界、自连等待有界（毫秒）。
+ *
+ * 只证明"绑得上"不够：虚拟网卡 / VPN / Wi-Fi Direct 常常**绑得上却连不通**
+ * （门禁里实测出现过一次 `ETIMEDOUT <LAN ip>` 的隧道用例失败）。所以每个候选要过两道：
+ *   ① `listen()` 成功（不是 EADDRNOTAVAIL）；② 从本机 `net.connect()` 在 300 ms 内连上。
+ * 两道都过才用作 e2e 的绑定地址。
+ */
+const LAN_PROBE_CONNECT_TIMEOUT_MS = 300
+const LAN_PROBE_MAX_CANDIDATES = 8
+
+/** 候选绑定成功后，从本机向它发起一次 `net.connect`，看是否真的可达。 */
+function candidateAcceptsConnect(port, address) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: address, port })
+    let settled = false
+    const finish = (ok) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      socket.destroy()
+      resolve(ok)
+    }
+    const timer = setTimeout(() => finish(false), LAN_PROBE_CONNECT_TIMEOUT_MS)
+    timer.unref()
+    socket.once('connect', () => finish(true))
+    socket.once('error', () => finish(false))
+  })
+}
+
+/**
+ * 本机第一块**既能绑定、又能自连**的非回环 IPv4（没有就跳过，并给出**具名**原因）。
+ *
+ * 只按网卡枚举挑第一个是不够的：本机会同时存在「Wi-Fi Direct / 承载网络」这类
+ * 看着合法、`listen()` 却回 EADDRNOTAVAIL 的地址（或睡一觉醒来就没了）；虚拟网卡 / VPN
+ * 还可能绑得上却连不通。所以逐个真绑 + 真连一次再决定，候选数量与自连等待都有上限。
+ */
+async function findBindableLanAddress() {
+  let tried = 0
   for (const list of Object.values(os.networkInterfaces())) {
     for (const item of list ?? []) {
       const family = item.family
@@ -52,14 +99,35 @@ function findLanAddress() {
       if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(item.address)) continue
       if (item.address.startsWith('169.254.')) continue
       if (!isBindableLanAddress(item.address)) continue
-      return item.address
+      if (tried >= LAN_PROBE_MAX_CANDIDATES) return null
+      tried += 1
+      const probe = net.createServer()
+      try {
+        await new Promise((resolve, reject) => {
+          const onError = (error) => reject(error)
+          probe.once('error', onError)
+          probe.listen(0, item.address, () => {
+            probe.removeListener('error', onError)
+            resolve()
+          })
+        })
+        const reachable = await candidateAcceptsConnect(probe.address().port, item.address)
+        await new Promise((resolve) => probe.close(resolve))
+        if (reachable) return item.address
+      } catch {
+        try {
+          probe.close()
+        } catch {
+          /* ignore */
+        }
+      }
     }
   }
   return null
 }
 
-const LAN = findLanAddress()
-const SKIP = LAN === null ? '本机没有可绑定的非回环 IPv4' : false
+const LAN = await findBindableLanAddress()
+const SKIP = LAN === null ? 'LAN-E2E-SKIP：本机没有「可绑定且可自连」的非回环 IPv4' : false
 
 function lanTest(name, fn) {
   return test(name, { skip: SKIP }, fn)
@@ -152,7 +220,7 @@ function delay(ms) {
 
 /**
  * 假上游：HTTP 返回请求的回显 JSON（含关键头），`/redirect` 返回回环 302，
- * Upgrade 回 101 + 原始字节 echo（不新增 ws 依赖）。
+ * `/dsh-401` 回 DSH index 的逐字 401 正文，Upgrade 回 101 + 原始字节 echo（不新增 ws 依赖）。
  */
 async function startFakeUpstream() {
   const state = { requests: [], upgrades: [], upgradeSockets: new Set() }
@@ -162,6 +230,12 @@ async function startFakeUpstream() {
     req.on('end', () => {
       const body = Buffer.concat(chunks).toString('utf8')
       state.requests.push({ method: req.method, url: req.url, headers: req.headers, body })
+      if (req.url === '/dsh-401') {
+        // DSH 未认证 index 的真实形态（`browser-auth.ts:385-393`）：状态码 + 正文必须逐字透传
+        res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end(DSH_UNAUTHORIZED_BODY)
+        return
+      }
       if (typeof req.url === 'string' && req.url.startsWith('/redirect')) {
         // 上游只知道自己是 127.0.0.1:<port>，于是生成回环 location（典型的坑）
         const port = server.address().port
@@ -178,6 +252,8 @@ async function startFakeUpstream() {
         xfh: req.headers['x-forwarded-host'] ?? null,
         xfp: req.headers['x-forwarded-proto'] ?? null,
         cookie: req.headers.cookie ?? null,
+        origin: req.headers.origin ?? null,
+        secFetchSite: req.headers['sec-fetch-site'] ?? null,
         injected: req.headers['x-injected'] ?? null,
         dyn: req.headers['x-dyn'] ?? null,
         body,
@@ -194,8 +270,14 @@ async function startFakeUpstream() {
   server.on('upgrade', (req, socket) => {
     state.upgrades.push({ url: req.url, headers: req.headers })
     state.upgradeSockets.add(socket)
+    // server 侧 upgrade socket 的 allowHalfOpen 是 true：对端 FIN 只会得到 'end'，
+    // 'close' 要等本端也收尾。收到 'end' 就主动 destroy，否则 fake.close() 会一直等它。
+    socket.on('end', () => {
+      state.upgradeSockets.delete(socket)
+      socket.destroy()
+    })
     socket.on('close', () => state.upgradeSockets.delete(socket))
-    socket.on('error', () => {})
+    socket.on('error', () => state.upgradeSockets.delete(socket))
     socket.write(
       'HTTP/1.1 101 Switching Protocols\r\n' +
         'Upgrade: websocket\r\n' +
@@ -230,6 +312,57 @@ async function startFakeUpstream() {
       await new Promise((resolve) => server.close(resolve))
     },
   }
+}
+
+/**
+ * "哑上游"：接受 TCP 连接、**一个字节都不回**。
+ *
+ * 它模拟的是最坏的那种挂死：端口在听（不是 ECONNREFUSED），但对端进程卡住/被挂起，
+ * 于是监听侧如果不设首字节预算，平板就会无限等（G2 的原始缺陷形态）。
+ */
+async function startSilentUpstream() {
+  const state = { connections: 0, sockets: new Set() }
+  const server = net.createServer((socket) => {
+    state.connections += 1
+    state.sockets.add(socket)
+    socket.on('error', () => {})
+    socket.on('close', () => state.sockets.delete(socket))
+  })
+  await listenOnce(server, 0, '127.0.0.1')
+  const port = server.address().port
+  return {
+    state,
+    port,
+    baseUrl: `http://127.0.0.1:${port}`,
+    async close() {
+      for (const socket of state.sockets) {
+        try {
+          socket.destroy()
+        } catch {
+          /* ignore */
+        }
+      }
+      state.sockets.clear()
+      await new Promise((resolve) => server.close(resolve))
+    },
+  }
+}
+
+/** 起一对"哑上游 + 旁挂监听"，测试结束自动清理。 */
+async function setupSilent(t, config = {}) {
+  const silent = await startSilentUpstream()
+  const handle = await startRemoteListener({
+    port: 0,
+    bindAddress: LAN,
+    upstream: { baseUrl: silent.baseUrl },
+    tls: TEST_TLS,
+    ...(config.listener ?? {}),
+  })
+  t.after(async () => {
+    await handle.close()
+    await silent.close()
+  })
+  return { silent, handle, base: `https://${LAN}:${handle.port}` }
 }
 
 /** 起一对"假上游 + 旁挂监听"，测试结束自动清理。 */
@@ -472,6 +605,59 @@ lanTest('HTTP 反代：POST body 原样转发', async (t) => {
   assert.equal(response.json.body, body)
 })
 
+// ---------------------------------------------------------------------------
+// 2.1 请求头改写（G1）：Host / 注入 cookie / Origin 同源与否
+// ---------------------------------------------------------------------------
+
+lanTest('请求头改写：Host 改写 + 注入 cookie 覆盖客户端 cookie + 同源 Origin 改写', async (t) => {
+  const INJECTED_COOKIE = 'dsh-auth-9c1f0d=v1.INJECTED.SIGNATURE'
+  const CLIENT_COOKIE = 'dsh-remote-session=CLIENT-SESSION-CANARY'
+  const { fake, handle, base } = await setup(t, {
+    listener: {
+      authorize: () => ({ kind: 'allow', upstreamHeaders: { cookie: INJECTED_COOKIE, 'x-injected': 'yes' } }),
+    },
+  })
+  const own = `${LAN}:${handle.port}`
+
+  // (1) 平板浏览器的真实形态：Origin 就是它自己看到的 authority（同源），还带自己的会话 cookie
+  const same = await httpRequest(`${base}/api/state`, {
+    headers: { origin: `https://${own}`, 'sec-fetch-site': 'same-origin', cookie: CLIENT_COOKIE },
+  })
+  assert.equal(same.status, 200)
+  const seen = fake.state.requests[0].headers
+  assert.equal(seen.host, `127.0.0.1:${fake.port}`, 'Host 必须改写上游 hostHeader')
+  assert.equal(seen.cookie, INJECTED_COOKIE, '上游只许看到门禁注入的那一个 cookie')
+  assert.ok(!String(seen.cookie).includes('CLIENT-SESSION-CANARY'), '客户端自己的 cookie 不能上行')
+  assert.equal(seen['x-forwarded-host'], own, 'x-forwarded-host 是客户端原始 Host')
+  assert.equal(seen['x-forwarded-proto'], 'https', '外部这一跳是 HTTPS')
+  assert.equal(
+    seen.origin,
+    `http://127.0.0.1:${fake.port}`,
+    '同源 Origin 必须改写成上游 authority（否则 DSH 栅栏 403）',
+  )
+  assert.equal(seen['sec-fetch-site'], 'same-origin', '其余请求头原样透传')
+
+  // (2) 同一个 authority 但 scheme 不同（http）：authority 相等即算同源，仍要改写
+  await httpRequest(`${base}/api/state`, { headers: { origin: `http://${own}` } })
+  assert.equal(
+    fake.state.requests[1].headers.origin,
+    `http://127.0.0.1:${fake.port}`,
+    'authority 比较不看 scheme',
+  )
+
+  // (3) 外来 Origin：**原样保留**，交给 DSH 自己的栅栏拒（绝不替它放宽）
+  await httpRequest(`${base}/api/state`, { headers: { origin: 'https://evil.example' } })
+  assert.equal(fake.state.requests[2].headers.origin, 'https://evil.example', '外来 Origin 必须不改写')
+
+  // (4) 不能解析的 Origin（可被某些客户端发成字面量 null）：同样原样保留
+  await httpRequest(`${base}/api/state`, { headers: { origin: 'null' } })
+  assert.equal(fake.state.requests[3].headers.origin, 'null', '不可解析的 Origin 不许被改写')
+
+  // (5) Origin 缺失：上游看不到 origin 头（与改写无关）
+  await httpRequest(`${base}/api/state`)
+  assert.equal(fake.state.requests[4].headers.origin, undefined, '没有 Origin 就不该凭空造一个')
+})
+
 lanTest('响应侧安全：剥 set-cookie，location 用请求 Host 改写', async (t) => {
   const { handle, base } = await setup(t)
 
@@ -623,6 +809,199 @@ lanTest('上游动态头：函数形式每次请求重新计算（cookie 可刷�
 })
 
 // ---------------------------------------------------------------------------
+// 4.5 上游失败（G2）：首字节预算 + typed 上游错误
+// ---------------------------------------------------------------------------
+
+test('默认首字节预算是 15000ms（导出常量，可被注入覆盖）', () => {
+  assert.equal(DEFAULT_UPSTREAM_FIRST_BYTE_TIMEOUT_MS, 15_000)
+})
+
+lanTest('上游接了连接却不回响应头：504 + typed E_UPSTREAM_TIMEOUT（首字节预算）', async (t) => {
+  const budget = 150
+  const { silent, base } = await setupSilent(t, { listener: { firstByteTimeoutMs: budget } })
+  const startedAt = Date.now()
+  const response = await httpRequest(`${base}/api/state`)
+  const elapsed = Date.now() - startedAt
+
+  assert.equal(response.status, 504, `期望 504，实际 ${String(response.status)}`)
+  assert.equal(response.headers['content-type'], 'application/json; charset=utf-8')
+  assert.equal(response.headers['cache-control'], 'no-store')
+  assert.match(String(response.text), /^\{.*\}$/, '正文必须是 JSON（不是明文 502 那句话）')
+  assert.equal(response.json?.ok, false)
+  assert.equal(response.json?.error?.code, 'E_UPSTREAM_TIMEOUT')
+  assert.equal(
+    response.text,
+    '{"ok":false,"error":{"code":"E_UPSTREAM_TIMEOUT"}}',
+    'typed 正文逐字节稳定',
+  )
+  assert.ok(silent.state.connections >= 1, '确实连上了哑上游（不是 ECONNREFUSED）')
+  assert.ok(elapsed >= budget - 20, `不该早于预算就报超时（实际 ${String(elapsed)}ms）`)
+  assert.ok(elapsed < 5_000, `必须在预算到期后立刻返回，不许挂住（实际 ${String(elapsed)}ms）`)
+})
+
+lanTest('首字节预算只卡响应头：慢一点但会回话的上游照旧 200', async (t) => {
+  const slow = http.createServer((req, res) => {
+    setTimeout(() => {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'x-slow': 'yes' })
+      res.end('慢但活着')
+    }, 120)
+  })
+  await listenOnce(slow, 0, '127.0.0.1')
+  t.after(async () => {
+    await new Promise((resolve) => slow.close(resolve))
+  })
+  const handle = await startRemoteListener({
+    port: 0,
+    bindAddress: LAN,
+    upstream: { baseUrl: `http://127.0.0.1:${slow.address().port}` },
+    tls: TEST_TLS,
+    // 预算比上游延迟大：正文与响应头都要活着
+    firstByteTimeoutMs: 2_000,
+  })
+  t.after(async () => {
+    await handle.close()
+  })
+
+  const response = await httpRequest(`https://${LAN}:${handle.port}/slow`)
+  assert.equal(response.status, 200)
+  assert.equal(response.text, '慢但活着')
+  assert.equal(response.headers['x-slow'], 'yes')
+})
+
+// --- 空闲预算（S1 / F2）：什么时候算"没有进展" ---------------------------------------
+
+lanTest('空闲预算（S1）：SSE 静默超过预算不算停滞（两段事件都到客户端）', async (t) => {
+  const GAP_MS = 450
+  const upstream = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' })
+    res.write('data: first\n\n')
+    setTimeout(() => {
+      res.write('data: second\n\n')
+      res.end()
+    }, GAP_MS)
+  })
+  await listenOnce(upstream, 0, '127.0.0.1')
+  const handle = await startRemoteListener({
+    port: 0,
+    bindAddress: LAN,
+    upstream: { baseUrl: `http://127.0.0.1:${upstream.address().port}` },
+    tls: TEST_TLS,
+    // 预算远小于两段事件之间的静默：安静是 SSE 的正常状态，不是停滞
+    idleTimeoutMs: 120,
+  })
+  t.after(async () => {
+    await handle.close()
+    await new Promise((resolve) => upstream.close(resolve))
+  })
+
+  const startedAt = Date.now()
+  const response = await httpRequest(`https://${LAN}:${handle.port}/plugins/events`)
+  const elapsed = Date.now() - startedAt
+  assert.equal(response.status, 200, '安静的 SSE 不许被空闲预算杀掉')
+  assert.equal(response.headers['content-type'], 'text/event-stream; charset=utf-8')
+  assert.ok(response.text.includes('data: first'), response.text)
+  assert.ok(response.text.includes('data: second'), '静默跨过预算之后写的事件也必须到达')
+  assert.ok(elapsed >= GAP_MS - 50, `本用例必须真的跨过空闲预算（实际 ${String(elapsed)}ms）`)
+})
+
+lanTest('空闲预算（S1）：客户端背压超过预算不算停滞（续读后字节完整）', async (t) => {
+  // 4 MiB 足够撑满回环两端的 socket 缓冲，逼出 `res.write() === false` 的背压分支
+  const TOTAL = 4 * 1024 * 1024
+  const CHUNK = Buffer.alloc(64 * 1024, 0x61)
+  const upstream = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(TOTAL) })
+    let sent = 0
+    const pump = () => {
+      while (sent < TOTAL) {
+        sent += CHUNK.length
+        if (!res.write(CHUNK)) {
+          res.once('drain', pump)
+          return
+        }
+      }
+      res.end()
+    }
+    pump()
+  })
+  await listenOnce(upstream, 0, '127.0.0.1')
+  const handle = await startRemoteListener({
+    port: 0,
+    bindAddress: LAN,
+    upstream: { baseUrl: `http://127.0.0.1:${upstream.address().port}` },
+    tls: TEST_TLS,
+    idleTimeoutMs: 120,
+  })
+  t.after(async () => {
+    await handle.close()
+    await new Promise((resolve) => upstream.close(resolve))
+  })
+
+  const PAUSE_MS = 350 // 远大于空闲预算：老实现会在这里把健康的传输截成半包
+  const startedAt = Date.now()
+  const result = await new Promise((resolve, reject) => {
+    const parsed = new URL(`https://${LAN}:${handle.port}/download`)
+    const request = https.request(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port,
+        path: parsed.pathname,
+        method: 'GET',
+        headers: {},
+        agent: false,
+        rejectUnauthorized: false,
+      },
+      (response) => {
+        let bytes = 0
+        response.on('data', (chunk) => {
+          bytes += chunk.length
+        })
+        response.on('end', () => resolve({ status: response.statusCode, bytes }))
+        response.on('error', reject)
+        // 故意不读：上游会被 res.write() 的背压 pause 住，此间没有任何 data 事件
+        response.pause()
+        setTimeout(() => response.resume(), PAUSE_MS)
+      },
+    )
+    request.on('error', reject)
+    request.end()
+  })
+  const elapsed = Date.now() - startedAt
+  assert.equal(result.status, 200)
+  assert.equal(result.bytes, TOTAL, '背压过后必须把整包传完（不许截断）')
+  assert.ok(elapsed >= PAUSE_MS - 50, `本用例必须真的跨过空闲预算（实际 ${String(elapsed)}ms）`)
+})
+
+lanTest('空闲预算（S1）：普通响应一个字节都没有且超过预算 ⇒ 504 typed E_UPSTREAM_STALLED', async (t) => {
+  const upstream = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+    res.flushHeaders()
+    // 之后一个字节都不写：TCP 还活着，但上游卡住（普通响应没有豁免）
+  })
+  await listenOnce(upstream, 0, '127.0.0.1')
+  const handle = await startRemoteListener({
+    port: 0,
+    bindAddress: LAN,
+    upstream: { baseUrl: `http://127.0.0.1:${upstream.address().port}` },
+    tls: TEST_TLS,
+    idleTimeoutMs: 120,
+  })
+  t.after(async () => {
+    await handle.close()
+    await new Promise((resolve) => upstream.close(resolve))
+  })
+
+  const startedAt = Date.now()
+  const response = await httpRequest(`https://${LAN}:${handle.port}/api/state`)
+  const elapsed = Date.now() - startedAt
+  assert.equal(response.status, 504, '普通响应不许被豁免空闲预算')
+  assert.equal(response.headers['content-type'], 'application/json; charset=utf-8')
+  assert.equal(response.json?.error?.code, 'E_UPSTREAM_STALLED')
+  assert.equal(response.text, '{"ok":false,"error":{"code":"E_UPSTREAM_STALLED"}}')
+  assert.ok(elapsed >= 100, `不该早于预算就收口（实际 ${String(elapsed)}ms）`)
+  assert.ok(elapsed < 5_000, `预算到期后要立刻收口（实际 ${String(elapsed)}ms）`)
+})
+
+// ---------------------------------------------------------------------------
 // 5. WebSocket 反代
 // ---------------------------------------------------------------------------
 
@@ -690,6 +1069,71 @@ lanTest('WebSocket 未授权：401 且没有 101，不建上游隧道', async (t
     allowed.socket.destroy()
   }
   assert.equal(fake.state.upgrades.length, 1)
+})
+
+lanTest('WebSocket 101 隧道：上游看到 Host 改写 + 注入 cookie + 同源 Origin 改写', async (t) => {
+  const INJECTED_COOKIE = 'dsh-auth-9c1f0d=v1.UPGRADE.SIGNATURE'
+  const { fake, handle } = await setup(t, {
+    listener: {
+      authorize: () => ({ kind: 'allow', upstreamHeaders: { cookie: INJECTED_COOKIE } }),
+    },
+  })
+  const own = `${LAN}:${handle.port}`
+
+  const { socket, reader } = await openWs(handle.port, LAN, {
+    path: '/api/remote.mux',
+    extraHeaders: { Origin: `https://${own}`, Cookie: 'dsh-remote-session=CLIENT-SESSION-CANARY' },
+  })
+  try {
+    const head = await reader.readHead()
+    assert.match(head, /^HTTP\/1\.1 101 /, head)
+  } finally {
+    socket.destroy()
+  }
+
+  assert.equal(fake.state.upgrades.length, 1)
+  const seen = fake.state.upgrades[0].headers
+  assert.equal(seen.host, `127.0.0.1:${fake.port}`, 'WS 握手同样必须改写 Host')
+  assert.equal(seen.cookie, INJECTED_COOKIE, 'WS 握手必须带门禁注入的 cookie')
+  assert.ok(!String(seen.cookie).includes('CLIENT-SESSION-CANARY'), '客户端 cookie 不能上行')
+  assert.equal(seen.origin, `http://127.0.0.1:${fake.port}`, 'WS 握手的同源 Origin 也要改写')
+})
+
+lanTest('WebSocket 上游没同意升级（回 200）：502 拒绝升级，不把 body 当隧道', async (t) => {
+  const refusedBody = 'no upgrade for you\n'
+  const upstream = http.createServer((_req, res) => {
+    res.writeHead(404)
+    res.end()
+  })
+  upstream.on('upgrade', (_req, socket) => {
+    // 明确回一个非 101 应答：这是"上游拒绝升级"的确定形态
+    socket.end(`HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: ${String(Buffer.byteLength(refusedBody))}\r\n\r\n${refusedBody}`)
+  })
+  await listenOnce(upstream, 0, '127.0.0.1')
+  t.after(async () => {
+    await new Promise((resolve) => upstream.close(resolve))
+  })
+  const handle = await startRemoteListener({
+    port: 0,
+    bindAddress: LAN,
+    upstream: { baseUrl: `http://127.0.0.1:${upstream.address().port}` },
+    tls: TEST_TLS,
+  })
+  t.after(async () => {
+    await handle.close()
+  })
+
+  const { socket, reader } = await openWs(handle.port, LAN, { path: '/api/remote.mux' })
+  try {
+    const head = await reader.readHead()
+    assert.match(head, /^HTTP\/1\.1 502 /, head)
+    assert.doesNotMatch(head, /101/, '上游没同意升级时绝不能回 101')
+    const expected = Buffer.from('remote upstream refused upgrade\n')
+    const body = await reader.readAtLeast(expected.length)
+    assert.deepEqual(Buffer.from(body), expected, '必须是 fail-closed 的固定正文')
+  } finally {
+    socket.destroy()
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -827,7 +1271,10 @@ test('非法绑定地址/上游：RemoteStartError 且消息里没有 token 明�
   assert.ok(!invalidUpstream.message.includes('PASSWORD-CANARY'), invalidUpstream.message)
 })
 
-lanTest('上游不可达：502 + lastError 带 errno 码（不含地址/凭据）', async (t) => {
+// 2026-11-23 retarget（mod-plugin-gui-proxy / G2）：这条用例原来断言上游不可达时的
+// **明文** 502（`remote upstream unavailable\n`）。现在"连不上"有 typed 码
+// `E_UPSTREAM_DOWN`，断言改成 JSON 正文 + 同一个状态码 502；`lastError` 的 errno 断言一字未动。
+lanTest('上游不可达：502 + typed E_UPSTREAM_DOWN + lastError 带 errno 码（不含地址/凭据）', async (t) => {
   const deadPort = await freePortOn('127.0.0.1')
   const handle = await startRemoteListener({
     port: 0,
@@ -841,9 +1288,258 @@ lanTest('上游不可达：502 + lastError 带 errno 码（不含地址/凭据�
 
   const response = await httpRequest(`https://${LAN}:${handle.port}/x`)
   assert.equal(response.status, 502)
-  assert.equal(response.text, 'remote upstream unavailable\n')
+  assert.equal(response.headers['content-type'], 'application/json; charset=utf-8')
+  assert.equal(response.headers['cache-control'], 'no-store')
+  assert.equal(
+    response.text,
+    '{"ok":false,"error":{"code":"E_UPSTREAM_DOWN"}}',
+    '连不上必须是 typed 正文（逐字节稳定），不是明文',
+  )
+  assert.equal(response.json?.ok, false)
+  assert.equal(response.json?.error?.code, 'E_UPSTREAM_DOWN')
+  assert.ok(!response.text.includes('remote upstream unavailable'), '旧明文只保留给"其它意外失败"')
   assert.ok(handle.lastError !== null)
   assert.equal(handle.lastError.code, 'ECONNREFUSED')
   assert.ok(!handle.lastError.message.includes('token'), handle.lastError.message)
   assert.ok(handle.stats().total >= 1)
+})
+
+// ---------------------------------------------------------------------------
+// 7. 上游 5xx 透传 / 隧道纪律（S3）
+// ---------------------------------------------------------------------------
+
+lanTest('上游 500 原样透传：状态码与上游正文都保留（不换成我们的话）', async (t) => {
+  const body = 'upstream exploded\n'
+  const upstream = http.createServer((_req, res) => {
+    res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'x-upstream-error': 'yes' })
+    res.end(body)
+  })
+  await listenOnce(upstream, 0, '127.0.0.1')
+  const handle = await startRemoteListener({
+    port: 0,
+    bindAddress: LAN,
+    upstream: { baseUrl: `http://127.0.0.1:${upstream.address().port}` },
+    tls: TEST_TLS,
+  })
+  t.after(async () => {
+    await handle.close()
+    await new Promise((resolve) => upstream.close(resolve))
+  })
+
+  const response = await httpRequest(`https://${LAN}:${handle.port}/api/state`)
+  assert.equal(response.status, 500, '5xx 是上游的语义，原样透传')
+  assert.equal(response.text, body, '上游正文不许被替换成我们的错误页')
+  assert.equal(response.headers['x-upstream-error'], 'yes')
+})
+
+lanTest('隧道纪律（S3）：客户端关闭 ⇒ 上游 socket 也被关（不留半开）', async (t) => {
+  const { fake, handle } = await setup(t, { listener: { authorize: () => ({ kind: 'allow' }) } })
+  const { socket, reader } = await openWs(handle.port, LAN, { path: '/api/remote.mux' })
+  const head = await reader.readHead()
+  assert.match(head, /^HTTP\/1\.1 101 /, head)
+  assert.equal(fake.state.upgrades.length, 1)
+  assert.equal(fake.state.upgradeSockets.size, 1)
+
+  socket.destroy()
+  // 等上游那一侧真的被断开（listener 的 teardown 是双向的）
+  for (let i = 0; i < 50; i += 1) {
+    if (fake.state.upgradeSockets.size === 0) break
+    await delay(20)
+  }
+  assert.equal(fake.state.upgradeSockets.size, 0, '客户端走了，上游 socket 必须一起断')
+})
+
+lanTest('隧道纪律（S3）：上游关闭 ⇒ 客户端 socket 也被关（消息不静默丢）', async (t) => {
+  const { fake, handle } = await setup(t, { listener: { authorize: () => ({ kind: 'allow' }) } })
+  const { socket, reader } = await openWs(handle.port, LAN, { path: '/api/remote.mux' })
+  const head = await reader.readHead()
+  assert.match(head, /^HTTP\/1\.1 101 /, head)
+  const [upstreamSocket] = Array.from(fake.state.upgradeSockets)
+  assert.ok(upstreamSocket !== undefined)
+  upstreamSocket.destroy()
+  await reader.wait(() => (reader.ended ? true : undefined), '客户端 socket 关闭')
+  assert.equal(reader.ended, true)
+  socket.destroy()
+})
+
+lanTest('隧道纪律（S3）：并发隧道到顶 ⇒ 503 typed E_UPGRADE_TUNNELS_FULL + rejected 计数', async (t) => {
+  const { fake, handle } = await setup(t, {
+    listener: { authorize: () => ({ kind: 'allow' }), maxUpgradeTunnels: 2 },
+  })
+  const opened = []
+  try {
+    for (let i = 0; i < 2; i += 1) {
+      const tunnel = await openWs(handle.port, LAN, { path: `/api/remote.mux?i=${String(i)}` })
+      const head = await tunnel.reader.readHead()
+      assert.match(head, /^HTTP\/1\.1 101 /, head)
+      opened.push(tunnel)
+    }
+    assert.equal(fake.state.upgrades.length, 2)
+
+    const third = await openWs(handle.port, LAN, { path: '/api/remote.mux?i=2' })
+    try {
+      const head = await third.reader.readHead()
+      assert.match(head, /^HTTP\/1\.1 503 /, head)
+      assert.match(head, /content-type: application\/json/i, head)
+      const expected = Buffer.from('{"ok":false,"error":{"code":"E_UPGRADE_TUNNELS_FULL"}}')
+      const body = await third.reader.readAtLeast(expected.length)
+      assert.deepEqual(Buffer.from(body), expected, '到顶必须是 typed 正文')
+    } finally {
+      third.socket.destroy()
+    }
+    assert.equal(fake.state.upgrades.length, 2, '被拒的升级绝不能打到上游')
+    assert.ok(handle.stats().rejected >= 1, '拒绝必须计入 rejected（不是静默丢弃）')
+  } finally {
+    for (const tunnel of opened) tunnel.socket.destroy()
+  }
+})
+
+lanTest('隧道纪律（S3）：监听 close() 时所有隧道两侧都被销毁', async (t) => {
+  const fake = await startFakeUpstream()
+  const handle = await startRemoteListener({
+    port: 0,
+    bindAddress: LAN,
+    upstream: { baseUrl: fake.baseUrl },
+    tls: TEST_TLS,
+    authorize: () => ({ kind: 'allow' }),
+  })
+  const tunnels = []
+  for (let i = 0; i < 3; i += 1) {
+    const tunnel = await openWs(handle.port, LAN, { path: `/api/remote.mux?i=${String(i)}` })
+    const head = await tunnel.reader.readHead()
+    assert.match(head, /^HTTP\/1\.1 101 /, head)
+    tunnels.push(tunnel)
+  }
+  assert.equal(fake.state.upgradeSockets.size, 3)
+
+  const closed = tunnels.map((tunnel) => tunnel.reader.wait(() => (tunnel.reader.ended ? true : undefined), '隧道关闭'))
+  await handle.close()
+  await Promise.all(closed)
+  for (const tunnel of tunnels) {
+    assert.equal(tunnel.reader.ended, true, 'close() 必须断开客户端一侧')
+    tunnel.socket.destroy()
+  }
+  for (let i = 0; i < 50; i += 1) {
+    if (fake.state.upgradeSockets.size === 0) break
+    await delay(20)
+  }
+  assert.equal(fake.state.upgradeSockets.size, 0, 'close() 必须断开上游一侧（否则句柄泄漏）')
+  await fake.close()
+})
+
+lanTest('隧道纪律（S3）：上游重启后，下一次升级直接可用（每次升级都是新连接）', async (t) => {
+  const port = await freePortOn('127.0.0.1')
+  const makeUpstream = async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(404)
+      res.end()
+    })
+    const sockets = new Set()
+    server.on('upgrade', (req, socket) => {
+      sockets.add(socket)
+      socket.on('close', () => sockets.delete(socket))
+      socket.on('error', () => {})
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          'Sec-WebSocket-Accept: restart-accept==\r\n\r\n',
+      )
+    })
+    await listenOnce(server, port, '127.0.0.1')
+    return {
+      server,
+      sockets,
+      async close() {
+        for (const socket of sockets) socket.destroy()
+        sockets.clear()
+        await new Promise((resolve) => server.close(resolve))
+      },
+    }
+  }
+
+  let upstream = await makeUpstream()
+  const handle = await startRemoteListener({
+    port: 0,
+    bindAddress: LAN,
+    upstream: { baseUrl: `http://127.0.0.1:${port}` },
+    tls: TEST_TLS,
+    authorize: () => ({ kind: 'allow' }),
+  })
+  t.after(async () => {
+    await handle.close()
+    await upstream.close()
+  })
+
+  const first = await openWs(handle.port, LAN, { path: '/api/remote.mux' })
+  const firstHead = await first.reader.readHead()
+  assert.match(firstHead, /^HTTP\/1\.1 101 /, firstHead)
+  first.socket.destroy()
+
+  await upstream.close()
+  await delay(50)
+
+  // 上游停了：这次升级必须 502（fail-closed），而不是挂住
+  const second = await openWs(handle.port, LAN, { path: '/api/remote.mux' })
+  const secondHead = await second.reader.readHead()
+  assert.match(secondHead, /^HTTP\/1\.1 502 /, secondHead)
+  second.socket.destroy()
+
+  // 上游在同一端口重启：下一次升级必须自己好起来（没有缓存死连接）
+  upstream = await makeUpstream()
+  const third = await openWs(handle.port, LAN, { path: '/api/remote.mux' })
+  const thirdHead = await third.reader.readHead()
+  assert.match(thirdHead, /^HTTP\/1\.1 101 /, thirdHead)
+  assert.match(thirdHead, /sec-websocket-accept: restart-accept==/i, thirdHead)
+  third.socket.destroy()
+})
+
+lanTest('连接预算（S1）：目标是黑洞地址时不会挂 21s，预算到期即 typed 收口', async (t) => {
+  // 203.0.113.0/24 是 TEST-NET-3（不可路由）：SYN 要么被丢弃、要么立刻 EHOSTUNREACH。
+  // 注意：Node 的 `req.setTimeout()` 管不到"还没连上"的阶段（实测 1.2s 的设置仍然挂到 21s），
+  // 所以这里必须由 listener 自己的连接预算收口。
+  const handle = await startRemoteListener({
+    port: 0,
+    bindAddress: LAN,
+    upstream: { baseUrl: 'http://203.0.113.1:81' },
+    tls: TEST_TLS,
+    connectTimeoutMs: 300,
+  })
+  t.after(async () => {
+    await handle.close()
+  })
+  const startedAt = Date.now()
+  const response = await httpRequest(`https://${LAN}:${handle.port}/api/state`)
+  const elapsed = Date.now() - startedAt
+  assert.ok(['E_UPSTREAM_TIMEOUT', 'E_UPSTREAM_DOWN'].includes(response.json?.error?.code), response.text)
+  assert.ok(elapsed < 5_000, `连接预算必须在大约 300ms 收口（实际 ${String(elapsed)}ms）`)
+})
+
+lanTest('协议错误（S1）：上游回的不是 HTTP ⇒ 502 typed E_UPSTREAM_PROTOCOL', async (t) => {
+  const garbageSockets = new Set()
+  const garbage = net.createServer((socket) => {
+    garbageSockets.add(socket)
+    socket.on('error', () => {})
+    socket.on('close', () => garbageSockets.delete(socket))
+    socket.end('NOT-HTTP-AT-ALL\r\n\r\n')
+  })
+  await listenOnce(garbage, 0, '127.0.0.1')
+  const handle = await startRemoteListener({
+    port: 0,
+    bindAddress: LAN,
+    upstream: { baseUrl: `http://127.0.0.1:${garbage.address().port}` },
+    tls: TEST_TLS,
+  })
+  t.after(async () => {
+    await handle.close()
+    // 半开的裸 socket 要自己收（否则 garbage.close() 会一直等它）
+    for (const socket of garbageSockets) socket.destroy()
+    garbageSockets.clear()
+    await new Promise((resolve) => garbage.close(resolve))
+  })
+
+  const response = await httpRequest(`https://${LAN}:${handle.port}/api/state`)
+  assert.equal(response.status, 502)
+  assert.equal(response.json?.error?.code, 'E_UPSTREAM_PROTOCOL')
+  assert.equal(response.text, '{"ok":false,"error":{"code":"E_UPSTREAM_PROTOCOL"}}')
 })

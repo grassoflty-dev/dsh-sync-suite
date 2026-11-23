@@ -52,6 +52,26 @@ export class RemoteStartError extends Error {
         this.detail = info.detail ?? '';
     }
 }
+/** 上游**响应头预算**的默认值（毫秒）：见 `RemoteListenerOptions.responseHeaderTimeoutMs`。 */
+export const DEFAULT_UPSTREAM_RESPONSE_HEADER_TIMEOUT_MS = 15_000;
+/** 旧名（等价于 `DEFAULT_UPSTREAM_RESPONSE_HEADER_TIMEOUT_MS`，保留以免破坏既有调用方/测试）。 */
+export const DEFAULT_UPSTREAM_FIRST_BYTE_TIMEOUT_MS = DEFAULT_UPSTREAM_RESPONSE_HEADER_TIMEOUT_MS;
+/** 上游**连接预算**默认值（毫秒）。 */
+export const DEFAULT_UPSTREAM_CONNECT_TIMEOUT_MS = 5_000;
+/** 上游**空闲预算**默认值（毫秒）：响应开始后多久没有新字节算卡死。 */
+export const DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS = 120_000;
+/**
+ * **开放式流**的 `content-type`：`text/event-stream`（SSE，DSH 的 `/plugins/events`）与
+ * `multipart/x-mixed-replace`（长连推流）。这类响应"安静"是正常状态，**不起空闲预算**。
+ */
+const OPEN_ENDED_STREAM_RE = /^(?:text\/event-stream|multipart\/x-mixed-replace)\b/i;
+/** **并发实时隧道**默认上限。 */
+export const DEFAULT_MAX_UPGRADE_TUNNELS = 16;
+/**
+ * 可重放请求体的上限（字节）：401 重试需要把请求体重放一次，所以只对不超过此值的
+ * `content-length` 缓冲；更大的（上传类）直接流式转发、不重试。**永不缓存上游响应体**。
+ */
+const REPLAY_BODY_LIMIT = 512 * 1024;
 /** IPv4 点分四段解析：拒绝前导零、非数字、越界（`192.168.1.256` 必须假）。 */
 function parseIpv4(addr) {
     const parts = addr.split('.');
@@ -299,7 +319,56 @@ async function resolveUpstreamHeaders(target) {
     }
     return out;
 }
-/** 组装转发给上游的请求头（host 改写 + x-forwarded-* 追加 + 静态/门禁头）。 */
+/**
+ * 解析一个预算值：只接受有限正数，其余回落默认值（绝不把预算变成"无预算"）。
+ */
+function resolveBudget(value, fallback) {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)
+        return fallback;
+    return Math.max(1, Math.floor(value));
+}
+/**
+ * G1：**同源 Origin 才改写**成上游 authority（实测 403 的修法）。
+ *
+ * 背景（实测，只记状态码）：对上真的 DSH GUI（`127.0.0.1:36569`）发
+ * `GET /api/state`，`Host: 127.0.0.1:36569` 且不带 Origin → **401**（栅栏通过，只是未认证）；
+ * 同一个请求加上 `Origin: https://192.168.1.6:3081` → **403 forbidden**；
+ * 把 Origin 换成 `http://127.0.0.1:36569` 又回到 401。DSH 的信任栅栏
+ * （`@deepseek-ai/dsh-client-connection/src/api-request-trust.ts:121-176`）要求
+ * Host 是回环/绑定/受信主机，**且**请求若带 Origin，其 authority 必须与 Host 的 authority 相同。
+ *
+ * 本监听把 Host 改写成了上游回环地址，却原样转发 Origin —— 于是平板浏览器
+ * （页面在 `https://<平板可见 authority>` 上）带来的 Origin 与改写后的 Host 不同源，
+ * 上游对**每个 `/api` POST 与每条 WebSocket 握手**都回 403：页面能渲染，但一点就废。
+ *
+ * 判定口径（只认"这确实是本监听自己的同源请求"）：
+ *   · 入站 `Origin` 与入站 `Host` 的 authority（`URL.host`，scheme 不参与比较，大小写不敏感）
+ *     完全相同 → 改写成 `http://<target.hostHeader>`（上游只有 http）；
+ *   · 其它任何情况（Origin 缺失 / 外来 authority / 不能解析，如 `null`）→ **原样保留**，
+ *     让 DSH 自己的栅栏拒掉。这里**绝不**替 DSH 放宽栅栏：外来 Origin 被改写成回环，
+ *     等于把跨站请求洗成同源请求，那是安全缺陷而不是修复。
+ *
+ * @returns 改写后的 Origin；不需要改写时返回 `undefined`（调用方保持原值）。
+ */
+function rewriteSameOrigin(value, inboundHost, upstreamHost) {
+    if (typeof value !== 'string' || value === '')
+        return undefined;
+    if (typeof inboundHost !== 'string' || inboundHost.trim() === '')
+        return undefined;
+    let parsed;
+    try {
+        parsed = new URL(value);
+    }
+    catch {
+        return undefined; // 不能解析（如 `null`）：原样保留
+    }
+    if (parsed.host === '')
+        return undefined;
+    if (parsed.host.toLowerCase() !== inboundHost.trim().toLowerCase())
+        return undefined; // 外来 Origin：不碰
+    return `http://${upstreamHost}`;
+}
+/** 组装转发给上游的请求头（host 改写 + Origin 同源改写 + x-forwarded-* 追加 + 静态/门禁头）。 */
 function outboundHeaders(req, target, extraHeaders) {
     const out = {};
     for (const [key, value] of Object.entries(req.headers)) {
@@ -330,6 +399,10 @@ function outboundHeaders(req, target, extraHeaders) {
         }
     }
     out.host = target.hostHeader;
+    // G1：Host 已改写，同源 Origin 必须跟着改写到同一 authority，否则上游一律 403（见上面实测）。
+    const origin = rewriteSameOrigin(req.headers.origin, originalHost, target.hostHeader);
+    if (origin !== undefined)
+        out.origin = origin;
     return out;
 }
 /** 回环 authority 判定（``127.0.0.1[:port]`` / `localhost[:port]` / `[::1][:port]`）。 */
@@ -457,6 +530,144 @@ function respondPlain(res, status, text, close = false, extraHeaders) {
         destroyQuietly(res);
     }
 }
+/**
+ * 上游各类 typed 失败的**固定正文**（逐字节稳定，测试与平板端都按它断言/解析）。
+ *
+ * 纪律：正文只有码，绝不含凭据、URL、查询串、上游地址或 errno 原文 —— 平板侧只要能区分
+ * 失败种类，不需要更多信息。`content-type` 固定 `application/json; charset=utf-8`，
+ * `cache-control: no-store`（错误不许被任何中间层缓存）。
+ */
+const UPSTREAM_ERROR_BODIES = {
+    /** 连接级失败（上游没接上 / 被重置 / 域名解析失败）：502。 */
+    E_UPSTREAM_DOWN: '{"ok":false,"error":{"code":"E_UPSTREAM_DOWN"}}',
+    /** 连接预算或响应头预算到期（上游一直不开始回话）：504。 */
+    E_UPSTREAM_TIMEOUT: '{"ok":false,"error":{"code":"E_UPSTREAM_TIMEOUT"}}',
+    /** 响应已经开始，但中途长时间没有新字节（空闲预算到期）：504。 */
+    E_UPSTREAM_STALLED: '{"ok":false,"error":{"code":"E_UPSTREAM_STALLED"}}',
+    /** 上游回了一个解析不了的响应（`HPE_*` 一类协议错误）：502。 */
+    E_UPSTREAM_PROTOCOL: '{"ok":false,"error":{"code":"E_UPSTREAM_PROTOCOL"}}',
+    /** 上游拒绝本机会话（401；换过一次身份仍被拒）：401。 */
+    E_UPSTREAM_SESSION: '{"ok":false,"error":{"code":"E_UPSTREAM_SESSION"}}',
+    /** 实时隧道数量到顶（见 `maxUpgradeTunnels`）：503。 */
+    E_UPGRADE_TUNNELS_FULL: '{"ok":false,"error":{"code":"E_UPGRADE_TUNNELS_FULL"}}',
+};
+/** 每个 typed 码对应的状态码（**不许**漂移：平板端按码分类，测试按码 + 状态码断言）。 */
+const UPSTREAM_ERROR_STATUS = {
+    E_UPSTREAM_DOWN: 502,
+    E_UPSTREAM_TIMEOUT: 504,
+    E_UPSTREAM_STALLED: 504,
+    E_UPSTREAM_PROTOCOL: 502,
+    E_UPSTREAM_SESSION: 401,
+    E_UPGRADE_TUNNELS_FULL: 503,
+};
+/**
+ * 给**人**看的中文说明（U1：平板侧永远不许看到上游的英文正文或堆栈）。
+ * 每种原因一套文案：说清"哪里坏了"与"下一步做什么"。
+ */
+const UPSTREAM_ERROR_COPY = {
+    E_UPSTREAM_DOWN: {
+        title: '电脑上的 DSH 页面没在运行',
+        detail: '代理连不上电脑上的 DSH 服务（连接被拒绝）。',
+        next: '请在电脑上打开 DSH 并确认服务在运行，然后重试。',
+    },
+    E_UPSTREAM_TIMEOUT: {
+        title: '电脑上的 DSH 响应超时',
+        detail: '代理等了一段时间，DSH 一直没有开始回应。',
+        next: '请确认电脑没有休眠、DSH 窗口还在运行，然后重试。',
+    },
+    E_UPSTREAM_STALLED: {
+        title: '电脑上的 DSH 传输中断',
+        detail: 'DSH 已经回应，但中途长时间没有新数据。',
+        next: '请重试；若反复出现，请检查电脑网络并重启 DSH。',
+    },
+    E_UPSTREAM_PROTOCOL: {
+        title: '电脑上的 DSH 回应不合法',
+        detail: 'DSH 返回的响应无法解析（版本不匹配或被中间件改写）。',
+        next: '请重启电脑上的 DSH 后重试。',
+    },
+    E_UPSTREAM_SESSION: {
+        title: '电脑上的 DSH 会话已失效',
+        detail: 'DSH 拒绝了这个会话（自动重新登录一次后仍被拒）。',
+        next: '请在电脑上重启 DSH；重启后代理会自动重新登录。',
+    },
+    E_UPGRADE_TUNNELS_FULL: {
+        title: '实时连接数已满',
+        detail: '同时打开的实时通道太多（每条标签页占一条）。',
+        next: '请关掉部分标签页或稍等片刻再重试。',
+    },
+};
+/**
+ * 连接级 / 超时类 errno：只有它们走 typed 502；其余意外失败仍走原来的明文 502
+ * （`remote upstream unavailable\n`），不改变既有排查口径。
+ */
+const UPSTREAM_DOWN_CODES = new Set([
+    'ECONNREFUSED',
+    'ECONNRESET',
+    'EHOSTUNREACH',
+    'NETUNREACH',
+    'ENETUNREACH',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'ETIMEDOUT',
+    'ESOCKETTIMEDOUT',
+]);
+/** 判断一个上游错误是否属于"连接级失败"（响应头一个字节都没到）。 */
+function isUpstreamDownError(error) {
+    if (typeof error !== 'object' || error === null)
+        return false;
+    const code = error.code;
+    return typeof code === 'string' && UPSTREAM_DOWN_CODES.has(code);
+}
+/** `HPE_*` 是 Node 的 HTTP 解析错误：上游回的东西根本不是合法 HTTP。 */
+function isUpstreamProtocolError(error) {
+    if (typeof error !== 'object' || error === null)
+        return false;
+    const code = error.code;
+    return typeof code === 'string' && code.startsWith('HPE_');
+}
+/** 回 typed 上游错误（JSON 正文；`content-type` 由 `respondPlain` 的额外头覆盖）。 */
+function respondUpstreamError(res, code) {
+    respondPlain(res, UPSTREAM_ERROR_STATUS[code], UPSTREAM_ERROR_BODIES[code], true, {
+        'content-type': 'application/json; charset=utf-8',
+    });
+}
+/** 导航请求（浏览器地址栏/内嵌 WebView 的主文档）才配 HTML 错误页。 */
+function wantsHtml(req) {
+    const accept = req.headers.accept;
+    return typeof accept === 'string' && accept.includes('text/html');
+}
+/** 极小的中文 HTML 错误页（无外链、无脚本、无上游正文；纯常量插值，无注入面）。 */
+function renderErrorPage(code, status) {
+    const copy = UPSTREAM_ERROR_COPY[code];
+    return [
+        '<!doctype html>',
+        '<html lang="zh-CN"><head><meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width,initial-scale=1">',
+        `<title>${copy.title}</title>`,
+        '<style>body{font:16px/1.7 -apple-system,"HarmonyOS Sans",sans-serif;margin:0;padding:32px;color:#1f1f1f;background:#fafafa}',
+        'main{max-width:32rem;margin:0 auto;background:#fff;border-radius:12px;padding:24px;box-shadow:0 1px 4px rgba(0,0,0,.08)}',
+        'h1{font-size:1.25rem;margin:0 0 .75rem}p{margin:.4rem 0}.code{color:#8a8a8a;font-size:.8rem;margin-top:1rem}</style>',
+        '</head><body><main>',
+        `<h1>${copy.title}</h1>`,
+        `<p>${copy.detail}</p>`,
+        `<p>${copy.next}</p>`,
+        `<p class="code">错误码 ${code} · HTTP ${String(status)}</p>`,
+        '</main></body></html>',
+        '',
+    ].join('\n');
+}
+/**
+ * 失败出口（U1）：导航请求给中文 HTML 页，其余给 typed JSON。
+ * 状态码保持与该失败种类一致（502/504/401/503），绝不改成 200。
+ */
+function respondUpstreamFailure(req, res, code) {
+    const status = UPSTREAM_ERROR_STATUS[code];
+    if (!wantsHtml(req)) {
+        respondUpstreamError(res, code);
+        return;
+    }
+    respondPlain(res, status, renderErrorPage(code, status), true, { 'content-type': 'text/html; charset=utf-8' });
+}
 /** 直接往裸 socket 写一个应答（Upgrade 通道没有 ServerResponse 可用）。 */
 function writeRawResponse(socket, status, text, extraHeaders) {
     const body = Buffer.from(text, 'utf8');
@@ -579,6 +790,12 @@ export async function startRemoteListener(options) {
     const address = bindAddress;
     const target = parseUpstream(options.upstream);
     const rewriteRedirects = options.rewriteRedirects !== false;
+    // 三条独立预算（连接 / 响应头 / 空闲）：见 `RemoteListenerOptions`。旧名 `firstByteTimeoutMs`
+    // 与 `responseHeaderTimeoutMs` 等价，前者优先（保持既有调用方语义不变）。
+    const responseHeaderTimeoutMs = resolveBudget(options.firstByteTimeoutMs ?? options.responseHeaderTimeoutMs, DEFAULT_UPSTREAM_RESPONSE_HEADER_TIMEOUT_MS);
+    const connectTimeoutMs = resolveBudget(options.connectTimeoutMs, DEFAULT_UPSTREAM_CONNECT_TIMEOUT_MS);
+    const idleTimeoutMs = resolveBudget(options.idleTimeoutMs, DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS);
+    const maxUpgradeTunnels = resolveBudget(options.maxUpgradeTunnels, DEFAULT_MAX_UPGRADE_TUNNELS);
     // TLS 准入：只认非空 PEM 字符串；缺一即 fail-closed。错误里只写字段名与 errno 码，
     // 绝不回显证书/私钥内容（token hygiene 的同一条纪律也适用于密钥材料）。
     const tlsInput = options.tls;
@@ -603,6 +820,14 @@ export async function startRemoteListener(options) {
         }
     };
     const sockets = new Set();
+    /**
+     * 已建立的实时隧道（客户端 socket ↔ 上游 socket）。
+     *
+     * 为什么单独登记：客户端 socket 本来就在 `sockets` 里（server 'connection' 时加入），
+     * 但**上游** socket 是 `agent:false` 拨出去的另一条连接，server 的集合里没有它。
+     * 监听关闭时必须两侧都断，否则会留下半开的上游连接（端口/句柄泄漏）。
+     */
+    const tunnels = new Set();
     let total = 0;
     let rejected = 0;
     let closed = false;
@@ -642,6 +867,12 @@ export async function startRemoteListener(options) {
         for (const socket of sockets)
             destroyQuietly(socket);
         sockets.clear();
+        // 实时隧道：两侧都断（上游 socket 不在 sockets 里，必须单独收）
+        for (const tunnel of tunnels) {
+            destroyQuietly(tunnel.upstream);
+            destroyQuietly(tunnel.client);
+        }
+        tunnels.clear();
         await new Promise((resolve) => {
             // 兜底：close 回调在极端情况下可能不来，2s 后强制返回（socket 已在上面断掉）
             const timer = setTimeout(() => resolve(), 2_000);
@@ -707,7 +938,47 @@ export async function startRemoteListener(options) {
             respondPlain(res, 502, 'remote upstream unavailable\n', true);
         }
     };
-    /** 放行之后真正转发（含动态上游头解析）。 */
+    /**
+     * 读请求体，判断这次请求能不能在 401 后**重放**。
+     *
+     * - 无 body（无 `content-length`）→ 空 Buffer，可重放；
+     * - `content-length` ≤ `REPLAY_BODY_LIMIT` → 缓冲后返回，可重放；
+     * - chunked 或超过上限（上传类）→ `body: null`，按流式转发、不重试。
+     *
+     * **只缓冲请求体，永不缓冲上游响应体**（响应体一律走流式管道）。
+     */
+    const collectReplayBody = async (req) => {
+        const encoding = req.headers['transfer-encoding'];
+        if (typeof encoding === 'string' && encoding !== '')
+            return { replayable: false, body: null };
+        const declaredRaw = req.headers['content-length'];
+        if (declaredRaw === undefined)
+            return { replayable: true, body: Buffer.alloc(0) };
+        const declared = Number(declaredRaw);
+        if (!Number.isFinite(declared) || declared < 0)
+            return { replayable: false, body: null };
+        if (declared === 0)
+            return { replayable: true, body: Buffer.alloc(0) };
+        if (declared > REPLAY_BODY_LIMIT)
+            return { replayable: false, body: null };
+        const chunks = [];
+        let total = 0;
+        try {
+            for await (const chunk of req) {
+                const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+                chunks.push(buf);
+                total += buf.length;
+                // HTTP 解析器保证不会超过 content-length；真超了只说明连接坏，放弃重试但仍按原样转发
+                if (total > declared)
+                    return { replayable: false, body: Buffer.concat(chunks) };
+            }
+        }
+        catch {
+            return { replayable: false, body: null };
+        }
+        return { replayable: total === declared, body: Buffer.concat(chunks) };
+    };
+    /** 放行之后真正转发（含动态上游头解析 + 三条预算 + 401 换会话重试一次）。 */
     const forwardRequest = async (req, res, gateHeaders) => {
         let staticHeaders;
         try {
@@ -718,62 +989,299 @@ export async function startRemoteListener(options) {
             respondPlain(res, 502, 'remote upstream unavailable\n', true);
             return;
         }
-        const extra = { ...staticHeaders, ...(gateHeaders ?? {}) };
+        const replay = await collectReplayBody(req);
         const authority = externalAuthority(req);
-        let upstreamReq;
-        try {
-            upstreamReq = http.request({
-                protocol: 'http:',
-                hostname: target.hostname,
-                port: target.port,
-                method: req.method ?? 'GET',
-                path: upstreamPath(target.basePath, req.url),
-                headers: outboundHeaders(req, target, extra),
-                // agent:false → 每个请求独占一条上游连接，close() 之后不会留下池化 socket
-                agent: false,
-            });
-        }
-        catch (error) {
-            noteFailure('代理请求', error);
-            respondPlain(res, 502, 'remote upstream unavailable\n', true);
-            return;
-        }
-        upstreamReq.on('response', (up) => {
-            if (closed) {
-                destroyQuietly(up);
-                destroyQuietly(upstreamReq);
-                rejected += 1;
-                respondPlain(res, 503, 'remote listener closed\n', true);
-                return;
-            }
+        const method = req.method ?? 'GET';
+        const requestPath = upstreamPath(target.basePath, req.url);
+        const baseExtra = { ...staticHeaders, ...(gateHeaders ?? {}) };
+        /**
+         * 派发一次上游请求。`attempt` 只用来把"401 后换身份重试"限制成**恰好一次**。
+         */
+        const dispatch = (extra, attempt) => {
+            let upstreamReq;
             try {
-                const headers = inboundHeaders(up, authority, target.hostname, rewriteRedirects);
-                res.writeHead(up.statusCode ?? 502, headers);
+                upstreamReq = http.request({
+                    protocol: 'http:',
+                    hostname: target.hostname,
+                    port: target.port,
+                    method,
+                    path: requestPath,
+                    headers: outboundHeaders(req, target, extra),
+                    // agent:false → 每个请求独占一条上游连接，close() 之后不会留下池化 socket
+                    agent: false,
+                });
             }
             catch (error) {
-                noteFailure('上游应答', error);
-                destroyQuietly(up);
+                noteFailure('代理请求', error);
                 respondPlain(res, 502, 'remote upstream unavailable\n', true);
                 return;
             }
-            up.on('error', () => {
-                destroyQuietly(res);
-            });
-            up.pipe(res);
-        });
-        upstreamReq.on('error', (error) => {
-            if (res.writableEnded)
-                return;
-            noteFailure('代理请求', error);
-            respondPlain(res, 502, 'remote upstream unavailable\n', true);
-        });
-        // 客户端先断（关页面/关 App）→ 立刻掐掉上游，避免悬挂连接
-        res.on('close', () => {
-            if (!res.writableFinished)
+            /** 这次派发是否已有结论（避免超时/错误/应答三个出口各写一次）。 */
+            let concluded = false;
+            let connectTimer = null;
+            let headerTimer = null;
+            let idleTimer = null;
+            const clearTimers = () => {
+                if (connectTimer !== null) {
+                    clearTimeout(connectTimer);
+                    connectTimer = null;
+                }
+                if (headerTimer !== null) {
+                    clearTimeout(headerTimer);
+                    headerTimer = null;
+                }
+                if (idleTimer !== null) {
+                    clearTimeout(idleTimer);
+                    idleTimer = null;
+                }
+            };
+            /** typed 失败收口：标记结论、撤掉所有预算、掐上游、回中文页/typed JSON。 */
+            const fail = (code) => {
+                if (concluded)
+                    return;
+                concluded = true;
+                clearTimers();
                 destroyQuietly(upstreamReq);
-        });
-        req.on('error', () => destroyQuietly(upstreamReq));
-        req.pipe(upstreamReq);
+                respondUpstreamFailure(req, res, code);
+            };
+            // 预算 1/3：**连接预算**（TCP 还没建起来）。'connect' 一到就撤表。
+            connectTimer = setTimeout(() => {
+                connectTimer = null;
+                noteFailure('上游连接', { name: 'ETIMEDOUT' });
+                fail('E_UPSTREAM_TIMEOUT');
+            }, connectTimeoutMs);
+            connectTimer.unref();
+            upstreamReq.on('socket', (socket) => {
+                const onConnect = () => {
+                    if (connectTimer !== null) {
+                        clearTimeout(connectTimer);
+                        connectTimer = null;
+                    }
+                };
+                socket.once('connect', onConnect);
+                socket.once('secureConnect', onConnect);
+                if (socket.connecting === false)
+                    onConnect();
+                socket.once('close', onConnect);
+            });
+            // 预算 2/3：**响应头预算**（上游多久还没开始回话）。'response' 一到就撤表。
+            headerTimer = setTimeout(() => {
+                headerTimer = null;
+                noteFailure('上游首字节', { name: 'ETIMEDOUT' });
+                fail('E_UPSTREAM_TIMEOUT');
+            }, responseHeaderTimeoutMs);
+            headerTimer.unref();
+            /** 401 后换一次身份再试；换不到 / 再 401 才把失败交给客户端。 */
+            const refreshAndRetry = async () => {
+                let fresh = null;
+                try {
+                    fresh = await options.onUpstreamUnauthorized();
+                }
+                catch (error) {
+                    noteFailure('上游会话刷新', error);
+                    fresh = null;
+                }
+                if (res.writableEnded || res.headersSent)
+                    return;
+                if (fresh === null || fresh === undefined) {
+                    noteFailure('上游会话', { name: 'E_UPSTREAM_SESSION' });
+                    respondUpstreamFailure(req, res, 'E_UPSTREAM_SESSION');
+                    return;
+                }
+                // 新头覆盖旧的会话头（cookie 在 fresh 里），静态头与门的其它头保留
+                dispatch({ ...baseExtra, ...fresh }, attempt + 1);
+            };
+            /** 响应开始后的**流式**管道：懒发响应头，逐块转发，空闲预算看门。 */
+            const pipeUpstream = (up) => {
+                let headFlushed = false;
+                let bodyBytes = 0;
+                /** 已经用"错误页/typed 应答"替换掉这个响应：此后上游的收尾事件不许再动 res。 */
+                let replaced = false;
+                /** 上游是否因为**客户端背压**被暂停：暂停期间空闲预算挂起（见 `armIdle`）。 */
+                let backpressured = false;
+                /** 开放式流（SSE / multipart 长推流）：静默是正常状态，整个豁免空闲预算。 */
+                const openEnded = OPEN_ENDED_STREAM_RE.test(typeof up.headers['content-type'] === 'string' ? up.headers['content-type'] : '');
+                const flushHead = () => {
+                    if (headFlushed)
+                        return true;
+                    try {
+                        res.writeHead(up.statusCode ?? 502, inboundHeaders(up, authority, target.hostname, rewriteRedirects));
+                    }
+                    catch (error) {
+                        noteFailure('上游应答', error);
+                        destroyQuietly(up);
+                        destroyQuietly(upstreamReq);
+                        respondPlain(res, 502, 'remote upstream unavailable\n', true);
+                        return false;
+                    }
+                    headFlushed = true;
+                    return true;
+                };
+                // 预算 3/3：**空闲预算**（响应开始后"两个方向都没有进展"的时长）。
+                // 重置点有两处：① 上游 data 块（下行字节）；② `res` 的 `drain`（客户端把积压读走）。
+                // 只在 ① 上重置会把"健康但客户端读得慢"的背压误判成停滞：`res.write()` 返回 false
+                // 后上游被 `pause()`，本来就不会再有 data 事件。
+                // 背压期间预算直接挂起（不重新起表）；开放式流（SSE / multipart）整个不起表。
+                const armIdle = () => {
+                    if (openEnded || backpressured || res.writableEnded)
+                        return;
+                    if (idleTimer !== null)
+                        clearTimeout(idleTimer);
+                    idleTimer = setTimeout(() => {
+                        idleTimer = null;
+                        noteFailure('上游空闲', { name: 'E_UPSTREAM_STALLED' });
+                        if (bodyBytes === 0) {
+                            // 一个字节都还没回给客户端（响应头也还没出去）：可以干净地换成 504 typed 页。
+                            // 必须先写应答再掐上游 —— 否则 up 的 'aborted'/'error' 会把刚写的应答一起收掉。
+                            replaced = true;
+                            respondUpstreamFailure(req, res, 'E_UPSTREAM_STALLED');
+                            destroyQuietly(up);
+                            destroyQuietly(upstreamReq);
+                            return;
+                        }
+                        // 已经开始回传：只截断，别在半个响应里塞错误页（浏览器/客户端会看到流中断）
+                        replaced = true;
+                        destroyQuietly(up);
+                        destroyQuietly(upstreamReq);
+                        destroyQuietly(res);
+                    }, idleTimeoutMs);
+                    idleTimer.unref();
+                };
+                armIdle();
+                up.on('data', (chunk) => {
+                    if (replaced)
+                        return;
+                    if (!flushHead())
+                        return;
+                    bodyBytes += chunk.length;
+                    if (!res.write(chunk)) {
+                        // 客户端读得比上游写得慢：先暂停上游，并**挂起空闲预算** —— 背压不是停滞。
+                        // （此时上游不再有 data 事件；对端是否还活着由客户端连接自己的生命周期决定，
+                        //   客户端断开时 `res` 的 'close' 会掐掉上游。）
+                        up.pause();
+                        backpressured = true;
+                        if (idleTimer !== null) {
+                            clearTimeout(idleTimer);
+                            idleTimer = null;
+                        }
+                        return;
+                    }
+                    armIdle();
+                });
+                res.on('drain', () => {
+                    if (replaced)
+                        return;
+                    // 客户端又读得动了：这属于"客户端侧进展"，预算重新起表后再恢复上游。
+                    backpressured = false;
+                    armIdle();
+                    up.resume();
+                });
+                up.on('end', () => {
+                    if (idleTimer !== null) {
+                        clearTimeout(idleTimer);
+                        idleTimer = null;
+                    }
+                    if (replaced)
+                        return;
+                    if (!flushHead())
+                        return;
+                    res.end();
+                });
+                up.on('error', () => {
+                    if (idleTimer !== null) {
+                        clearTimeout(idleTimer);
+                        idleTimer = null;
+                    }
+                    if (replaced)
+                        return;
+                    destroyQuietly(res);
+                });
+                up.on('aborted', () => {
+                    if (replaced)
+                        return;
+                    destroyQuietly(res);
+                });
+                up.on('close', () => {
+                    if (idleTimer !== null) {
+                        clearTimeout(idleTimer);
+                        idleTimer = null;
+                    }
+                });
+            };
+            upstreamReq.on('response', (up) => {
+                if (headerTimer !== null) {
+                    clearTimeout(headerTimer);
+                    headerTimer = null;
+                }
+                if (concluded) {
+                    destroyQuietly(up);
+                    return;
+                }
+                if (closed) {
+                    concluded = true;
+                    clearTimers();
+                    destroyQuietly(up);
+                    destroyQuietly(upstreamReq);
+                    rejected += 1;
+                    respondPlain(res, 503, 'remote listener closed\n', true);
+                    return;
+                }
+                const status = up.statusCode ?? 502;
+                if (status === 401) {
+                    // U1：上游 401 = 本机注入的会话失效。DSH 的 admit() 在 RPC handler 之前就拒绝
+                    // （rpc-host.ts:129-137），这次请求没有副作用 ⇒ 换一次身份后**只重试一次**。
+                    concluded = true;
+                    clearTimers();
+                    try {
+                        up.resume(); // 丢掉 401 的正文，避免占住连接
+                    }
+                    catch {
+                        /* ignore */
+                    }
+                    destroyQuietly(upstreamReq);
+                    if (attempt === 0 && replay.replayable && typeof options.onUpstreamUnauthorized === 'function') {
+                        void refreshAndRetry();
+                        return;
+                    }
+                    noteFailure('上游会话', { name: 'E_UPSTREAM_SESSION' });
+                    respondUpstreamFailure(req, res, 'E_UPSTREAM_SESSION');
+                    return;
+                }
+                concluded = true;
+                pipeUpstream(up);
+            });
+            upstreamReq.on('error', (error) => {
+                if (concluded)
+                    return;
+                noteFailure('代理请求', error);
+                if (isUpstreamProtocolError(error)) {
+                    // 上游回的东西不是合法 HTTP（HPE_* 解析错误）：502 typed，保留原文排查用
+                    fail('E_UPSTREAM_PROTOCOL');
+                    return;
+                }
+                if (isUpstreamDownError(error)) {
+                    fail('E_UPSTREAM_DOWN');
+                    return;
+                }
+                concluded = true;
+                clearTimers();
+                respondPlain(res, 502, 'remote upstream unavailable\n', true);
+            });
+            // 客户端先断（关页面/关 App）→ 立刻掐掉上游，避免悬挂连接
+            res.on('close', () => {
+                clearTimers();
+                if (!res.writableFinished)
+                    destroyQuietly(upstreamReq);
+            });
+            req.on('error', () => destroyQuietly(upstreamReq));
+            if (replay.body === null) {
+                req.pipe(upstreamReq);
+            }
+            else {
+                upstreamReq.end(replay.body);
+            }
+        };
+        dispatch(baseExtra, 0);
     };
     /**
      * WebSocket（以及任何 Upgrade 协议）隧道：
@@ -818,6 +1326,16 @@ export async function startRemoteListener(options) {
         catch (error) {
             noteFailure('上游头解析', error);
             writeRawResponse(socket, 502, 'remote upstream unavailable\n');
+            return;
+        }
+        // S3：并发隧道上限。每条 WS 占一条独立上游连接，不封顶就能被一个页面吃光；
+        // 到顶后明确拒绝（503 + typed JSON），并计入 rejected —— 不是静默丢弃。
+        if (tunnels.size >= maxUpgradeTunnels) {
+            rejected += 1;
+            log(`[remote] 拒绝升级请求：实时隧道已达上限 ${String(maxUpgradeTunnels)}`);
+            writeRawResponse(socket, 503, UPSTREAM_ERROR_BODIES.E_UPGRADE_TUNNELS_FULL, {
+                'content-type': 'application/json; charset=utf-8',
+            });
             return;
         }
         const extra = { ...staticHeaders, ...upstreamHeaders };
@@ -880,25 +1398,28 @@ export async function startRemoteListener(options) {
                     return;
                 }
             }
-            // 3) 双向裸字节隧道
+            // 3) 双向裸字节隧道 + 登记（监听 close 时两侧要一起断）
+            const tunnel = { client: socket, upstream: upSocket };
+            tunnels.add(tunnel);
             socket.pipe(upSocket);
             upSocket.pipe(socket);
             socket.resume();
-            // 4) 任一侧错误/关闭 → 两侧都销毁，避免半开连接与端口残留
+            // 4) 任一侧结束/错误/关闭 → 两侧都销毁，避免半开连接与端口残留。
+            //
+            // **必须同时监听 'end'**：server 侧 upgrade socket 的 `allowHalfOpen` 是 true，
+            // 对端发 FIN 时只会得到 'end'，'close' 要等本端也结束才来。只听 'close' 的话，
+            // 平板关页面后上游那条连接会一直半开着（S3 要求：不存在半开隧道）。
             const teardown = () => {
+                tunnels.delete(tunnel);
                 destroyQuietly(upSocket);
                 destroyQuietly(socket);
             };
             upSocket.on('error', teardown);
             socket.on('error', teardown);
-            upSocket.on('close', () => {
-                if (!socket.destroyed)
-                    destroyQuietly(socket);
-            });
-            socket.on('close', () => {
-                if (!upSocket.destroyed)
-                    destroyQuietly(upSocket);
-            });
+            upSocket.on('end', teardown);
+            socket.on('end', teardown);
+            upSocket.on('close', teardown);
+            socket.on('close', teardown);
         });
         // 上游没同意升级（200/4xx…）：fail-closed，不把 body 当隧道数据转发
         upstreamReq.on('response', (upRes) => {
