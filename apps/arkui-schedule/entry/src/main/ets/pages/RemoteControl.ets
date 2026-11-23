@@ -61,6 +61,9 @@ import { settingsStore } from '../services/settingsStore';
 import { describeError } from '../services/scheduleStore';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
 import { Rc3GatePanel, rc3GateRequested } from '../components/Rc3GatePanel';
+import { canPrompt } from '../model/instanceGrant';
+import { instanceGrantStore } from '../services/instanceGrantStore';
+import { RemoteCommandComposer } from '../components/RemoteCommandComposer';
 
 /** 页面状态：加载中 / 没有地址 / 已挂载 Web。 */
 const PHASE_LOADING: string = 'loading';
@@ -202,6 +205,44 @@ struct RemoteControl {
   }
 
   /**
+   * 当前地址对应的实例 id：整个页面**唯一**一处 URL→实例 id 派生。
+   *
+   * 证书 pin 查询与「发指令」目标都走这里，绝不各写一次 URL 派生调用——
+   * 两处派生一旦漂移，pin 校验的就会是另一台电脑。
+   */
+  private targetInstanceId(): string {
+    return instanceIdFromUrl(this.url);
+  }
+
+  /** 发指令目标展示名：有实例行用其名字，缺行退回 id（不编造名字）。 */
+  private targetDisplayName(): string {
+    const id: string = this.targetInstanceId();
+    if (id.length === 0) {
+      return '';
+    }
+    const found: DsInstance | null = findInstance(instanceStore.list(), id);
+    return found === null ? id : found.name;
+  }
+
+  /**
+   * 发指令授权：只认显式授予的 session.prompt。
+   * 实例行缺失或授权表损坏 / 存储不可用时一律 false（fail-closed），不猜测、不放行。
+   */
+  private targetCommandGranted(): boolean {
+    const id: string = this.targetInstanceId();
+    if (id.length === 0) {
+      return false;
+    }
+    if (findInstance(instanceStore.list(), id) === null) {
+      return false;
+    }
+    if (instanceGrantStore.lastProblem() !== 'ok') {
+      return false;
+    }
+    return canPrompt(instanceGrantStore.list(), id, Date.now());
+  }
+
+  /**
    * 读该地址对应实例的配对 pin。
    *
    * pin 的唯一来源是 `addPairedInstance` 写入实例信封的 `tlsFingerprint`；
@@ -210,7 +251,7 @@ struct RemoteControl {
    */
   private storedPin(): string {
     try {
-      const id: string = instanceIdFromUrl(this.url);
+      const id: string = this.targetInstanceId();
       if (id.length === 0) {
         return '';
       }
@@ -583,6 +624,13 @@ struct RemoteControl {
           // 不挂旧 WebView；常规路径必须等原生客户端通过设备验收。
           this.RefusedView()
         }
+        // mod-remote-command-wire：单次确认闸的真实界面，挂在今天唯一可达的 PHASE_READY 态
+        // （证书未启用 ⇒ tlsBlocked=true ⇒ RefusedView）。目标派生与 storedPin() 共用一处。
+        RemoteCommandComposer({
+          instanceId: this.targetInstanceId(),
+          instanceName: this.targetDisplayName(),
+          commandGranted: this.targetCommandGranted()
+        })
       } else if (this.phase === PHASE_EMPTY) {
         this.EmptyView()
       }
