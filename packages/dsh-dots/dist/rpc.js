@@ -56,11 +56,12 @@ function asString(value) {
 /**
  * 网络类失败（只有这类才把 `reachable` 记成 false；本地 git 错误不算"不可达"）。
  *
- * `rate-limited` / `remote-error` **不算不可达**（评审 b11b P2-3）：这两个原因意味着
- * 远端（或中间的代理/网关）**回了话**——429 是限流、5xx 是对方自己坏了。它们从引擎出来时
- * 往往带 `network: true`（命令本身是网络命令），若据此写 `reachable: false`，状态文件说
- * 「连不上」，而同一次失败的正文说「远端或代理返回 5xx」，两处事实互相打脸；代理回 502 时
- * 尤其明显——链路明明是通的。所以这两类先于 `network` 标志判定为「不是链路失败」。
+ * `rate-limited` / `remote-error` / `not-found` **不算不可达**（评审 b11b P2-3 + P2-1）：
+ * 这几个原因意味着远端**回了话**——429 是限流、5xx 是对方自己坏了、404 是仓库不存在或
+ * 凭据看不到它。它们从引擎出来时往往带 `network: true`（命令本身是网络命令），若据此写
+ * `reachable: false`，状态文件说「连不上」，而同一次失败的正文说「远端返回 404」或
+ * 「远端或代理返回 5xx」，两处事实互相打脸；代理回 502 时尤其明显——链路明明是通的。
+ * 所以这三类先于 `network` 标志判定为「不是链路失败」。
  *
  * 导出仅为测试：`test/push-auth-classification.test.mjs` 逐原因钉住「哪些失败可以宣称不可达」。
  */
@@ -75,7 +76,9 @@ export function isNetworkFailure(error) {
     if (details !== null && typeof details === 'object') {
         const record = details;
         // 「远端回了状态码」不是「链路不通」：这条必须排在 `network === true` 之前。
-        if (record.reason === 'remote-error' || record.reason === 'rate-limited')
+        if (record.reason === 'remote-error'
+            || record.reason === 'rate-limited'
+            || record.reason === 'not-found')
             return false;
         if (record.network === true)
             return true;

@@ -85,6 +85,10 @@ node node_modules/typescript/bin/tsc -p apps/arkui-schedule/tools/tsconfig.json 
   `true|false|null`（null=未探测），网络探测只发生在 `testConnection`/`push`/`preview`；
   `localPending`/`remotePending` 基于本地 `origin/<branch>` 引用，无 upstream 时为 `null`；
   单次 git 网络调用 `NETWORK_TIMEOUT_MS=8000` 超时映射 `E_GIT`。
+  **[2026-11-24 订正]** 上句只是当时的**读命令**口径，作为历史记录保留；现行预算是三个具名常量
+  （`src/engine/git.ts`）：`NETWORK_TIMEOUT_MS`（读命令）、`FIRST_NETWORK_TIMEOUT_MS`（本进程首次调用，
+  覆盖 askpass 冷启动）、`PUSH_TIMEOUT_MS`（推送，上传本地对象）；且「超时」与「网络不可达」已拆成
+  两个 typed 结果，不再共用一句话。
 - **`apply.applied[]` 双 SHA**：`fileSha256` = 写后整个 profile patch 的 SHA-256（落盘校验），
   `blockSha256` = 该 entry 合并后文本的 SHA-256（条目追踪），不再使用含糊的 `sha256`。
   测试断言同文件多条 `fileSha256` 相同、`blockSha256` 不同且等于 `parsePatch` 该条目 raw 的 SHA。
@@ -2305,3 +2309,18 @@ Gitee 上看得到 `main` 分支及对应提交时间；**除这四项外，本�
 - 电脑侧 GUI 代理的 120 s 推送预算、空闲预算只用注入值跑过；Windows 上 `git-remote-https` 孙进程可能延迟 `SIGTERM` 结算。
 - 离线推送是否真的变成「超时（预算 N ms）」文案 —— 待真机复核。
 - 所有渲染像素类结论（插件面板、ArkUI 布局）仍为源码级/单测级证据。
+
+---
+
+### 2026-11-24 订正（**追加**；上文历史行一律不改写）
+
+- **§15 的 P1-1 行里的 `NETWORK_TIMEOUT_MS=8000`** 是**当时**（单项预算）的口径，作为历史原样保留。
+  现行预算是三个具名常量（`packages/dsh-dots/src/engine/git.ts`）：`NETWORK_TIMEOUT_MS`（读命令
+  `ls-remote` / `fetch`）、`FIRST_NETWORK_TIMEOUT_MS`（本进程**首次**调用，覆盖 askpass 解释器冷启动）、
+  `PUSH_TIMEOUT_MS`（push，要上传本地对象，成本随工作量增长）。当次真正用掉的数字进 `details.budgetMs`
+  并写进错误正文，不再有"单一 8 秒上限"这种说法。
+- 同一批还拆开了失败语义：**超时 / 网络不可达 / 凭据被拒 / 代理要鉴权 / 远端或代理 5xx / 限流 /
+  404（仓库不存在或看不到）** 是**不同结果**，各有独立中文原因与下一步；"超时"不再冒充"网络不可达"，
+  "凭据被拒"也不再冒充"网络不可达"。见 `docs/MODULES.md` §6 的 `mod-plugin-push-auth-vs-network`
+  与 `mod-plugin-push-classify-hardening` 两行，以及 `docs/REVIEW-b11b-batch.md` §5。
+- 本订正**只追加**，不改写上文任何一句当时观测。

@@ -16,6 +16,13 @@
  *   · P2-3：5xx 的原因句必须同时提到代理，且 `rpc.isNetworkFailure()` 不再为
  *     `remote-error` / `rate-limited` 写「不可达」（E1）。
  *
+ * `mod-plugin-push-classify-hardening` 再收两条（P2-1 / P2-4，本文件 G1 / G2）：
+ *   · P2-4：传输证据**分成两类**，只有硬证据算数（`unable to access` 这个 curl 包装前缀
+ *     被整条删掉），并且硬证据**赢过**状态码；松形状（协议行 / 裸 `HTTP NNN`）只在
+ *     **非 `remote:`/`hint:` 回显行**上成立；
+ *   · P2-1：`404` 有了自己的原因 `not-found`（带 `details.status=404`），其它未映射码
+ *     （3xx / 400 / 405 / 422 …）落 `git-failed`，**绝不**再退回「网络不可达」。
+ *
  * 结构（前置：cd packages/dsh-dots && node scripts/build.mjs）：
  *   A. 纯函数分类器：状态码形状 × 原因映射 × 控制组（DNS 失败仍是 unreachable，
  *      被 kill 的子进程仍是 timeout，即使 stderr 里有 403）；
@@ -23,7 +30,8 @@
  *   C. 凭据卫生：stderr 里出现令牌形态的值，绝不进 message，也绝不进 details；
  *   D. 引擎侧（`GitRepo`）：ls-remote 走同一套状态码分类，v1 push / fetch 说同一份真相；
  *   E. `reachable` 归因：`rpc.isNetworkFailure()` 逐原因的真值表；
- *   F. cycle 侧：白名单 + 下一步覆盖四个新原因（与 PO-09/PO-10 的短语闸门互补）。
+ *   F. cycle 侧：白名单 + 下一步覆盖五个状态码原因（与 PO-09/PO-10 的短语闸门互补）；
+ *   G. 证据优先级与未映射码（P2-4 / P2-1 的正面证明 + 反向控制）。
  * 全部只在 os.tmpdir() 外做纯注入，不联网、不跑 live 同步、不写项目仓库、不碰 ~/.dsh/dots。
  */
 import test from 'node:test'
@@ -35,9 +43,12 @@ import {
   GitRepo,
   HTTP_STATUS_CAUSE_ZH,
   GIT_AUTH_REJECTED_NEXT_STEP,
+  GIT_NOT_FOUND_NEXT_STEP,
   GIT_PROXY_AUTH_NEXT_STEP,
   GIT_RATE_LIMITED_NEXT_STEP,
   GIT_REMOTE_ERROR_NEXT_STEP,
+  TRANSPORT_DROPPED_WRAPPER_PATTERNS,
+  TRANSPORT_HARD_EVIDENCE_PATTERNS,
   hasAuthRejectedEvidence,
   httpStatusCodesOf,
   httpStatusFailureOf,
@@ -51,6 +62,7 @@ import {
   PUSH_ARGS,
   PUSH_AUTH_PROMPT_NEXT_STEP,
   PUSH_AUTH_REJECTED_NEXT_STEP,
+  PUSH_NOT_FOUND_NEXT_STEP,
   PUSH_PROXY_AUTH_NEXT_STEP,
   PUSH_RATE_LIMITED_NEXT_STEP,
   PUSH_REMOTE_ERROR_NEXT_STEP,
@@ -179,7 +191,7 @@ async function cycleWithPushError(error) {
   return { result, outbox }
 }
 
-/* 四个新原因在源码里的唯一真值：供措辞一致性断言（不含 URL / 用户名 / 令牌）。 */
+/* 五个状态码原因在源码里的唯一真值：供措辞一致性断言（不含 URL / 用户名 / 令牌）。 */
 
 const NEW_REASONS = Object.freeze({
   'auth-rejected': {
@@ -188,6 +200,15 @@ const NEW_REASONS = Object.freeze({
     engineNext: GIT_AUTH_REJECTED_NEXT_STEP,
     cycleNext: PUSH_AUTH_REJECTED_NEXT_STEP,
     pushPhrase: '推送失败：远端拒绝了这个用户名或令牌（HTTP 401/403），凭据需要重新核对',
+  },
+  // b11b P2-1（本批闭合）：404 有了自己的原因与下一步——「仓库不存在 / 凭据看不到它」，
+  // 既不是网络问题，也不是「令牌被拒」。
+  'not-found': {
+    status: 404,
+    cause: HTTP_STATUS_CAUSE_ZH['not-found'],
+    engineNext: GIT_NOT_FOUND_NEXT_STEP,
+    cycleNext: PUSH_NOT_FOUND_NEXT_STEP,
+    pushPhrase: '推送失败：远端返回 404，仓库不存在或当前凭据看不到它',
   },
   'proxy-auth': {
     status: 407,
@@ -220,6 +241,10 @@ const STDERR_SHAPES = Object.freeze({
     "fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 401",
     'error: 403 Forbidden while accessing https://gitee.com/acme/repo.git/info/refs?service=git-receive-pack',
     'error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403',
+  ],
+  'not-found': [
+    "fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 404",
+    'fatal: unable to access remote: HTTP 404',
   ],
   'proxy-auth': [
     "fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 407",
@@ -265,9 +290,12 @@ test('A1 状态码形状：git 会打印的五种形态都能取出数字，端�
   assert.deepEqual(httpStatusCodesOf('fatal: unable to access remote: Failed to connect to gitee.com port 443'), [])
   assert.deepEqual(httpStatusCodesOf('Receiving objects: 100% (12/12), 1.2 MiB | 300.00 KiB/s'), [])
   assert.deepEqual(httpStatusCodesOf('unable to access: 0 objects'), [])
-  // 不在映射表里的状态码（404）不算“能定原因”，但数字本身仍被识别出来。
+  // 404 现在**能定原因**（b11b P2-1 收口）：旧断言是 `null`（「404 不发明原因」），
+  // 结果是兜底把「仓库不存在」说成「网络不可达」；retarget 成 not-found + 404，比旧断言更严
+  // （旧断言只钉「没原因」，新断言连原因、状态码、文案、下一步都钉）。
   assert.deepEqual(httpStatusCodesOf('fatal: unable to access remote: HTTP 404'), [404])
-  assert.equal(httpStatusFailureOf('fatal: unable to access remote: HTTP 404'), null, '404 不发明原因')
+  assert.deepEqual(httpStatusFailureOf('fatal: unable to access remote: HTTP 404'),
+    { reason: 'not-found', status: 404 }, '404 ⇒ not-found（不是网络、也不是凭据）')
 })
 
 test('A5 新形状不越界：进度/令牌/`remote:` 日志里的数字，以及 HTTP/2 200 都定不出原因', () => {
@@ -292,23 +320,38 @@ test('A5 新形状不越界：进度/令牌/`remote:` 日志里的数字，以�
   // `HTTP/2 200` 单独钉：协议行形状确实认得出 200，但 200 不映射原因 ⇒ 仍然 null。
   assert.deepEqual(httpStatusCodesOf('HTTP/2 200'), [200], '协议行形状仍按原样认得 200')
   assert.equal(httpStatusFailureOf('HTTP/2 200'), null, '200 不在映射表，绝不发明原因')
-  // 既有的 `remote:` + `HTTP 403` 兜底形状（b11b P2-4）**保持原样**，本批没有把它变宽：
-  // 它的现状是"会被认领成 403"，P2-4 仍开着，Lead 决定不在本批收窄。
-  assert.deepEqual(httpStatusCodesOf('remote: build log: see HTTP 403 section'), [403])
-  // 但新加的两条形状不参与这种误认：同样的 `remote:` 日志换成代理措辞就不认。
+  // b11b P2-4（本批闭合）：`remote:` / `hint:` 行是**服务器回显**，不是 git 的 HTTP 客户端；
+  // 松形状（协议行 / 裸 `HTTP NNN`）只对非回显行生效。旧断言在这里是 `[403]`（承认误认），
+  // retarget 成 `[]` —— 这是**收紧**：旧断言把 bug 钉成现状，新断言把正确行为钉死。
+  assert.deepEqual(httpStatusCodesOf('remote: build log: see HTTP 403 section'), [])
+  assert.equal(httpStatusFailureOf('remote: build log: see HTTP 403 section'), null)
+  assert.deepEqual(httpStatusCodesOf('hint: HTTP 403 section is documented below'), [])
+  assert.deepEqual(httpStatusCodesOf('  remote: HTTP/1.1 503 from the hook'), [], '行首有空白的回显行同样跳过')
+  // 行过滤的**作用域**要说清：本批只给两条松形状加过滤（评审 b11b P2-4 的原文要求）。
+  // 句子形状仍然整段扫——它们是 git 自己的措辞；若远端钩子逐字抄一句 `returned error: 403`，
+  // 仍会被认领（残留面，未在本批收窄，记在报告 unverified 边界里）。
+  assert.deepEqual(httpStatusCodesOf('remote: returned error: 403'), [403])
+  // 新加的两条形状不参与这种误认：同样的 `remote:` 日志换成代理措辞也不认。
   assert.equal(httpStatusFailureOf('remote: see Received HTTP code 407 section'), null)
 })
 
-test('A2 映射：401/403 → auth-rejected，407 → proxy-auth，429 → rate-limited，5xx → remote-error，其它 null', () => {
+test('A2 映射：401/403 → auth-rejected，404 → not-found，407 → proxy-auth，429 → rate-limited，5xx → remote-error，其它 null', () => {
   for (const status of [401, 403]) assert.equal(httpStatusReasonOf(status), 'auth-rejected', String(status))
+  // b11b P2-1 retarget（**收紧**）：404 以前在下面那张 null 表里（「不发明原因」），
+  // 结果是兜底把它说成网络不可达。现在它有自己的原因，所以从 null 表移到正向断言。
+  assert.equal(httpStatusReasonOf(404), 'not-found')
   assert.equal(httpStatusReasonOf(407), 'proxy-auth')
   assert.equal(httpStatusReasonOf(429), 'rate-limited')
   for (const status of [500, 502, 503, 504, 599]) assert.equal(httpStatusReasonOf(status), 'remote-error', String(status))
-  for (const status of [200, 204, 301, 304, 400, 404, 409, 422, 600, 999, 0, -1, 40.5, Number.NaN]) {
+  // 仍然**不发明原因**的码：1xx/2xx/3xx/400/405/422/超界/非整数。
+  for (const status of [200, 204, 301, 302, 304, 400, 405, 409, 422, 451, 600, 999, 0, -1, 40.5, Number.NaN]) {
     assert.equal(httpStatusReasonOf(status), null, String(status))
   }
   assert.equal(httpStatusFailureOf("fatal: unable to access 'x': The requested URL returned error: 403").status, 403)
   assert.equal(httpStatusFailureOf('error: 502 Bad Gateway while accessing https://x/y.git').status, 502)
+  // 未映射码在**纯函数层**仍是 null（「认出了码、但没映射」由调用方区分）：
+  assert.equal(httpStatusFailureOf("fatal: unable to access 'x': The requested URL returned error: 302"), null)
+  assert.deepEqual(httpStatusCodesOf("fatal: unable to access 'x': The requested URL returned error: 302"), [302])
 })
 
 test('A3 控制组：真正的 DNS / 连接失败仍是 unreachable，绝不会被说成 auth-rejected', async () => {
@@ -476,7 +519,7 @@ test('B9 凭据被拒的**文本**形态（没有数字状态码）→ auth-reje
   assert.equal(pushFailureReason(new Error("fatal: could not read Username for 'x'")), 'auth-prompt')
 })
 
-test('B6 cycle 端到端：四个新原因的短语过白名单，下一步各自点名（互不相同）', async () => {
+test('B6 cycle 端到端：五个状态码原因的短语过白名单，下一步各自点名（互不相同）', async () => {
   // 先钉住每一条“真实 git stderr 形状”都落到它该落的原因上（表里没有未使用样本）。
   for (const [reason, shapes] of Object.entries(STDERR_SHAPES)) {
     for (const stderr of shapes) {
@@ -506,13 +549,15 @@ test('B6 cycle 端到端：四个新原因的短语过白名单，下一步各�
     seenMessages.add(result.message)
     seenSteps.add(spec.cycleNext)
   }
-  assert.equal(seenMessages.size, 4, '四种原因的终态消息必须互不相同')
-  assert.equal(seenSteps.size, 4, '四种原因的下一步必须互不相同')
+  // 5 = 本批新增的 not-found 之后的状态码原因数（四条 → 五条），retarget 只改数字，
+  // 唯一性要求本身没变（任两条撞车就会小于 5）。
+  assert.equal(seenMessages.size, 5, '五种原因的终态消息必须互不相同')
+  assert.equal(seenSteps.size, 5, '五种原因的下一步必须互不相同')
   // 与超时 / 不可达的下一步也不许撞车（否则等于没分）。
   assert.equal(Object.values(NEW_REASONS).some((spec) => spec.cycleNext.includes('检查网络')), false)
 })
 
-test('B8 nextStepOf 覆盖九类原因：四个新原因与 auth-prompt 各有专属下一步，两条历史原因共用默认建议', () => {
+test('B8 nextStepOf 覆盖十类原因：五个状态码原因与 auth-prompt 各有专属下一步，两条历史原因共用默认建议', () => {
   const typed = (reason) => new SyncError(V2_ERROR.PUSH_REJECTED, '推送失败：x', { reason })
   const decidedOf = (reason) => gitStageFailure(typed(reason), {
     code: V2_ERROR.PUSH_REJECTED, message: 'fallback',
@@ -531,6 +576,8 @@ test('B8 nextStepOf 覆盖九类原因：四个新原因与 auth-prompt 各有�
     unreachable: PUSH_UNREACHABLE_NEXT_STEP,
     network: PUSH_UNREACHABLE_NEXT_STEP, // 旧字段兼容：network = unreachable
     'auth-rejected': PUSH_AUTH_REJECTED_NEXT_STEP,
+    // b11b P2-1：404 有了自己的动作（核对地址 / 私有库授权），不再借用网络或远端分叉建议。
+    'not-found': PUSH_NOT_FOUND_NEXT_STEP,
     'proxy-auth': PUSH_PROXY_AUTH_NEXT_STEP,
     'remote-error': PUSH_REMOTE_ERROR_NEXT_STEP,
     'rate-limited': PUSH_RATE_LIMITED_NEXT_STEP,
@@ -542,6 +589,10 @@ test('B8 nextStepOf 覆盖九类原因：四个新原因与 auth-prompt 各有�
   for (const [reason, step] of Object.entries(expected)) {
     assert.equal(stepOf(reason), step, `${reason} 必须拿到自己那条下一步`)
   }
+  // not-found 的下一步必须真的讲「仓库地址 / 私有库」，不许提网络（P2-1 的全部意义）。
+  assert.equal(PUSH_NOT_FOUND_NEXT_STEP.includes('仓库地址'), true)
+  assert.equal(PUSH_NOT_FOUND_NEXT_STEP.includes('私有库'), true)
+  assert.equal(PUSH_NOT_FOUND_NEXT_STEP.includes('网络'), false)
   // auth-prompt 的下一步必须真的讲「填全登录名/令牌」，不许是那条远端分叉建议。
   assert.equal(PUSH_AUTH_PROMPT_NEXT_STEP.includes('登录名/令牌'), true)
   assert.equal(PUSH_AUTH_PROMPT_NEXT_STEP.includes('其他设备推进'), false)
@@ -680,8 +731,18 @@ test('D2 v1 push（GitRepo.push）同样先认状态码：403 不再被说成网
 test('D3 顺序守卫：同一段 stderr 同时命中「传输证据」与 403 时，状态码胜出（旧误报的成因）', async () => {
   const mixed =
     "fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 403"
-  // 文本层确实含「不可达」证据 —— 这正是旧实现把 403 说成网络问题的原因。
-  assert.equal(hasTransportEvidence(mixed), true, '旧误报的成因：unable to access 是传输层证据')
+  // 旧误报的成因（b11b P2-4 已根治）：`unable to access` 是 curl 给所有 HTTPS 失败打的**包装前缀**，
+  // 它本身不是证据。本处由 `true` retarget 成 `false`（**收紧**）：旧断言钉的是 bug 的成因，
+  // 新断言钉的是「这个前缀已被逐出证据集」；紧接着的正向控制组保证证据集没被掏空。
+  assert.equal(hasTransportEvidence(mixed), false, '`unable to access` 不再是传输层证据')
+  const hardControl = "fatal: unable to access 'x': Could not resolve host: gitee.com"
+  assert.equal(hasTransportEvidence(hardControl), true, '正向控制组：硬证据仍在证据集里')
+  // 证据集的分裂是结构性的：包装前缀被单独列出，且**不在**硬证据表里。
+  assert.deepEqual(TRANSPORT_DROPPED_WRAPPER_PATTERNS, ['unable to access'])
+  assert.equal(
+    TRANSPORT_HARD_EVIDENCE_PATTERNS.some((pattern) => pattern.includes('unable to access')),
+    false, '硬证据表里不许出现包装前缀',
+  )
   assert.equal(httpStatusFailureOf(mixed).reason, 'auth-rejected')
   const repo = repoWithStderr(mixed)
   try {
@@ -712,9 +773,10 @@ test('E1 reachable 归因：只有链路不通 / 凭据类失败才写 reachable
     { code: 'E_AUTH', details: { reason: 'auth-rejected', status: 403, network: true }, expected: true },
     // 代理要凭据：链路是通的（代理答了 407）——但这条仍沿用既有 E_GIT+network 的判定
     { code: 'E_GIT', details: { reason: 'proxy-auth', status: 407, network: true }, expected: true },
-    // 5xx / 429：远端**回了话**，不许说成连不上（b11b P2-3）
+    // 5xx / 429 / 404：远端**回了话**，不许说成连不上（b11b P2-3 + P2-1）
     { code: 'E_GIT', details: { reason: 'remote-error', status: 502, network: true }, expected: false },
     { code: 'E_GIT', details: { reason: 'rate-limited', status: 429, network: true }, expected: false },
+    { code: 'E_GIT', details: { reason: 'not-found', status: 404, network: true }, expected: false },
     // 本地错误（git 不在 PATH）：从来不是网络失败
     { code: 'E_GIT', details: { reason: 'git-missing' }, expected: false },
     // 无 details 的 E_GIT：没有正面证据就不许宣称不可达
@@ -740,4 +802,141 @@ test('E1 reachable 归因：只有链路不通 / 凭据类失败才写 reachable
   // 429 的措辞仍是限流专属（不许被 5xx 的"代理"口径带跑）。
   assert.equal(NEW_REASONS['rate-limited'].pushPhrase.includes('限流'), true)
   assert.equal(PUSH_RATE_LIMITED_NEXT_STEP.includes('代理'), false)
+
+  // 4）404（b11b P2-1）：远端回了话 ⇒ 不许写 reachable:false。顺序守卫同上。
+  const notFound = typed('E_GIT', { reason: 'not-found', status: 404, network: true })
+  assert.equal(notFound.details.network, true, '前提：网络命令失败时引擎会带 network 标记')
+  assert.equal(isNetworkFailure(notFound), false, '但 404 不等于不可达')
+})
+
+/* -------------------------------------------------------------------------- */
+/* G. 证据优先级与未映射码（b11b P2-4 / P2-1 的收口：正面证明 + 反向控制）          */
+/* -------------------------------------------------------------------------- */
+
+test('G1 硬传输证据优先于状态码：`remote:` 回显 403 + DNS 失败 ⇒ unreachable（且没有 status）', async () => {
+  // 评审 b11b P2-4 的原串（一字不改），旧实现的答案：auth-rejected + status=403（真因是 DNS）。
+  const witness = 'remote: build log: see HTTP 403 section; Could not resolve host'
+  assert.equal(httpStatusCodesOf(witness).length, 0, '回显行上的 403 不是 git 的状态码')
+  assert.equal(httpStatusFailureOf(witness), null)
+  assert.equal(hasTransportEvidence(witness), true, '硬证据成立')
+  const port = portWithRunner(failRunner(witness))
+  try {
+    const error = await captureRejection(() => port.pushMain(PUSH_ARGS))
+    assert.equal(error.code, V2_ERROR.PUSH_REJECTED)
+    assert.equal(error.details.reason, 'unreachable', '真因是 DNS，不是凭据')
+    assert.equal(error.details.status, undefined, '不可达不许挂状态码')
+    assert.equal(error.message, '推送失败：网络不可达（无法解析或连接到远端）')
+    assert.equal(/令牌|凭据|401\/403/.test(error.message), false, '不许把网络问题说成凭据问题')
+  } finally {
+    await port.dispose()
+  }
+
+  // 同一件事在**更完整的真实形态**里也成立：curl 的 fatal 行 + 钩子日志两行同时出现。
+  const mixed = [
+    "fatal: unable to access 'https://gitee.com/acme/repo.git/': Could not resolve host: gitee.com",
+    'remote: build log: see HTTP 403 section',
+  ].join('\n')
+  const mixedPort = portWithRunner(failRunner(mixed))
+  try {
+    const error = await captureRejection(() => mixedPort.pushMain(PUSH_ARGS))
+    assert.equal(error.details.reason, 'unreachable', '硬证据赢过同段文本里的 403')
+    assert.equal(error.details.status, undefined)
+  } finally {
+    await mixedPort.dispose()
+  }
+
+  // 引擎侧（ls-remote / v1 push 走同一条 `failure()`）：同一份裁决，码为 E_GIT。
+  const repo = repoWithStderr(mixed)
+  try {
+    const error = await captureRejection(() => repo.lsRemote())
+    assert.equal(error.code, 'E_GIT')
+    assert.equal(error.details.reason, 'unreachable')
+    assert.equal(error.details.status, undefined)
+    assert.equal(/网络不可达/.test(error.message), true)
+  } finally {
+    await repo.dispose()
+  }
+
+  // **同伴用例**：同样涉及 403、但**没有** DNS 证据 ⇒ 必须仍是 auth-rejected（Gitee 不回归）。
+  for (const stderr of [
+    "fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 403",
+    'error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403',
+  ]) {
+    const companion = portWithRunner(failRunner(stderr))
+    try {
+      const error = await captureRejection(() => companion.pushMain(PUSH_ARGS))
+      assert.equal(error.details.reason, 'auth-rejected', stderr)
+      assert.equal(error.details.status, 403, stderr)
+      assert.equal(error.message, NEW_REASONS['auth-rejected'].pushPhrase, stderr)
+    } finally {
+      await companion.dispose()
+    }
+  }
+})
+
+test('G2 未映射码：404 ⇒ not-found（可操作文案 + status），3xx/400/405/422 ⇒ git-failed 且绝非 unreachable', async () => {
+  // ① 404：自己的原因 + 自己的文案 + 自己的下一步 + 数字。
+  const notFound = await pushWith("fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 404")
+  assert.equal(notFound.code, V2_ERROR.PUSH_REJECTED)
+  assert.equal(notFound.details.reason, 'not-found')
+  assert.equal(notFound.details.status, 404)
+  assert.equal(notFound.message, '推送失败：远端返回 404，仓库不存在或当前凭据看不到它')
+  assert.equal(/网络不可达|不可达/.test(notFound.message), false, '404 不许说成网络不可达')
+  assert.equal(/令牌过期|401\/403/.test(notFound.message), false, '404 不等于凭据被拒')
+  assert.deepEqual(Object.keys(notFound.details).sort(), ['reason', 'status'], 'details 只带原因与数字')
+
+  // cycle 端到端：not-found 的短语过白名单、下一步是「核对地址 / 私有库授权」。
+  const cycled = await cycleWithPushError(notFound)
+  assert.equal(cycled.result.message.includes(notFound.message), true)
+  assert.equal(cycled.result.message.includes(PUSH_NOT_FOUND_NEXT_STEP), true)
+  assert.equal(cycled.result.message.includes('原因类别未识别'), false)
+  assert.equal(cycled.outbox.entries[0].state, 'pending', '失败只停放，不报成功')
+
+  // ② 其它未映射码：落 git-failed（文案不怪网络），不冒充不可达，也不编 status。
+  const unmapped = [
+    ["fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 302", 302],
+    ['error: RPC failed; HTTP 400 Bad Request', 400],
+    ['error: 405 Method Not Allowed while accessing https://gitee.com/acme/repo.git/info/refs', 405],
+    ['fatal: unable to access remote: HTTP 422 Unprocessable Entity', 422],
+  ]
+  for (const [stderr, status] of unmapped) {
+    assert.equal(httpStatusFailureOf(stderr), null, `分类器不发明原因：${stderr}`)
+    assert.deepEqual(httpStatusCodesOf(stderr), [status], `但码被认出来了：${stderr}`)
+    const error = await pushWith(stderr)
+    assert.equal(error.details.reason, 'git-failed', stderr)
+    assert.equal(error.details.status, undefined, `未映射码不挂 status：${stderr}`)
+    assert.equal(error.message, '推送失败：git 拒绝了本次推送，请检查远端状态后重试', stderr)
+    assert.equal(/网络不可达|不可达/.test(error.message), false, `未映射码不许说成网络不可达：${stderr}`)
+    assert.equal(/远端拒绝了这个用户名|限流|代理要求/.test(error.message), false, stderr)
+  }
+
+  // ③ 反向控制组：没有状态码的硬证据仍然是 unreachable（本批没有把证据集掏空）。
+  const dns = await pushWith("fatal: unable to access 'https://gitee.com/acme/repo.git/': Could not resolve host: gitee.com")
+  assert.equal(dns.details.reason, 'unreachable')
+  assert.equal(dns.details.status, undefined)
+
+  // ④ 引擎侧：ls-remote 对 404 / 302 给出同一份裁决；未映射码的 `network` 一律 false。
+  const repo404 = repoWithStderr("fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 404")
+  try {
+    const error = await captureRejection(() => repo404.lsRemote())
+    assert.equal(error.code, 'E_GIT')
+    assert.equal(error.details.reason, 'not-found')
+    assert.equal(error.details.status, 404)
+    assert.equal(error.message.includes(HTTP_STATUS_CAUSE_ZH['not-found']), true)
+    assert.equal(error.message.includes(GIT_NOT_FOUND_NEXT_STEP), true)
+    assert.equal(/网络不可达/.test(error.message), false)
+    assert.equal(isNetworkFailure(error), false, '404 不许把 reachable 写成 false')
+  } finally {
+    await repo404.dispose()
+  }
+  const repo302 = repoWithStderr("fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 302")
+  try {
+    const error = await captureRejection(() => repo302.lsRemote())
+    assert.equal(error.details.reason, 'git-failed')
+    assert.equal(error.details.network, false, '认出了状态码却没映射：不许给「网络类失败」盖章')
+    assert.equal(isNetworkFailure(error), false)
+    assert.equal(/网络不可达/.test(error.message), false)
+  } finally {
+    await repo302.dispose()
+  }
 })

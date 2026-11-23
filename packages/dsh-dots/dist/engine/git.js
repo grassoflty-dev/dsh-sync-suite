@@ -55,33 +55,63 @@ export function gitTimeoutMessage(command, budgetMs, firstCall) {
     return `git ${command} 超时（>${budgetMs} 毫秒未完成${warm}）；${GIT_TIMEOUT_NEXT_STEP}`;
 }
 /**
- * 传输层失败的**正面证据**：只有这些字样才算「网络不可达」。
- * `timed out` / `timeout` **不在**此列——超时由结构信号（子进程被预算杀死）判定，
- * 绝不靠对外文文本的宽泛猜测。
+ * 传输层失败的正面证据（唯一一份）：**分两类**，只有「硬证据」算数。
  *
- * 注意 `unable to access` 也在这一列：它是 git 打印**所有** HTTPS 失败的公共前缀，
- * 所以任何带 HTTP 状态码的失败都必须先被 `httpStatusFailureOf()` 认领（403 不等于不可达）。
+ * ① **硬证据**（本表）＝ 真的能证明链路没通：解析不到主机/代理、连接被拒/被重置、
+ *    `connect to <host> port <n> failed`、`unable to connect`。
+ *    `timed out` / `timeout` **不在**此列——超时由结构信号（子进程被预算杀死）判定，
+ *    绝不靠对外文文本的宽泛猜测。
+ *
+ * ② **被丢掉的那一类：`unable to access`**。它是 curl 给**所有** HTTPS 失败打的公共前缀
+ *    （`fatal: unable to access '<url>': …`），403/404/407/5xx 全都带它，所以它什么也证明不了。
+ *    把它当证据的直接后果（评审 b11b P2-1）：`returned error: 404`、`returned error: 302`
+ *    这类「远端回了话」的失败被说成「网络不可达（无法解析或连接到远端）」，让用户去查网络。
+ *    真正的网络失败时 `Could not resolve host` / `Failed to connect` 一定会和它同时出现，
+ *    因此丢掉这个前缀**不会丢掉任何证据**（见 `test/push-auth-classification.test.mjs` 的 G1）。
  */
-const TRANSPORT_EVIDENCE_RE = /could not resolve host|could not resolve proxy|failed to connect|couldn'?t connect|unable to access|network is unreachable|no route to host|connection refused|connection reset|connect to [^\s]+ port [^\s]+ failed/i;
-/** 文本里是否有传输失败的正面证据（结构性判定的唯一入口，供 gitPort 复用）。 */
+export const TRANSPORT_HARD_EVIDENCE_PATTERNS = Object.freeze([
+    'could not resolve host',
+    'could not resolve proxy',
+    'failed to connect',
+    "couldn't connect",
+    'network is unreachable',
+    'no route to host',
+    'connection refused',
+    'connection reset',
+    'connect to [^\\s]+ port [^\\s]+ failed',
+    'unable to connect',
+]);
+/**
+ * 被**排除**在证据集之外的「包装前缀」。
+ *
+ * 这份常量不参与任何判定，存在的唯一目的是让测试能钉住「它确实被丢掉了」：
+ * 只要有人把它加回 `TRANSPORT_HARD_EVIDENCE_PATTERNS`，那条守卫就会红。
+ */
+export const TRANSPORT_DROPPED_WRAPPER_PATTERNS = Object.freeze(['unable to access']);
+const TRANSPORT_HARD_EVIDENCE_RE = new RegExp(TRANSPORT_HARD_EVIDENCE_PATTERNS.join('|'), 'i');
+/** 文本里是否有**硬**传输失败证据（结构性判定的唯一入口，供 gitPort 复用）。 */
 export function hasTransportEvidence(text) {
-    return typeof text === 'string' && TRANSPORT_EVIDENCE_RE.test(text);
+    return typeof text === 'string' && TRANSPORT_HARD_EVIDENCE_RE.test(text);
 }
 /**
  * 状态码 → 原因的**唯一映射**（`failure()` 与 `sync/gitPort.ts` 共用，绝不各写一份）。
  *
  * - 401 / 403 → `auth-rejected`：远端收到凭据但拒绝（Gitee 令牌过期 / 无写权限就是这一形）；
+ * - 404 → `not-found`：仓库不存在 / 改名 / 删了 / 令牌看不到它（**不是**网络问题，评审 b11b P2-1）；
  * - 407 → `proxy-auth`：代理要它自己的凭据，和仓库登录名无关；
  * - 429 → `rate-limited`：远端限流；
  * - 500–599 → `remote-error`：远端**或中间代理/网关**出错（代理回 502 时 git 的文案与仓库
  *   自己回 502 完全相同，所以措辞不把责任单方面判给仓库），本地改动与令牌都没有问题；
- * - 其它（含 404 一类）→ `null`：**不发明原因**，交回既有文本规则。
+ * - 其它（1xx/2xx/3xx/400/405/422 …）→ `null`：**不发明原因**，交回调用方的
+ *   「认出了状态码但没映射」分支（那一支一律 `git-failed`，绝不退回「网络不可达」）。
  */
 export function httpStatusReasonOf(status) {
     if (!Number.isInteger(status))
         return null;
     if (status === 401 || status === 403)
         return 'auth-rejected';
+    if (status === 404)
+        return 'not-found';
     if (status === 407)
         return 'proxy-auth';
     if (status === 429)
@@ -91,54 +121,80 @@ export function httpStatusReasonOf(status) {
     return null;
 }
 /**
- * git / libcurl **真正会打印**的 HTTP 状态码形状（源码里唯一一份）。
+ * git / libcurl **真正会打印**的 HTTP 状态码形状（源码里唯一一份）：**只认句子形状**。
  *
- * 顺序 = 可信度：curl 的标准出口在前，老形态次之，协议行 / `HTTP 403` 兜底，最后是
- * 代理 CONNECT 的两种文案（b11b P1-1）；这样即使同一段 stderr 里还有别的数字
- * （端口、重定向进度），也先命中真正的状态码。
+ * 这里四条都是「git 自己的 HTTP 客户端说的一句话」——curl 的两个出口，加上代理 CONNECT
+ * 的两种文案。它们自带判别性上下文，端口数字、令牌片段、进度行里的数字都命中不了。
  *
- * 代理那两条为什么必须进表：`Received HTTP code 407 from proxy after CONNECT` 与
+ * 代理那两条为什么必须在表里：`Received HTTP code 407 from proxy after CONNECT` 与
  * `CONNECT tunnel failed, response 407` 是 git/libcurl 走 HTTPS 代理失败时**真实**会打印的
- * 两种形态，它们既不含 `returned error:` 也不含 `HTTP <数字>` 之外的可用锚点；漏掉它们，
- * 「代理要它自己的凭据」就会落回兜底的「网络不可达」，用户被告知去查网络（模块存在的意义就是杀掉这个谎）。
+ * 两种形态；漏掉它们，「代理要它自己的凭据」就会落回兜底的「网络不可达」。
+ * （前提说明：这两条是 libcurl 的**文档形态**，本机没有真实代理链路，未曾实机观测。）
  */
-const HTTP_STATUS_SOURCES = Object.freeze([
+const HTTP_STATUS_SENTENCE_SOURCES = Object.freeze([
     // curl 标准出口：`fatal: unable to access '<url>': The requested URL returned error: 403`
     'returned error:\\s*(\\d{3})\\b',
     // 老版本 git：`error: 403 Forbidden while accessing https://…`
     '\\berror:\\s*(\\d{3})(?:\\s+[A-Za-z][A-Za-z .!\'-]*)?\\s+while accessing',
-    // 协议行：`HTTP/1.1 429`
-    '\\bHTTP/\\d+(?:\\.\\d+)?\\s+(\\d{3})\\b',
-    // 兜底：`HTTP 403` / `RPC failed; HTTP 403`
-    '\\bHTTP\\s+(\\d{3})\\b',
     // libcurl 走 HTTPS 代理时的 407 文案（评审 b11b P1-1）：
     //   `fatal: unable to access '<url>': Received HTTP code 407 from proxy after CONNECT`
     // 这里**故意要求** `from proxy` 这一小段：真正的代理失败句必然带它，而 `remote:` 钩子
-    // 回显的普通日志（`remote: … received HTTP code 503 …`）不带，因此不会被认领成状态码
-    // （b11b P2-4 的教训：兜底形状越宽，越容易把网络问题说成凭据/服务端问题）。
+    // 回显的普通日志（`remote: … received HTTP code 503 …`）不带。
     '\\bReceived HTTP code\\s+(\\d{3})\\s+from proxy\\b',
     // curl 8.x 的替代文案：`CONNECT tunnel failed, response 407`
     // 同样自带判别性上下文（`CONNECT tunnel failed,`），不会命中任何"只是提到 response 一词"的进度行。
     'CONNECT tunnel failed,\\s*response\\s+(\\d{3})\\b',
 ]);
-/** 从任意 git 文本里取出能认出的 HTTP 状态码（100..599，按形状顺序、去重）。 */
-export function httpStatusCodesOf(text) {
-    if (typeof text !== 'string' || text === '')
-        return [];
-    const codes = [];
-    for (const source of HTTP_STATUS_SOURCES) {
+/**
+ * 更松的两条形状（协议行 `HTTP/1.1 429`、裸 `HTTP 403`）：**只对不是服务器回显的行**生效。
+ *
+ * 为什么必须按行过滤（评审 b11b P2-4）：`remote:` 是远端钩子的输出、`hint:` 是配套提示，
+ * 它们不是 git 的 HTTP 客户端说的话。一句 `remote: build log: see HTTP 403 section`
+ * 会把真正的 DNS 失败判成「凭据被拒」——方向与本模块的目标正好相反。
+ * 过滤是**结构性**的：按行切开、剥掉行首空白、跳过 `remote:` / `hint:` 开头的整行，再跑正则；
+ * 不做「看起来像日志」之类的猜测。句子形状（上表）不受此过滤影响：那是 git 自己的措辞。
+ */
+const HTTP_STATUS_LOOSE_SOURCES = Object.freeze([
+    // 协议行：`HTTP/1.1 429`
+    '\\bHTTP/\\d+(?:\\.\\d+)?\\s+(\\d{3})\\b',
+    // 兜底：`HTTP 403` / `RPC failed; HTTP 403`
+    '\\bHTTP\\s+(\\d{3})\\b',
+]);
+/** 服务器回显行（远端钩子日志 / 提示）的行首前缀：这一行不是 git 的 HTTP 客户端输出。 */
+const ECHO_LINE_PREFIX_RE = /^(?:remote|hint)\s*:/i;
+/** 把 `sources` 里的所有匹配按顺序追加进 `codes`（去重，只收 100..599）。 */
+function collectStatusCodes(text, sources, codes) {
+    for (const source of sources) {
         for (const match of text.matchAll(new RegExp(source, 'gi'))) {
             const code = Number.parseInt(match[1] ?? '', 10);
             if (Number.isInteger(code) && code >= 100 && code <= 599 && !codes.includes(code))
                 codes.push(code);
         }
     }
+}
+/** 从任意 git 文本里取出能认出的 HTTP 状态码（100..599，按形状顺序、去重）。 */
+export function httpStatusCodesOf(text) {
+    if (typeof text !== 'string' || text === '')
+        return [];
+    const codes = [];
+    // 句子形状先跑：同一段 stderr 里既有 `HTTP/1.1 200 Connection established` 又有
+    // `returned error: 500` 时，真正的失败码必须先被认领（源顺序 = 可信度）。
+    collectStatusCodes(text, HTTP_STATUS_SENTENCE_SOURCES, codes);
+    // 松形状逐行跑，跳过服务器回显行（`remote:` / `hint:`）。
+    for (const line of text.split(/\r?\n/)) {
+        const body = line.trimStart();
+        if (body === '' || ECHO_LINE_PREFIX_RE.test(body))
+            continue;
+        collectStatusCodes(body, HTTP_STATUS_LOOSE_SOURCES, codes);
+    }
     return codes;
 }
 /**
  * 从 git 文本里找出**第一个能定原因**的状态码。
  *
- * 认不出、或状态码不在映射表（例如 404）→ `null`：绝不发明原因，交回既有文本规则。
+ * 认不出、或状态码不在映射表（例如 302 / 400 / 405 / 422）→ `null`：绝不发明原因。
+ * 调用方据此区分两件事：「根本没看见状态码」与「看见了但没映射」——后者一律 `git-failed`，
+ * 绝不许退回「网络不可达」（评审 b11b P2-1，用 `httpStatusCodesOf(text).length > 0` 判）。
  */
 export function httpStatusFailureOf(text) {
     for (const status of httpStatusCodesOf(text)) {
@@ -149,22 +205,28 @@ export function httpStatusFailureOf(text) {
     return null;
 }
 /**
- * 四种状态码失败的**中文原因**（一句话，只说真实原因）。
+ * 五种状态码失败的**中文原因**（一句话，只说真实原因）。
  * `sync/gitPort.ts` 的 push 文案沿用同一批措辞（那边以「推送失败：」开头的整句字面量受
  * 终态白名单约束，见 `test/push-auth-classification.test.mjs` 的措辞一致性断言）。
  *
  * 5xx 的措辞**必须提到代理**（评审 b11b P2-3）：公司代理返回 502/503 时 curl 打的是
  * 与仓库服务端出错**一模一样**的那句 `returned error: 502`，只说「远端服务器出错」会把
  * 代理故障归因给仓库；只说「代理」又会把真正的服务端 5xx 说错。两个都点名。
+ *
+ * 404 的措辞（评审 b11b P2-1）只说「远端回了 404」+ 两种真实处境（仓库不存在 / 凭据看不到），
+ * 不写「网络」「代理」「防火墙」——那正是旧兜底把用户带偏的方向。
  */
 export const HTTP_STATUS_CAUSE_ZH = Object.freeze({
     'auth-rejected': '远端拒绝了这个用户名或令牌',
+    'not-found': '远端返回 404，仓库不存在或当前凭据看不到它',
     'proxy-auth': '代理要求它自己的鉴权',
     'rate-limited': '远端限流',
     'remote-error': '远端或代理返回 HTTP 5xx，本地改动与令牌都没有问题',
 });
-/** 四种状态码失败的下一步（每条都点名真实原因对应的动作，与原因一一对应）。 */
+/** 五种状态码失败的下一步（每条都点名真实原因对应的动作，与原因一一对应）。 */
 export const GIT_AUTH_REJECTED_NEXT_STEP = '下一步：在设置里核对仓库登录名与私人令牌（需要写权限），令牌过期或被吊销后重新生成，不要把令牌填成登录密码';
+/** 404：先核对仓库地址，再核对这个令牌看不看得见私有库——两件都不是网络问题。 */
+export const GIT_NOT_FOUND_NEXT_STEP = '下一步：核对仓库地址是否改名或已删除；私有库需要该登录名与令牌有读取权限';
 export const GIT_PROXY_AUTH_NEXT_STEP = '下一步：检查 HTTPS_PROXY 的用户名与口令，或先关掉代理再试';
 /** 5xx：先怀疑代理/网关与服务端两侧（代理回 502 与仓库回 502 的 git 文案完全相同）。 */
 export const GIT_REMOTE_ERROR_NEXT_STEP = '下一步：稍后重试；连续出现先确认代理是否正常，再去看仓库状态页';
@@ -172,6 +234,7 @@ export const GIT_RATE_LIMITED_NEXT_STEP = '下一步：等几分钟再试；先�
 /** 原因 → 下一步的唯一查表（`failure()` 用；`sync/cycle.ts` 有自己的 push 版本）。 */
 export const HTTP_STATUS_NEXT_STEP = Object.freeze({
     'auth-rejected': GIT_AUTH_REJECTED_NEXT_STEP,
+    'not-found': GIT_NOT_FOUND_NEXT_STEP,
     'proxy-auth': GIT_PROXY_AUTH_NEXT_STEP,
     'rate-limited': GIT_RATE_LIMITED_NEXT_STEP,
     'remote-error': GIT_REMOTE_ERROR_NEXT_STEP,
@@ -531,18 +594,22 @@ export class GitRepo {
         });
     }
     /**
-     * 非零退出的统一解释（D1）：**类别靠结构 + 状态码 + 正面证据**，不靠宽泛外文猜测。
+     * 非零退出的统一解释（D1）：**类别靠结构 + 正面证据 + 状态码**，不靠宽泛外文猜测。
      *
-     * 判定顺序（本文件与 `sync/gitPort.ts` 共用同一套，不许各自发明）：
-     *   1. stderr 里的 HTTP 状态码（`httpStatusFailureOf`）：401/403 → `auth-rejected`，
-     *      407 → `proxy-auth`，429 → `rate-limited`，5xx → `remote-error`；
-     *      **必须排在一切文本匹配之前**——Gitee 的 403 正文里同时含 `unable to access`，
-     *      先跑文本规则就会把「令牌被拒」说成「网络不可达」（评审 b11 P2-6）；
-     *   2. 拿不出凭据的鉴权失败 → E_AUTH + `auth-prompt`（语义不变：git 没把凭据送出去）；
+     * 判定顺序（本文件与 `sync/gitPort.ts` 的 `textFailureOf()` 共用同一套，不许各自发明）：
+     *   0. 超时/预算杀死由结构信号在 `run()` 里先判掉（走不到这里）；
+     *   1. **硬传输证据**（`hasTransportEvidence`：解析不到主机/代理、连接被拒/被重置等）
+     *      → E_GIT + `unreachable`。**它必须先于状态码**：真正的 DNS 失败会同时带一串 HTTP 文本
+     *      （`remote:` 钩子回显、代理抱怨），此时链路根本没通，那些数字不是「远端回的码」
+     *      （评审 b11b P2-4 的收口；`unable to access` 这个 curl 包装前缀已从证据集里删掉）；
+     *   2. stderr 里的 HTTP 状态码（`httpStatusFailureOf`）：401/403 → `auth-rejected`，
+     *      404 → `not-found`，407 → `proxy-auth`，429 → `rate-limited`，5xx → `remote-error`；
+     *   3. **认出了状态码但没映射**（3xx / 400 / 405 / 422 …）→ E_GIT + `git-failed`，
+     *      且 `network: false`：远端回过话，这不许被说成「网络不可达」（评审 b11b P2-1）；
+     *   4. 拿不出凭据的鉴权失败 → E_AUTH + `auth-prompt`（语义不变：git 没把凭据送出去）；
      *      凭据被拒的文本形态（`Authentication failed` / `HTTP Basic: Access denied` 等，
      *      没有数字状态码）→ E_AUTH + `auth-rejected`（b11b P2-2：被拒绝 ≠ 不可用）；
-     *   3. 传输层失败的正面证据（解析不到主机 / 连接失败 / 无法访问）→ E_GIT + `unreachable`；
-     *   4. 其它 → E_GIT + `git-failed`，文案逐字保持历史行为。
+     *   5. 其它 → E_GIT + `git-failed`，文案逐字保持历史行为。
      *
      * 状态码分支的文案**只写真实原因 + 下一步**，不回显 stderr：那段原文可能带 URL / 令牌片段，
      * 而真实原因已经由状态码确定，不需要再猜。`details.status` 只带数字，永远不带凭据。
@@ -551,10 +618,28 @@ export class GitRepo {
      */
     failure(args, result, network = false) {
         const text = `${result.stderr}\n${result.stdout}`.trim();
+        const summary = text
+            .split('\n')
+            .map((line) => line.trim())
+            .filter((line) => line !== '')
+            .slice(0, 4)
+            .join(' | ') || `exit ${result.code}`;
+        const raw = `git ${args[0] ?? ''} 失败：${this.scrub(summary)}`;
+        // 1. 硬传输证据优先：链路没通的时候，stderr 里其余的 HTTP 文本都只是回显。
+        if (hasTransportEvidence(text)) {
+            return new SyncError('E_GIT', `网络不可达（无法解析或连接到远端）：${raw}；${GIT_UNREACHABLE_NEXT_STEP}`, {
+                command: args.map((arg) => this.scrub(arg)),
+                exitCode: result.code,
+                // 调用方据此判断"是否网络类失败"（网络失败才写 reachable:false）；字段名与语义不变。
+                network,
+                reason: 'unreachable',
+            });
+        }
+        const codes = httpStatusCodesOf(text);
         const statusHit = httpStatusFailureOf(text);
         if (statusHit !== null) {
             // auth-rejected 是「远端拒了你的凭据」→ E_AUTH（调用方按鉴权处理）；
-            // 其余三种是链路/服务端事实 → E_GIT，不冒充仓库凭据问题。
+            // 其余几种（含 not-found）是远端/链路事实 → E_GIT，不冒充仓库凭据问题。
             const code = statusHit.reason === 'auth-rejected' ? 'E_AUTH' : 'E_GIT';
             const message = `git ${args[0] ?? ''} 失败：${HTTP_STATUS_CAUSE_ZH[statusHit.reason]}（HTTP ${statusHit.status}）；`
                 + HTTP_STATUS_NEXT_STEP[statusHit.reason];
@@ -566,26 +651,25 @@ export class GitRepo {
                 status: statusHit.status,
             });
         }
-        const summary = text
-            .split('\n')
-            .map((line) => line.trim())
-            .filter((line) => line !== '')
-            .slice(0, 4)
-            .join(' | ') || `exit ${result.code}`;
-        // 鉴权类文本分两个桶：拿不出凭据（auth-prompt）与被远端拒绝（auth-rejected）。
+        // 3. 认出了状态码却没映射：不许落到文本规则上（尤其不许落到「网络不可达」）。
+        //    `network: false` 是同一个诚实要求：正文说「HTTP 302」时，状态文件不许写「连不上」。
+        if (codes.length > 0) {
+            return new SyncError('E_GIT', raw, {
+                command: args.map((arg) => this.scrub(arg)),
+                exitCode: result.code,
+                network: false,
+                reason: 'git-failed',
+            });
+        }
+        // 4. 鉴权类文本分两个桶：拿不出凭据（auth-prompt）与被远端拒绝（auth-rejected）。
         // 先问「拿不出」：git 若连用户名都读不到，根本没送出凭据，"不可用"才是根因。
         const authPrompt = hasAuthPromptEvidence(text);
         const authRejected = !authPrompt && hasAuthRejectedEvidence(text);
         const authOther = !authPrompt && !authRejected && AUTH_OTHER_TEXT_RE.test(text);
         const auth = authPrompt || authRejected || authOther;
-        const unreachable = !auth && hasTransportEvidence(text);
         const code = auth ? 'E_AUTH' : 'E_GIT';
-        const reason = authRejected ? 'auth-rejected' : auth ? 'auth-prompt' : unreachable ? 'unreachable' : 'git-failed';
-        const raw = `git ${args[0] ?? ''} 失败：${this.scrub(summary)}`;
-        const message = unreachable
-            ? `网络不可达（无法解析或连接到远端）：${raw}；${GIT_UNREACHABLE_NEXT_STEP}`
-            : raw;
-        return new SyncError(code, message, {
+        const reason = authRejected ? 'auth-rejected' : auth ? 'auth-prompt' : 'git-failed';
+        return new SyncError(code, raw, {
             command: args.map((arg) => this.scrub(arg)),
             exitCode: result.code,
             // 调用方据此判断"是否网络类失败"（网络失败才写 reachable:false）；字段名与语义不变。

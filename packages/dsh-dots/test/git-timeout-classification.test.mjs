@@ -580,7 +580,7 @@ test('T13 超过 120 秒的推送 → reason=timeout 且 budgetMs=120000，文�
 /*     更细的纯函数 / cycle / 引擎侧证据在 test/push-auth-classification.test.mjs    */
 /* -------------------------------------------------------------------------- */
 
-test('T14 状态码先于文本：401/403 → auth-rejected、407 → proxy-auth、429 → rate-limited、5xx → remote-error', async () => {
+test('T14 状态码先于文本：401/403 → auth-rejected、404 → not-found、407 → proxy-auth、429 → rate-limited、5xx → remote-error', async () => {
   /** [stderr, 期望原因, 期望 details.status] —— 形状全来自 git / libcurl 的实际输出。 */
   const table = [
     // 评审 b11 P2-6 的原始形状：Gitee 鉴权失败（旧实现说成「网络不可达」）
@@ -605,6 +605,30 @@ test('T14 状态码先于文本：401/403 → auth-rejected、407 → proxy-auth
     assert.equal(error.details.reason, expected, stderr)
     assert.equal(error.details.status, status, stderr)
     assert.equal(/网络不可达/.test(error.message), false, `状态码原因不得说成网络不可达：${stderr}`)
+    await port.dispose()
+  }
+
+  // mod-plugin-push-classify-hardening（b11b P2-4 / P2-1）：三条新裁决，逐条打真 pushMain()。
+  // ① 回显行上的 403 + DNS 失败 ⇒ unreachable（硬证据赢过状态码，且不挂 status）；
+  // ② 404 ⇒ not-found + status=404（仓库不存在，不是网络）；
+  // ③ 302 ⇒ git-failed + 无 status（认出了码但没映射，绝不冒充不可达）。
+  const hardening = [
+    ['remote: build log: see HTTP 403 section; Could not resolve host', 'unreachable', undefined],
+    ["fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 404", 'not-found', 404],
+    ["fatal: unable to access 'https://gitee.com/acme/repo.git/': The requested URL returned error: 302", 'git-failed', undefined],
+  ]
+  for (const [stderr, expected, status] of hardening) {
+    const port = portWithRunner(failRunner(stderr))
+    const error = await captureRejection(() => port.pushMain(PUSH_ARGS))
+    assert.equal(error.code, V2_ERROR.PUSH_REJECTED, stderr)
+    assert.equal(error.details.reason, expected, stderr)
+    assert.equal(error.details.status, status, stderr)
+    if (expected === 'unreachable') {
+      assert.equal(error.message, '推送失败：网络不可达（无法解析或连接到远端）', stderr)
+      assert.equal(/令牌|凭据/.test(error.message), false, `DNS 失败不许说成凭据问题：${stderr}`)
+    } else {
+      assert.equal(/网络不可达/.test(error.message), false, `${expected} 不得说成网络不可达：${stderr}`)
+    }
     await port.dispose()
   }
 

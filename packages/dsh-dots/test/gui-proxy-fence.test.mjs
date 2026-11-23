@@ -18,13 +18,14 @@
  * **既能绑定又能自连**；本机没有这样的地址时相关用例带具名原因跳过（`LAN-E2E-SKIP：…`），
  * 并由文件末尾的「LAN 台账」用例把 登记/实跑/跳过 三条数钉死（跳过不可能被当成通过）。
  */
-import test from 'node:test'
+import nodeTest from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import https from 'node:https'
 import net from 'node:net'
 import tls from 'node:tls'
 import os from 'node:os'
+import { readFileSync } from 'node:fs'
 import { DEFAULT_UPSTREAM_FIRST_BYTE_TIMEOUT_MS, isBindableLanAddress, startRemoteListener } from '../dist/remote/listener.js'
 import { generatePairingCertificate } from '../dist/remote/pairingTls.js'
 
@@ -134,27 +135,105 @@ function lanSkipReason(totalCases) {
 }
 
 /**
- * LAN 用例台账（P2-B）：**跳过必须可见，且不可能被当成通过**。
+ * 唯一注册器（评审 b11b P2-8）：**每一个**用例都必须经这里登记。
  *
- * 静态 `skip` 选项会让人无法从输出里区分"跑过了"与"压根没跑"；这里把每条 `lanTest`
- * 都登记进台账，由文件末尾的台账用例断言 `ran + skipped === total` 且"只有本机真的
- * 缺能力时才允许跳过"，并打印具体原因。跳过用运行期的 `t.skip(文案)`，因为只有运行时
- * 才知道本文件一共登记了多少条 `lanTest`（文案里的条数必须是真实条数）。
- * 用例体本身的断言与行为**一字未改**：跳过时函数体不会执行（与静态 skip 等价）。
+ * 旧实现只在 `lanTest()` 里给台账累加，所以直接注册的用例对台账**完全不可见** —— 将来有人
+ * 加一条 LAN 用例忘了用 `lanTest()`，台账照样"通过"，那一条永远不在账上（不会假通过，但会
+ * 漏账，而漏账比假通过更难发现）。现在两条纪律合起来才是"每个用例都真的被记账"：
+ *   ① 结构上：`node:test` 只允许在这个包装器里被调用（nodeTest 标识符），`test()` /
+ *      `lanTest()` 都是它的薄封装，所以 **`total` 是本文件全部注册的条数**，不是手抄清单；
+ *   ② 运行期：`lanTest()` 注册的用例在**运行期**才知道本机有没有 LAN 能力，缺能力时用
+ *      `t.skip(具名原因)` 跳过（不是注册期静态 skip），跳过被 node 的汇总记进 `skipped`
+ *      而**不是** `pass`。
+ * 文件末尾的台账用例把三条数钉死，并读本文件源码自检「没有绕过包装器的直调」。
  */
-const LAN_LEDGER = { total: 0, ran: 0, skipped: 0 }
 
-function lanTest(name, fn) {
+/**
+ * 台账：`total` = **全部**注册数（harness-wide），`gated` = 其中的 LAN 用例数
+ * （只有这部分会因缺能力而跳过），`ran` / `skipped` = 运行期实际结果。
+ */
+const LAN_LEDGER = {
+  total: 0, gated: 0, ran: 0, skipped: 0, staticSkipped: 0, reason: '',
+}
+
+/**
+ * 台账裁决（**纯函数**，评审 b11b P2-8）：不读环境、不碰网络、不看本机网卡，
+ * 因此「缺能力时 `ran === 0 && skipped > 0`」这条分支可以**离线真的执行一遍**。
+ */
+function lanLedgerVerdict({ total, ran, skipped, missing, gated = total, staticSkipped = 0 }) {
+  const problems = []
+  if (!Number.isInteger(total) || total <= 0) {
+    problems.push(`登记数 ${String(total)} 必须 > 0：0 条说明登记被绕过，这条守卫会恒真`)
+    return { ok: false, problems }
+  }
+  if (!Number.isInteger(ran) || !Number.isInteger(skipped)) {
+    problems.push(`实跑/跳过计数必须是整数（ran=${String(ran)} skipped=${String(skipped)}）`)
+    return { ok: false, problems }
+  }
+  if (!Number.isInteger(gated) || gated < 0 || gated > total) {
+    problems.push(`LAN 子集 ${String(gated)} 必须是 0..${String(total)} 的整数`)
+  }
+  const expectedSkipped = (missing ? gated : 0) + staticSkipped
+  if (ran + skipped !== total) {
+    problems.push(`实跑 ${String(ran)} + 跳过 ${String(skipped)} 必须等于登记 ${String(total)}`)
+  }
+  if (skipped !== expectedSkipped) {
+    problems.push(
+      `跳过数 ${String(skipped)} ≠ ${String(expectedSkipped)}`
+      + `（缺能力=${String(missing)}；LAN 用例 ${String(gated)} + 注册期跳过 ${String(staticSkipped)}）`,
+    )
+  }
+  if (ran !== total - expectedSkipped) {
+    problems.push(`实跑数 ${String(ran)} ≠ ${String(total - expectedSkipped)}（缺能力时一条都不许实跑）`)
+  }
+  return { ok: problems.length === 0, problems }
+}
+
+/**
+ * 一条用例的运行期记账（**唯一**记账点）：注册器与离线探针共用同一份代码。
+ * 缺能力的 LAN 用例 ⇒ 记一次跳过 + `t.skip(具名原因)`，**用例体不执行**。
+ */
+async function runGatedCase(t, { fn, gated = true, missing = LAN === null, ledger = LAN_LEDGER } = {}) {
+  if (gated && missing) {
+    ledger.skipped += 1
+    ledger.reason = lanSkipReason(ledger.gated)
+    t.skip(ledger.reason)
+    return undefined
+  }
+  ledger.ran += 1
+  return await fn(t)
+}
+
+/** `test(name, fn)` / `test(name, options, fn)` 两种写法都收（`node:test` 的原样签名）。 */
+function splitTestArgs(optionsOrFn, maybeFn) {
+  if (typeof optionsOrFn === 'function') return { options: {}, fn: optionsOrFn }
+  return { options: optionsOrFn ?? {}, fn: maybeFn }
+}
+
+/** 唯一注册器：`node:test` **只**在这里被调用（末尾自检就查这一点）。 */
+function register(name, options, fn, gated) {
   LAN_LEDGER.total += 1
-  return test(name, async (t) => {
-    if (LAN === null) {
-      LAN_LEDGER.skipped += 1
-      t.skip(lanSkipReason(LAN_LEDGER.total))
-      return
-    }
-    LAN_LEDGER.ran += 1
-    return fn(t)
+  if (gated) LAN_LEDGER.gated += 1
+  const staticSkip = options.skip !== undefined && options.skip !== false && options.skip !== ''
+  if (staticSkip) {
+    LAN_LEDGER.skipped += 1
+    LAN_LEDGER.staticSkipped += 1
+  }
+  return nodeTest(name, options, async (t) => {
+    if (staticSkip) return undefined
+    return await runGatedCase(t, { fn, gated })
   })
+}
+
+/** 普通用例：不因缺 LAN 能力而跳过。 */
+function test(name, optionsOrFn, maybeFn) {
+  const { options, fn } = splitTestArgs(optionsOrFn, maybeFn)
+  return register(name, options, fn, false)
+}
+
+/** LAN 用例：本机缺能力时以具名原因跳过，并进台账。 */
+function lanTest(name, fn) {
+  return register(name, {}, fn, true)
 }
 
 async function listenOnce(server, port, host) {
@@ -1175,38 +1254,126 @@ test('F1 上游身份：缓存过期时门禁触发一次后台自愈，下一�
 })
 
 // ---------------------------------------------------------------------------
-// LAN 台账（P2-B）：跳过必须可见，且不可能被当成通过
+// LAN 台账（P2-B + P2-8）：跳过必须可见，且不可能被当成通过
 // ---------------------------------------------------------------------------
 
 /**
- * 台账守卫：`lanTest` 的 登记数 / 实跑数 / 跳过数 必须自洽，且"跳过"只允许出现在
- * 本机**真的缺能力**的时候。本用例在所有 `lanTest` 之后注册，运行时三条数已经定稿。
- *
- * 不真空的三条保证：
- *   · `total > 0`：一条 `lanTest` 都没登记时本用例直接失败（否则它什么也没证明）；
- *   · `ran + skipped === total`：跳过与实跑都不许"消失"；
- *   · `skipped === 缺能力 ? total : 0`：有能力时一条都不许跳过，缺能力时**每一条**
- *     都要以跳过出现在台账里（不可能有哪条悄悄算成通过）。
+ * 缺能力分支的**离线**执行（评审 b11b P2-8 的第三点）：本机有 LAN 地址，所以真实台账的
+ * `skipped` 永远是 0，那条断言当次**没跑过**。这里用同一份 `runGatedCase` / `lanLedgerVerdict`，
+ * 只把 `missing` 注入成 `true`，把「跳过」跑一遍（不依赖任何环境、不碰网卡）。
  */
-test('LAN 台账（P2-B）：登记数 = 实跑数 + 跳过数，且跳过只能发生在能力缺失时', (t) => {
-  const { total, ran, skipped } = LAN_LEDGER
+test('LAN 台账自检（P2-8）：缺能力分支离线真跑一遍（注入 missing，用例体必须一次都不执行）', async () => {
+  const ledger = { total: 0, gated: 0, ran: 0, skipped: 0, staticSkipped: 0, reason: '' }
+  const executed = []
+  const skips = []
+  const fakeT = { skip: (text) => skips.push(text) }
+  for (let index = 0; index < 3; index += 1) {
+    ledger.total += 1
+    ledger.gated += 1
+    await runGatedCase(fakeT, {
+      fn: () => executed.push(index), gated: true, missing: true, ledger,
+    })
+  }
+  assert.deepEqual(executed, [], '缺能力时用例体一次都不许执行（跳过 ≠ 通过）')
+  assert.equal(skips.length, 3, '每一条都要以具名原因跳过')
+  assert.match(skips[0], /^LAN-E2E-SKIP：/, '跳过文案必须可诊断（不是静默）')
+  assert.equal(ledger.skipped, 3)
+  assert.equal(ledger.ran, 0)
+  assert.deepEqual(
+    lanLedgerVerdict({ total: 3, ran: 0, skipped: 3, missing: true, gated: 3 }).problems, [],
+    'ran=0 且 skipped>0 在缺能力时是**合法**结论',
+  )
+
+  // 对照组：能力存在时同一份代码必须实跑、0 跳过（否则"注入 missing"就没有证明力）。
+  const okLedger = { total: 0, gated: 0, ran: 0, skipped: 0, staticSkipped: 0, reason: '' }
+  const okExecuted = []
+  for (let index = 0; index < 3; index += 1) {
+    okLedger.total += 1
+    okLedger.gated += 1
+    await runGatedCase(fakeT, { fn: () => okExecuted.push(index), gated: true, missing: false, ledger: okLedger })
+  }
+  assert.deepEqual(okExecuted, [0, 1, 2], '有能力时必须实跑')
+  assert.equal(okLedger.skipped, 0)
+  assert.deepEqual(
+    lanLedgerVerdict({ total: 3, ran: 3, skipped: 0, missing: false, gated: 3 }).problems, [],
+  )
+})
+
+/**
+ * 裁决函数的边界（P2-8）：每条不变式都要能**单独**被判红，否则"永不失败的函数"没有意义。
+ * 这些是纯函数调用，缺能力分支因此在本机（有 LAN 地址）也真的执行过。
+ */
+test('LAN 台账纯函数（P2-8）：lanLedgerVerdict 的不变式逐条可判红', () => {
+  const verdictOf = (input) => lanLedgerVerdict(input)
+  // 缺能力：ran=0 / skipped=total（这就是本机跑不到的那条分支）。
+  assert.deepEqual(verdictOf({ total: 5, ran: 0, skipped: 5, missing: true }).problems, [])
+  // 缺能力却有一条实跑 ⇒ 红。
+  assert.equal(verdictOf({ total: 5, ran: 1, skipped: 4, missing: true }).problems.length > 0, true)
+  // 缺能力却一条都没跳 ⇒ 红。
+  assert.equal(verdictOf({ total: 5, ran: 5, skipped: 0, missing: true }).problems.length > 0, true)
+  // 有能力：必须全部实跑、0 跳过。
+  assert.deepEqual(verdictOf({ total: 5, ran: 5, skipped: 0, missing: false }).problems, [])
+  assert.equal(verdictOf({ total: 5, ran: 4, skipped: 1, missing: false }).problems.length > 0, true)
+  // 有注册期跳过时，两种能力状态的期望值都还是精确数。
+  assert.deepEqual(verdictOf({ total: 6, ran: 5, skipped: 1, missing: false, gated: 5, staticSkipped: 1 }).problems, [])
+  assert.deepEqual(verdictOf({ total: 6, ran: 0, skipped: 6, missing: true, gated: 5, staticSkipped: 1 }).problems, [])
+  // 用例"消失"（ran + skipped ≠ total）⇒ 红。
+  assert.equal(verdictOf({ total: 5, ran: 2, skipped: 2, missing: false }).problems.length > 0, true)
+  // 空账本 / 坏输入 ⇒ 红（守卫不许因为没有登记而恒真）。
+  assert.equal(verdictOf({ total: 0, ran: 0, skipped: 0, missing: true }).problems.length > 0, true)
+  assert.equal(verdictOf({ total: -1, ran: 0, skipped: 0, missing: false }).problems.length > 0, true)
+  assert.equal(verdictOf({ total: 5, ran: 0, skipped: 5, missing: true, gated: 9 }).problems.length > 0, true)
+})
+
+/**
+ * 台账守卫（评审 b11b P2-8 收口）：`total` 是**本文件全部注册**的条数（登记器唯一入口），
+ * `gated` 是其中会因缺 LAN 能力而跳过的子集，`ran` / `skipped` 是运行期实际结果。
+ *
+ * 本用例注册在所有 `test` / `lanTest` **之后**（含上面两条自检），运行时三条数已经定稿：
+ *   · `total > 0` 且 `total > gated`：一条都没登记、或登记器只覆盖 LAN 用例、或有人绕过
+ *     登记器，本用例都会失败（旧实现只统计 `lanTest`，这正是缺陷本身）；
+ *   · `ran + skipped === total`：跳过与实跑都不许"消失"；
+ *   · 缺能力时 `skipped === gated + staticSkipped`、`ran === total - 它`：每一条 LAN 用例都必须
+ *     以跳过出现（不可能有哪条悄悄算成通过），非 LAN 用例照常实跑；
+ *   · **源码自检**：nodeTest 的直调（带括号）只允许出现一次（唯一包装器里）——这是"每个用例
+ *     都经过登记器"的构造性证明，而不是靠人记得用 `lanTest`。
+ */
+test('LAN 台账（P2-B / P2-8）：登记数 = 实跑数 + 跳过数，且跳过只能发生在能力缺失时', (t) => {
+  const { total, gated, ran, skipped, staticSkipped } = LAN_LEDGER
   const capabilityMissing = LAN === null
-  assert.ok(total > 0, '台账里必须有 >= 1 条 LAN 用例：0 条说明登记被绕过，这条守卫就失去意义')
+  const verdict = lanLedgerVerdict({ total, ran, skipped, missing: capabilityMissing, gated, staticSkipped })
+  assert.deepEqual(verdict.problems, [], `台账不自洽：${verdict.problems.join('；')}`)
+
+  assert.ok(total > 0, '台账里必须有 >= 1 条用例：0 条说明登记被绕过，这条守卫就失去意义')
+  assert.ok(gated > 0, '本文件必须至少有一条 LAN 用例（否则台账没有意义）')
+  // 旧台账只统计 `lanTest`；现在 total 必须**多于** LAN 子集，才证明它真的是全量登记数。
+  assert.ok(total > gated, `登记总数 ${String(total)} 必须多于 LAN 子集 ${String(gated)}（本文件有非 LAN 用例）`)
   assert.equal(ran + skipped, total, `实跑 ${String(ran)} + 跳过 ${String(skipped)} 必须等于登记 ${String(total)}`)
+  const expectedSkipped = (capabilityMissing ? gated : 0) + staticSkipped
   assert.equal(
     skipped,
-    capabilityMissing ? total : 0,
-    `跳过数 ${String(skipped)} 与本机能力（缺失=${String(capabilityMissing)}）不一致：有能力时一条都不许跳过`,
+    expectedSkipped,
+    `跳过数 ${String(skipped)} 与本机能力（缺失=${String(capabilityMissing)}）不一致：有能力时一条 LAN 用例都不许跳过`,
   )
   assert.equal(
     ran,
-    capabilityMissing ? 0 : total,
-    `实跑数 ${String(ran)} 与本机能力（缺失=${String(capabilityMissing)}）不一致：缺能力时一条都不许实跑`,
+    total - expectedSkipped,
+    `实跑数 ${String(ran)} 与本机能力（缺失=${String(capabilityMissing)}）不一致：缺能力时 LAN 用例一条都不许实跑`,
   )
+
+  // 源码自检：node:test 只允许在唯一包装器里被调用一次。用拼接构造针，避免这段源码自己命中。
+  const source = readFileSync(new URL(import.meta.url), 'utf8')
+  const needle = `node${'Test'}(`
+  const hits = source.split(needle).length - 1
+  assert.equal(hits, 1, `node:test 直调必须恰好 1 处（唯一包装器里），实际 ${String(hits)} 处`)
+
   const reason = capabilityMissing
-    ? lanSkipReason(total)
-    : `能力存在：可绑定且可自连的 ${String(LAN)}（${String(total)} 条 LAN 用例全部实跑，0 跳过）`
+    ? lanSkipReason(gated)
+    : `能力存在：可绑定且可自连的 ${String(LAN)}（${String(gated)} 条 LAN 用例全部实跑，0 跳过）`
   t.diagnostic(reason)
-  console.log(`[LAN-LEDGER] total=${String(total)} ran=${String(ran)} skipped=${String(skipped)} | ${reason}`)
+  console.log(
+    `[LAN-LEDGER] registered=${String(total)} gated=${String(gated)}`
+    + ` ran=${String(ran)} skipped=${String(skipped)} | ${reason}`,
+  )
 })
 

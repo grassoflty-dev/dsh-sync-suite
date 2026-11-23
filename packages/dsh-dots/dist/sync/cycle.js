@@ -756,6 +756,11 @@ export const PUSH_REMOTE_ERROR_NEXT_STEP = '；下一步：稍后重试；连续
 /** 远端限流（429）：等，别猛推。 */
 export const PUSH_RATE_LIMITED_NEXT_STEP = '；下一步：等几分钟再试；先把多次小提交合并再推';
 /**
+ * 远端回 404（评审 b11b P2-1）：仓库不存在 / 改名 / 删了 / 当前凭据看不到它。
+ * 动作是**核对地址与私有库授权**——绝不是查网络（旧兜底把 404 说成「网络不可达」）。
+ */
+export const PUSH_NOT_FOUND_NEXT_STEP = '；下一步：核对仓库地址是否改名或已删除；私有库需要该登录名与令牌有读取权限';
+/**
  * 拿不出凭据（本机鉴权环境）：动作是**把登录名/令牌填全**，与 401/403 的「核对令牌」不同。
  * 旧实现让它共用 `DEFAULT_GIT_NEXT_STEP`（「检查远端是否被其他设备推进」），于是同一句
  * 「HTTPS 鉴权无法通过」后面跟着一句与鉴权无关的建议——文案自相矛盾（评审 b11b P2-2）。
@@ -764,10 +769,10 @@ export const PUSH_AUTH_PROMPT_NEXT_STEP = '；下一步：检查登录名/令牌
 /** 其它 typed 码（含既有 E_PUSH_REJECTED）沿用原来的远端分叉建议，文案逐字节不变。 */
 const DEFAULT_GIT_NEXT_STEP = '；下一步：检查远端是否被其他设备推进，下一次同步会做有界重试，仍未成功请人工协调';
 /**
- * reason → 下一步的**完整表**：`sync/gitPort.ts` 能产出的九类原因在这里一一对应，
+ * reason → 下一步的**完整表**：`sync/gitPort.ts` 能产出的十类原因在这里一一对应，
  * 少写一个就会落回 DEFAULT（因此 `test/push-auth-classification.test.mjs` 逐原因断言）。
  *
- * - 四个状态码原因各有独立动作（改令牌 / 改代理 / 等 / 等服务端恢复，5xx 那条同时提代理）；
+ * - 五个状态码原因各有独立动作（改令牌 / 核对仓库地址 / 改代理 / 等 / 等服务端恢复，5xx 那条同时提代理）；
  * - `timeout` / `unreachable` 各自保留原有措辞（超时与不可达是两种结局）；
  * - `auth-prompt` 有自己的动作（把登录名/令牌填全）——它的短语只说「鉴权无法通过」，
  *   不给动作就等于让用户去读那份「远端被推进」的建议（b11b P2-2）；
@@ -780,6 +785,7 @@ const PUSH_NEXT_STEP = Object.freeze({
     unreachable: PUSH_UNREACHABLE_NEXT_STEP,
     network: PUSH_UNREACHABLE_NEXT_STEP, // 旧字段兼容：network = unreachable
     'auth-rejected': PUSH_AUTH_REJECTED_NEXT_STEP,
+    'not-found': PUSH_NOT_FOUND_NEXT_STEP,
     'proxy-auth': PUSH_PROXY_AUTH_NEXT_STEP,
     'remote-error': PUSH_REMOTE_ERROR_NEXT_STEP,
     'rate-limited': PUSH_RATE_LIMITED_NEXT_STEP,
@@ -836,13 +842,21 @@ const MAX_TERMINAL_PUSH_REASON = 96;
 /** 未通过白名单时的固定替代文案：只报类别，不报位置、原文或任何可还原片段。 */
 const GENERIC_PUSH_REASON = '推送失败（原因类别未识别）';
 /**
- * 只接受 `gitPort.pushFailure()` 的全部固定短语（8 条 + 1 个超时模板 = 9）；
- * 任何其它正文都不进终态消息。
+ * 白名单共 10 条短语（9 条固定短语 + 1 个超时模板 = 10）：只接受 `gitPort.pushFailure()`
+ * 的全部固定短语，任何其它正文都不进终态消息。
+ *
+ * 上面那句带数字的条数标注是**机器可校验**的，不是散文（评审 b11b P2-6）：
+ * 这条注释曾经写「五个短语」而数组里其实是九条 —— 一句会撒谎的注释比没有注释更坏。
+ * `test/plugin-pending-ownership.test.mjs` 从本文件源码里把那个数字解析出来，与
+ * `ALLOWED_PUSH_REASONS.length` 精确比对；数字与数组长度不一致，测试就红。
+ * 所以**改条数时必须同时改这个数字**（全文只允许出现这一处该标注，重复会直接被守卫点出来）。
  */
 const ALLOWED_PUSH_REASONS = Object.freeze([
     '推送失败：HTTPS 鉴权无法通过（git 已禁用交互提示，askpass／用户名或令牌不可用）；请检查鉴权配置后重试',
     // b11 P2-6：凭据被远端拒绝与「拿不出凭据」是两件事，四条短语各自点名真实原因。
     '推送失败：远端拒绝了这个用户名或令牌（HTTP 401/403），凭据需要重新核对',
+    // b11b P2-1：404 是「仓库不存在 / 凭据看不到它」，与网络无关。
+    '推送失败：远端返回 404，仓库不存在或当前凭据看不到它',
     '推送失败：代理要求它自己的鉴权（HTTP 407），不是仓库凭据的问题',
     '推送失败：远端限流（HTTP 429），稍后再推',
     // 5xx 不单方面归因给仓库：代理/网关回 502 时 git 的文案与仓库自己回 502 完全相同（b11b P2-3）。
@@ -855,7 +869,7 @@ const ALLOWED_PUSH_REASONS = Object.freeze([
     '推送失败：git 拒绝了本次推送，请检查远端状态后重试',
 ]);
 /**
- * 精确短语白名单（fail-closed）：折叠成单行、有界之后，只有逐字等于九条
+ * 精确短语白名单（fail-closed）：折叠成单行、有界之后，只有逐字等于上面那十条
  * pushFailure() 短语之一才通过；其它一切（含 UNC / 相对 / 全角路径、盘符、
  * 令牌、hex、超长串）都整段换成固定短语。不做部分打码、不做占位符替换。
  *

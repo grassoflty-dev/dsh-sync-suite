@@ -154,7 +154,7 @@ async function hostileReasonResult(pushErrorText) {
   })
 }
 
-// 两侧短语漂移守卫：从源码逐字抽出九个「推送失败：…」短语，不靠人工维护清单。
+// 两侧短语漂移守卫：从源码逐字抽出十个「推送失败：…」短语，不靠人工维护清单。
 // 其中超时短语是模板（唯一变量 = 当次预算数字），单独从 gitPort.ts 的导出常量取出。
 function quotedPushPhrases(block) {
   const out = []
@@ -449,18 +449,36 @@ test('PO-08 16 个 hostile 推送原因全部折叠为固定短语（含 r2 fuzz
 })
 
 /**
- * 终态白名单的 shipped 短语条数：8 条固定短语 + 1 个超时模板 = 9。
+ * 终态白名单的 shipped 短语条数：9 条固定短语 + 1 个超时模板 = 10。
  *
  * retarget 历史：`mod-plugin-git-timeout-classification` 时为 5（4 + 超时模板）；
  * `mod-plugin-push-auth-vs-network`（b11 P2-6）把「凭据被远端拒绝」与世界状态另立四条
- * （auth-rejected / proxy-auth / rate-limited / remote-error），于是变成 9。
+ * （auth-rejected / proxy-auth / rate-limited / remote-error），于是变成 9；
+ * `mod-plugin-push-classify-hardening`（b11b P2-1）再加 `not-found`（404），于是 9 → 10。
  * 断言本身一条未放宽：逐条跑完整 cycle 并逐字比对，条数少一条或多一条都会失败。
  */
-const SHIPPED_PUSH_PHRASE_COUNT = 9
+const SHIPPED_PUSH_PHRASE_COUNT = 10
 
-test('PO-09 九个 shipped 短语逐字节存活（防止过度打码）', async () => {
+/**
+ * 从 `src/sync/cycle.ts` 的注释里解析「白名单共 N 条短语」的 N（评审 b11b P2-6）。
+ *
+ * 为什么要有这一条：白名单数组上方的注释曾经写「五个短语」而数组里是九条 —— 注释与代码
+ * 各说一套，读文档的人会按错的条数理解闸门。注释里的数字必须**机器可校验**：
+ * 这里把它解析出来，下面与数组长度、与 shipped 条数三方比对；任何一处不一致都失败。
+ */
+function documentedPushPhraseCount() {
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const src = readFileSync(path.resolve(here, '../src/sync/cycle.ts'), 'utf8')
+  const matches = [...src.matchAll(/白名单共\s*(\d+)\s*条短语/g)]
+  assert.equal(matches.length, 1, 'cycle.ts 必须恰好有一处「白名单共 N 条短语」的可校验注释')
+  const value = Number.parseInt(matches[0][1], 10)
+  assert.equal(Number.isInteger(value), true, '注释里的条数必须是整数')
+  return value
+}
+
+test('PO-09 十个 shipped 短语逐字节存活（防止过度打码）', async () => {
   const reasons = shippedPushReasons()
-  // 8 条固定短语 + 1 条超时模板（超时与不可达、凭据被拒与拿不出凭据都是不同结局）。
+  // 9 条固定短语 + 1 条超时模板（超时与不可达、凭据被拒与拿不出凭据、404 与 5xx 都是不同结局）。
   assert.equal(reasons.length, SHIPPED_PUSH_PHRASE_COUNT)
   for (const shipped of reasons) {
     const result = await hostileReasonResult(shipped)
@@ -490,10 +508,24 @@ test('PO-11 超时短语带真实预算数字也能穿过白名单；把数字�
 test('PO-10 drift guard：cycle.ts 的精确短语表与 gitPort.pushFailure() 逐字一致', () => {
   const shipped = shippedPushReasons()
   const allowed = cycleAllowedReasons()
-  // 两侧都是 9 条（4 条状态码新原因 + 原有 4 条 + 超时模板）；本断言只改数字，不放宽比较。
+  // 两侧都是 10 条（5 条状态码原因 + 原有 3 条 + 超时模板）；本断言只改数字，不放宽比较。
   assert.equal(shipped.length, SHIPPED_PUSH_PHRASE_COUNT)
   assert.equal(allowed.length, SHIPPED_PUSH_PHRASE_COUNT)
   // 任一侧改写 / 增删短语都会让排序后的数组不同 ⇒ 本测试失败，
   // 不会让重新措辞的正文悄无声息地穿过终态消息。
   assert.deepEqual(allowed, shipped)
+})
+
+test('PO-12 census 注释守卫：cycle.ts 注释里写的条数必须等于数组实际长度（注释不许撒谎）', () => {
+  const documented = documentedPushPhraseCount()
+  const allowed = cycleAllowedReasons()
+  // 三方一致：注释里的 N、源码里 ALLOWED_PUSH_REASONS 的实际条数、以及 shipped 短语条数常量。
+  assert.equal(documented, allowed.length, '注释里的「白名单共 N 条短语」必须等于数组实际长度')
+  assert.equal(documented, SHIPPED_PUSH_PHRASE_COUNT, '注释里的 N 必须等于 shipped 短语条数常量')
+  // 反向证明这条守卫不是恒真：把注释里的数字换成别的值，就必须与数组长度不等。
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const src = readFileSync(path.resolve(here, '../src/sync/cycle.ts'), 'utf8')
+  const tampered = src.replace(/白名单共\s*\d+\s*条短语/, '白名单共 5 条短语')
+  const tamperedCount = Number.parseInt(/白名单共\s*(\d+)\s*条短语/.exec(tampered)[1], 10)
+  assert.notEqual(tamperedCount, allowed.length, '篡改后的数字必须被检出（守卫不是恒真）')
 })
