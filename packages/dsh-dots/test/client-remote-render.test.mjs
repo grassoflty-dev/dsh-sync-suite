@@ -676,7 +676,8 @@ test('merged panel：pairing-client 接线后远程组仍在同一页内可达�
   const text = textOf(group)
   for (const expected of [
     '远程控制', // 页内分组标题
-    zh['lean.remote.mode.hint'], '自动选中：lan', // 方式 + 自动选中原因
+    // retarget（mod-plugin-remote-hints-mode-keyed）：方式行改为该方式自己的提示，不再是「自动选中：lan」。
+    zh['lean.remote.mode.hint'], zh['lean.remote.hint.lan'],
     'Tailscale：平板需加入同一 tailnet', '局域网：同一 Wi-Fi',
     '局域网也需要端口和令牌：二维码里已经带好，不用手输；令牌阻止同一网络里的其他人控制这台 DSH。',
     '显示二维码', '复制配对串', '重新生成', '自检', '停止接受连接',

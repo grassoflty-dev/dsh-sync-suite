@@ -26,6 +26,10 @@ const pkgDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const clientDist = path.join(pkgDir, 'dist', 'client.js')
 const zh = JSON.parse(readFileSync(path.join(pkgDir, 'locale', 'zh.json'), 'utf8'))
 
+// mod-plugin-remote-hints-mode-keyed：none 只给唯一推荐动作；旧并列文案作为反例钉死。
+const NONE_HINT_ZH = '未检测到可用网络：推荐先登录 Tailscale，让平板加入同一 tailnet。'
+const OLD_NONE_HINT_ZH = '请先连同一 Wi-Fi，或登录 Tailscale 让平板加入同一 tailnet'
+
 function flatten(list, out) {
   for (const item of list) {
     if (Array.isArray(item)) flatten(item, out)
@@ -429,7 +433,9 @@ test('d1：没有任何可用方式 → 明确显示未检测到网络，不画�
     }
   })
   assert.equal(calls.some((c) => c.action === 'pairingShow'), false)
-  assert.ok(textOf(nodes).includes(zh['lean.remote.transport.none']))
+  // retarget（mod-plugin-remote-hints-mode-keyed）：旧「同一 Wi-Fi 或 Tailscale」并列句 → 单一推荐动作句。
+  assert.ok(textOf(nodes).includes(NONE_HINT_ZH), '必须显示新的单一推荐动作句')
+  assert.equal(textOf(nodes).includes(OLD_NONE_HINT_ZH), false, '不得再并列多种方式的前提')
   assert.equal(nodes.filter((node) => node.type === 'svg').length, 0)
 })
 

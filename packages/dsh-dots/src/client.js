@@ -123,8 +123,15 @@ window.__ModuleLoader__.load({
       "lean.remote.mode.hint": "方式（自动选中，可覆盖）",
       "lean.remote.mode.auto": "自动选择（推荐）",
       "lean.remote.transport.selected": "自动选中：{mode}",
-      "lean.remote.transport.none": "未检测到可用网络：请先连同一 Wi-Fi，或登录 Tailscale 让平板加入同一 tailnet",
+      // retarget（mod-plugin-remote-hints-mode-keyed）：只给唯一推荐动作，不再并列多种方式的前提。
+      "lean.remote.transport.none": "未检测到可用网络：推荐先登录 Tailscale，让平板加入同一 tailnet。",
       "lean.remote.transport.fallback": "所选方式不可用，已回落到自动选择",
+      // mod-plugin-remote-hints-mode-keyed：按方式唯一的提示，只讲本方式自己的前提。
+      "lean.remote.hint.auto": "自动选路已开启：按当前可用网络选择传输方式。",
+      "lean.remote.hint.tailscale": "两端加入同一 tailnet，填电脑的 100.x 地址；平板用鸿蒙原生 Tailscale 客户端。",
+      "lean.remote.hint.lan": "平板与电脑在同一 Wi-Fi/局域网，填电脑的局域网 IP。",
+      "lean.remote.hint.ipv6": "电脑有公网 IPv6 且放行入站，填 [地址]:端口；平板需支持 IPv6。",
+      "lean.remote.hint.fallback": "未知方式暂无专用提示，请以上方状态行为准。",
       // 传输诚实：TLS 落地前只讲事实，不做任何通道安全承诺。
       "lean.remote.transport.recommended": "推荐：Tailscale（已加密）",
       "lean.remote.transport.plaintext": "当前为明文 HTTP，仅建议在 Tailscale 下使用；加密传输模块随后",
@@ -228,8 +235,15 @@ window.__ModuleLoader__.load({
       "lean.remote.mode.hint": "Mode (auto-selected, overridable)",
       "lean.remote.mode.auto": "Auto (recommended)",
       "lean.remote.transport.selected": "Auto-selected: {mode}",
-      "lean.remote.transport.none": "No available network: join the same Wi-Fi, or sign in to Tailscale so the tablet joins the same tailnet",
+      // retarget（mod-plugin-remote-hints-mode-keyed）：只给唯一推荐动作，不再并列多种方式的前提。
+      "lean.remote.transport.none": "No usable network detected: sign in to Tailscale first so the tablet joins the same tailnet (recommended).",
       "lean.remote.transport.fallback": "Selected mode unavailable; fell back to auto-selection",
+      // mod-plugin-remote-hints-mode-keyed：按方式唯一的提示，只讲本方式自己的前提。
+      "lean.remote.hint.auto": "Auto-selection is on: the transport follows the networks currently available.",
+      "lean.remote.hint.tailscale": "Join the same tailnet on both ends and enter the PC's 100.x address; the tablet needs the native HarmonyOS Tailscale client.",
+      "lean.remote.hint.lan": "Put the tablet and PC on the same Wi-Fi/LAN and enter the PC's LAN IP.",
+      "lean.remote.hint.ipv6": "The PC needs public IPv6 with inbound access allowed; enter [address]:port and make sure the tablet supports IPv6.",
+      "lean.remote.hint.fallback": "No specific guidance for this mode; follow the status line above.",
       // Transport honesty: state facts only; no channel-security promise until TLS lands.
       "lean.remote.transport.recommended": "Recommended: Tailscale (encrypted)",
       "lean.remote.transport.plaintext": "Plain HTTP right now; only recommended under Tailscale; encrypted transport module to follow",
@@ -316,6 +330,35 @@ window.__ModuleLoader__.load({
         }
         return t(key, vars)
       }
+    }
+
+    // ------------------------------------------------------------------
+    // mod-plugin-remote-hints-mode-keyed：远程方式提示表（纯数据 + 查表，零副作用）。
+    // 只按 select 的真实可选项建条目：auto / tailscale / lan / ipv6；
+    // none = 没检测到传输（只给一条推荐动作），fallback = 未知方式的中性兜底。
+    // 每条只讲自己的前提，绝不拼进别的方式的整句要求。
+    // ------------------------------------------------------------------
+    const LEAN_MODE_HINT_KEYS = {
+      auto: 'lean.remote.hint.auto',
+      tailscale: 'lean.remote.hint.tailscale',
+      lan: 'lean.remote.hint.lan',
+      ipv6: 'lean.remote.hint.ipv6',
+      none: 'lean.remote.transport.none',
+      fallback: 'lean.remote.hint.fallback'
+    }
+
+    /** 纯查表：空串 = 未检测到(none)；未知值 = 中性 fallback，绝不回落到某个具体方式。 */
+    function leanModeHintKey(mode) {
+      if (mode === '') return LEAN_MODE_HINT_KEYS.none
+      if (typeof mode !== 'string' || !Object.prototype.hasOwnProperty.call(LEAN_MODE_HINT_KEYS, mode)) {
+        return LEAN_MODE_HINT_KEYS.fallback
+      }
+      return LEAN_MODE_HINT_KEYS[mode]
+    }
+
+    /** 取唯一一条提示文案；tr 由调用方注入，本函数无副作用。 */
+    function leanModeHint(mode, tr) {
+      return tr(leanModeHintKey(mode))
     }
 
     // ------------------------------------------------------------------
@@ -1309,6 +1352,8 @@ window.__ModuleLoader__.load({
       const candidates = transports && transports.candidates && typeof transports.candidates === 'object' ? transports.candidates : {}
       // 手动覆盖不可用 → 回落自动选中，下拉也必须显示回落后的真实方式，绝不留在死选项上。
       const modeValue = fallback && selected !== '' ? selected : (override !== '' ? override : selected)
+      // 方式提示只查一行：modeValue 是下拉实际生效值（'' = 未检测到传输）。
+      const modeHint = tr(leanModeHintKey(modeValue))
       // 传输诚实：这条说明跟着"实际用于二维码的传输方式"走；transports 还没落地时
       // 退回 provision 的 view.transport（二维码此刻用的就是它），fail-closed 先讲明文事实。
       const effectiveTransport = override !== '' ? override : (selected !== '' ? selected : (view && typeof view.transport === 'string' ? view.transport : ''))
@@ -1375,9 +1420,7 @@ window.__ModuleLoader__.load({
             }
           })
         ),
-        h('div', { 'data-lean': 'remote-transport', style: S.hint },
-          selected !== '' ? tr('lean.remote.transport.selected', { mode: selected }) : tr('lean.remote.transport.none')
-        ),
+        h('div', { 'data-lean': 'remote-transport', style: S.hint }, modeHint),
         // 运行状态单独一行讲真话：已启动 / 未启动。停止时下面的二维码与复制入口整体不渲染。
         h('div', { 'data-lean': 'remote-running', style: S.hint },
           stopped ? tr('lean.remote.stopped') : tr('lean.remote.started')
@@ -1465,6 +1508,10 @@ window.__ModuleLoader__.load({
     DotsPanel.LeanRemoteGroup = LeanRemoteGroup
     // 纯展示推断的测试接缝：G01 用它逐条对拍 engine/gitUsername.ts（防止两副本漂移）。
     DotsPanel.leanInferLogin = leanInferLogin
+    // mod-plugin-remote-hints-mode-keyed：纯查表接缝（与 LeanRemoteGroup / leanInferLogin 同级）。
+    DotsPanel.leanModeHint = leanModeHint
+    DotsPanel.leanModeHintKey = leanModeHintKey
+    DotsPanel.LEAN_MODE_HINT_KEYS = LEAN_MODE_HINT_KEYS
 
     // ------------------------------------------------------------------
     // Plugin body

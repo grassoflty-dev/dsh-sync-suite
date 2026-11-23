@@ -126,8 +126,9 @@ test('shipped 面板的文案 key 双份都在；dormant 旧面板文案已删�
       assert.equal(Object.hasOwn(dict, dead), false, `${lang} 不得复活 dormant 文案 key ${dead}`)
     }
   }
-  // 246 个 dormant-only key 已删除：324 -> 78。精确计数同时阻止整批复活与误删 shipped 文案。
-  assert.equal(Object.keys(en).length, 78, `locale 应恰好 78 个 shipped key，实际 ${Object.keys(en).length}`)
+  // 246 个 dormant-only key 已删除：324 -> 78；mod-plugin-remote-hints-mode-keyed 新增 5 个
+  // 按方式唯一的提示 key（auto/tailscale/lan/ipv6/fallback）→ 83。精确计数同时阻止整批复活与误删。
+  assert.equal(Object.keys(en).length, 83, `locale 应恰好 83 个 shipped key，实际 ${Object.keys(en).length}`)
 })
 
 test('src/client.js 内置字典与 locale JSON 完全一致（key 与文案）', () => {

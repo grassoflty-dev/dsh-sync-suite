@@ -16,6 +16,10 @@ const pkgDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const clientDist = path.join(pkgDir, 'dist', 'client.js')
 const zh = JSON.parse(readFileSync(path.join(pkgDir, 'locale', 'zh.json'), 'utf8'))
 
+// mod-plugin-remote-hints-mode-keyed：none 只给唯一推荐动作；旧并列文案作为反例钉死。
+const NONE_HINT_ZH = '未检测到可用网络：推荐先登录 Tailscale，让平板加入同一 tailnet。'
+const OLD_NONE_HINT_ZH = '请先连同一 Wi-Fi，或登录 Tailscale 让平板加入同一 tailnet'
+
 const TOKEN = 'rt_real_0123456789abcdef'
 const PAYLOAD = JSON.stringify({
   v: 1, instanceId: 'gwl-pc', transport: 'lan', host: '192.168.1.6', port: 44996,
@@ -265,7 +269,8 @@ test('W1：真实宿主 props 挂载 → pairingProvision / pairingTransports / 
   for (const line of reasonLines) {
     assert.ok(textOf(tree).includes(line), `必须渲染运输原因行：${line}`)
   }
-  assert.equal(dataText(tree, 'remote-transport').includes('lan'), true, '必须显示自动选中的方式')
+  // retarget（mod-plugin-remote-hints-mode-keyed）：方式行只显示 lan 自己的提示，不再显示「自动选中：lan」。
+  assert.equal(dataText(tree, 'remote-transport'), zh['lean.remote.hint.lan'], '只显示 lan 方式自己的一句提示')
 })
 
 test('W2：显式「显示二维码」→ pairingShow 产生唯一 svg（role=img / aria-label=二维码），矩阵来自 RPC', async () => {
@@ -384,7 +389,9 @@ test('W9：无任何可用传输 → 明确显示「未检测到可用网络」�
       })
     }
   })
-  assert.ok(textOf(mount.tree).includes(zh['lean.remote.transport.none']))
+  // retarget（mod-plugin-remote-hints-mode-keyed）：旧「同一 Wi-Fi 或 Tailscale」并列句 → 单一推荐动作句。
+  assert.ok(textOf(mount.tree).includes(NONE_HINT_ZH), '必须显示新的单一推荐动作句')
+  assert.equal(textOf(mount.tree).includes(OLD_NONE_HINT_ZH), false, '不得再并列多种方式的前提')
   const select = nodesOf(mount.tree).filter((n) => n.type === 'select')[0]
   assert.ok(select.props.children.filter((o) => o.props.disabled).length === 3, '三项都要灰掉')
 })
