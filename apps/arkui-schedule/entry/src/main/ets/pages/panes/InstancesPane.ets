@@ -28,6 +28,8 @@
  */
 import { promptAction, router } from '@kit.ArkUI';
 import { common, Want } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
+import { scanBarcode, scanCore } from '@kit.ScanKit';
 import { ActionButton } from '../../components/ActionButton';
 import { EmptyState } from '../../components/state/EmptyState';
 import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../../common/uiTokens';
@@ -43,6 +45,7 @@ import { REMOTE_MODE_LAN, REMOTE_MODE_ORDER, findRemoteMode } from '../../model/
 import { mergeRemoteToken, normalizeRemoteUrl, routeToRemote, stripRemoteToken } from '../../model/remoteUrl';
 import { FIRST_PAIRING_DETAIL, FIRST_PAIRING_WORDING } from '../../model/remoteAnnounceRefresh';
 import type { AnnounceRefreshOutcome, AnnounceRefreshState } from '../../model/remoteAnnounceRefresh';
+import { normaliseScannedPairing, scanUnavailableResult } from '../../model/pairingScan';
 import { badgeOf, canShowFingerprint } from '../../model/pairingBadge';
 import {
   REMOTE_OUTCOME_KEY,
@@ -491,6 +494,48 @@ export struct InstancesPane {
     }
   }
 
+  /**
+   * 扫码配对（mod-app-pairing-qr-scan）：调起系统扫码 UI，扫描文本经纯模型归一后
+   * 复用 addByPairing() 的唯一解析 + 探活 + 写表路径；粘贴入口保持原样、不是必经步骤。
+   * 用户取消（1000500002）静默返回；API 自身失败只显示固定中文原因，不回显扫描原文 / URL。
+   */
+  private async scanPairing(): Promise<void> {
+    if (this.pairingBusy) {
+      return;
+    }
+    this.pairingBusy = true;
+    this.pairingError = '';
+    let inScanApi: boolean = true;
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const result = await scanBarcode.startScanForResult(context, { scanTypes: [scanCore.ScanType.QR_CODE] });
+      const scanned = normaliseScannedPairing(result.originalValue);
+      inScanApi = false;
+      if (!scanned.ok) {
+        // 与粘贴路径共用解析器的固定中文 reason，错误区绝不回显扫描原文
+        this.pairingError = scanned.reason;
+        return;
+      }
+      // 规范串交给粘贴框，再走同一个 addByPairing()；它自己管理 busy，故先释放扫码占用的标志
+      this.pairingText = scanned.text;
+      this.pairingBusy = false;
+      await this.addByPairing();
+    } catch (error) {
+      if (inScanApi) {
+        const codeValue: number = (error as BusinessError).code;
+        const code: number = typeof codeValue === 'number' ? codeValue : -1;
+        // 用户主动取消不是错误：静默返回，不改错误区、不留状态
+        if (code !== scanCore.ScanErrorCode.SCAN_SERVICE_CANCELED) {
+          this.pairingError = scanUnavailableResult().reason;
+        }
+      }
+    } finally {
+      if (!this.disposed) {
+        this.pairingBusy = false;
+      }
+    }
+  }
+
   /** 删除任意远程行（没有受保护的本机行）；删完立刻重读内存镜像，空表不回补实例。 */
   private deleteInstance(view: RedactedInstance): void {
     instanceStore.remove(view.id);
@@ -855,9 +900,10 @@ export struct InstancesPane {
   }
 
   /**
-   * 手动配对面板（仅 configurable=true）：粘贴电脑面板的配对串即可添加实例。
+   * 手动配对面板（仅 configurable=true）：粘贴电脑面板的配对串即可添加实例；
+   * 「扫码配对」只是粘贴框旁的附加入口，成功时把规范串填回同一个粘贴框再走同一条添加路径。
    * 与下面的地址 / 令牌 / 方式表单是两条独立路径：配对串自带端口与令牌，不走两步公告同意。
-   * 错误区只显示 store 返回的固定中文 reason，绝不回显粘贴原文（token）。
+   * 错误区只显示解析器 / store 返回的固定中文 reason，绝不回显粘贴原文或扫描原文（token）。
    */
   @Builder
   PairingPanel() {
@@ -889,6 +935,19 @@ export struct InstancesPane {
             this.pairingText = value;
             this.pairingError = '';
           })
+        // 扫码是粘贴之外的**附加**入口：成功即把规范串填回粘贴框并复用同一条添加路径
+        ActionButton({
+          label: '扫码配对',
+          actionEnabled: true,
+          disabledReason: '',
+          busy: this.pairingBusy,
+          variant: 'secondary',
+          block: false,
+          onTap: (): void => {
+            this.scanPairing();
+          },
+          onBlockedTap: null
+        })
         if (this.pairingError.length > 0) {
           Text(this.pairingError)
             .fontSize(FONT.caption)
