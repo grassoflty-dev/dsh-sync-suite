@@ -61,6 +61,13 @@
   var PROTOCOL_VERSION = 1;
   var HTTP_TIMEOUT_MS = 90000;
   var MAX_MESSAGE_LENGTH = 600;
+  /** 桥内部未捕获 JS 异常的统一码：ArkTS 侧据此折成固定中文，原始 V8 文案只进诊断区。 */
+  var E_BRIDGE = 'E_BRIDGE';
+  /** 桥诊断栈的最大字符数（只做排查，绝不上用户可见状态行）。 */
+  var MAX_STACK_LENGTH = 1200;
+  /** V8 / JS 运行时异常的原文特征（isomorphic-git 内部也会抛这类 TypeError）。 */
+  var JS_RUNTIME_ERROR_RE =
+    /^(TypeError|RangeError|ReferenceError|SyntaxError)\b|Cannot read propert|is not a function|is not iterable|is not defined|Invalid attempt to (spread|destructure)|undefined is not an object/i;
 
   /** call/args 里允许携带的配置字段（token 永不回显）。 */
   // `username` 是 HTTPS 认证用户名（Gitee = 登录名，GitHub = x-access-token），由 ArkTS 侧解析后传入
@@ -325,7 +332,23 @@
     return text;
   }
 
-  /** 把 isomorphic-git / 宿主异常统一成 { code ∈ E_GIT|E_HTTP|E_AUTH|E_FS, message 中文 }。 */
+  /** 数组护栏：桥边界外的 plumbing/status 结果一律先过这里，undefined/null/错型退回空数组。 */
+  function asArray(value) {
+    return Array.isArray(value) ? value : [];
+  }
+
+  /** 栈只供诊断：先脱敏再截断，绝不进用户可见文案。 */
+  function sanitizeStack(stack) {
+    var text = sanitizeMessage(typeof stack === 'string' ? stack : '');
+    return text.length > MAX_STACK_LENGTH ? text.slice(0, MAX_STACK_LENGTH) + '…' : text;
+  }
+
+  /**
+   * 把 isomorphic-git / 宿主异常统一成
+   * { code ∈ E_GIT|E_HTTP|E_AUTH|E_FS|E_BRIDGE, message }。
+   * 未识别的 V8 运行时异常（TypeError: Cannot read properties of … 等）
+   * 一律归 E_BRIDGE：原始文案随错误对象回传（只进诊断区），不再冒充 Git 错误给用户。
+   */
   function normalizeError(error) {
     if (!error) {
       return bridgeError('E_GIT', '未知错误');
@@ -335,6 +358,11 @@
     }
     var name = String((error && (error.code || error.name)) || '');
     var message = sanitizeMessage(error && error.message !== undefined ? error.message : error);
+    if (JS_RUNTIME_ERROR_RE.test(name) || JS_RUNTIME_ERROR_RE.test(message)) {
+      var internal = bridgeError(E_BRIDGE, message);
+      internal.jsStack = sanitizeStack(error && error.stack !== undefined ? error.stack : '');
+      return internal;
+    }
     var statusCode =
       error && error.data && typeof error.data.statusCode === 'number' ? error.data.statusCode : null;
 
@@ -432,11 +460,12 @@
   function emitResult(id, error, data) {
     var payload;
     if (error) {
-      payload = {
-        id: id,
-        ok: false,
-        error: { code: error.code || 'E_GIT', message: sanitizeMessage(error.message) }
-      };
+      var failure = { code: error.code || 'E_GIT', message: sanitizeMessage(error.message) };
+      // E_BRIDGE 才带栈：仅供宿主写诊断，ArkTS 绝不把它拼进任何用户可见文案。
+      if (failure.code === E_BRIDGE) {
+        failure.stack = sanitizeStack(error.jsStack || '');
+      }
+      payload = { id: id, ok: false, error: failure };
     } else {
       payload = { id: id, ok: true, data: data === undefined ? null : data };
     }
@@ -559,6 +588,79 @@
     return depth;
   }
 
+  // ---------------------------------------------------------------- 边界值护栏（纯函数，单测直调）
+  //
+  // 这些都是「宿主 / isomorphic-git 返回值 → 数组」的唯一入口。V8 的
+  // `Cannot read properties of undefined (reading 'length')` 全部来自对 undefined 直接读
+  // .length/.map/[0]；任何跨桥值在循环/映射前必须先过 asArray。
+
+  /** git.log 结果 → sha 数组（项可能是 null / 缺 oid / 非对象，全部跳过）。 */
+  function shasFromLog(commits) {
+    var out = [];
+    var list = asArray(commits);
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i];
+      var oid = item && item.oid ? String(item.oid) : '';
+      if (oid.length > 0) {
+        out.push(oid);
+      }
+    }
+    return out;
+  }
+
+  /** git.statusMatrix 结果 → {changed, conflicts}；坏行跳过，不把 undefined 当数组。 */
+  function changedFromStatusMatrix(matrix) {
+    var list = asArray(matrix);
+    var changed = [];
+    for (var i = 0; i < list.length; i++) {
+      var row = list[i];
+      if (!Array.isArray(row) || row.length < 4) {
+        continue;
+      }
+      if (row[1] === 1 && row[2] === 1 && row[3] === 1) {
+        continue;
+      }
+      changed.push({ path: String(row[0]), head: row[1], workdir: row[2], stage: row[3] });
+    }
+    return { changed: changed, conflicts: countConflicts(list) };
+  }
+
+  /** git.listFiles 结果 → 合法日目录字符串数组。 */
+  function daysFromListFiles(files) {
+    var list = asArray(files);
+    var days = [];
+    for (var i = 0; i < list.length; i++) {
+      var m = /^timeline\/(\d{4}-\d{2}-\d{2})\/records\.json$/.exec(String(list[i]));
+      if (m) {
+        days.push(m[1]);
+      }
+    }
+    days.sort();
+    return days;
+  }
+
+  /** args.paths（JSON 字符串）→ 字符串数组；解析失败 / null / 对象都退回空数组。 */
+  function pathsFromJson(raw) {
+    if (typeof raw !== 'string' || raw.length === 0) {
+      return [];
+    }
+    try {
+      return asArray(JSON.parse(raw));
+    } catch (error) {
+      return [];
+    }
+  }
+
+  /** git.log 结果 → 可展示的提交列表。 */
+  function commitsToReports(commits) {
+    var out = [];
+    var list = asArray(commits);
+    for (var i = 0; i < list.length; i++) {
+      out.push(mapCommit(list[i]));
+    }
+    return out;
+  }
+
   // ---------------------------------------------------------------- 分支与 ahead/behind（A2）
 
   /** 计算 ahead/behind 时读取的提交条数上限（超出部分按「下界」处理，不联网、不读 packfile）。 */
@@ -662,14 +764,7 @@
   async function logShas(git, ref) {
     try {
       var commits = await git.log({ fs: session.fs, dir: session.repoRoot, ref: ref, depth: BRANCH_LOG_DEPTH });
-      var shas = [];
-      for (var i = 0; i < commits.length; i++) {
-        var oid = commits[i] && commits[i].oid ? String(commits[i].oid) : '';
-        if (oid.length > 0) {
-          shas.push(oid);
-        }
-      }
-      return shas;
+      return shasFromLog(commits);
     } catch (error) {
       return [];
     }
@@ -686,8 +781,8 @@
     var remoteRef = 'refs/remotes/origin/' + name;
     var localOid = await refOid(git, localRef);
     var remoteOid = await refOid(git, remoteRef);
-    var localShas = localOid === null ? [] : await logShas(git, localRef);
-    var remoteShas = remoteOid === null ? [] : await logShas(git, remoteRef);
+    var localShas = localOid === null ? [] : asArray(await logShas(git, localRef));
+    var remoteShas = remoteOid === null ? [] : asArray(await logShas(git, remoteRef));
     var range = computeAheadBehind(localShas, remoteShas);
     return {
       branch: name,
@@ -1311,7 +1406,7 @@
 
   function snapshotDeviceFiles(deviceId) {
     var backup = [];
-    var files = listDeviceFiles(deviceId);
+    var files = asArray(listDeviceFiles(deviceId));
     for (var i = 0; i < files.length; i++) {
       var absolute = pathJoin(session.repoRoot, files[i]);
       var encoded = readHostFileBase64(absolute);
@@ -1849,7 +1944,7 @@
     if (hostCall('fileExists', [deviceDir]) !== true) {
       throw bridgeError('E_FS', '本设备目录不存在：devices/' + deviceId + '（请先保存一条日程）');
     }
-    var files = listDeviceFiles(deviceId);
+    var files = asArray(listDeviceFiles(deviceId));
     for (var i = 0; i < files.length; i++) {
       await git.add({ fs: session.fs, dir: root, filepath: files[i] });
     }
@@ -2186,8 +2281,8 @@
     }
     if (report.head !== null) {
       try {
-        var latest = await git.log({ fs: session.fs, dir: root, depth: 1 });
-        if (latest && latest.length > 0) {
+        var latest = asArray(await git.log({ fs: session.fs, dir: root, depth: 1 }));
+        if (latest.length > 0) {
           report.lastCommit = mapCommit(latest[0]);
         }
       } catch (error) {
@@ -2196,17 +2291,10 @@
     }
     try {
       var matrix = await git.statusMatrix({ fs: session.fs, dir: root });
-      var changed = [];
-      for (var i = 0; i < matrix.length; i++) {
-        var row = matrix[i];
-        if (row[1] === 1 && row[2] === 1 && row[3] === 1) {
-          continue;
-        }
-        changed.push({ path: String(row[0]), head: row[1], workdir: row[2], stage: row[3] });
-      }
-      report.changedCount = changed.length;
-      report.changed = changed.slice(0, 100);
-      report.conflicts = countConflicts(matrix);
+      var status = changedFromStatusMatrix(matrix);
+      report.changedCount = status.changed.length;
+      report.changed = status.changed.slice(0, 100);
+      report.conflicts = status.conflicts;
     } catch (error) {
       report.statusError = sanitizeMessage(error && error.message !== undefined ? error.message : error);
     }
@@ -2227,7 +2315,7 @@
     report.head = await resolveHead(git);
     try {
       var commits = await git.log({ fs: session.fs, dir: root, depth: depth });
-      report.commits = commits.map(mapCommit);
+      report.commits = commitsToReports(commits);
     } catch (error) {
       var name = String((error && (error.code || error.name)) || '');
       if (!/NotFound|ResolveRef/.test(name)) {
@@ -2322,13 +2410,7 @@
         out.value = '[]';
         return out;
       }
-      var days = [];
-      for (var d = 0; d < files.length; d++) {
-        var m = /^timeline\/(\d{4}-\d{2}-\d{2})\/records\.json$/.exec(files[d]);
-        if (m) { days.push(m[1]); }
-      }
-      days.sort();
-      out.value = JSON.stringify(days);
+      out.value = JSON.stringify(daysFromListFiles(files));
       return out;
     }
     if (op === 'remoteLayout') {
@@ -2410,15 +2492,17 @@
       if (target.length === 0) {
         throw bridgeError('E_GIT', '缺少 origin/main，无法快进');
       }
+      // isomorphic-git 的 merge 入参是 `theirs`（要合进来的提交），不是 `oid`。
+      // 旧版传 `oid` 会让 merge 内部拿到 ref=undefined，在 GitRefManager.expand 里
+      // 读 `ref.length` 抛 V8 TypeError（真机「Cannot read properties of undefined」的根因）。
       await git.merge({
-        fs: session.fs, dir: root, oid: target,
+        fs: session.fs, dir: root, theirs: target,
         fastForwardOnly: true, author: authorOf(config)
       });
       return out;
     }
     if (op === 'addCommit') {
-      var paths = [];
-      try { paths = JSON.parse(String(args.paths || '[]')); } catch (error) { paths = []; }
+      var paths = pathsFromJson(args.paths);
       // 只接受 timeline/** 路径：任何 devices/** 或仓库外路径都被拒（契约：devices/ 零写入）。
       for (var i = 0; i < paths.length; i++) {
         if (typeof paths[i] !== 'string' || paths[i].indexOf('timeline/') !== 0 ||
@@ -2705,6 +2789,22 @@
   // ---------------------------------------------------------------- 入口
 
   /**
+   * 每个桥命令的唯一失败出口：任何异常（含 normalizeError 自己也坏掉的极端情况）
+   * 都必须折成 typed 错误，绝不把原始 JS throw 漏给 ArkTS。
+   */
+  function toBridgeFailure(error) {
+    try {
+      var normalized = normalizeError(error);
+      if (normalized && normalized.isBridgeError === true && typeof normalized.code === 'string') {
+        return normalized;
+      }
+      return bridgeError(E_BRIDGE, '本地 Git 桥内部出错，原始信息：' + sanitizeMessage(error && error.message !== undefined ? error.message : error));
+    } catch (inner) {
+      return bridgeError(E_BRIDGE, '本地 Git 桥内部出错，本次操作未完成');
+    }
+  }
+
+  /**
    * 发起一次操作。**没有返回值**：结果只通过 dshGitHost.onEvent 回传。
    * 操作串行执行（Promise 链），避免并发写 .git/index 互相破坏。
    */
@@ -2728,17 +2828,26 @@
       return;
     }
     var args = request.args && typeof request.args === 'object' ? request.args : {};
-    session.queue = session.queue.then(function () {
-      return handler(args);
-    });
-    session.queue = session.queue.then(
-      function (data) {
-        emitResult(id, null, data);
-      },
-      function (error) {
-        emitResult(id, normalizeError(error));
-      }
-    );
+    try {
+      session.queue = session.queue.then(function () {
+        try {
+          return handler(args);
+        } catch (error) {
+          throw toBridgeFailure(error);
+        }
+      });
+      session.queue = session.queue.then(
+        function (data) {
+          emitResult(id, null, data);
+        },
+        function (error) {
+          emitResult(id, toBridgeFailure(error));
+        }
+      );
+    } catch (error) {
+      // 队列本身被破坏（内部不变量）：仍以 typed E_BRIDGE 回传，绝不静默丢事件
+      emitResult(id, toBridgeFailure(error));
+    }
   }
 
   // ---------------------------------------------------------------- 导出
@@ -2784,6 +2893,15 @@
     // 分支与同步状态（A2）：纯函数 + 需要真实仓库的两个 helper
     computeAheadBehind: computeAheadBehind,
     countConflicts: countConflicts,
+    asArray: asArray,
+    shasFromLog: shasFromLog,
+    changedFromStatusMatrix: changedFromStatusMatrix,
+    daysFromListFiles: daysFromListFiles,
+    pathsFromJson: pathsFromJson,
+    commitsToReports: commitsToReports,
+    sanitizeStack: sanitizeStack,
+    toBridgeFailure: toBridgeFailure,
+    bridgeErrorCode: E_BRIDGE,
     pushPlan: pushPlan,
     branchState: branchState,
     ensureOnBranch: ensureOnBranch,

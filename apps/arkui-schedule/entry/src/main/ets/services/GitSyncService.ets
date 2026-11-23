@@ -45,6 +45,7 @@ import { AUTH_HTTPS } from '../model/settingsForm';
 import {
   DEFAULT_BRANCH,
   describeSyncStatus,
+  redactSecrets,
   validateBranchName
 } from '../model/syncError';
 import type { SyncStatusView, UploadState } from '../model/syncError';
@@ -209,6 +210,8 @@ interface LocalIdentity {
 interface BridgeEventError {
   code?: string;
   message?: string;
+  /** 仅桥诊断用；本服务绝不把 stack 拼进任何用户可见文案。 */
+  stack?: string;
 }
 
 interface BridgeEvent {
@@ -467,7 +470,16 @@ function syncedTextNow(): string {
 
 // ---------------------------------------------------------------- 错误
 
-/** 携带桥错误码（E_GIT | E_HTTP | E_AUTH | E_FS）的异常。 */
+/** 桥内部未捕获 JS 异常的统一码（git-bridge.js 的 E_BRIDGE）。 */
+const E_BRIDGE_CODE: string = 'E_BRIDGE';
+/** 用户可见的固定中文：只说现状与下一步，不宣称成功、不宣称数据丢失。 */
+const E_BRIDGE_USER_MESSAGE: string = '本地 Git 桥内部出错，本次操作未完成；请稍后重试，详细信息见诊断行';
+/** 诊断行前缀：与原始 V8 文案一起只出现在「诊断（仅排查用）」区。 */
+const BRIDGE_DIAGNOSTIC_PREFIX: string = '｜桥诊断：';
+/** 诊断区里原始 JS 文案的最大长度（脱敏 + 折叠空白后截断）。 */
+const BRIDGE_DIAGNOSTIC_MAX: number = 300;
+
+/** 携带桥错误码（E_GIT | E_HTTP | E_AUTH | E_FS | E_BRIDGE）的异常。 */
 class SyncError extends Error {
   code: string;
 
@@ -649,6 +661,11 @@ export class GitSyncService {
   private bridgeReady: boolean = false;
   /** 桥不可用的原因（空串表示没有失败）。 */
   private bridgeError: string = '';
+  /**
+   * 最近一次 E_BRIDGE 的原始 JS 文案（已脱敏；**只进诊断区**）。
+   * 用户可见错误永远是 E_BRIDGE_USER_MESSAGE，栈从不保存、更不上屏。
+   */
+  private bridgeDiagnostic: string = '';
   /** 本机设备指纹缓存（= 统一后的身份 uuid；空串 = 还没解析/生成）。 */
   private fingerprintCache: string = '';
   /** 最近一次身份比对的结论文案（空串 = 正常；非空 = 撞号 / 指纹被覆盖）。 */
@@ -901,7 +918,7 @@ export class GitSyncService {
                 : failure.code;
             const text: string =
               failure === undefined || failure.message === undefined ? '桥调用失败' : failure.message;
-            reject(new SyncError(code, text));
+            reject(this.failureOf(code, text));
           }
         },
         reject: reject,
@@ -1289,6 +1306,10 @@ export class GitSyncService {
       const data: StatusPayload = event.data === undefined ? {} : event.data as StatusPayload;
       const view: SyncStatusView = this.statusViewOf(data);
       let diagnostics: string = describeSyncStatus(view);
+      // E_BRIDGE 的原始 JS 文案只在这里出现（前缀可检索）；用户可见状态行永不读它。
+      if (this.bridgeDiagnostic.length > 0) {
+        diagnostics = diagnostics + this.bridgeDiagnostic;
+      }
       const remoteError: string = GitSyncService.textOf(data.remoteError, '');
       if (remoteError.length > 0) {
         diagnostics = diagnostics + '｜远端刷新失败：' + remoteError;
@@ -1408,6 +1429,25 @@ export class GitSyncService {
     return result;
   }
 
+  /**
+   * 桥失败 → 用户可见 typed 错的唯一映射点。
+   * E_BRIDGE 的原始 JS 文案（例如 V8 的 Cannot read properties of undefined）只写诊断成员，
+   * 抛给上层的 message 恒为固定中文；stack 一律忽略。
+   */
+  private failureOf(code: string, rawMessage: string): SyncError {
+    if (code === E_BRIDGE_CODE) {
+      const safe: string = redactSecrets(typeof rawMessage === 'string' ? rawMessage : '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const detail: string = safe.length > BRIDGE_DIAGNOSTIC_MAX
+        ? safe.slice(0, BRIDGE_DIAGNOSTIC_MAX) + '…'
+        : safe;
+      this.bridgeDiagnostic = BRIDGE_DIAGNOSTIC_PREFIX + (detail.length > 0 ? detail : '无原始文案');
+      return new SyncError(E_BRIDGE_CODE, E_BRIDGE_USER_MESSAGE);
+    }
+    return new SyncError(code, typeof rawMessage === 'string' ? rawMessage : '未知错误');
+  }
+
   // -------------------------------------------------------------- 宿主代理：事件回传
 
   /** 桥的操作结果回传入口（JS 同步调用）。 */
@@ -1432,7 +1472,7 @@ export class GitSyncService {
     const failure: BridgeEventError = event.error === undefined ? {} : event.error;
     const code: string = failure.code === undefined ? 'E_GIT' : failure.code;
     const text: string = failure.message === undefined ? '未知错误' : failure.message;
-    pending.reject(new SyncError(code, text));
+    pending.reject(this.failureOf(code, text));
   }
 
   /** 把 HTTP 结果送回桥（由 httpRequest 内部调用）。 */
