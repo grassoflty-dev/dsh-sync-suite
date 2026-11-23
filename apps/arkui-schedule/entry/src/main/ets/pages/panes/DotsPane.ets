@@ -14,7 +14,8 @@
  * 不调 upsert / revoke），在列表上方渲染一条紧凑的授权行 —— 当前有效实例的 view 工具并集 +
  * 「命令工具 session.prompt 未授予」；坏信封 / 空表由 store 的 typed problem _fail-closed_ 到
  * 「未授权 / 未知」，绝不声称权限存在。**发指令保持禁用**：原因写在禁用的 Text 上（渲染文案，
- * 不是日志）——命令工具未授予、指令确认闸尚未接线。没有 grant UI / 没有 RPC / 没有配置面。
+ * 不是日志），且逐字来自冻结闸门 `COMMAND_WORDING`（经纯函数 `placeholderRefusalReason`），
+ * 没有手写拒绝文案。没有 grant UI / 没有 RPC / 没有配置面。
  * 加载 / 空 / 错误+重试 / 列表四态齐全，不渲染任何假行。
  *
  * 历史锚点（守卫按源码文本钉住，勿当作现行语义）：
@@ -33,6 +34,7 @@ import { chatSummaryLine, filterByKind, sortChats } from '../../model/chatList';
 import type { ChatIndexEntry, ChatKind } from '../../model/chatList';
 import { isViewTool, problemText, TOOL_SESSION_PROMPT, VIEW_TOOLS } from '../../model/instanceGrant';
 import type { GrantProblem, RedactedGrant } from '../../model/instanceGrant';
+import { placeholderRefusalReason, remoteChannelVerified } from '../../model/remoteCommandDraft';
 import { chatStore } from '../../services/chatStore';
 import type { ChatListResult } from '../../services/chatStore';
 import { instanceGrantStore } from '../../services/instanceGrantStore';
@@ -40,9 +42,6 @@ import { describeError } from '../../services/scheduleStore';
 
 /** 本分段只看 dots 会话；云端会话不在这里展示（分段切换只由 ShellRail 负责）。 */
 const PANE_KIND: ChatKind = 'dots';
-
-/** 禁用原因（渲染在禁用的 Text 上，不是日志）：命令工具未授予 + 指令确认闸尚未接线，今天成立。 */
-const REASON_DOTS: string = '命令工具未授予，指令确认闸尚未接线';
 
 /** 新副标题：取代过度承诺的旧句，只陈述今天真做到的事（只读查看 + 发指令暂不可用）。 */
 const DOTS_SUBTITLE: string = 'dots 只读查看会话，暂不能发指令。';
@@ -79,11 +78,14 @@ export struct DotsPane {
   @State loading: boolean = true;
   /** 只读授权行（单一 aboutToAppear 内算一次；坏信封 / 空表 fail-closed 到「未授权 / 未知」）。 */
   @State grantLine: string = '';
+  /** 发指令禁用原因：逐字来自 COMMAND_WORDING，经纯函数派生；常量与面板都不写第二份中文。 */
+  @State refusalReason: string = '';
 
   aboutToAppear(): void {
     chatStore.prepare(getContext(this) as common.UIAbilityContext);
     this.reload();
     this.grantLine = this.buildGrantLine();
+    this.refusalReason = this.buildRefusalReason();
   }
 
   /** 外壳全局刷新信号：一次周期的结果已落盘，这里只从 chatStore 重读，不重跑任何同步。 */
@@ -129,6 +131,35 @@ export struct DotsPane {
       }
     }
     return `${GRANT_LINE_PREFIX}${instances} 个实例已授权查看 ${ordered.join(' / ')}${tail}`;
+  }
+
+  /**
+   * 禁用原因 = 前置条件 → 闸门文案的唯一映射（纯函数在 model 里，面板只喂布尔、只渲染结果）。
+   * 坏信封 / 空表没有目标 ⇒ 目标缺失句；有目标但未显式授予 session.prompt ⇒ 未授权句；
+   * 已授权但通道未过真机门禁 ⇒ 通道未校验句。今天 `remoteChannelVerified()` 恒 false。
+   */
+  private buildRefusalReason(): string {
+    const problem: GrantProblem = instanceGrantStore.lastProblem();
+    if (problem !== 'ok') {
+      return placeholderRefusalReason({
+        hasTarget: false, commandGranted: false, remoteVerified: remoteChannelVerified()
+      });
+    }
+    const views: RedactedGrant[] = instanceGrantStore.redacted(Date.now());
+    let hasTarget: boolean = false;
+    let commandGranted: boolean = false;
+    for (const view of views) {
+      if (!view.active) {
+        continue;
+      }
+      hasTarget = true;
+      if (view.canPrompt) {
+        commandGranted = true;
+      }
+    }
+    return placeholderRefusalReason({
+      hasTarget: hasTarget, commandGranted: commandGranted, remoteVerified: remoteChannelVerified()
+    });
   }
 
   /** 读 `chats/index.jsonl` → 只取 dots 段 → 按更新时间倒序。失败只落 `errorText`，不抛。 */
@@ -292,7 +323,7 @@ export struct DotsPane {
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(`发指令（${REASON_DOTS}）`)
+          Text(`发指令（${this.refusalReason}）`)
             .fontSize(FONT.caption)
             .lineHeight(LINE_HEIGHT.caption)
             .fontColor($r('app.color.text_secondary'))

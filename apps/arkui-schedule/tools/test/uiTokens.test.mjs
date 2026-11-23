@@ -512,9 +512,11 @@ test('U-S2 外壳页头标题是分段标签；dots 保留 typed 禁用原因，
   const labels = ['dots']
   labels.forEach((label, index) => {
     assert.match(PANE_CODES[index], new RegExp(`Text\\('${label}'\\)`), `缺少分段标签「${label}」`)
-    assert.match(PANE_CODES[index], /const REASON_DOTS: string = '命令工具未授予，指令确认闸尚未接线';/,
-      `「${label}」必须写出今天成立的 typed 禁用原因`)
-    assert.match(PANE_CODES[index], /发指令（\$\{REASON_DOTS\}）/, `「${label}」禁用动作必须把原因渲染在 Text 上`)
+    assert.equal(PANE_CODES[index].includes('指令确认闸尚未接线'), false,
+      `「${label}」不得再手写「指令确认闸尚未接线」`)
+    assert.match(PANE_CODES[index], /placeholderRefusalReason\(\{/,
+      `「${label}」禁用原因必须由 COMMAND_WORDING 纯函数派生`)
+    assert.match(PANE_CODES[index], /发指令（\$\{this\.refusalReason\}）/, `「${label}」禁用动作必须把原因渲染在 Text 上`)
   })
   // mod-shell-cloud-chat-pane（old→new，收紧）：云端标题仍在，禁用原因 / 占位文案绝迹。
   assert.match(PANE_CODES[1], /Text\('云端对话'\)/, '云端面板页头仍有分段标题')
@@ -671,7 +673,7 @@ test('U-S8 dots 只读授权行来自 instanceGrantStore；禁用原因渲染在
   assert.match(dots, /instanceGrantStore\.redacted\(nowMs\)/)
   assert.match(dots, /Text\(this\.grantLine\)/, '授权行必须是渲染文案')
   assert.ok(dots.includes('未授权 / 未知'), '坏信封 / 空表 fail-closed')
-  assert.match(dots, /Text\(`发指令（\$\{REASON_DOTS\}）`\)[\s\S]{0,400}\.enabled\(false\)/,
+  assert.match(dots, /Text\(`发指令（\$\{this\.refusalReason\}）`\)[\s\S]{0,400}\.enabled\(false\)/,
     '禁用原因必须与 .enabled(false) 同处渲染节点')
   assert.equal(/console\./.test(dots), false, '原因不得只写日志')
   assert.equal(stripComments(dots).includes('dots 可查看实例并对会话发指令，所有操作需你确认。'), false,

@@ -3,7 +3,10 @@
  *
  * 契约来源：`docs/STATE-UI.md` §3。解决的是「按钮禁用后没有任何反馈」：
  * ArkUI 的禁用修饰符（enabled 链式属性）会把 `onClick` 一起吞掉，用户点不动却不知道为什么。
- * 所以 `ActionButton` **永远可点**，点击时先问这里「到底能不能执行」，不能执行就 toast 原因。
+ * 所以 `ActionButton` 的**默认路径永远可点**，点击时先问这里「到底能不能执行」，不能执行就 toast 原因。
+ * 例外是 additive 的 `hardDisabled`：只有调用方明确声明「这个动作永久不可用且原因已经常驻可见」
+ * 时才走 ArkUI 的 `.enabled(false)`（设备上看得到 `enabled:"false"`、点不到）；该选项默认 false，
+ * 所有既有调用点保持「可点 + toast」语义不变。
  *
  * 三个状态（互斥，`busy` 优先）：
  * | 入参 | tappable | busy | opacity | 说明 |
@@ -11,6 +14,7 @@
  * | `enabled=true, busy=false` | true | false | 1.0 | 正常可点 |
  * | `busy=true`（无论 enabled） | false | true | 0.5 | 处理中，忽略重复点击 |
  * | `enabled=false, busy=false` | false | false | 0.4 | 不可用，点了给原因 |
+ * | `hardDisabled=true`（additive） | false | false | 0.4 | 永久不可用，渲染层 `.enabled(false)`、点击直接早退 |
  *
  * 硬约束：`tappable=false` 时 `blockedReason` **永远非空**（`enabled=false` 且没给原因 →
  * 兜底 `当前不可用，请稍后再试`），「点了没反应」这种静默失败在本批之后不允许出现。
@@ -57,13 +61,16 @@ function normalizeReason(raw: string): string {
  *
  * `busy` 优先于 `enabled`：正在跑的动作不允许被第二个点击打断（也不该显示成「不可用」）。
  */
-export function resolveButton(enabled: boolean, busy: boolean, disabledReason: string): ButtonState {
+export function resolveButton(enabled: boolean, busy: boolean, disabledReason: string,
+  hardDisabled: boolean = false): ButtonState {
   const isBusy: boolean = busy === true;
   const isEnabled: boolean = enabled === true;
   if (isBusy) {
     return { tappable: false, busy: true, blockedReason: REASON_BUSY, opacity: OPACITY_BUSY };
   }
-  if (!isEnabled) {
+  // hardDisabled=true 是唯一让按钮在模型层也 tappable=false 的入口（组件另有 handleClick 早退）。
+  // 默认 false 时这一行与旧行为逐字节一致：只有 actionEnabled=false 才进入「点了给原因」分支。
+  if (!isEnabled || hardDisabled === true) {
     const reason: string = normalizeReason(disabledReason);
     return {
       tappable: false,

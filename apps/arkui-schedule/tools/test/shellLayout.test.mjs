@@ -62,9 +62,8 @@ const PANES = [
  */
 // mod-dots-readonly：动作槽从「新建对话」改成禁用的「发指令」，原因改为 grant 口径。
 const SCAFFOLDS = [
-  { name: 'DotsPane', file: 'DotsPane.ets', label: 'dots', action: '发指令', reason: 'REASON_DOTS', empty: '还没有 dots 对话' }
+  { name: 'DotsPane', file: 'DotsPane.ets', label: 'dots', action: '发指令', reason: 'this.refusalReason', empty: '还没有 dots 对话' }
 ];
-const DOTS_REASON = '命令工具未授予，指令确认闸尚未接线';
 const DOTS_SUBTITLE = 'dots 只读查看会话，暂不能发指令。';
 const OLD_DOTS_SUBTITLE = 'dots 可查看实例并对会话发指令，所有操作需你确认。';
 const CLOUD_FILE = 'CloudChatPane.ets';
@@ -285,8 +284,12 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
       const actionSlot = 'Text(`' + action + '（${' + reason + '}）`)';
       assert.ok(body.includes(actionSlot), `${name} 的动作槽必须显示「${action}（原因）」`);
       assert.match(body, /\.enabled\(false\)/, `${name} 的「发指令」动作必须禁用（无假入口）`);
-      assert.match(source, /const REASON_DOTS: string = '命令工具未授予，指令确认闸尚未接线';/,
-        `${name} 的禁用原因必须是今天成立的 typed 原因`);
+      assert.match(source, /@State refusalReason: string = '';/,
+        `${name} 必须有渲染用的命名原因状态`);
+      assert.match(source, /placeholderRefusalReason\(\{/,
+        `${name} 的禁用原因必须由纯函数从 COMMAND_WORDING 派生`);
+      assert.equal(source.includes('指令确认闸尚未接线'), false,
+        `${name} 旧句必须绝迹（闸门已接线）`);
       assert.equal(/TextInput\(|输入给 dots 的指令…/.test(source), false,
         `${name} 不得保留禁用输入框 / 假发送入口`);
     }
@@ -328,9 +331,11 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     const body = paneBody('DotsPane');
     assert.equal(/dots 尚未接线|输入给 dots 的指令…/.test(source), false,
       '旧 scaffold 原因与输入框文案必须绝迹');
-    assert.match(source, /const REASON_DOTS: string = '命令工具未授予，指令确认闸尚未接线';/,
-      '逐字保留新的 typed 禁用原因');
-    assert.match(body, /Text\(`发指令（\$\{REASON_DOTS\}）`\)/, '禁用原因必须渲染在 Text 上');
+    assert.equal(source.includes('指令确认闸尚未接线'), false,
+      '假的「指令确认闸尚未接线」文案必须绝迹');
+    assert.match(source, /placeholderRefusalReason\(\{/,
+      '禁用原因必须由纯函数从 COMMAND_WORDING 派生');
+    assert.match(body, /Text\(`发指令（\$\{this\.refusalReason\}）`\)/, '禁用原因必须渲染在 Text 上');
     assert.match(body, /\.enabled\(false\)/, '「发指令」动作必须禁用');
     assert.equal(/TextInput\(|placeholder: '输入给 dots 的指令…'/.test(body), false,
       '发指令尚未接线，不得有输入框假入口');
@@ -570,8 +575,8 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.match(code, /instanceGrantStore\.redacted\(nowMs\)/, '只读 redacted 视图');
     assert.match(body, /Text\(this\.grantLine\)/, '授权行是渲染文案');
     assert.ok(code.includes('未授权 / 未知'), 'fail-closed 状态文案');
-    assert.match(body, /Text\(`发指令（\$\{REASON_DOTS\}）`\)/, '禁用原因在 Text 上');
-    assert.ok(code.includes(`const REASON_DOTS: string = '${DOTS_REASON}';`));
+    assert.match(body, /Text\(`发指令（\$\{this\.refusalReason\}）`\)/, '禁用原因在 Text 上');
+    assert.match(code, /placeholderRefusalReason\(\{/, '原因来自 COMMAND_WORDING 映射而非手写');
     assert.equal(raw.includes(OLD_DOTS_SUBTITLE), false, '旧过度承诺副标题全文绝迹');
     assert.ok(code.includes(`const DOTS_SUBTITLE: string = '${DOTS_SUBTITLE}';`));
     assert.match(body, /Text\(DOTS_SUBTITLE\)/, '新副标题渲染');

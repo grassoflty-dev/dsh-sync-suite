@@ -36,10 +36,9 @@ const PANE_RAW = new Map(
  */
 // mod-dots-readonly：动作槽从「新建对话」改成禁用的「发指令」，原因改为今天成立的 grant 口径。
 const SCAFFOLDS = [
-  { name: 'DotsPane', action: '发指令', reason: 'REASON_DOTS', empty: '还没有 dots 对话' }
+  { name: 'DotsPane', action: '发指令', reason: 'this.refusalReason', empty: '还没有 dots 对话' }
 ];
-/** mod-dots-readonly：只读授权行 / 新副标题 / 禁用原因的逐字真值。 */
-const DOTS_REASON = '命令工具未授予，指令确认闸尚未接线';
+/** mod-dots-readonly：只读授权行 / 新副标题的逐字真值；禁用原因已改为 COMMAND_WORDING 派生。 */
 const DOTS_SUBTITLE = 'dots 只读查看会话，暂不能发指令。';
 const OLD_DOTS_SUBTITLE = 'dots 可查看实例并对会话发指令，所有操作需你确认。';
 const GRANT_READ_APIS = ['instanceGrantStore.lastProblem()', 'instanceGrantStore.redacted(', 'problemText(',
@@ -384,17 +383,19 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
   });
 
   // mod-shell-cloud-chat-pane / mod-shell-dots-pane（old→new，收紧）：禁用假入口只剩 dots 一个动作槽；
-  // 旧断言只要求「原因文字非空」，现在逐字钉住今天成立的 typed 原因，并禁止禁用输入框复活。
+  // D2 后原因不再手写，改由 placeholderRefusalReason 从 COMMAND_WORDING 派生；禁用输入框仍禁复活。
   test('P-16 dots 面板保留禁用主操作 + 逐字 typed 原因；云端面板无禁用假入口', () => {
     for (const scaffold of SCAFFOLDS) {
       const p = pane(scaffold.name);
-      assert.match(p.source, new RegExp(`const ${scaffold.reason}: string = '[^']+';`),
-        `${scaffold.name} 必须有命名禁用原因`);
-      assert.match(p.source, /const REASON_DOTS: string = '命令工具未授予，指令确认闸尚未接线';/,
-        `${scaffold.name} 禁用原因必须是今天成立的 typed 原因`);
+      assert.match(p.source, /@State refusalReason: string = '';/,
+        `${scaffold.name} 必须有渲染用的命名原因状态`);
+      assert.match(p.source, /placeholderRefusalReason\(\{/,
+        `${scaffold.name} 禁用原因必须由纯函数从 COMMAND_WORDING 派生`);
+      assert.equal(p.source.includes('指令确认闸尚未接线'), false,
+        `${scaffold.name} 旧句必须绝迹（闸门已接线）`);
       const actionSlot = 'Text(`' + scaffold.action + '（${' + scaffold.reason + '}）`)';
       assert.ok(p.body.includes(actionSlot), `${scaffold.name} 动作槽必须显示「${scaffold.action}（原因）」`);
-      assert.match(p.body, /\.enabled\(false\)/, `${scaffold.name} 的「新建对话」动作必须禁用`);
+      assert.match(p.body, /\.enabled\(false\)/, `${scaffold.name} 的「发指令」动作必须禁用`);
       assert.equal(/TextInput\(|输入给 dots 的指令…/.test(p.source), false,
         `${scaffold.name} 不得保留禁用输入框 / 假发送入口`);
     }
@@ -405,15 +406,17 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
   });
 
   // mod-shell-dots-pane（old→new，收紧，id P-17 不变）：旧断言钉「禁用输入框 + 旧字面原因」，
-  // 两者都已随真列表移除。新真值 = 真列表数据源 + typed 禁用原因 + 短下一步 + 无假发送入口。
+  // 两者都已随真列表移除。新真值 = 真列表数据源 + 闸门派生的禁用原因 + 短下一步 + 无假发送入口。
   test('P-17 dots 面板是真列表 + typed 禁用原因 + 无禁用输入框', () => {
     const dots = pane('DotsPane');
     // 旧原因「dots 尚未接线」与旧输入框文案在代码视图里彻底绝迹（注释里的迁移记录已剥离）。
     assert.equal(/dots 尚未接线|输入给 dots 的指令…/.test(dots.source), false,
       '旧 scaffold 原因与输入框文案必须绝迹');
-    assert.match(dots.source, /const REASON_DOTS: string = '命令工具未授予，指令确认闸尚未接线';/,
-      '新的 typed 禁用原因逐字保留（命令工具未授予 + 确认闸尚未接线）');
-    assert.match(dots.body, /Text\(`发指令（\$\{REASON_DOTS\}）`\)[\s\S]{0,400}\.enabled\(false\)/,
+    assert.equal(dots.source.includes('指令确认闸尚未接线'), false,
+      '假的「确认闸尚未接线」文案必须绝迹');
+    assert.match(dots.source, /placeholderRefusalReason\(\{/,
+      '禁用原因必须经纯函数从冻结闸门 COMMAND_WORDING 派生');
+    assert.match(dots.body, /Text\(`发指令（\$\{this\.refusalReason\}）`\)[\s\S]{0,400}\.enabled\(false\)/,
       '「发指令」必须禁用且显示 typed 原因（渲染在 Text 上，不是日志）');
     assert.equal(/TextInput\(|placeholder: '输入给 dots 的指令…'/.test(dots.body), false,
       '发指令尚未接线，不得渲染输入框假入口');
@@ -670,10 +673,11 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     assert.match(dots.source, /未授权 \/ 未知（\$\{problemText\(problem\)\}）/,
       '坏信封必须带 typed problemText 原因');
     // 3. 禁用原因是渲染在 Text 上的文案（source-shape，不是日志 / 注释）。
-    assert.ok(body.includes('Text(`发指令（${REASON_DOTS}）`)'), '禁用动作必须把原因渲染在 Text 上');
-    assert.match(body, /Text\(`发指令（\$\{REASON_DOTS\}）`\)[\s\S]{0,400}\.enabled\(false\)/,
+    assert.ok(body.includes('Text(`发指令（${this.refusalReason}）`)'), '禁用动作必须把原因渲染在 Text 上');
+    assert.match(body, /Text\(`发指令（\$\{this\.refusalReason\}）`\)[\s\S]{0,400}\.enabled\(false\)/,
       '原因必须与 .enabled(false) 处于同一渲染节点（不是 console.log）');
-    assert.ok(dots.source.includes(`const REASON_DOTS: string = '${DOTS_REASON}';`), '禁用原因逐字保留');
+    assert.match(dots.source, /placeholderRefusalReason\(\{/,
+      '禁用原因必须来自 COMMAND_WORDING 映射（不是手写常量）');
     assert.equal(/console\.|consoleInfo/.test(dots.source), false, '原因绝不能只写进日志');
     // 4. 新副标题替换旧过度承诺（旧串全文绝迹）。
     assert.equal(raw.includes(OLD_DOTS_SUBTITLE), false, '旧过度承诺副标题绝迹（含注释）');

@@ -410,20 +410,22 @@ describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
   });
 
   // mod-shell-dots-pane（新增正向守卫）/ mod-dots-readonly（retarget，收紧）：scaffold 只有两个 @Prop；
-  // 落真后四个 @State 必须在渲染树里真被读到（chats→ForEach、errorText→条件+ErrorState.why、
-  // loading→条件、grantLine→授权 Text），且对外契约一字未改。
-  test('SG-S7 dots 面板落真 + 只读授权行：四个 @State 都有渲染落点，props / 保活 / 单一 aboutToAppear 不变', () => {
+  // 落真后五个 @State 必须在渲染树里真被读到（chats→ForEach、errorText→条件+ErrorState.why、
+  // loading→条件、grantLine→授权 Text、refusalReason→发指令 Text），对外契约一字未改。
+  // D2 retarget：旧断言钉四个字段；新增的 refusalReason 必须同样有真渲染落点（不放宽）。
+  test('SG-S7 dots 面板落真 + 只读授权行：五个 @State 都有渲染落点，props / 保活 / 单一 aboutToAppear 不变', () => {
     const file = PANE_FILES.find((path) => path.endsWith('DotsPane.ets'));
     const code = stripComments(readFileSync(file, 'utf8'));
     const fields = collectStateFields(componentFiles()).filter((item) =>
       item.file.endsWith('pages/panes/DotsPane.ets'));
-    assert.deepEqual(fields.map((item) => item.field).sort(), ['chats', 'errorText', 'grantLine', 'loading'],
-      'dots 面板必须恰好声明这四个 @State（不多不少）');
-    for (const field of ['chats', 'errorText', 'grantLine', 'loading']) {
+    assert.deepEqual(fields.map((item) => item.field).sort(),
+      ['chats', 'errorText', 'grantLine', 'loading', 'refusalReason'],
+      'dots 面板必须恰好声明这五个 @State（不多不少）');
+    for (const field of ['chats', 'errorText', 'grantLine', 'loading', 'refusalReason']) {
       assert.ok(fieldUsage(code, field).reads > 0, `@State ${field} 必须被渲染树读到（不是死状态）`);
     }
-    // chats / errorText / grantLine 还必须是「作为值」的真落点；loading 是纯分支标志，读在条件里即成立。
-    for (const field of ['chats', 'errorText', 'grantLine']) {
+    // chats / errorText / grantLine / refusalReason 还必须是「作为值」的真落点；loading 是纯分支标志。
+    for (const field of ['chats', 'errorText', 'grantLine', 'refusalReason']) {
       assert.equal(hasRenderSite(code, field), true, `@State ${field} 必须在 build()/@Builder 里有值落点`);
     }
     assert.match(code, /@Prop deepLinkId: string = '';/, '深链 prop 原样保留');
@@ -448,7 +450,9 @@ describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
     assert.match(code, /instanceGrantStore\.redacted\(nowMs\)/, '必须读 redacted 视图');
     assert.match(code, /Text\(this\.grantLine\)/, '授权行必须渲染在 Text 上');
     assert.ok(code.includes('未授权 / 未知'), '坏信封 / 空表 fail-closed');
-    assert.ok(code.includes('Text(`发指令（${REASON_DOTS}）`)'), '禁用原因必须有渲染落点');
+    assert.ok(code.includes('Text(`发指令（${this.refusalReason}）`)'), '禁用原因必须有渲染落点');
+    assert.match(code, /placeholderRefusalReason\(\{/, '禁用原因必须由 COMMAND_WORDING 纯函数派生');
+    assert.equal(code.includes('指令确认闸尚未接线'), false, '假的「尚未接线」文案绝迹');
     assert.equal(/console\./.test(code), false, '禁用原因不得只写日志');
     for (const api of ['instanceGrantStore.upsert(', 'instanceGrantStore.revoke(', 'upsertGrant(',
       'revokeGrant(', 'session.prompt(', 'sessionPrompt(']) {

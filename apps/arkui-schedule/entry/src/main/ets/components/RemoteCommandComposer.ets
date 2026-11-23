@@ -171,6 +171,9 @@ export struct RemoteCommandComposer {
         .color($r('app.color.divider'))
 
       // 永久禁用：actionEnabled 恒 false；无投递通道，onTap 永远不会被业务执行。
+      // D1 真机收口：默认 disabledReason + opacity 0.4 仍让按钮 enabled:"true" / clickable:"true"，
+      // 因此这里显式打开 additive hardDisabled —— 渲染层 .enabled(false)、handleClick 早退，
+      // 用户点不到；同一句原因仍由下面的可见 Text 常驻呈现，不需要先点一下才知道为什么。
       ActionButton({
         label: '发送指令',
         actionEnabled: false,
@@ -178,6 +181,7 @@ export struct RemoteCommandComposer {
         busy: false,
         variant: 'secondary',
         block: true,
+        hardDisabled: true,
         onTap: (): void => {},
         onBlockedTap: null
       })

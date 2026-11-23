@@ -7,7 +7,7 @@
  */
 
 import { TOOL_SESSION_PROMPT } from './instanceGrant';
-import { COMMAND_TEXT_LIMIT, commandFingerprint, decideCommandSend } from './remoteCommandGate';
+import { COMMAND_TEXT_LIMIT, COMMAND_WORDING, commandFingerprint, decideCommandSend } from './remoteCommandGate';
 import type { CommandDraft, CommandGateDecision, CommandGateInput } from './remoteCommandGate';
 
 /** 当前唯一合法的指令工具（值即 `session.prompt`）。 */
@@ -141,6 +141,36 @@ export function composerReason(state: ComposerState, commandGranted: boolean): s
   const decision: CommandGateDecision = composerDecision(state, commandGranted);
   if (decision.ok === false) {
     return decision.wording;
+  }
+  return '';
+}
+
+/**
+ * D2：dots 等**没有 composer 的只读面板**也要显示「为什么发指令不可用」。
+ *
+ * 这里只做「前置条件 → 闸门文案」的一张映射表：文案一律来自冻结闸的 `COMMAND_WORDING`，
+ * 本文件不写第二份中文，面板也不再手写那句「确认闸未接线」的失效旧话（闸门早已接线）。
+ * 判定顺序与闸门一致：目标 → 授权 → 通道；通道已验证时返回空串（今天不可达）。
+ */
+export interface PlaceholderRefusalInput {
+  /** 当前有没有可选的有效目标实例。 */
+  hasTarget: boolean;
+  /** 该目标是否显式授予了 session.prompt（view 权不算）。 */
+  commandGranted: boolean;
+  /** 承载指令的通道是否已通过真机校验。 */
+  remoteVerified: boolean;
+}
+
+/** 只读面板的拒绝原因（逐字取自 COMMAND_WORDING；全部满足时为空串）。 */
+export function placeholderRefusalReason(input: PlaceholderRefusalInput): string {
+  if (input.hasTarget !== true) {
+    return COMMAND_WORDING.E_COMMAND_TARGET_MISSING;
+  }
+  if (input.commandGranted !== true) {
+    return COMMAND_WORDING.E_COMMAND_NOT_GRANTED;
+  }
+  if (input.remoteVerified !== true) {
+    return COMMAND_WORDING.E_COMMAND_REMOTE_UNVERIFIED;
   }
   return '';
 }

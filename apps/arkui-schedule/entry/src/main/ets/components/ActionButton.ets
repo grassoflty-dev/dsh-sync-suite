@@ -2,12 +2,17 @@
  * 全站唯一按钮（`docs/STATE-UI.md` §3）。
  *
  * 存在的唯一理由：ArkUI 的禁用修饰符（enabled 链式属性）会把 `onClick` 一起吞掉，用户点不动却不知道为什么。
- * 所以本组件**绝不使用禁用修饰符**：按钮永远可点，`onClick` 里先问 `model/actionButton.ts`
+ * 所以本组件的**默认路径绝不使用禁用修饰符**：按钮永远可点，`onClick` 里先问 `model/actionButton.ts`
  * 的 `resolveButton()` 能不能执行——
  * - 可点：执行 `onTap`；
  * - 忙碌：忽略重复点击（标签已经是「处理中…」），不弹 toast（那是噪音）；
  * - 不可用：`promptAction.showToast()` 说出原因（`disabledReason` 为空时由 model 兜底
  *   「当前不可用，请稍后再试」），并且**不**执行 `onTap`。
+ *
+ * additive 例外 `hardDisabled`（默认 false，既有调用点一处未改）：仅当调用方明确说「这个动作
+ * 永久不可用、原因已常驻可见」时才走 ArkUI 的 `.enabled(false)`（`uitest dumpLayout` 会报
+ * `enabled:"false"`、真的点不到），并且 `handleClick` 第一行早退（belt and braces）。
+ * 这是给「永久禁用却仍可点」那类假动作收口用的，不改变其它按钮的 toast 语义。
  *
  * 视觉档位（`variant`）：`primary` 品牌底反白字 / `secondary` 控件灰底 / `ghost` 白底品牌字 /
  * `danger` 危险底反白字。不可用时：`primary` 背景降 `brand_soft`、文字 `brand`；
@@ -48,6 +53,8 @@ export struct ActionButton {
   @Prop variant: string = VARIANT_PRIMARY;
   /** `true` = 撑满父容器（表单底部主操作 / 空态主按钮）。 */
   @Prop block: boolean = false;
+  /** additive：`true` = 永久不可用，挂 ArkUI `.enabled(false)` 且点击早退；默认 false 不改任何既有调用点。 */
+  @Prop hardDisabled: boolean = false;
 
   /** 可点时的业务回调（忙碌/不可用时不执行）。 */
   onTap: () => void = () => {};
@@ -57,7 +64,7 @@ export struct ActionButton {
 
   /** 解析后的按钮状态：唯一一处同时决定「能不能点 / 多透明 / 说什么」。 */
   private buttonState(): ButtonState {
-    return resolveButton(this.actionEnabled, this.busy, this.disabledReason);
+    return resolveButton(this.actionEnabled, this.busy, this.disabledReason, this.hardDisabled);
   }
 
   /** 显示文案：忙碌时加「…」（已带省略号则不重复叠加）。 */
@@ -99,6 +106,10 @@ export struct ActionButton {
 
   /** 点击统一入口：先判状态，再决定「执行 / 忽略 / 说原因」。 */
   private handleClick(): void {
+    // 硬禁用是 belt：ArkUI 的 .enabled(false) 已在渲染层拦住手势，这里再拦一次程序化点击。
+    if (this.hardDisabled === true) {
+      return;
+    }
     const state: ButtonState = this.buttonState();
     if (state.busy === true) {
       return;
@@ -130,6 +141,7 @@ export struct ActionButton {
       .borderRadius(RADIUS.sm)
       .padding({ left: SPACING.lg, right: SPACING.lg })
       .opacity(this.buttonState().opacity)
+      .enabled(!this.hardDisabled)
       .onClick(() => this.handleClick())
   }
 
@@ -145,6 +157,7 @@ export struct ActionButton {
         .borderRadius(RADIUS.sm)
         .padding({ left: SPACING.lg, right: SPACING.lg })
         .opacity(this.buttonState().opacity)
+        .enabled(!this.hardDisabled)
         .width('100%')
         .onClick(() => this.handleClick())
     }

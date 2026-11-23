@@ -180,14 +180,17 @@ describe('日程面板契约（S3 已迁入 SchedulePane.ets）：AI 汇总图�
 describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作', () => {
   test('H-1 外壳页头标题 = 分段标签，dots 面板有带标签页头 + typed 禁用原因，另三面用真页头', () => {
     // 旧 PaneHeader builder 随 S3 抽壳落到占位文件里；instances / cloud-chat / dots 三模块后四个面板都落真。
-    // old→new（收紧，非删除）：旧断言只要求「有一个 REASON_ 常量」，现在逐字钉住今天成立的 typed 原因
-    // 与其渲染点；正文已换成 chatStore+chatList 真列表（见新增 H-5）。
+    // old→new（收紧，非删除）：旧断言钉手写 REASON_DOTS 常量；D2 后原因改为 `placeholderRefusalReason`
+    // 从冻结闸 COMMAND_WORDING 派生并渲染在 Text 上，旧句「指令确认闸尚未接线」必须绝迹。
+    // 正文仍是 chatStore+chatList 真列表（见新增 H-5）。
     const labels = ['dots'];
     labels.forEach((label, index) => {
       assert.match(PANE_CODES[index], new RegExp(`Text\\('${label}'\\)`), `缺少「${label}」分段标签`);
-      assert.match(PANE_CODES[index], /const REASON_DOTS: string = '命令工具未授予，指令确认闸尚未接线';/,
-        `${label} 页头必须写出今天成立的 typed 禁用原因`);
-      assert.match(PANE_CODES[index], /发指令（\$\{REASON_DOTS\}）/,
+      assert.equal(PANE_CODES[index].includes('指令确认闸尚未接线'), false,
+        `${label} 不得再手写「指令确认闸尚未接线」（闸门已接线，文案必须是假的）`);
+      assert.match(PANE_CODES[index], /placeholderRefusalReason\(\{/,
+        `${label} 禁用原因必须由纯函数从 COMMAND_WORDING 派生`);
+      assert.match(PANE_CODES[index], /发指令（\$\{this\.refusalReason\}）/,
         `${label} 禁用动作必须显示「发指令（原因）」`);
     });
     // mod-shell-cloud-chat-pane（old→new，收紧）：云端标题仍在，禁用原因 / 占位文案绝迹。
@@ -237,7 +240,7 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
       'dots 面板已落真只读列表，不得保留禁用输入框 / 发送假入口（发指令属 mod-dots-readonly）');
     for (const [index, code] of PANE_CODES.entries()) {
       if (index === 0) {
-        assert.match(code, /Text\(`发指令（\$\{REASON_DOTS\}）`\)[\s\S]{0,400}\.enabled\(false\)/,
+        assert.match(code, /Text\(`发指令（\$\{this\.refusalReason\}）`\)[\s\S]{0,400}\.enabled\(false\)/,
           'dots 的「发指令」动作必须禁用并把 typed 原因渲染在 Text 上（无假入口）');
       } else {
         assert.equal(/\.enabled\(false\)/.test(code), false, '云端面板已落真，不得有禁用假入口');
@@ -278,7 +281,7 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
     // 面板只保留一个带 typed 原因的禁用「新建对话」动作，绝不渲染假的输入 / 发送入口。
     assert.equal(/TextInput\(|placeholder: '输入给 dots 的指令…'|pages\/Chats|pages\/Home/.test(PANE_CODES[0]), false,
       'dots 面板不得有禁用输入框、假发送入口或跨节页跳转');
-    assert.match(PANE_CODES[0], /Text\(`发指令（\$\{REASON_DOTS\}）`\)/,
+    assert.match(PANE_CODES[0], /Text\(`发指令（\$\{this\.refusalReason\}）`\)/,
       'dots 的禁用动作必须仍在并把 typed 原因渲染在 Text 上');
   });
 
@@ -325,7 +328,7 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
     assert.match(dots, /instanceGrantStore\.redacted\(nowMs\)/, '只读 redacted 视图');
     assert.match(dots, /Text\(this\.grantLine\)/, '授权行必须是渲染文案，不是注释 / 日志');
     assert.ok(dots.includes('未授权 / 未知'), '坏信封 / 空表必须给「未授权 / 未知」');
-    assert.match(dots, /Text\(`发指令（\$\{REASON_DOTS\}）`\)/, '禁用原因必须在渲染的 Text 上');
+    assert.match(dots, /Text\(`发指令（\$\{this\.refusalReason\}）`\)/, '禁用原因必须在渲染的 Text 上');
     assert.equal(/console\./.test(dots), false, '原因不得只写日志');
     assert.equal(raw.includes('dots 可查看实例并对会话发指令，所有操作需你确认。'), false,
       '旧过度承诺副标题全文绝迹');

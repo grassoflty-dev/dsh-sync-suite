@@ -22,9 +22,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const DRAFT_TS = resolve(HERE, '../../entry/src/main/ets/model/remoteCommandDraft.ts');
 const COMPONENT_ETS = resolve(HERE, '../../entry/src/main/ets/components/RemoteCommandComposer.ets');
 const REMOTE_ETS = resolve(HERE, '../../entry/src/main/ets/pages/RemoteControl.ets');
+const ACTION_BUTTON_ETS = resolve(HERE, '../../entry/src/main/ets/components/ActionButton.ets');
 
 const draftModel = await import('../.build/model/remoteCommandDraft.js');
 const gate = await import('../.build/model/remoteCommandGate.js');
+const buttonModel = await import('../.build/model/actionButton.js');
 
 const {
   COMMAND_TOOL,
@@ -36,13 +38,15 @@ const {
   setConfirmed,
   composerGateInput,
   composerDecision,
-  composerReason
+  composerReason,
+  placeholderRefusalReason
 } = draftModel;
 const { COMMAND_TEXT_LIMIT, COMMAND_WORDING, decideCommandSend } = gate;
 
 const componentSrc = readFileSync(COMPONENT_ETS, 'utf8');
 const remoteSrc = readFileSync(REMOTE_ETS, 'utf8');
 const draftSrc = readFileSync(DRAFT_TS, 'utf8');
+const actionButtonSrc = readFileSync(ACTION_BUTTON_ETS, 'utf8');
 
 const ID = 'inst-a1b2c3d4e5f60718';
 const OTHER_ID = 'inst-0011223344556677';
@@ -77,6 +81,21 @@ describe('A. 默认态与闸门文案', () => {
       assert.equal(componentSrc.includes(wording), false,
         `组件不得复制闸门文案 ${code}：${wording}`);
     }
+  });
+
+  test('A3 只读面板原因映射逐字来自 COMMAND_WORDING（D2，无手写「尚未接线」）', () => {
+    assert.equal(
+      placeholderRefusalReason({ hasTarget: false, commandGranted: true, remoteVerified: true }),
+      COMMAND_WORDING.E_COMMAND_TARGET_MISSING);
+    assert.equal(
+      placeholderRefusalReason({ hasTarget: true, commandGranted: false, remoteVerified: true }),
+      COMMAND_WORDING.E_COMMAND_NOT_GRANTED);
+    assert.equal(
+      placeholderRefusalReason({ hasTarget: true, commandGranted: true, remoteVerified: false }),
+      COMMAND_WORDING.E_COMMAND_REMOTE_UNVERIFIED);
+    assert.equal(
+      placeholderRefusalReason({ hasTarget: true, commandGranted: true, remoteVerified: true }), '');
+    assert.equal(draftSrc.includes('指令确认闸尚未接线'), false, '纯模型不得保留旧假文案');
   });
 });
 
@@ -195,6 +214,40 @@ describe('F. 组件源码形状（诚实、无投递、令牌化）', () => {
     assert.match(componentSrc, /Text\(this\.reason\)/);
     assert.match(componentSrc, /composerReason\(this\.currentState\(\), this\.commandGranted\)/);
     assert.match(componentSrc, /COMMAND_TOOL/);
+  });
+
+  // D1 真机缺陷收口：发送按钮此前 enabled:"true" / clickable:"true" / opacity:0.4 —— 只是「看着禁用」。
+  // 这里用三层证明它不是视觉骗局：(i) composer 显式传 hardDisabled:true；
+  // (ii) ActionButton 据它挂 .enabled(false)、handleClick 早退、false 时 .onClick 仍在；
+  // (iii) 模型 resolveButton(...,true) 直接 tappable=false（点击路径短路）；
+  // 外加一个变异负对照：把 composer 的 flag 去掉，断言必然转红。
+  test('F4 hardDisabled 让发送按钮真不可点：源码形状 + 模型短路 + 负对照', () => {
+    assert.match(componentSrc, /hardDisabled:\s*true/, 'composer 必须显式打开 hardDisabled');
+    assert.match(componentSrc, /Text\(this\.reason\)/, '原因仍须常驻可见 Text（不靠点击才知道）');
+
+    assert.match(actionButtonSrc, /@Prop hardDisabled: boolean = false/, 'additive 属性默认 false');
+    assert.match(actionButtonSrc, /\.enabled\(!this\.hardDisabled\)/,
+      'hardDisabled=true 时渲染 ArkUI .enabled(false)；false 时 .enabled(true) 不吞 onClick');
+    assert.match(actionButtonSrc, /if \(this\.hardDisabled === true\) \{\s*return;\s*\}/,
+      'handleClick 必须早退（belt and braces）');
+    assert.match(actionButtonSrc, /\.onClick\(\(\) => this\.handleClick\(\)\)/,
+      '默认路径的 onClick 仍在（不改变其它调用点）');
+
+    const blocked = buttonModel.resolveButton(false, false, '原因', true);
+    assert.equal(blocked.tappable, false, '模型层点击路径必须短路');
+    assert.equal(buttonModel.blockedTapText(blocked), '原因');
+    const normal = buttonModel.resolveButton(true, false, '');
+    assert.equal(normal.tappable, true, '默认（hardDisabled=false）行为不变');
+
+    const mutated = componentSrc.replace(/hardDisabled:\s*true,?/, '');
+    assert.equal(/hardDisabled:\s*true/.test(mutated), false, '负对照必须先真的去掉 flag');
+    let mutatedFailed = false;
+    try {
+      assert.match(mutated, /hardDisabled:\s*true/);
+    } catch {
+      mutatedFailed = true;
+    }
+    assert.equal(mutatedFailed, true, '负对照：去掉 flag 后断言必须转红');
   });
 
   test('F3 只用设计令牌与 $r 颜色', () => {
