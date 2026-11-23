@@ -122,6 +122,63 @@ hdc -t <serial> shell "cat /data/app/el2/100/base/com.itwill.schedule/haps/entry
 
 ---
 
+## 2.6 远程页（B 方案：插件代理电脑上的 DSH GUI）—— 2026-11-24 新增
+
+这一节是 `mod-plugin-gui-proxy` 落地后的自查顺序。**前提只有两条**，缺任何一条页面都打不开：
+
+1. 电脑上 DSH 本体在跑（它只监听回环，`127.0.0.1`，端口每次启动可能不同）；
+2. 插件远程监听已启动且平板已配对（设置 → 远程控制 → 开始接受连接 → 平板扫码）。
+
+不需要：把 DSH 暴露到局域网、给电脑装证书、在平板上装 CA、额外端口转发。
+
+### 2.6.1 电脑侧（只读）
+
+```powershell
+# 1) DSH 的 GUI 端口（只监听回环，这是正常的）
+Get-NetTCPConnection -State Listen | Where-Object { $_.LocalAddress -eq '127.0.0.1' } |
+  Select-Object LocalPort, OwningProcess | Sort-Object LocalPort
+
+# 2) 插件监听端口（配对串里那个）
+$hdc = "D:\A-DevEco\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe"
+& $hdc list targets
+```
+
+判读：DSH 的 GUI 端口只出现在 `127.0.0.1` 上是**设计如此**，不是故障；插件代理会在电脑本机带 `?token=` 去换 `dsh-auth` cookie，令牌不出电脑。
+
+### 2.6.2 平板侧（`uitest dumpLayout`，机械断言）
+
+一条命令跑完（脚本在 `.tmp/device-check-remote.mjs`，属临时件，不进仓库）：
+
+```powershell
+node .tmp/device-check-remote.mjs 192.168.1.11:33023
+```
+
+它会自动点「远程 DSH」→「打开」，然后逐条断言：
+
+| 断言 | 期望 | 失败意味着 |
+| --- | --- | --- |
+| 平板已连 | 出现 serial | 无线调试断了，重连 `hdc tconn` |
+| 实例列表渲染 | 出现「N 个实例」 | 实例库为空或页面没刷新 |
+| 不是我们的错误页 | 页面**不含**「电脑上的 DSH」/「未启动」类文案 | 代理拿不到上游（DSH 没跑 / 监听没起） |
+| 有 DSH 界面内容 | 出现 DSH 自己的界面文案 | 上游 403（Origin 栅栏）或资源全 404 |
+| 无英文 401 | 不含 `dsh web authentication required` | 令牌没注入成功 |
+| 无原始 JS 报错 | 不含 `Cannot read propert` | 桥/代理把异常泄到了页面 |
+| 发指令控件（若在页面上） | `enabled=false` / `clickable=false` | 硬禁用回归 |
+
+### 2.6.3 三条「不能用」的判别（对应用户会报的症状）
+
+| 症状 | 最可能原因 | 电脑侧怎么证 |
+| --- | --- | --- |
+| 页面白屏 / 一直转 | DSH 没启动，或插件监听没起 | `Get-NetTCPConnection` 找不到 DSH 回环口；面板显示监听未启动 |
+| 页面能开但点不动、发消息失败 | 上游 403（Origin/Host 栅栏） | 代理日志里 `E_UPSTREAM_*` 或上游 403；本仓库 `test/gui-proxy-fence.test.mjs` 复刻了这条栅栏 |
+| 平板显示英文 401 | 令牌注入失败 | 插件进程内的上游 cookie 槽失效；重启 DSH 让插件重新取 `authenticatedUrl` |
+
+### 2.6.4 我**不**替你做的事
+
+- 不解锁你的平板、不代按密码；
+- 不重启你的 DSH（会结束当前会话）；
+- 不把 DSH 暴露到局域网、不装 CA、不开端口转发（这些都已明确否决，理由见 `docs/RESEARCH-B-dsh-gui-proxy.md` §6）。
+
 ## 3. 我做不到、只能请你或用户做的
 
 1. **DSH Web GUI**：本机浏览器对 `127.0.0.1:37946` 返回 401（需要 `dsh web` 打印的带 token 的 URL）。面板的视觉确认只能由你/用户完成。
