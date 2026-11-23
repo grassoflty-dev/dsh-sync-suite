@@ -16,13 +16,60 @@ import os from 'node:os';
 import path from 'node:path';
 import { SyncError } from './errors.js';
 import { GITEE_USERNAME_REQUIRED, resolveGitUsername, scrubAuthValue } from './gitUsername.js';
-import { resolveAskpassNode } from './nodePath.js';
+import { warmAskpassNode } from './nodePath.js';
 /**
- * 网络命令（ls-remote / fetch / push）的单次超时上限。
+ * **读类**网络命令（ls-remote / fetch / clone）的单次超时上限。
  *
- * 离线或仓库无响应时不能把设置页/推送挂死：超时后 kill 子进程并报 E_GIT（含"超时"字样）。
+ * 离线或仓库无响应时不能把设置页挂死：超时后 kill 子进程并报 E_GIT（含"超时"字样）。
+ * push 不在这一档：它上传对象，耗时与本地工作量成正比，见 `PUSH_TIMEOUT_MS`。
  */
 export const NETWORK_TIMEOUT_MS = 8000;
+/**
+ * push 的单次超时上限（毫秒）：**只给 push 用，绝不与读命令共用**。
+ *
+ * 推送要把本地对象上传到远端，耗时与本地新增的工作量成正比（本仓库含手写页截图与
+ * 附件 zip，几 MB 的数据在家用上行链路上完全可能超过 8 秒）。把读命令的 8 秒预算套到
+ * push 上，会把「慢但健康」的推送判成超时——超时会累加同步周期的尝试次数，
+ * 一次慢推送就可能把意图停放掉。所以 push 单独用 120 秒这一档；
+ * 它已经远大于 askpass / node 的冷启动成本，因此 push **不申请**首次调用放宽
+ * （见 `GitRepo.pushBudget()`）。
+ */
+export const PUSH_TIMEOUT_MS = 120_000;
+/**
+ * 本机**第一次**网络**读命令**（ls-remote / fetch / clone）使用的预算（毫秒）。
+ *
+ * D2：首次调用要在 git 子进程里启动 askpass 的 node 解释器（冷启动可能数秒），
+ * 这段成本不应算进 8s 网络预算，否则健康的远端会在第一次探测/拉取被判成超时。
+ * 只有调用方**没有**显式配置 `networkTimeoutMs` 时才会放宽到这个值；
+ * 真正用掉的数字会出现在超时错误里（`details.budgetMs` + 文案）。
+ * push 不吃这一档：`PUSH_TIMEOUT_MS` 本身已经远大于冷启动（见 `pushBudget()`）。
+ */
+export const FIRST_NETWORK_TIMEOUT_MS = 20_000;
+/** 超时的下一步：先怀疑耗时（预热/远端慢），再怀疑链路。 */
+export const GIT_TIMEOUT_NEXT_STEP = '下一步：稍后重试；连续超时先检查网络与代理是否可用';
+/** 网络不可达的下一步：只有解析 / 连接到远端失败才用这一条。 */
+export const GIT_UNREACHABLE_NEXT_STEP = '下一步：检查网络、代理或防火墙，确认远端地址可访问后重试';
+/** 超时文案：预算数字一律来自当次实际使用的预算，不写死。 */
+export function gitTimeoutMessage(command, budgetMs, firstCall) {
+    const warm = firstCall ? '，本机首次调用可能包含预热耗时' : '';
+    return `git ${command} 超时（>${budgetMs} 毫秒未完成${warm}）；${GIT_TIMEOUT_NEXT_STEP}`;
+}
+/**
+ * 传输层失败的**正面证据**：只有这些字样才算「网络不可达」。
+ * `timed out` / `timeout` **不在**此列——超时由结构信号（子进程被预算杀死）判定，
+ * 绝不靠对外文文本的宽泛猜测。
+ */
+const TRANSPORT_EVIDENCE_RE = /could not resolve host|could not resolve proxy|failed to connect|couldn'?t connect|unable to access|network is unreachable|no route to host|connection refused|connection reset|connect to [^\s]+ port [^\s]+ failed/i;
+/** 文本里是否有传输失败的正面证据（结构性判定的唯一入口，供 gitPort 复用）。 */
+export function hasTransportEvidence(text) {
+    return typeof text === 'string' && TRANSPORT_EVIDENCE_RE.test(text);
+}
+/** 进程内已经发起过多少次带预算的网络 git 调用（第一次调用据此放宽预算）。 */
+let networkCallsThisProcess = 0;
+/** 仅测试：把「本进程第一次网络调用」复位，便于观察首次预算。 */
+export function resetNetworkCallBudget() {
+    networkCallsThisProcess = 0;
+}
 /** 是否需要走临时 askpass：仅 https 仓库 + https 模式 + 有 token。 */
 export function usesGitAskpass(config) {
     return config.authMode === 'https' && config.token !== null && /^https:\/\//i.test(config.repoUrl);
@@ -53,7 +100,8 @@ export function gitAuthEnv(config) {
         env.DSH_GIT_SYNC_USER = config.username;
         // node 解释器必须经解析 + 探针验证，不能直接用 process.execPath（DSH 里它是应用二进制）。
         // 解析失败在这里 typed 抛出，早于任何 git 子进程；不涉及 token，也不退化成 auth-prompt。
-        const node = resolveAskpassNode({ ...config.nodePath, env: config.nodePath?.env ?? env });
+        // 走 warmAskpassNode：每进程只解析 / 探测一次（冷启动成本在带预算的网络调用之前付掉）。
+        const node = warmAskpassNode({ ...config.nodePath, env: config.nodePath?.env ?? env });
         env.DSH_GIT_SYNC_NODE = node.path;
         // ELECTRON_RUN_AS_NODE 只在真正使用应用二进制时出现；真实 node.exe 必须没有这个 Electron 变量。
         if (node.electronRunAsNode)
@@ -238,6 +286,9 @@ export class GitRepo {
     extraEnv;
     nodePath;
     networkTimeoutMs;
+    /** 调用方是否显式给了 networkTimeoutMs（显式预算绝不放宽：测试与自定义上限的口径不变）。 */
+    configuredTimeout;
+    execFileImpl;
     askpassDir = null;
     askpassPath = null;
     askpassCounter = null;
@@ -264,11 +315,42 @@ export class GitRepo {
         this.allowLocalRepo = options.allowLocalRepo === true;
         this.extraEnv = options.env ?? {};
         this.nodePath = options.nodePath;
+        this.execFileImpl = options.execFileImpl;
         const configured = options.networkTimeoutMs;
-        this.networkTimeoutMs =
-            typeof configured === 'number' && Number.isFinite(configured) && configured > 0
-                ? Math.min(configured, NETWORK_TIMEOUT_MS)
-                : NETWORK_TIMEOUT_MS;
+        this.configuredTimeout =
+            typeof configured === 'number' && Number.isFinite(configured) && configured > 0;
+        this.networkTimeoutMs = this.configuredTimeout
+            ? Math.min(configured, NETWORK_TIMEOUT_MS)
+            : NETWORK_TIMEOUT_MS;
+    }
+    /**
+     * 本次网络调用实际要用的预算。
+     *
+     * - 本进程第一次带预算的网络调用，且调用方没有显式配置 → 放宽到 FIRST_NETWORK_TIMEOUT_MS，
+     *   让首次 askpass/node 冷启动不至于把健康远端判成超时；
+     * - 其余情况仍然是调用方的预算（默认 NETWORK_TIMEOUT_MS）。
+     *
+     * 返回值会被写进超时错误的 `details`，用户看到的就是"这次实际用掉的那个数"。
+     */
+    networkBudget() {
+        const firstNetworkCall = networkCallsThisProcess === 0;
+        networkCallsThisProcess += 1;
+        // firstCall 的语义 = 「这次真的用上了放宽后的首次预算」，不是「这是第几次调用」：
+        // 显式配置预算的调用方永远拿到自己给的数字，文案里也不会出现「首次调用」的解释。
+        if (!firstNetworkCall || this.configuredTimeout)
+            return { timeoutMs: this.networkTimeoutMs, firstCall: false };
+        return { timeoutMs: Math.max(this.networkTimeoutMs, FIRST_NETWORK_TIMEOUT_MS), firstCall: true };
+    }
+    /**
+     * push 的预算（见 `PUSH_TIMEOUT_MS`）：**独立一档，不与读命令共用**。
+     *
+     * - 恒为 120 秒，**不读** `networkTimeoutMs`：读命令的预算配置不得反向缩小推送；
+     * - 恒为 `firstCall: false`：120 秒已远大于 askpass / node 冷启动，不需要再放宽，
+     *   文案里也不会出现「首次调用预热」这种用于读命令的解释；
+     * - **不推进**进程级网络调用计数：push 抢不走 ls-remote / fetch 的首次放宽。
+     */
+    pushBudget() {
+        return { timeoutMs: PUSH_TIMEOUT_MS, firstCall: false };
     }
     usesAskpass() {
         return usesGitAskpass({ authMode: this.authMode, repoUrl: this.repoUrl, token: this.token });
@@ -314,6 +396,16 @@ export class GitRepo {
             nodePath: this.nodePath,
         });
     }
+    /**
+     * 非零退出的统一解释（D1）：**类别靠结构 + 正面证据**，不靠宽泛外文猜测。
+     *
+     * - 鉴权失败 → E_AUTH（文案与 details 与历史逐字一致，只多一个 `reason`）；
+     * - 传输层失败的正面证据（解析不到主机 / 连接失败 / 无法访问）→ E_GIT + `reason:'unreachable'`，
+     *   文案显式写「网络不可达」，并给链路排查的下一步；
+     * - 其它 → E_GIT + `reason:'git-failed'`，文案逐字保持历史行为。
+     *
+     * 注意：**超时不会走到这里**——超时由子进程被预算杀死（结构信号）在 `run()` 里单独判定。
+     */
     failure(args, result, network = false) {
         const text = `${result.stderr}\n${result.stdout}`.trim();
         const summary = text
@@ -322,22 +414,35 @@ export class GitRepo {
             .filter((line) => line !== '')
             .slice(0, 4)
             .join(' | ') || `exit ${result.code}`;
-        const code = isAuthFailure(text) ? 'E_AUTH' : 'E_GIT';
-        return new SyncError(code, `git ${args[0] ?? ''} 失败：${this.scrub(summary)}`, {
+        const auth = isAuthFailure(text);
+        const unreachable = !auth && hasTransportEvidence(text);
+        const code = auth ? 'E_AUTH' : 'E_GIT';
+        const reason = auth ? 'auth-prompt' : unreachable ? 'unreachable' : 'git-failed';
+        const raw = `git ${args[0] ?? ''} 失败：${this.scrub(summary)}`;
+        const message = unreachable
+            ? `网络不可达（无法解析或连接到远端）：${raw}；${GIT_UNREACHABLE_NEXT_STEP}`
+            : raw;
+        return new SyncError(code, message, {
             command: args.map((arg) => this.scrub(arg)),
             exitCode: result.code,
-            // 调用方据此判断"是否网络类失败"（网络失败才写 reachable:false）。
+            // 调用方据此判断"是否网络类失败"（网络失败才写 reachable:false）；字段名与语义不变。
             network,
+            reason,
         });
     }
+    /**
+     * 起一个 git 子进程。`timeoutMs` 命中时**子进程被杀死**（结构信号 `error.killed`），
+     * 这条分支与 stderr 是否有内容、是什么语言无关，因此结果确定：timeout，而不是网络不可达。
+     */
     async run(args, options = {}) {
         const cwd = options.cwd ?? (existsSync(this.dir) ? this.dir : os.tmpdir());
         const env = await this.buildEnv();
         const networkFlags = options.network === true && this.usesAskpass() ? ['-c', 'credential.helper='] : [];
         const fullArgs = [...IDENTITY_ARGS, ...networkFlags, ...args];
         const timeoutMs = options.timeoutMs;
+        const exec = this.execFileImpl ?? execFile;
         const result = await new Promise((resolve, reject) => {
-            execFile('git', fullArgs, {
+            exec('git', fullArgs, {
                 cwd,
                 env,
                 windowsHide: true,
@@ -352,9 +457,11 @@ export class GitRepo {
                 }
                 const killed = error !== null && error.killed === true;
                 if (killed && timeoutMs !== undefined) {
-                    reject(new SyncError('E_GIT', `git ${args[0] ?? ''} 超时（>${timeoutMs} ms）：网络不可达或仓库响应过慢，可稍后重试`, {
+                    reject(new SyncError('E_GIT', gitTimeoutMessage(args[0] ?? '', timeoutMs, options.firstCall === true), {
                         command: args.map((arg) => this.scrub(arg)),
                         timeoutMs,
+                        budgetMs: timeoutMs,
+                        firstCall: options.firstCall === true,
                         network: options.network === true,
                         reason: 'timeout',
                     }));
@@ -453,10 +560,12 @@ export class GitRepo {
         return { sha, message: line.slice(tab + 1), time: line.slice(0, tab) };
     }
     async lsRemote() {
+        const budget = this.networkBudget();
         const result = await this.run(['ls-remote', '--heads', this.repoUrl], {
             allowFailure: true,
             network: true,
-            timeoutMs: this.networkTimeoutMs,
+            timeoutMs: budget.timeoutMs,
+            firstCall: budget.firstCall,
         });
         if (result.code !== 0)
             throw this.failure(['ls-remote', this.repoUrl], result, true);
@@ -488,10 +597,12 @@ export class GitRepo {
      */
     async fetch() {
         await this.ensureRemote();
+        const budget = this.networkBudget();
         const fetched = await this.run(['fetch', '--quiet', 'origin', this.branch], {
             allowFailure: true,
             network: true,
-            timeoutMs: this.networkTimeoutMs,
+            timeoutMs: budget.timeoutMs,
+            firstCall: budget.firstCall,
         });
         if (fetched.code !== 0) {
             const text = `${fetched.stderr}\n${fetched.stdout}`;
@@ -617,10 +728,14 @@ export class GitRepo {
         return { commit: head.sha, files: changed };
     }
     async pushOnce() {
+        // push 用自己的一档（PUSH_TIMEOUT_MS），不走读命令的 networkBudget()：
+        // 推送上传对象的耗时与本地工作量成正比，8 秒预算会把慢但健康的推送判成超时。
+        const budget = this.pushBudget();
         const result = await this.run(['push', '--porcelain', 'origin', `HEAD:${this.branch}`], {
             allowFailure: true,
             network: true,
-            timeoutMs: this.networkTimeoutMs,
+            timeoutMs: budget.timeoutMs,
+            firstCall: budget.firstCall,
         });
         const text = `${result.stdout}\n${result.stderr}`;
         if (result.code === 0) {

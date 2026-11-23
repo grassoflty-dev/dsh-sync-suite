@@ -31,7 +31,7 @@ import {
   v2TrailerLine,
 } from '../dist/sync/cycle.js'
 import { SyncError } from '../dist/engine/errors.js'
-import { GitRepoV2Port } from '../dist/sync/gitPort.js'
+import { GitRepoV2Port, pushTimeoutReason } from '../dist/sync/gitPort.js'
 import { NodeTimelineFs } from '../dist/timeline/write.js'
 import { NodeOutboxPort } from '../dist/sync/outbox.js'
 import { FRESH_SCHEMA_TEXT, buildRecordsText, canonicalRecordLine } from '../dist/timeline/index.js'
@@ -154,7 +154,8 @@ async function hostileReasonResult(pushErrorText) {
   })
 }
 
-// 两侧短语漂移守卫：从源码逐字抽出四个「推送失败：…」字面量，不靠人工维护清单。
+// 两侧短语漂移守卫：从源码逐字抽出五个「推送失败：…」短语，不靠人工维护清单。
+// 其中超时短语是模板（唯一变量 = 当次预算数字），单独从 gitPort.ts 的导出常量取出。
 function quotedPushPhrases(block) {
   const out = []
   const re = /'([^'\r\n]*)'/g
@@ -172,7 +173,13 @@ function shippedPushReasons() {
   const end = src.indexOf('}[reason]', start)
   assert.notEqual(start, -1)
   assert.notEqual(end, -1)
-  return quotedPushPhrases(src.slice(start, end)).sort()
+  const phrases = quotedPushPhrases(src.slice(start, end))
+  // 超时短语由模板 + 实际预算生成：模板必须能被源码逐字取出，否则本守卫失效。
+  const template = /export const PUSH_TIMEOUT_REASON_TEMPLATE = '([^']+)'/.exec(src)
+  assert.notEqual(template, null, 'gitPort.ts 必须导出 PUSH_TIMEOUT_REASON_TEMPLATE')
+  assert.equal(template[1].includes('>N 毫秒'), true, '超时模板的唯一变量必须是 >N 毫秒')
+  phrases.push(template[1])
+  return phrases.sort()
 }
 
 function cycleAllowedReasons() {
@@ -441,9 +448,10 @@ test('PO-08 16 个 hostile 推送原因全部折叠为固定短语（含 r2 fuzz
   }
 })
 
-test('PO-09 四个 shipped 短语逐字节存活（防止过度打码）', async () => {
+test('PO-09 五个 shipped 短语逐字节存活（防止过度打码）', async () => {
   const reasons = shippedPushReasons()
-  assert.equal(reasons.length, 4)
+  // 4 个固定短语 + 1 个超时模板（mod-plugin-git-timeout-classification：超时与不可达分开）。
+  assert.equal(reasons.length, 5)
   for (const shipped of reasons) {
     const result = await hostileReasonResult(shipped)
     assert.equal(result.code, V2_ERROR.LOCAL_PENDING, shipped)
@@ -454,11 +462,26 @@ test('PO-09 四个 shipped 短语逐字节存活（防止过度打码）', async
   }
 })
 
+test('PO-11 超时短语带真实预算数字也能穿过白名单；把数字换成文字仍被折叠', async () => {
+  // mod-plugin-git-timeout-classification：超时与不可达是两种结局，数字来自当次预算。
+  const shipped = pushTimeoutReason(20_000)
+  assert.equal(shipped.includes('>20000 毫秒'), true)
+  const kept = await hostileReasonResult(shipped)
+  assert.equal(kept.code, V2_ERROR.LOCAL_PENDING)
+  assert.equal(kept.message.includes(`最近一次推送失败：E_PUSH_REJECTED：${shipped}）`), true)
+
+  // 唯一允许的变量是纯数字：换成文字就必须整段折叠成固定短语（闸门没有放宽）。
+  const tampered = shipped.replace('20000', '两百')
+  const folded = await hostileReasonResult(tampered)
+  assert.equal(folded.message.includes('推送失败（原因类别未识别）'), true)
+  assert.equal(folded.message.includes('两百'), false)
+})
+
 test('PO-10 drift guard：cycle.ts 的精确短语表与 gitPort.pushFailure() 逐字一致', () => {
   const shipped = shippedPushReasons()
   const allowed = cycleAllowedReasons()
-  assert.equal(shipped.length, 4)
-  assert.equal(allowed.length, 4)
+  assert.equal(shipped.length, 5)
+  assert.equal(allowed.length, 5)
   // 任一侧改写 / 增删短语都会让排序后的数组不同 ⇒ 本测试失败，
   // 不会让重新措辞的正文悄无声息地穿过终态消息。
   assert.deepEqual(allowed, shipped)

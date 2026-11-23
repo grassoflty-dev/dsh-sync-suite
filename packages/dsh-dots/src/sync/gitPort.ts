@@ -6,7 +6,9 @@
  * `{remote:'origin', branch:'main', force:false}`，这里再次断言后执行，绝不拼强制推送参数。
  */
 import { execFile } from 'node:child_process'
-import { GitRepo } from '../engine/git.js'
+import {
+  GitRepo, PUSH_TIMEOUT_MS, gitTimeoutMessage, hasTransportEvidence,
+} from '../engine/git.js'
 import { SyncError } from '../engine/errors.js'
 import { ASKPASS_NODE_MISSING_CODE } from '../engine/nodePath.js'
 import type { GitRepoOptions } from '../engine/git.js'
@@ -20,17 +22,51 @@ interface RunResult {
   stderr: string
 }
 
+/** 一次 push 的实际预算与来源（push 恒用 PUSH_TIMEOUT_MS，firstCall 恒为 false）。 */
+interface PushBudget {
+  timeoutMs: number
+  firstCall: boolean
+}
+
 /**
  * 底层执行器：execFile，不拼 shell、不拼 token。
  * env 由调用方从 `GitRepo.buildEnv()`（`gitAuthEnv()` 的唯一构造点）传入，
  * 本函数绝不自行构造环境——这是 push 鉴权不再丢失的关键。
+ *
+ * 预算命中时子进程被杀死（结构信号 `killed`）：这条分支与 stderr 有没有内容、
+ * 是什么语言无关，因此一律判成 **timeout**，绝不再冒充「网络不可达」（D1）。
+ *
+ * `impl` 默认就是 node:child_process 的 execFile；仅测试注入替身，用来观察
+ * 「这次 push 实际用了哪一档预算」，生产路径永远走真实 execFile。
  */
-function execGit(cwd: string, args: string[], env: NodeJS.ProcessEnv): Promise<RunResult> {
+function execGit(
+  cwd: string, args: string[], env: NodeJS.ProcessEnv, budget: PushBudget | null,
+  impl: typeof execFile = execFile,
+): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd, windowsHide: true, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, env },
+    impl('git', args, {
+      cwd, windowsHide: true, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, env,
+      ...(budget === null ? {} : { timeout: budget.timeoutMs, killSignal: 'SIGTERM' as const }),
+    },
       (error, stdout, stderr) => {
         if (error !== null && (error as NodeJS.ErrnoException).code === 'ENOENT') {
           reject(new SyncError('E_GIT', '找不到 git 可执行文件，请先安装 git 并加入 PATH'))
+          return
+        }
+        const killed = error !== null && (error as unknown as { killed?: unknown }).killed === true
+        if (killed && budget !== null) {
+          reject(new SyncError(
+            'E_GIT',
+            gitTimeoutMessage(args[0] ?? 'push', budget.timeoutMs, budget.firstCall),
+            {
+              reason: 'timeout',
+              network: true,
+              killed: true,
+              timeoutMs: budget.timeoutMs,
+              budgetMs: budget.timeoutMs,
+              firstCall: budget.firstCall,
+            },
+          ))
           return
         }
         const code = error === null ? 0 : typeof (error as { code?: unknown }).code === 'number'
@@ -90,24 +126,126 @@ export interface GitRepoV2PortOptions extends GitRepoOptions {
   runner?: (cwd: string, args: string[], env: NodeJS.ProcessEnv) => Promise<RunResult>
 }
 
+/* -------------------------------------------------------------------------- */
+/* 推送失败分类（D1）：结构优先，文本只作异类兜底                              */
+/* -------------------------------------------------------------------------- */
+
+/** push 失败的五类稳定原因：「超时」与「不可达」是两件事，各有独立文案与下一步。 */
+export type PushReason = 'auth-prompt' | 'non-fast-forward' | 'timeout' | 'unreachable' | 'git-failed'
+
+const PUSH_REASONS: readonly PushReason[] = Object.freeze([
+  'auth-prompt', 'non-fast-forward', 'timeout', 'unreachable', 'git-failed',
+])
+
+/**
+ * 超时短语模板：唯一可变量是预算数字（`>N 毫秒`）；终态白名单按这份模板精确匹配。
+ *
+ * 文案只描述**推送**的耗时来源（要上传本地对象，上传量大或远端响应慢），
+ * 不再写「本机首次调用预热」——push 不吃首次调用放宽，那个原因对推送不成立。
+ */
+export const PUSH_TIMEOUT_REASON_TEMPLATE = '推送失败：推送超时（>N 毫秒未完成，推送需上传本地对象，上传量大或远端响应慢）'
+
+/** 用当次**实际预算**填充超时短语：数字永远来自真实调用，不写死散文。 */
+export function pushTimeoutReason(budgetMs: number): string {
+  return PUSH_TIMEOUT_REASON_TEMPLATE.replace('>N 毫秒', `>${budgetMs} 毫秒`)
+}
+
+/**
+ * 从 typed 详情取当次预算；拿不到就退回 push 自己的上限 `PUSH_TIMEOUT_MS`。
+ * 退回值也必须是**推送**的预算：这里若退回读命令的 8 秒，文案会把读预算说成推送预算。
+ */
+function timeoutBudgetOf(error: unknown): number {
+  const details = (error as { details?: { budgetMs?: unknown; timeoutMs?: unknown } } | null)?.details
+  for (const value of [details?.budgetMs, details?.timeoutMs]) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.floor(value)
+  }
+  return PUSH_TIMEOUT_MS
+}
+
+/** typed 详情里的 reason（结构信号）；只认五类之一，别的值一律忽略。 */
+function typedReasonOf(error: unknown): PushReason | null {
+  const raw = (error as { details?: { reason?: unknown } } | null)?.details?.reason
+  const mapped = raw === 'network' ? 'unreachable' : raw // 旧字段兼容：network = unreachable
+  return typeof mapped === 'string' && (PUSH_REASONS as readonly string[]).includes(mapped)
+    ? (mapped as PushReason)
+    : null
+}
+
+/** 子进程被预算杀死 / 明确的超时 errno：与 stderr 语言无关的结构信号。 */
+function killedTimeout(error: unknown): boolean {
+  const record = error as { killed?: unknown; code?: unknown; details?: { killed?: unknown } } | null
+  return record?.killed === true
+    || record?.details?.killed === true
+    || record?.code === 'ETIMEDOUT'
+    || (error instanceof Error && error.name === 'TimeoutError')
+}
+
+function errorTextOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+const AUTH_TEXT_RE =
+  /User cancelled dialog|\/dev\/tty|could not read (Username|Password)|terminal prompts disabled|Authentication failed|prompt script|askpass/i
+const NON_FAST_FORWARD_TEXT_RE =
+  /non-fast-forward|\[rejected\]|fetch first|stale info|failed to push some refs/i
+const TIMEOUT_TEXT_RE = /timed? ?out|timeout|ETIMEDOUT/i
+
+/**
+ * 分类顺序（D1 的核心）：
+ *   1. 结构：typed `details.reason`（engine 的 timeout / unreachable 原样透传）；
+ *   2. 结构：`killed` / ETIMEDOUT / TimeoutError → **timeout**，哪怕 stderr 为空或是外文；
+ *   3. 文本：鉴权 → non-fast-forward → **正面传输证据** → 「不可达」；
+ *   4. 文本：只有超时字样、没有传输证据 → 仍是 timeout，不冒充不可达；
+ *   5. 其它 → git-failed（既有文案）。
+ */
+export function pushFailureReason(error: unknown): PushReason {
+  const typed = typedReasonOf(error)
+  if (typed !== null) return typed
+  if (killedTimeout(error)) return 'timeout'
+  const text = errorTextOf(error)
+  if (AUTH_TEXT_RE.test(text)) return 'auth-prompt'
+  if (NON_FAST_FORWARD_TEXT_RE.test(text)) return 'non-fast-forward'
+  if (hasTransportEvidence(text)) return 'unreachable'
+  if (TIMEOUT_TEXT_RE.test(text)) return 'timeout'
+  return 'git-failed'
+}
+
+/** git 非零退出的文本类别：只产类别，不产文案（正文仍按既有口径截断进 message）。 */
+function gitFailureReasonOf(text: string): PushReason {
+  if (AUTH_TEXT_RE.test(text)) return 'auth-prompt'
+  if (NON_FAST_FORWARD_TEXT_RE.test(text)) return 'non-fast-forward'
+  if (hasTransportEvidence(text)) return 'unreachable'
+  if (TIMEOUT_TEXT_RE.test(text)) return 'timeout'
+  return 'git-failed'
+}
+
 export class GitRepoV2Port implements V2GitPort {
   private readonly repo: GitRepo
   private readonly runner: ((cwd: string, args: string[], env: NodeJS.ProcessEnv) => Promise<RunResult>) | null
+  private readonly execFileImpl: typeof execFile | null
 
   constructor(options: GitRepoV2PortOptions) {
     // v2 固定 main：这里只固定 config 值，不执行任何改分支命令。
     this.repo = new GitRepo({ ...options, branch: 'main' })
     this.runner = options.runner ?? null
+    // 仅测试注入：用来观察 push 实际拿到的 `timeout` 选项；生产不传，走真实 execFile。
+    this.execFileImpl = options.execFileImpl ?? null
   }
 
   /**
    * 所有 git 子进程的统一入口：env 只来自 `GitRepo.buildEnv()` → `gitAuthEnv()`。
    * 与 clone / fetch 共用同一份构造逻辑，保证 push 不再丢失 askpass / 用户名 / 禁提示设置。
+   *
+   * **只有 push 带预算，且用的是 push 自己的一档 `PUSH_TIMEOUT_MS`（120 秒）**：
+   * 推送上传对象，耗时与本地工作量成正比，读命令的 8 秒预算会把慢但健康的推送杀掉；
+   * push 也不吃首次调用放宽（120 秒已远大于冷启动）。其余命令一律不带预算。
    */
   private async run(cwd: string, args: string[]): Promise<RunResult> {
     const env = await this.repo.buildEnv()
+    // 注入的 runner 是测试替身，不消耗进程级预算，也不经过真实 execFile。
     if (this.runner !== null) return await this.runner(cwd, args, env)
-    return await execGit(cwd, args, env)
+    const budget = args[0] === 'push' ? this.repo.pushBudget() : null
+    return await execGit(cwd, args, env, budget, this.execFileImpl ?? execFile)
   }
 
   /** 每条命令都过 argv 守卫；identity 的 -c 由 commit() 单独拼，不经此口。 */
@@ -115,7 +253,12 @@ export class GitRepoV2Port implements V2GitPort {
     assertSafeGitArgs(args)
     const result = await this.run(this.repo.dir, args)
     if (result.code !== 0 && !allowFailure) {
-      throw new SyncError('E_GIT', `git ${args[0] ?? ''} 失败：${(result.stderr || result.stdout).trim().slice(0, 300)}`)
+      const text = (result.stderr || result.stdout).trim()
+      throw new SyncError('E_GIT', `git ${args[0] ?? ''} 失败：${text.slice(0, 300)}`, {
+        // 只带**类别**进详情（结构化分类用），正文仍按既有口径截断进 message。
+        reason: gitFailureReasonOf(text),
+        exitCode: result.code,
+      })
     }
     return result
   }
@@ -213,22 +356,20 @@ export class GitRepoV2Port implements V2GitPort {
    * 注意：node 解释器缺失是 buildEnv() 阶段的 typed 配置错误，由 pushMain() 在调用本函数前
    * 原样抛出；本函数下面的 auth-prompt 分类只处理真正的 git 鉴权失败，语义保持不变。
    */
-  private pushFailure(text: string): SyncError {
-    let reason: 'auth-prompt' | 'non-fast-forward' | 'network' | 'git-failed' = 'git-failed'
-    if (/User cancelled dialog|\/dev\/tty|could not read (Username|Password)|terminal prompts disabled|Authentication failed|prompt script|askpass/i.test(text)) {
-      reason = 'auth-prompt'
-    } else if (/non-fast-forward|\[rejected\]|fetch first|stale info|failed to push some refs/i.test(text)) {
-      reason = 'non-fast-forward'
-    } else if (/Could not resolve host|timed? ?out|unable to access|network|connection/i.test(text)) {
-      reason = 'network'
-    }
+  private pushFailure(error: unknown): SyncError {
+    const reason = pushFailureReason(error)
+    const budgetMs = timeoutBudgetOf(error)
+    // 文案表：五个短语都以「推送失败：」开头，终态白名单（cycle.ts）用同一批短语做精确匹配。
     const message = {
       'auth-prompt': '推送失败：HTTPS 鉴权无法通过（git 已禁用交互提示，askpass／用户名或令牌不可用）；请检查鉴权配置后重试',
       'non-fast-forward': '推送失败：远端分支已前进，下一次同步会做有界重试',
-      network: '推送失败：网络不可达或远端响应超时，请稍后重试',
+      timeout: pushTimeoutReason(budgetMs),
+      unreachable: '推送失败：网络不可达（无法解析或连接到远端）',
       'git-failed': '推送失败：git 拒绝了本次推送，请检查远端状态后重试',
     }[reason]
-    return new SyncError('E_PUSH_REJECTED', message, { reason })
+    // 超时把当次预算一并带进 typed 详情（`budgetMs`）：调用方能直接看到「这次用掉的是 push 的
+    // 120 秒档」，不必从文案里解析；其它原因与预算无关，详情仍是原来的 `{ reason }`。
+    return new SyncError('E_PUSH_REJECTED', message, reason === 'timeout' ? { reason, budgetMs } : { reason })
   }
 
   async pushMain(args: PushArgs): Promise<void> {
@@ -241,7 +382,8 @@ export class GitRepoV2Port implements V2GitPort {
       // 绝不经过 pushFailure() 的 auth-prompt 分类（那会把配置问题误报成鉴权问题）。
       if (error instanceof SyncError && error.code === ASKPASS_NODE_MISSING_CODE) throw error
       // typed 错误 + 固定文案：原文可能含 tty 对话框堆栈、askpass 正文甚至 token，一律不带出。
-      throw this.pushFailure(error instanceof Error ? error.message : String(error))
+      // 传错误对象而不是 message：结构信号（killed / details.reason）必须能到达分类器。
+      throw this.pushFailure(error)
     }
   }
 

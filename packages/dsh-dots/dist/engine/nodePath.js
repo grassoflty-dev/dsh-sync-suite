@@ -169,6 +169,64 @@ export function defaultAskpassProbe(candidate, context) {
     probeCache.set(key, ok);
     return ok;
 }
+const resolutionCache = new Map();
+/** 注入的探针 / 存在性判定按**对象身份**区分：不同测试的注入不会互相串味。 */
+const functionIds = new WeakMap();
+let functionIdSeq = 0;
+let warmUpState = { warmed: false, elapsedMs: 0, path: '' };
+/** 仅测试：清空进程内解析缓存与预热状态，让「首次调用」可被重复观察。 */
+export function resetAskpassNodeWarmUp() {
+    resolutionCache.clear();
+    warmUpState = { warmed: false, elapsedMs: 0, path: '' };
+}
+/** 当前进程的预热状态快照（只读；调用方据此在超时文案里点明首次调用的额外成本）。 */
+export function askpassNodeWarmUp() {
+    return { ...warmUpState };
+}
+function functionIdOf(value) {
+    if (value === undefined)
+        return 'default';
+    const known = functionIds.get(value);
+    if (known !== undefined)
+        return String(known);
+    functionIdSeq += 1;
+    functionIds.set(value, functionIdSeq);
+    return String(functionIdSeq);
+}
+/** 缓存键 = 影响解析结果的全部输入（含注入函数的身份，保证测试可预测）。 */
+function warmUpKey(inputs) {
+    const env = inputs.env ?? process.env;
+    const platform = inputs.platform ?? process.platform;
+    const win = platform === 'win32';
+    return [
+        env[ASKPASS_NODE_OVERRIDE_ENV] ?? '',
+        readPathValue(env, win),
+        inputs.pathExt ?? env.PATHEXT ?? '',
+        platform,
+        inputs.pathDelimiter ?? '',
+        inputs.execPath ?? process.execPath,
+        inputs.electronVersion ?? process.versions.electron ?? '',
+        functionIdOf(inputs.fileExists),
+        functionIdOf(inputs.probe),
+    ].join('\u0000');
+}
+/**
+ * 预热 + 每进程只解析一次：第一次调用真的列举候选并跑探针（冷启动成本在这里付掉，
+ * 早于任何带预算的网络 git 子进程），之后同键调用直接命中缓存，不再列举、不再起探针进程。
+ *
+ * 失败**绝不缓存**、绝不降级：解释器缺失仍然是 typed `E_ASKPASS_NODE_MISSING`，每次调用都抛。
+ */
+export function warmAskpassNode(inputs = {}) {
+    const key = warmUpKey(inputs);
+    const cached = resolutionCache.get(key);
+    if (cached !== undefined)
+        return { ...cached };
+    const startedAt = Date.now();
+    const resolved = resolveAskpassNode(inputs);
+    resolutionCache.set(key, resolved);
+    warmUpState = { warmed: true, elapsedMs: Date.now() - startedAt, path: resolved.path };
+    return { ...resolved };
+}
 /** 按顺序探测候选，第一个通过者胜出；全部失败则 typed 拒绝，不返回任何假解释器。 */
 export function resolveAskpassNode(inputs = {}) {
     const probe = inputs.probe ?? defaultAskpassProbe;

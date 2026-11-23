@@ -943,8 +943,23 @@ function typedError(error: unknown): string {
 /** node 解释器缺失的下一步：全文件唯一一份，push / branchName / fetch 共用。 */
 export const ASKPASS_NODE_NEXT_STEP = '；下一步：安装 Node.js 或把 DSH_GIT_SYNC_NODE 指向 node.exe 后重试'
 
+/** 超时的下一步：先怀疑耗时（首次预热 / 远端慢），与「不可达」的链路排查分开。 */
+export const PUSH_TIMEOUT_NEXT_STEP = '；下一步：稍后重试；连续超时先检查网络与代理是否可用'
+
+/** 网络不可达的下一步：只有解析/连接失败这一类才给链路排查指令。 */
+export const PUSH_UNREACHABLE_NEXT_STEP = '；下一步：检查网络、代理或防火墙，确认远端地址可访问后重试'
+
 /** 其它 typed 码（含既有 E_PUSH_REJECTED）沿用原来的远端分叉建议，文案逐字节不变。 */
 const DEFAULT_GIT_NEXT_STEP = '；下一步：检查远端是否被其他设备推进，下一次同步会做有界重试，仍未成功请人工协调'
+
+/** 下一步只按 typed `details.reason` 与码选一份，不再让超时复用「远端被推进」的建议。 */
+function nextStepOf(error: unknown): string {
+  if (typedCodeOf(error) === ASKPASS_NODE_MISSING_CODE) return ASKPASS_NODE_NEXT_STEP
+  const raw = (error as { details?: { reason?: unknown } } | null)?.details?.reason
+  if (raw === 'timeout') return PUSH_TIMEOUT_NEXT_STEP
+  if (raw === 'unreachable' || raw === 'network') return PUSH_UNREACHABLE_NEXT_STEP
+  return DEFAULT_GIT_NEXT_STEP
+}
 
 /**
  * typed 码判定：只有 SyncError 且 code 为 E_ 前缀才保留；其余一律走调用方兜底文案。
@@ -966,8 +981,7 @@ export function gitStageFailure(
 ): { code: string; message: string } {
   const code = typedCodeOf(error)
   if (code === '') return fallback
-  const nextStep = code === ASKPASS_NODE_MISSING_CODE ? ASKPASS_NODE_NEXT_STEP : DEFAULT_GIT_NEXT_STEP
-  return { code, message: `${code}: ${typedError(error)}${nextStep}` }
+  return { code, message: `${code}: ${typedError(error)}${nextStepOf(error)}` }
 }
 
 /**
@@ -988,23 +1002,30 @@ const MAX_TERMINAL_PUSH_REASON = 96
 /** 未通过白名单时的固定替代文案：只报类别，不报位置、原文或任何可还原片段。 */
 const GENERIC_PUSH_REASON = '推送失败（原因类别未识别）'
 
-/** 只接受 pushFailure() 的四个固定短语；任何其它正文都不进终态消息。 */
+/** 只接受 pushFailure() 的五个固定短语；任何其它正文都不进终态消息。 */
 const ALLOWED_PUSH_REASONS: readonly string[] = Object.freeze([
   '推送失败：HTTPS 鉴权无法通过（git 已禁用交互提示，askpass／用户名或令牌不可用）；请检查鉴权配置后重试',
   '推送失败：远端分支已前进，下一次同步会做有界重试',
-  '推送失败：网络不可达或远端响应超时，请稍后重试',
+  '推送失败：网络不可达（无法解析或连接到远端）',
+  // 超时短语的唯一变量是当次实际预算数字（push 恒为 PUSH_TIMEOUT_MS = 120000）：
+  // 匹配前把 `>N 毫秒` 归一（见 singleLineSafeReason）。
+  '推送失败：推送超时（>N 毫秒未完成，推送需上传本地对象，上传量大或远端响应慢）',
   '推送失败：git 拒绝了本次推送，请检查远端状态后重试',
 ])
 
 /**
- * 精确短语白名单（fail-closed）：折叠成单行、有界之后，只有逐字等于四个
+ * 精确短语白名单（fail-closed）：折叠成单行、有界之后，只有逐字等于五个
  * pushFailure() 短语之一才通过；其它一切（含 UNC / 相对 / 全角路径、盘符、
  * 令牌、hex、超长串）都整段换成固定短语。不做部分打码、不做占位符替换。
+ *
+ * 超时短语里的 `>N 毫秒` 是唯一允许的变量：只把**纯数字**归一成 N 再做精确比对，
+ * 命中后仍然输出带真实数字的原文（数字来自当次预算，不写死）。
  */
 function singleLineSafeReason(text: string, max = MAX_TERMINAL_PUSH_REASON): string {
   const flat = text.replace(/[\r\n\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim()
   const bounded = flat.slice(0, max)
-  return ALLOWED_PUSH_REASONS.includes(bounded) ? bounded : GENERIC_PUSH_REASON
+  const canonical = bounded.replace(/>\d{1,6} 毫秒/, '>N 毫秒')
+  return ALLOWED_PUSH_REASONS.includes(canonical) ? bounded : GENERIC_PUSH_REASON
 }
 
 /** 从 push 异常提取 typed 原因：优先带出 E_ 码，正文只取白名单化的单行短句。 */
