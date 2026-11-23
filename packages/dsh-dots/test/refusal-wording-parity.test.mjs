@@ -41,6 +41,8 @@ const EXPECTED_KEYS = [
   'prompt.duplicate',
   'instance.unknown',
   'session.unavailable',
+  'session.deliveryFailed',
+  'session.recordFailed',
 ]
 
 let mismatches = 0
@@ -98,12 +100,12 @@ function parseApp() {
   return { limit, wording }
 }
 
-test('拒绝文案三方对拍：16 行 + App 侧 + 插件侧 +  hygiene', () => {
+test('拒绝文案三方对拍：19 行 + App 侧 + 插件侧 +  hygiene', () => {
   const rows = parseDoc()
   const app = parseApp()
 
   // (c) 行数与 key 集合
-  check('row count', rows.length, 17)
+  check('row count', rows.length, 19)
   check('key set', [...new Set(rows.map((row) => row.key))].sort().join(','), [...EXPECTED_KEYS].sort().join(','))
   // prompt.text.tooLong 的模板先决条件
   check('COMMAND_TEXT_LIMIT', app.limit, 2000)
@@ -134,7 +136,7 @@ test('拒绝文案三方对拍：16 行 + App 侧 + 插件侧 +  hygiene', () =>
     }
   }
   check('app row count', appRows, 8)
-  check('plugin row count', pluginRows, 12)
+  check('plugin row count', pluginRows, 14)
 
   // (d) 文案 hygiene（文档 + App 值 + 插件两表）
   const texts = [...allWording, ...Object.values(app.wording), ...Object.values(PROMPT_WORDING), ...Object.values(LEASE_WORDING)]

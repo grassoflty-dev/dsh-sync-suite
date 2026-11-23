@@ -102,9 +102,9 @@ async function setup(t, options = {}) {
     lastProblem: () => null,
   }
   const delivery = {
-    send: async (req) => {
+    send: async () => {
       calls.delivery += 1
-      return { seq: 1, sha256: SHA, accepted: true, text: req.text }
+      return { ok: true, seq: 1, sha256: SHA }
     },
   }
   const headReader = { readHeadSha: async () => { calls.headReader += 1; return SHA } }

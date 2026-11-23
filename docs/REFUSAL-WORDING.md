@@ -23,9 +23,13 @@
 | prompt.duplicate | — | — | E_PROMPT_DUPLICATE | PROMPT_WORDING | 同一条指令已经处理过，未重复写入 | 插件 `sessionPrompt` |
 | instance.unknown | — | — | E_INSTANCE_UNKNOWN | PROMPT_WORDING | 找不到该实例，请重新配对 | 插件 `sessionPrompt` |
 | session.unavailable | — | — | E_SESSION_UNAVAILABLE | PROMPT_WORDING | 该会话暂时不可写入（投递通道未接入） | 插件 `sessionPrompt` |
+| session.deliveryFailed | — | — | E_SESSION_DELIVERY_FAILED | PROMPT_WORDING | 已尝试投递但失败（会话未写入），可用同一请求号重试 | 插件 `sessionPrompt` |
+| session.recordFailed | — | — | E_SESSION_RECORD_FAILED | PROMPT_WORDING | 会话已写入但请求记录未落盘，请先刷新会话确认，勿盲目重发 | 插件 `sessionPrompt` |
 
 > `channel.tablet.unverified` 与 `channel.desktop.unverified` 是**同一个前置条件的两个半边，文案不同、不可互换、不可互相替代**：平板侧证明的是「本机没有通过真机 pin 校验」，桌面侧证明的是「操作员没有标记本机通道已验证」。两侧都成立才允许发送。
 > `channel.desktop.leafMismatch` 表示**操作员确实验证过某个证书，但当前证书已不是那一个**（换证书 / 重装）；它与 `channel.desktop.unverified`（从未验证 / 标记缺失 / 无 pin 可绑）**必须可区分**，两者都拒绝发送，且都绝不 TOFU 补 pin。
+
+> `session.unavailable` / `session.deliveryFailed` / `session.recordFailed` 是三段式诚实区分：**unavailable = 没投递**（没有 transport，或端口自己报告无通道）；**deliveryFailed = 投递了但失败**（会话未写入，可用同一请求号重试）；**recordFailed = 投递成功但记录失败**（会话可能已写入，须先刷新确认，勿盲目重发）。三者互不替代。
 
 > `prompt.text.*` 与 `prompt.grant.denied` 是**同一失败空间的重叠**：平板先拦（本地判定），插件再拦（防御性复检）。**同一语义键在两侧必须逐字相同**；这就是本表存在的原因。
 
@@ -39,4 +43,4 @@
 
 ---
 
-日期 2026-11-23 · owner：总设计师 · 本表共 **17 行**语义键 · 状态：本表随 `mod-plugin-session-prompt` 落地；`mod-chat-lease` 的 `LEASE_WORDING` 先于本表冻结。
+日期 2026-11-23 · owner：总设计师 · 本表共 **19 行**语义键 · 状态：本表随 `mod-plugin-session-prompt` 落地；`mod-chat-lease` 的 `LEASE_WORDING` 先于本表冻结。

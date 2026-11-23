@@ -79,9 +79,10 @@ async function setup(t, options = {}) {
   }
   const delivery = options.delivery === false ? null : {
     // 故意多塞 text / leaseOwner 两个字段，证明服务层只回白名单三字段。
-    send: async (request) => {
+    send: async () => {
       calls.delivery += 1
-      return { seq: 7, sha256: 'c'.repeat(64), accepted: true, text: request.text, leaseOwner: request.leaseOwner }
+      // 故意多塞两个字段，证明服务层只回 {seq,sha256,accepted} 白名单。
+      return { ok: true, seq: 7, sha256: 'c'.repeat(64), text: 'SHOULD-NOT-ECHO', leaseOwner: 'dots' }
     },
   }
   const headReader = {

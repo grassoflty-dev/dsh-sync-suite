@@ -1,7 +1,8 @@
 /**
  * mod-plugin-session-prompt：发指令拒绝文案的**语义键表**（插件侧唯一事实源）。
  *
- * 逐字来源：`docs/REFUSAL-WORDING.md`（16 行 join 表）。本文件只登记插件侧的 7 个语义键；
+ * 逐字来源：`docs/REFUSAL-WORDING.md`（19 行 join 表）。`PROMPT_SEMANTIC_KEYS` 只列 gate 层的
+ * 7 个键；通道指纹状态键与两个投递结果键由 `PromptSemanticKey` 联合类型显式补入。
  * 租约四码继续用 `lease.ts` 的 `LEASE_WORDING`，**绝不**在这里复制第二份。
  *
  * 为什么按语义键而不是按错误码索引：同一个 E_VALIDATION 要承载 text.empty 与 text.tooLong
@@ -29,6 +30,8 @@ export const PROMPT_ERROR_CODES = {
   PROMPT_DUPLICATE: 'E_PROMPT_DUPLICATE',
   INSTANCE_UNKNOWN: 'E_INSTANCE_UNKNOWN',
   SESSION_UNAVAILABLE: 'E_SESSION_UNAVAILABLE',
+  SESSION_DELIVERY_FAILED: 'E_SESSION_DELIVERY_FAILED',
+  SESSION_RECORD_FAILED: 'E_SESSION_RECORD_FAILED',
 } as const
 
 /** gate 层级拒绝的语义键（不含通道指纹状态键，后者由 pin 绑定层单独产生）。 */
@@ -42,7 +45,11 @@ export const PROMPT_SEMANTIC_KEYS = [
   'session.unavailable',
 ] as const
 
-export type PromptSemanticKey = (typeof PROMPT_SEMANTIC_KEYS)[number] | 'channel.desktop.leafMismatch'
+export type PromptSemanticKey =
+  | (typeof PROMPT_SEMANTIC_KEYS)[number]
+  | 'channel.desktop.leafMismatch'
+  | 'session.deliveryFailed'
+  | 'session.recordFailed'
 
 export type LeaseSemanticKey = 'lease.notHeld' | 'lease.observing' | 'lease.expired' | 'head.moved'
 
@@ -58,6 +65,8 @@ export const PROMPT_CODE_BY_KEY: Readonly<Record<PromptSemanticKey, string>> = {
   'prompt.duplicate': PROMPT_ERROR_CODES.PROMPT_DUPLICATE,
   'instance.unknown': PROMPT_ERROR_CODES.INSTANCE_UNKNOWN,
   'session.unavailable': PROMPT_ERROR_CODES.SESSION_UNAVAILABLE,
+  'session.deliveryFailed': PROMPT_ERROR_CODES.SESSION_DELIVERY_FAILED,
+  'session.recordFailed': PROMPT_ERROR_CODES.SESSION_RECORD_FAILED,
 }
 
 /** 语义键 → 逐字中文（与 REFUSAL-WORDING.md 的插件列逐字节一致）。 */
@@ -70,6 +79,8 @@ export const PROMPT_WORDING: Readonly<Record<PromptSemanticKey, string>> = {
   'prompt.duplicate': '同一条指令已经处理过，未重复写入',
   'instance.unknown': '找不到该实例，请重新配对',
   'session.unavailable': '该会话暂时不可写入（投递通道未接入）',
+  'session.deliveryFailed': '已尝试投递但失败（会话未写入），可用同一请求号重试',
+  'session.recordFailed': '会话已写入但请求记录未落盘，请先刷新会话确认，勿盲目重发',
 }
 
 /** 租约四码 → 文档语义键（文案仍取自 LEASE_WORDING，不在本表复制）。 */

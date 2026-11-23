@@ -1,8 +1,14 @@
 /**
  * mod-plugin-session-prompt：DARK 的 sessionPrompt 服务编排（插件侧，零 RPC 实现细节）。
  *
- * 本模块**没有投递实现**：`DeliveryPort` 缺省缺席，生产构造下每一步都会诚实拒绝
- * `E_SESSION_UNAVAILABLE`；绝不发明 DSH 会话 API、绝不返回假 seq / 假成功。
+ * 本轮仍**没有真实投递通道**：生产缺省挂载 `createUnavailableDeliveryPort()`，它会拒绝
+ * `E_SESSION_UNAVAILABLE` 且完全不读请求正文 / owner；绝不发明 DSH 会话 API、绝不返回假成功。
+ *
+ * 幂等策略 = **record-on-success**：只有投递成功（port 返回 ok:true）之后才把 (sessionId,
+ * requestId) 写进账本。这样投递失败 / 拒绝不会污染账本，同一请求号可以安全重试；代价是
+ * 「已投递成功但账本写失败」这个窗口无法靠重放自动收敛——因此单独返回 `E_SESSION_RECORD_FAILED`
+ * 明确要求先刷新会话确认、勿盲目重发。单进程 + 已 HELD 租约把并发在飞窗口压到最小，
+ * 但账本写失败时绝不假定「没写入」，这是有意保留的诚实警告而不是静默成功。
  *
  * 操作员标记文件只读：`channel-verified.json` 由操作员在带外写入，载荷
  * `{verifiedAt, instanceId, leafSha256, verifier}`；本服务只 `readFileSync`，从不写它。
@@ -56,9 +62,29 @@ export interface PromptDeliveryResult {
   accepted: boolean
 }
 
-/** 真实会话写入端口——本轮**缺省不存在**；下一模块才提供实现。 */
+/**
+ * 端口的可判别结果：成功只给 seq/sha256；失败只给两个 typed 码与可选原因，
+ * **没有任何 prompt / leaseOwner 字段可从类型上进结果**。
+ */
+export type DeliveryOutcome =
+  | { ok: true; seq: number; sha256: string }
+  | { ok: false; code: 'E_SESSION_UNAVAILABLE' | 'E_SESSION_DELIVERY_FAILED'; reason?: string }
+
+/** 真实会话写入端口（本轮生产缺省为「无通道」实现）。 */
 export interface DeliveryPort {
-  send(request: PromptSendRequest): Promise<PromptDeliveryResult>
+  send(request: PromptSendRequest): Promise<DeliveryOutcome>
+}
+
+/**
+ * 生产缺省投递端口：没有真实 transport，固定拒绝 E_SESSION_UNAVAILABLE。
+ * 刻意不读 request 的任何字段——正文 / owner 不被触碰、不进日志、不进 reason、不回显。
+ */
+export function createUnavailableDeliveryPort(): DeliveryPort {
+  return {
+    async send(): Promise<DeliveryOutcome> {
+      return { ok: false, code: 'E_SESSION_UNAVAILABLE', reason: '未接入投递通道' }
+    },
+  }
 }
 
 /** 当前头锚读取端口；缺省时用已保存租约的 headSha，没有租约就是空串（fail-closed）。 */
@@ -106,7 +132,10 @@ export interface SessionPromptServiceOptions {
   grants?: PromptGrantCheck
   leases?: LeaseStore
   ledger?: PromptLedgerStore
-  /** 本轮生产缺省 undefined ⇒ session.unavailable。 */
+  /**
+   * 投递端口；undefined ⇒ 生产缺省 `createUnavailableDeliveryPort()`，
+   * 显式 null ⇒ 连端口都没挂（gate 的 session.unavailable）。
+   */
   delivery?: DeliveryPort | null
   headReader?: HeadReaderPort | null
 }
@@ -144,16 +173,19 @@ export function bareFingerprint(raw: unknown): string {
   return result.ok ? result.value.replace(/:/g, '') : ''
 }
 
-function refusal(key: 'channel.desktop.unverified' | 'channel.desktop.leafMismatch' | 'instance.unknown' | 'session.unavailable'): SyncError {
+function refusal(
+  key: 'channel.desktop.unverified' | 'channel.desktop.leafMismatch' | 'instance.unknown'
+    | 'session.unavailable' | 'session.deliveryFailed' | 'session.recordFailed',
+): SyncError {
   const typed = promptRefusal(key)
   return new SyncError(typed.code, typed.wording, { key: typed.key })
 }
 
-function projectDelivery(raw: PromptDeliveryResult | null | undefined): PromptDeliveryResult {
-  const item = raw as Partial<PromptDeliveryResult> | null | undefined
-  const seq = typeof item?.seq === 'number' && Number.isFinite(item.seq) && item.seq >= 0 ? Math.trunc(item.seq) : 0
-  const sha256 = typeof item?.sha256 === 'string' ? item.sha256 : ''
-  return { seq, sha256, accepted: item?.accepted === true }
+/** 成功结果白名单投影：只取 seq / sha256，accepted 恒 true，绝不回显正文或 owner。 */
+function projectDelivery(raw: Extract<DeliveryOutcome, { ok: true }>): PromptDeliveryResult {
+  const seq = typeof raw.seq === 'number' && Number.isFinite(raw.seq) && raw.seq >= 0 ? Math.trunc(raw.seq) : -1
+  const sha256 = typeof raw.sha256 === 'string' && raw.sha256.trim() !== '' ? raw.sha256 : ''
+  return { seq, sha256, accepted: seq >= 0 && sha256 !== '' }
 }
 
 export function createSessionPromptService(options: SessionPromptServiceOptions = {}): SessionPromptService {
@@ -165,7 +197,10 @@ export function createSessionPromptService(options: SessionPromptServiceOptions 
   const pins = options.pins ?? createPairingPinLookup({ homeDir: options.homeDir })
   const leases = options.leases ?? createLeaseStore({ filePath: path.join(root, LEASE_FILE), now })
   const ledger = options.ledger ?? createPromptLedger({ filePath: path.join(root, LEDGER_FILE), now })
-  const delivery = options.delivery ?? null
+  // undefined ⇒ 生产缺省「无通道」端口；显式 null 才表示连端口都未挂载。
+  const delivery: DeliveryPort | null = options.delivery === undefined
+    ? createUnavailableDeliveryPort()
+    : options.delivery
   const headReader = options.headReader ?? null
 
   function channelState(instanceId: string): ChannelState {
@@ -242,21 +277,44 @@ export function createSessionPromptService(options: SessionPromptServiceOptions 
       throw new SyncError(decision.code, decision.wording, { key: decision.key })
     }
 
-    // 先持久化租约与 requestId，再调用端口（幂等账本在端口调用前记录）。
+    // 投递前只持久化租约（本地写者身份）；requestId **刻意不写账本**（record-on-success）。
     await leases.upsert(decision.claim.lease)
-    await ledger.record(request.sessionId, request.requestId, nowMs)
 
     // 双保险：gate 已检查过，这里再挡一次，避免端口晚卸载时假成功。
     if (delivery === null) throw refusal('session.unavailable')
-    const delivered = await delivery.send({
-      sessionId: request.sessionId,
-      instanceId,
-      requestId: request.requestId,
-      text: request.text,
-      expectedPrevSha: request.expectedPrevSha,
-      leaseOwner: request.leaseOwner,
-    })
-    return projectDelivery(delivered)
+
+    let outcome: DeliveryOutcome
+    try {
+      outcome = await delivery.send({
+        sessionId: request.sessionId,
+        instanceId,
+        requestId: request.requestId,
+        text: request.text,
+        expectedPrevSha: request.expectedPrevSha,
+        leaseOwner: request.leaseOwner,
+      })
+    } catch {
+      // 端口抛错 ⇒ 已尝试投递但失败；绝不原样冒出，也绝不误判成前置拒绝或成功。
+      throw refusal('session.deliveryFailed')
+    }
+    if (outcome === null || typeof outcome !== 'object' || outcome.ok !== true) {
+      const code = outcome !== null && typeof outcome === 'object' ? (outcome as { code?: unknown }).code : undefined
+      if (code === 'E_SESSION_UNAVAILABLE') throw refusal('session.unavailable')
+      // 任何其它 code（含自由文本 / 未知码 / 空值）一律 fail-closed 到 deliveryFailed。
+      throw refusal('session.deliveryFailed')
+    }
+    const result = projectDelivery(outcome)
+    if (!result.accepted) throw refusal('session.deliveryFailed')
+
+    // record-on-success：只在投递成功后落账；写失败是独立的 typed 警告，不静默。
+    try {
+      const recorded = await ledger.record(request.sessionId, request.requestId, nowMs)
+      if (!recorded.ok) throw refusal('session.recordFailed')
+    } catch (error) {
+      if (error instanceof SyncError && error.code === 'E_SESSION_RECORD_FAILED') throw error
+      throw refusal('session.recordFailed')
+    }
+    return result
   }
 
   return { markerPath, channelState, channelVerified, send }
