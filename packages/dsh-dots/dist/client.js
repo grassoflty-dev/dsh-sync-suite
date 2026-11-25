@@ -1152,6 +1152,11 @@ window.__ModuleLoader__.load({
       const [audit, setAudit] = React.useState([])
       const [running, setRunning] = React.useState(null)
       const [probe, setProbe] = React.useState(null)
+      /**
+       * mod-plugin-lan-address-selection：状态里那条「广播哪个地址、为什么」的中文说明
+       * （引擎给的 `status.urls[].note`，与地址同源）。空串 = 本条目不适用（非局域网方式）。
+       */
+      const [addressNote, setAddressNote] = React.useState('')
       const [republish, setRepublish] = React.useState(null)
       const [rotated, setRotated] = React.useState(false)
       const [busy, setBusy] = React.useState('')
@@ -1159,6 +1164,19 @@ window.__ModuleLoader__.load({
       const booted = React.useRef(false)
 
       function activeOverride() { return override === '' ? 'auto' : override }
+
+      /**
+       * 唯一的远程状态落地口：running / probe / 地址说明一起更新，避免三个 setState 各自漂移。
+       * `addressNote` 只取引擎算好的那一行（`urls[].note`），前端不自己拼地址判断。
+       */
+      function applyRemoteStatus(status) {
+        if (!status || typeof status !== 'object') return
+        setRunning(status.running === true)
+        if (status.probe) setProbe(status.probe)
+        const first = Array.isArray(status.urls) && status.urls.length > 0 ? status.urls[0] : null
+        const note = first && typeof first.note === 'string' ? first.note : ''
+        setAddressNote(note)
+      }
 
       async function refreshProvision(which) {
         const result = await rpcCall('pairingProvision', { transport: which === '' ? 'auto' : which })
@@ -1202,10 +1220,7 @@ window.__ModuleLoader__.load({
             })(),
             (async function () {
               const result = await rpcCall('remoteGetState', {})
-              if (!stopped && result.ok && result.data && result.data.status) {
-                setRunning(result.data.status.running === true)
-                if (result.data.status.probe) setProbe(result.data.status.probe)
-              }
+              if (!stopped && result.ok && result.data) applyRemoteStatus(result.data.status)
             })(),
           ])
         })()).catch(function () { /* rpcCall 不抛；这里只兜住意外 */ })
@@ -1307,7 +1322,7 @@ window.__ModuleLoader__.load({
           setShown(null)
           setRunning(false)
           const state = await rpcCall('remoteGetState', {})
-          if (state.ok && state.data && state.data.status) setRunning(state.data.status.running === true)
+          if (state.ok && state.data) applyRemoteStatus(state.data.status)
         })
       }
 
@@ -1338,6 +1353,8 @@ window.__ModuleLoader__.load({
           }
           setRunning(true)
           setRotated(false)
+          // 启动返回的就是最新状态：地址说明（广播哪个地址 / 为什么）跟着一起落地。
+          applyRemoteStatus(status)
           // 旧二维码（若曾由枚举产生）在真正启动后作废；配对串只由新的 pairingShow 取。
           setShown(null)
           await refreshProvision(activeOverride())
@@ -1433,6 +1450,9 @@ window.__ModuleLoader__.load({
         reasonLines.map(function (line, i) {
           return h('div', { key: 'reason' + i, 'data-lean': 'remote-reason', style: S.hint }, line)
         }),
+        // mod-plugin-lan-address-selection：唯一一条「广播哪个地址、为什么、跳过了什么」的说明。
+        // 文案由引擎给（与真正要绑定的地址同源），前端不重算；空串时不渲染（非局域网方式）。
+        addressNote ? h('div', { 'data-lean': 'remote-address-note', style: S.hint }, addressNote) : null,
         portLine ? h('div', { 'data-lean': 'remote-port', style: S.hint }, portLine) : null,
         // 未启动 ⇒ 没有二维码入口、没有可复制配对串；启动是唯一可做的远程动作。
         stopped ? null : h(

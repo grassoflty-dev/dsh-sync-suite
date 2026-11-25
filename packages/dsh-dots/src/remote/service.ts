@@ -13,8 +13,15 @@
  * 依赖全部**注入**（listener / gate / qr / probe 都是回调），因此本文件不 import
  * `listener.ts` / `auth.ts` / `qr.ts` / `probe.ts`：并行开发时不会互相卡编译，
  * 单测也能用假实现把状态机跑满。
+ *
+ * 唯一例外（mod-plugin-lan-address-selection）：从 `listener.ts` 引入**两个纯谓词**
+ * `isBindableLanAddress` / `isBindableIpv6Address`。理由：选路结果必须与监听的真实准入门槛
+ * 用**同一套判定**，否则会出现"自动挑中了却绑不上"的假故障；这两个函数是纯函数，不读盘、
+ * 不起监听、不产生任何副作用，因此不会破坏上面的并行开发/注入解耦。
  */
+import dgram from 'node:dgram'
 import os from 'node:os'
+import { isBindableIpv6Address, isBindableLanAddress } from './listener.js'
 import { RemoteStore } from './store.js'
 import { createRemoteAuthorizer } from './routes.js'
 import type { RemoteAuthorizeInput, RemoteAuthorizeResult, RemoteGate } from './routes.js'
@@ -111,6 +118,22 @@ export interface RemoteServiceOptions {
   upstreamIdleTimeoutMs?: number
   /** 并发实时隧道上限（默认交给 listener 的 16）。 */
   upstreamMaxTunnels?: number
+  /**
+   * 默认路由探测（**测试注入**）。默认实现 `probeRouteAddress('IPv4')`：UDP `connect` 只查路由、
+   * 不发包、有界（≤200 ms）；返回 null = 无默认路由 / 探测失败（此时走候选规则兜底）。
+   * 注入函数可以是同步的，也可以是 `Promise`（服务内部统一 await，绝不会挂住事件循环）。
+   */
+  routeProbeAddress?: () => string | null | Promise<string | null>
+  /**
+   * 网卡表注入（**测试**用假网卡，不依赖本机 NIC）。默认 `listLanCandidates()`
+   * （`os.networkInterfaces()` + 名字启发式）。抛出时按"没有候选"处理，绝不冒泡。
+   */
+  interfaces?: () => LanCandidate[]
+  /**
+   * provisioning 自动镜像值（**测试注入**）。默认 `provisionedMirrorLanAddress()`：
+   * 用来判断磁盘上的 `lanAddress` 是不是"自动写进去的"，而不是运维手填的。
+   */
+  provisionedLanAddress?: () => string | null
 }
 
 export const REMOTE_SESSION_COOKIE = 'dsh-remote-session'
@@ -169,34 +192,396 @@ export function toSettingsView(settings: RemoteSettings): RemoteSettingsView {
   }
 }
 
-/** 网卡枚举：虚拟网卡（Hyper-V/VMware/WSL/容器/Teredo）在自动挑选时跳过。 */
-const VIRTUAL_IFACE_RE = /(vEthernet|VMware|VirtualBox|Hyper-V|Loopback|Teredo|isatap|docker|veth|br-|WSL|Tailscale)/i
+/* ------------------------------------------------------------------ 局域网选路 */
+/**
+ * 虚拟网卡识别（**次级**启发式）。主判据是**默认路由地址**，见 `resolveLanSelection`。
+ *
+ * 为什么主判据是路由而不是名字：虚拟网卡（Hyper-V / Wi-Fi Direct / VMware / 容器桥）几乎
+ * 永远不会持有默认路由，所以"内核说默认路由走哪个源地址"本身就足以把这类网卡排到最后；
+ * 名字只是第二道保险，覆盖路由判断不了的两件事：① 本机根本没有默认路由；② 需要把
+ * "不是路由地址"这件事在状态行里标出来。
+ *
+ * 真实伤疤（本模块的成因）：中文版 Windows 上 Hyper-V / Wi-Fi Direct 的虚拟适配器名字是
+ * `本地连接* 16`，而旧正则只认 `vEthernet` 这类英文名，`VIRTUAL_IFACE_RE.test(name)` 判不出来
+ * → 虚拟网卡被当成真网卡 → 按枚举顺序取第一个私网地址 → 广播了 `192.168.137.1`，
+ * 而平板在 `192.168.1.0/24` 上，永远路由不到它（表现为"连接失败超时"）。
+ *
+ * **这条规则识别不了什么**（如实列出，别指望它兜住）：
+ *   · 被人手工改名成 `WLAN 3` 这种正常名字的虚拟网卡（名字里一点线索都没有）；
+ *   · 没有默认路由时，一台机器上"真实但与默认路由无关"的第二块物理网卡；
+ *   · 能绑上却根本不可达的地址（例如手工配的 Wi-Fi Direct 网段）：名字不带线索、绑定也会成功，
+ *     只能靠"它不是默认路由地址"这一点由状态行如实标注（`LanSelection.reason`）。
+ *
+ * 为什么**不**去调 `Get-NetAdapter` / `netsh` 拿平台元数据：那要 spawn 子进程（几百毫秒、
+ * 可能被安全软件拦、可能被策略禁、输出还随系统语言变化），而 `service.ts` 位于插件启动与
+ * 每次状态刷新路径上，任何一次阻塞都会连累配置同步；失败时也只能 fail-open 回退到同一套
+ * 名字启发式。收益（极少数被改名的虚拟网卡）远小于"启动路径上多一个可变阻塞点"的代价。
+ */
+const VIRTUAL_IFACE_RE =
+  /(vEthernet|VMware|VirtualBox|Hyper-V|VMnet|Loopback|Teredo|isatap|docker|veth|br-|WSL|Tailscale|ZeroTier|OpenVPN|WireGuard|Npcap|虚拟|环回|隧道)/i
+/**
+ * 中文版 Windows 的 Wi-Fi Direct 虚拟适配器名形如 `本地连接* 16` / `本地连接* 1`。
+ * 注意**必须带 `*`**：不带 `*` 的「本地连接」是老系统上物理以太网的正常名字，不能误伤。
+ */
+const LOCAL_CONNECTION_VIRTUAL_RE = /^本地连接\s*\*/
+/** RFC1918 IPv4 私网：候选规则里排在最前（与旧行为一致）。 */
+const RFC1918_RE = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/
+/** 链路本地 IPv6（fe80::/10）：换网就失效，不能广播。 */
+const IPV6_LINK_LOCAL_RE = /^fe80:/i
+/** Teredo（2001:0::/32）与 6to4（2002::/16）：隧道地址，不是本机可直连地址。 */
+const IPV6_TUNNEL_RE = /^(2001:0:|2002:|2001:0000:)/i
 
-export function listLanCandidates(): LanCandidate[] {
+/** 网卡名 → 是否虚拟网卡（纯名字启发式；不认识的名字一律当真实网卡，不猜）。 */
+export function isVirtualIfaceName(name: unknown): boolean {
+  const text = typeof name === 'string' ? name.trim() : ''
+  if (text === '') return false
+  return VIRTUAL_IFACE_RE.test(text) || LOCAL_CONNECTION_VIRTUAL_RE.test(text)
+}
+
+/**
+ * 网卡枚举（跳过 `internal`）。`table` 只为测试注入：生产一律 `os.networkInterfaces()`。
+ * 枚举失败返回空数组（绝不抛），调用方按"没有候选"处理。
+ */
+export function listLanCandidates(table?: NodeJS.Dict<os.NetworkInterfaceInfo[]>): LanCandidate[] {
   const out: LanCandidate[] = []
-  let table: NodeJS.Dict<os.NetworkInterfaceInfo[]>
+  let source: NodeJS.Dict<os.NetworkInterfaceInfo[]>
   try {
-    table = os.networkInterfaces()
+    source = table ?? os.networkInterfaces()
   } catch {
     return out
   }
-  for (const [name, infos] of Object.entries(table)) {
+  for (const [name, infos] of Object.entries(source)) {
     if (infos === undefined) continue
     for (const info of infos) {
       if (info.internal) continue
       const family = info.family === 'IPv4' ? 'IPv4' : 'IPv6'
-      out.push({ address: info.address, iface: name, family, virtual: VIRTUAL_IFACE_RE.test(name) })
+      out.push({ address: info.address, iface: name, family, virtual: isVirtualIfaceName(name) })
     }
   }
   return out
 }
 
-/** 优先挑真实（非虚拟）IPv4；私网段优先，其余兜底。没有就返回 null（不许回落 0.0.0.0）。 */
+/** 路由探测预算（毫秒）：整个探测不超过它；超时一律当作"没有默认路由"。 */
+export const ROUTE_PROBE_TIMEOUT_MS = 200
+/** 轮询步长（毫秒）：隐式 bind 完成前 `address()` 会抛 EBADF，只能小步等待。 */
+const ROUTE_PROBE_POLL_MS = 5
+/**
+ * 路由地址缓存时长（毫秒）。为什么需要缓存：探测是异步的，而 `status()` 是同步的；
+ * 5 s 足够覆盖"一次用户动作里连出好几个状态"（start 内部会多次取状态），
+ * 又短到换网后下一次动作就能拿到新地址。
+ */
+const ROUTE_CACHE_TTL_MS = 5000
+/**
+ * 探测目标：公共字面量，只用来让内核查路由表选源地址。
+ * **不发任何包**：UDP `connect()` 只做本地路由查找与隐式绑定，不会产生报文。
+ */
+const ROUTE_PROBE_TARGET_V4 = '223.5.5.5'
+const ROUTE_PROBE_TARGET_V6 = '2400:3200::1'
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+/** 探测回来的源地址是否可用（通配 / 回环都不算"路由选出的本机地址"）。 */
+function usableRouteSource(address: string): boolean {
+  if (address === '' || address === '0.0.0.0' || address === '::' || address === '::1') return false
+  if (/^127\./.test(address)) return false
+  return true
+}
+
+/**
+ * 问操作系统："去默认路由，你会用本机哪个地址？"——依赖为零、不发包、有界。
+ *
+ * 做法：`dgram.createSocket('udp4')` → `connect(53, <公共字面量>)` → `address().address` → `close()`。
+ * UDP 的 `connect` 不握手、不发包，只让内核按路由表选定本地源地址，正是我们要的"路由权威"。
+ *
+ * **为什么是异步的（实测教训）**：`connect()` 触发的隐式 bind 在 libuv 里是**异步**的，
+ * Windows 上紧接着调 `address()` 会抛 `EBADF`；必须小步等到绑定完成，`getsockname` 才给
+ * 路由选出的源地址（本机实测：5 ms 内返回 `192.168.1.5`，而 IPv6 返回链路外的全局地址）。
+ * 若绑定完成后拿到的仍是 `0.0.0.0`（内核没按路由选源），一律当作探测失败。
+ *
+ * 三种失败都返回 null（绝不抛、绝不阻塞事件循环、总时长 ≤ 预算）：
+ *   · 没有默认路由 → 内核回 ENETUNREACH/ECONNREFUSED（已挂 `error` 监听，避免未捕获异常）；
+ *   · 该地址族不可用 / 创建 socket 失败；
+ *   · 探测回来的地址是通配或回环。
+ */
+export async function probeRouteAddress(
+  family: 'IPv4' | 'IPv6' = 'IPv4',
+  options: { timeoutMs?: number; target?: string } = {},
+): Promise<string | null> {
+  const budget =
+    typeof options.timeoutMs === 'number' && options.timeoutMs > 0 ? options.timeoutMs : ROUTE_PROBE_TIMEOUT_MS
+  const target = typeof options.target === 'string' && options.target !== ''
+    ? options.target
+    : family === 'IPv6' ? ROUTE_PROBE_TARGET_V6 : ROUTE_PROBE_TARGET_V4
+  const deadline = Date.now() + budget
+  let socket: dgram.Socket
+  try {
+    socket = dgram.createSocket(family === 'IPv6' ? 'udp6' : 'udp4')
+  } catch {
+    return null
+  }
+  let failed = false
+  const onError = (): void => {
+    failed = true
+  }
+  socket.on('error', onError)
+  try {
+    socket.connect(53, target)
+  } catch {
+    socket.removeListener('error', onError)
+    try {
+      socket.close()
+    } catch {
+      /* 未绑定：忽略 */
+    }
+    return null
+  }
+  try {
+    while (Date.now() < deadline) {
+      if (failed) return null
+      try {
+        const local = socket.address()
+        const raw = typeof local.address === 'string' ? local.address.trim() : ''
+        // link-local 的 `%zone` 后缀对 URL 无意义，去掉再判。
+        const address = raw.split('%')[0] ?? ''
+        return usableRouteSource(address) ? address : null
+      } catch {
+        // 还没绑完（EBADF）：等一小步再看。
+        await sleep(ROUTE_PROBE_POLL_MS)
+      }
+    }
+    return null
+  } finally {
+    socket.removeListener('error', onError)
+    try {
+      socket.close()
+    } catch {
+      /* 已关闭：忽略 */
+    }
+  }
+}
+
+/** 一个候选的排查视图（候选表 + 为什么被排除）；`LanCandidate` 本身不动（对外契约保持）。 */
+export interface LanCandidateReport extends LanCandidate {
+  /** 该地址就是默认路由所在地址。 */
+  route: boolean
+  /** 被排除的中文原因（空串 = 可选）。 */
+  rejected: string
+}
+
+/** 一次局域网选路的**完整结论**：一个地址 + 一行中文原因 + 排查用的候选表。 */
+export interface LanSelection {
+  /** 最终要绑定并广播的地址；null = 没有可用地址（typed 失败，绝不回落 0.0.0.0）。 */
+  address: string | null
+  /** 来源：override（设置里手填）/ route（默认路由）/ fallback（候选规则）/ none（无可用）。 */
+  source: 'override' | 'route' | 'fallback' | 'none'
+  /** 一行中文原因：广播哪个地址、为什么、跳过了什么。状态行直接展示。 */
+  reason: string
+  /**
+   * 原因短语（不含「广播 <地址>」前缀）：给"设置选中的地址 ≠ 监听句柄实际绑定的地址"
+   * 那种不一致场景复用，避免同一行里出现两个自相矛盾的「广播 X」。
+   */
+  explain: string
+  /** 路由探测到的本机地址（null = 无默认路由或探测失败）。 */
+  routeAddress: string | null
+  /** 候选表（含路由标记与被排除原因）：干跑脚本与排查用。 */
+  candidates: LanCandidateReport[]
+}
+
+export interface LanSelectionInput {
+  candidates: LanCandidate[]
+  /** 默认路由探测结果（null/省略 = 无默认路由或探测失败）。 */
+  routeAddress?: string | null
+  /** 设置里的「局域网地址」= 运维**显式覆盖**；空串/省略 = 自动选路。 */
+  override?: string
+  /**
+   * 这个覆盖值是否可信（默认 `true`）。
+   *
+   * `false` 只用于一种情形：`lanAddress` 与 **provisioning 自动镜像写入**的值逐字节相同，
+   * 因而无法证明是运维手填的（见 `provisionedMirrorLanAddress` 的注释）。此时把它当"自动值"，
+   * 让默认路由地址优先；原因行会明说"已忽略落盘的 X"。绝不静默忽略。
+   */
+  overrideTrusted?: boolean
+}
+
+/** 单个候选的排除原因（纯函数）。IPv4 用监听同一套 `isBindableLanAddress`，保证"选中即可绑"。 */
+function rejectionOf(item: LanCandidate): string {
+  if (item.family === 'IPv4') {
+    if (!isBindableLanAddress(item.address)) {
+      if (/^169\.254\./.test(item.address)) return 'APIPA 链路本地'
+      if (/^127\./.test(item.address)) return '回环地址'
+      if (/^0\./.test(item.address)) return '通配地址'
+      return '不是可绑定的单播 IPv4'
+    }
+    return item.virtual === true ? '虚拟网卡' : ''
+  }
+  if (IPV6_LINK_LOCAL_RE.test(item.address)) return '链路本地 IPv6'
+  if (IPV6_TUNNEL_RE.test(item.address)) return 'Teredo/6to4 隧道'
+  if (!isBindableIpv6Address(item.address)) return '不是可绑定的全局 IPv6'
+  return item.virtual === true ? '虚拟网卡' : ''
+}
+
+/** 被跳过候选的**计数摘要**（同因合并，保持一行短句）。 */
+function summarizeRejected(items: LanCandidateReport[]): string {
+  if (items.length === 0) return ''
+  const counts = new Map<string, number>()
+  for (const item of items) counts.set(item.rejected, (counts.get(item.rejected) ?? 0) + 1)
+  const parts: string[] = []
+  for (const [why, count] of counts) parts.push(count > 1 ? `${why} ${String(count)}` : why)
+  return `；已跳过 ${String(items.length)} 个候选（${parts.join('、')}）`
+}
+
+/**
+ * 纯函数：**唯一**的局域网选路规则。优先级（高 → 低）：
+ *
+ *   1. **显式覆盖**：设置里的 `lanAddress` 非空且可绑定 → 用它并说明"这是你手填的"。
+ *      这是运维唯一的逃生舱（例如机器多网卡、要固定绑第二块网卡）。
+ *      若它与默认路由地址不一致，就在原因行里**明说**平板可能连不上，并给出清空办法。
+ *   2. **默认路由地址**：探测到且确实在本机网卡表里 → 用它（这是本模块的核心修复：
+ *      先问路由，不按枚举顺序猜）。
+ *   3. **候选规则兜底**（没有默认路由 / 探测失败）：排除回环、APIPA `169.254/16`、
+ *      链路本地 IPv6 `fe80::/10`、Teredo/6to4 隧道、虚拟网卡；私网 RFC1918 优先。
+ *   4. **没有可用地址** → `address:null` + 明确中文原因（**绝不**回落 `0.0.0.0`，
+ *      也绝不广播一个已知不可达的地址）。
+ *
+ * 局域网方式只选 IPv4：绑到 IPv6 会被 `transportOfBoundAddress` 判成 `ipv6` 传输，
+ * 与 `mode:lan` 的载荷语义冲突（配对会 typed 拒绝），所以这里不跨族兜底。
+ */
+export function resolveLanSelection(input: LanSelectionInput): LanSelection {
+  const rawRoute = typeof input.routeAddress === 'string' ? input.routeAddress.trim() : ''
+  const routeAddress = rawRoute === '' ? null : rawRoute
+  const candidates: LanCandidateReport[] = (Array.isArray(input.candidates) ? input.candidates : []).map((item) => ({
+    address: item.address,
+    iface: item.iface,
+    family: item.family,
+    virtual: item.virtual === true,
+    route: routeAddress !== null && item.address === routeAddress,
+    rejected: rejectionOf(item),
+  }))
+  const skipped = candidates.filter((item) => item.rejected !== '')
+  const skipTail = summarizeRejected(skipped)
+  const override = typeof input.override === 'string' ? input.override.trim() : ''
+  /** overrideTrusted=false ⇒ 这个值是 provisioning 自动镜像写入的，不能当运维覆盖。 */
+  const overrideTrusted = input.overrideTrusted !== false
+  const mirrorTail = !overrideTrusted && override !== ''
+    ? `；已忽略落盘的 ${override}（与自动挑选结果相同，按自动值处理）`
+    : ''
+
+  if (override !== '' && overrideTrusted) {
+    if (!isBindableLanAddress(override)) {
+      const explain = '「局域网地址」不是可绑定的具体私网 IPv4（不能是 0.0.0.0 / 127.x / 169.254.x）；请改成电脑网卡上的地址'
+      return { address: null, source: 'none', reason: explain, explain, routeAddress, candidates }
+    }
+    if (routeAddress === override) {
+      const explain = `你手填的局域网地址，与默认路由一致${skipTail}`
+      return { address: override, source: 'override', reason: `广播 ${override}（${explain}）`, explain, routeAddress, candidates }
+    }
+    if (routeAddress !== null) {
+      const explain =
+        `你手填的局域网地址；本机默认路由是 ${routeAddress}，平板多半连不上它，` +
+        '清空「局域网地址」就会自动改用路由地址'
+      return { address: override, source: 'override', reason: `广播 ${override}（${explain}）`, explain, routeAddress, candidates }
+    }
+    const explain = `你手填的局域网地址；没探测到默认路由，无法印证平板是否可达${skipTail}`
+    return { address: override, source: 'override', reason: `广播 ${override}（${explain}）`, explain, routeAddress, candidates }
+  }
+
+  if (routeAddress !== null && candidates.some((item) => item.address === routeAddress && item.family === 'IPv4')) {
+    const explain = `本机默认路由所在地址${skipTail}${mirrorTail}`
+    return { address: routeAddress, source: 'route', reason: `广播 ${routeAddress}（${explain}）`, explain, routeAddress, candidates }
+  }
+
+  const usable = candidates.filter((item) => item.family === 'IPv4' && item.rejected === '')
+  const preferred = usable.filter((item) => RFC1918_RE.test(item.address))
+  const chosen = preferred[0] ?? usable[0]
+  if (chosen !== undefined) {
+    const why =
+      routeAddress === null
+        ? '没探测到默认路由，按候选规则选'
+        : `默认路由地址 ${routeAddress} 不在本机网卡表里，按候选规则选`
+    const explain = `${why}${skipTail}${mirrorTail}`
+    return { address: chosen.address, source: 'fallback', reason: `广播 ${chosen.address}（${explain}）`, explain, routeAddress, candidates }
+  }
+
+  const detail = skipped.length === 0 ? '本机没有非回环网卡' : `只找到 ${String(skipped.length)} 个不可用候选`
+  const explain = `没找到可用的局域网 IPv4：${detail}${skipTail}${mirrorTail}；请先连上 Wi-Fi，或在设置里手动填「局域网地址」`
+  return { address: null, source: 'none', reason: explain, explain, routeAddress, candidates }
+}
+
+/**
+ * 兼容旧调用点：只看候选表（不探测路由）时的挑选结果。
+ * 语义与 `resolveLanSelection({ candidates })` 完全一致，避免出现第二套规则。
+ */
 export function pickLanAddress(candidates: LanCandidate[]): string | null {
-  const v4 = candidates.filter((item) => item.family === 'IPv4' && !item.virtual)
-  const preferred = v4.filter((item) => /^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(item.address))
-  const chosen = preferred[0] ?? v4[0]
-  return chosen === undefined ? null : chosen.address
+  return resolveLanSelection({ candidates }).address
+}
+
+/**
+ * 与 `createRemoteService().lanSelectionFor` **同一条规则**的可复用入口（干跑/排查用）。
+ *
+ * 存在的唯一理由：不允许出现"服务里一套、脚本里另一套"的判断 —— 尤其是
+ * "落盘值是不是 provisioning 自动镜像"这条最容易两边写成不同结论的规则。
+ */
+export function resolveLanSelectionForSettings(input: {
+  candidates: LanCandidate[]
+  routeAddress: string | null
+  lanAddress: string
+  /** 本进程里被 `saveSettings` 显式保存过 ⇒ 无条件当覆盖。 */
+  explicitSave?: boolean
+  /** provisioning 自动镜像值（省略则现算）。 */
+  provisionedAddress?: string | null
+}): LanSelection {
+  const override = typeof input.lanAddress === 'string' ? input.lanAddress.trim() : ''
+  let auto: string | null = null
+  if (input.provisionedAddress !== undefined) {
+    auto = input.provisionedAddress
+  } else {
+    try {
+      auto = provisionedMirrorLanAddress()
+    } catch {
+      auto = null
+    }
+  }
+  const trusted =
+    input.explicitSave === true || override === '' || auto === null || auto === undefined || auto.trim() !== override
+  return resolveLanSelection({ candidates: input.candidates, routeAddress: input.routeAddress, override, overrideTrusted: trusted })
+}
+
+/**
+ * provisioning 落盘时用的**旧启发式**（冻结在此，故意不随本文件的新规则演进）。
+ *
+ * 为什么需要它：`pairingProvision.persistEndpoint()` 会把自动挑选结果**镜像**写进
+ * `remote.json` 的 `lanAddress`，所以磁盘上的值天然分不清"运维手填"与"自动镜像"。
+ * 本机就是这样把 `192.168.137.1`（`本地连接* 16`）写进设置、又按"显式覆盖"绑了上去。
+ *
+ * 这份实现逐字对齐当时的规则（名字正则 + 枚举顺序取第一个**非虚拟** RFC1918），
+ * 用途只有一个：回答"这个落盘值是不是当初那条自动写进去的？"。
+ * **不能**跟着新规则一起改：provisioning 将来若改成路由选路，历史镜像值就不会再等于
+ * 新规则的输出，那时把旧值误判成"手填"会重新引入本模块要修的缺陷。
+ */
+const PROVISIONED_VIRTUAL_RE = /(vEthernet|VMware|VirtualBox|Hyper-V|Loopback|Teredo|isatap|docker|veth|br-|WSL|Tailscale)/i
+
+export function provisionedMirrorLanAddress(table?: NodeJS.Dict<os.NetworkInterfaceInfo[]>): string | null {
+  let source: NodeJS.Dict<os.NetworkInterfaceInfo[]>
+  try {
+    source = table ?? os.networkInterfaces()
+  } catch {
+    return null
+  }
+  for (const [name, infos] of Object.entries(source)) {
+    if (infos === undefined) continue
+    for (const info of infos) {
+      if (info.internal) continue
+      if (info.family !== 'IPv4') continue
+      if (PROVISIONED_VIRTUAL_RE.test(name)) continue
+      if (!RFC1918_RE.test(info.address)) continue
+      return info.address
+    }
+  }
+  return null
 }
 
 function isIPv4(value: string): boolean {
@@ -215,6 +600,21 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
   let minting: Promise<UpstreamIdentity | null> | null = null
   let starting = false
   let refreshTimer: ReturnType<typeof setInterval> | null = null
+  /**
+   * 本进程里**显式保存过**的「局域网地址」取值（没有就是 null）。
+   *
+   * 为什么需要：磁盘上的 `lanAddress` 既可能是运维手填，也可能是 provisioning 自动镜像
+   * （`remote.json` 没有来源标记）。`saveSettings` 是唯一的显式入口，因此"本进程刚被
+   * 显式保存过的那个值"可以无条件当成覆盖；从磁盘读到、且恰好等于自动镜像值的，按自动值处理。
+   * 只记住**值**而不是布尔量：之后 provisioning 改写成别的地址时，旧值不会再被误当覆盖。
+   */
+  let explicitLanSave: string | null = null
+
+  /** 这个落盘值是否等于本进程显式保存过的那个值。 */
+  function isExplicitLanSave(value: string): boolean {
+    const trimmed = typeof value === 'string' ? value.trim() : ''
+    return explicitLanSave !== null && trimmed !== '' && trimmed === explicitLanSave
+  }
 
   function readSettings(): RemoteSettings {
     const raw = store.readRawSettings()
@@ -248,19 +648,105 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
     return typeof port === 'number' && Number.isInteger(port) && port > 0 ? port : null
   }
 
-  /** 当前方式下应当绑定的**具体**地址；返回 null 表示"这种方式不需要/不能起监听"。 */
-  function resolveBindAddress(mode: RemoteAccessMode, settings: RemoteSettings): { ok: boolean; address: string; reason: string } {
+  /**
+   * 网卡表与默认路由探测的**唯一取值口**（都可注入，且都绝不抛）。
+   * 选路、状态行、`detectLan`、URL 拼接全部经这里 —— 一处取值，不允许出现第二份规则。
+   */
+  function listCandidatesNow(): LanCandidate[] {
+    const source = options.interfaces
+    if (source === undefined) return listLanCandidates()
+    try {
+      const injected = source()
+      return Array.isArray(injected) ? injected : []
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * 路由探测是**异步**的（见 `probeRouteAddress` 的注释），而 `status()` 是同步的：
+   * 因此这里保留一份**短期缓存 + single-flight 探测**，异步入口（getState/saveSettings/
+   * start/probe/showLink）先 await 一次再出状态，同步出口只读缓存，绝不阻塞。
+   */
+  let routeCache: { at: number; address: string | null } | null = null
+  let routeInflight: Promise<string | null> | null = null
+
+  function probeRouteNow(): Promise<string | null> {
+    const injected = options.routeProbeAddress
+    if (injected === undefined) return probeRouteAddress('IPv4')
+    try {
+      return Promise.resolve(injected())
+        .then((value) => (typeof value === 'string' && value.trim() !== '' ? value.trim() : null))
+        .catch(() => null)
+    } catch {
+      return Promise.resolve(null)
+    }
+  }
+
+  /** 刷新一次（并发调用共享同一次探测 → 一次状态刷新最多一个 UDP socket）。 */
+  function refreshRouteAddress(): Promise<string | null> {
+    const inflight = routeInflight
+    if (inflight !== null) return inflight
+    const task = probeRouteNow()
+      .catch(() => null)
+      .then((address) => {
+        routeCache = { at: Date.now(), address }
+        routeInflight = null
+        return address
+      })
+    routeInflight = task
+    return task
+  }
+
+  /** 解析绑定地址前先拿一次路由地址（TTL 内复用缓存，避免每次 RPC 都探测）。 */
+  async function routeAddressForResolution(): Promise<string | null> {
+    const cached = routeCache
+    if (cached !== null && Date.now() - cached.at < ROUTE_CACHE_TTL_MS) return cached.address
+    return refreshRouteAddress()
+  }
+
+  /** 同步出口读到的路由地址（可能为 null：首次探测还没回来 / 确实没有默认路由）。 */
+  function routeAddressCached(): string | null {
+    return routeCache === null ? null : routeCache.address
+  }
+
+  /** 当前设置下的局域网选路结论（一个地址 + 一行原因 + 候选表）。 */
+  function lanSelectionFor(settings: RemoteSettings, routeAddress: string | null): LanSelection {
+    return resolveLanSelectionForSettings({
+      candidates: listCandidatesNow(),
+      routeAddress,
+      lanAddress: settings.lanAddress,
+      explicitSave: isExplicitLanSave(settings.lanAddress),
+      provisionedAddress: provisionedNow(),
+    })
+  }
+
+  /** provisioning 自动镜像值（可注入；任何时候都不抛）。 */
+  function provisionedNow(): string | null {
+    const source = options.provisionedLanAddress
+    if (source === undefined) return provisionedMirrorLanAddress()
+    try {
+      const value = source()
+      return typeof value === 'string' && value.trim() !== '' ? value.trim() : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 当前方式下应当绑定的**具体**地址；返回 null 表示"这种方式不需要/不能起监听"。
+   * `routeAddress` 由调用方现取（异步入口 await 过），保证"绑定地址"与"状态行原因"同源。
+   */
+  function resolveBindAddress(
+    mode: RemoteAccessMode,
+    settings: RemoteSettings,
+    routeAddress: string | null,
+  ): { ok: boolean; address: string; reason: string } {
     if (mode === 'lan') {
-      const explicit = settings.lanAddress.trim()
-      if (explicit !== '') {
-        if (!isIPv4(explicit) || explicit === '0.0.0.0' || /^127\./.test(explicit)) {
-          return { ok: false, address: '', reason: '局域网地址必须是具体的私网 IPv4（不能是 0.0.0.0 或 127.x）' }
-        }
-        return { ok: true, address: explicit, reason: '' }
-      }
-      const picked = pickLanAddress(listLanCandidates())
-      if (picked === null) return { ok: false, address: '', reason: '没找到可用的局域网 IPv4，请先连上 Wi-Fi 或手动填地址' }
-      return { ok: true, address: picked, reason: '' }
+      // 一条规则：显式覆盖 > 默认路由地址 > 候选规则 > typed 失败（见 `resolveLanSelection`）。
+      const selection = lanSelectionFor(settings, routeAddress)
+      if (selection.address === null) return { ok: false, address: '', reason: selection.reason }
+      return { ok: true, address: selection.address, reason: selection.reason }
     }
     if (mode === 'ipv6') {
       const address = settings.ipv6Address.trim()
@@ -287,16 +773,11 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
       // 隧道客户端与 DSH 同机运行：用**局域网地址**做回源。
       // 为什么不用 127.0.0.1：listener 的门禁要求绑定具体局域网单播地址（拒绝回环，
       // 回环会与 DSH 自己的监听撞车）；绑局域网地址同样只在本机可达范围内，且令牌门仍在前面。
-      const explicit = settings.lanAddress.trim()
-      if (explicit !== '') {
-        if (!isIPv4(explicit) || explicit === '0.0.0.0' || /^127\./.test(explicit)) {
-          return { ok: false, address: '', reason: '局域网地址必须是具体的私网 IPv4（不能是 0.0.0.0 或 127.x）' }
-        }
-        return { ok: true, address: explicit, reason: '' }
+      const selection = lanSelectionFor(settings, routeAddress)
+      if (selection.address === null) {
+        return { ok: false, address: '', reason: `${selection.reason}（隧道客户端无法回源）` }
       }
-      const picked = pickLanAddress(listLanCandidates())
-      if (picked === null) return { ok: false, address: '', reason: '没找到可用的局域网 IPv4，隧道客户端无法回源' }
-      return { ok: true, address: picked, reason: '' }
+      return { ok: true, address: selection.address, reason: selection.reason }
     }
     return { ok: false, address: '', reason: '这种方式不需要本机监听' }
   }
@@ -406,6 +887,26 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
     return previous === null ? null : { cookie: previous.cookie }
   }
 
+  /**
+   * 运行中的**广播地址**：唯一来源是监听句柄的 `address`（`server.address()` 的真值）。
+   *
+   * 为什么不在运行时重新挑一次：`start()` 与 `status()`/`showLink()` 是两个时刻，
+   * 机器可能已经换网（Wi-Fi 切到有线、VPN 起来），重新挑会得到**另一个**地址，
+   * 于是"绑的是 A、二维码里是 B"——平板照样连不上。绑什么就广播什么。
+   */
+  function advertisedLanAddress(handle: RemoteListenerHandle | null, selection: LanSelection): string | null {
+    return handle !== null ? handle.address : selection.address
+  }
+
+  /** 把面板要显示的一行中文原因：广播哪个地址、为什么、跳过了什么。 */
+  function lanNote(selection: LanSelection, handle: RemoteListenerHandle | null): string {
+    if (handle === null) return selection.reason
+    if (selection.address === handle.address) return `${selection.reason}；已按该地址绑定并广播`
+    // 只在"设置选出来的地址"与"句柄真实绑定地址"不一致时出现：以句柄为准，并说清设置那边选了什么。
+    const expected = selection.address === null ? '（当前设置选不出可用地址）' : selection.address
+    return `实际绑定并广播的是 ${handle.address}（以监听句柄为准）；设置那边选出的是 ${expected}：${selection.explain}`
+  }
+
   function status(): RemoteStatus {
     const settings = readSettings()
     const tokenRecord = store.readToken()
@@ -413,9 +914,20 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
     const stats = handle === null ? { active: 0, total: 0, rejected: 0 } : handle.stats()
     const token = readTokenValue()
     const urls = []
-    const built = urlForMode(settings.mode, settings, { lanAddress: pickLanAddress(listLanCandidates()), dshPort: dshPort() ?? 0 })
+    // 只有 lan 需要"挑地址"；其余方式的地址来自设置里的具体字段（隧道域名 / v6 字面量 …）。
+    const selection = settings.mode === 'lan' ? lanSelectionFor(settings, routeAddressCached()) : null
+    const lanAddress = selection === null ? null : advertisedLanAddress(handle, selection)
+    // 运行中：URL 的 host 必须是被绑定的那个地址（覆盖 settings.lanAddress 里可能过期的值）。
+    const urlSettings = handle !== null && settings.mode === 'lan' ? { ...settings, lanAddress: handle.address } : settings
+    const built = urlForMode(settings.mode, urlSettings, { lanAddress, dshPort: dshPort() ?? 0 })
     if (built.ok) {
-      urls.push({ mode: settings.mode, url: redactUrlForDisplay(built.url), label: labelOfMode(settings.mode), note: '', withToken: false })
+      urls.push({
+        mode: settings.mode,
+        url: redactUrlForDisplay(built.url),
+        label: labelOfMode(settings.mode),
+        note: selection === null ? '' : lanNote(selection, handle),
+        withToken: false,
+      })
     }
     return {
       running: handle !== null,
@@ -458,7 +970,34 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
           sessionCookieName,
         })
 
-  async function stop(): Promise<RemoteStatus> {
+  /**
+   * 把 `remote.json` 里的 `enabled` 与**监听句柄的真实状态**对齐（单一事实来源 = `runtime.handle`）。
+   *
+   * 为什么需要它（Lead 的活体证据，21:16）：`remote.json` 写着 `enabled=false`，而
+   * `Get-NetTCPConnection -State Listen` 明明是 `192.168.137.1:44996`。旧实现里
+   * `remoteStart` 从不写这个位，于是文件读起来像"没有在接连接"，与事实相反 —— 同一类"报告说谎"。
+   *
+   * 语义（**重要，别把它当运行时快照**）：`enabled` 仍是**意图位**（"下次挂载时是否自动起监听"，
+   * 见 `src/index.ts:208` 的消费点），只是在**用户点开始/停止的那一刻**由句柄状态同步写入：
+   * 起成功 → `true`；主动停止 → `false`。因此它不会再和刚发生的用户动作相矛盾。
+   * 真正"此刻在接连接"的事实仍然是 `status().running` / `status().listen` / `status().boundAddress`。
+   * 进程被强杀时文件会停在 `true`（意图），下次挂载据此自动重启 —— 这是意图位应有的行为。
+   *
+   * 写盘失败不影响监听与状态面（监听已经起来了，不能因为写配置文件把它拆掉）。
+   */
+  function commitEnabledFlag(): void {
+    try {
+      const current = readSettings()
+      const live = runtime.handle !== null
+      if (current.enabled === live) return
+      store.writeSettings({ ...current, enabled: live })
+    } catch {
+      /* 写盘失败只影响下一次自动启动，不影响本次监听 */
+    }
+  }
+
+  /** 停监听：`persistEnabled=false` 用于 `dispose()`（进程退出不是"用户点了停止"）。 */
+  async function stopInternal(persistEnabled: boolean): Promise<RemoteStatus> {
     const handle = runtime.handle
     runtime.handle = null
     runtime.startedAt = null
@@ -474,7 +1013,12 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
         /* 关闭失败不改变"已停止"这一事实：句柄已摘除 */
       }
     }
+    if (persistEnabled && handle !== null) commitEnabledFlag()
     return status()
+  }
+
+  async function stop(): Promise<RemoteStatus> {
+    return stopInternal(true)
   }
 
   async function start(): Promise<RemoteStatus> {
@@ -511,7 +1055,7 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
         runtime.lastError = { code: 'E_NO_UPSTREAM_IDENTITY', message: '拿不到 DSH 的本机会话（DSH 版本不支持或会话换取失败），远程访问已拒绝启动' }
         return status()
       }
-      const bind = resolveBindAddress(settings.mode, settings)
+      const bind = resolveBindAddress(settings.mode, settings, await routeAddressForResolution())
       if (!bind.ok) {
         runtime.lastError = { code: 'E_NO_BIND_ADDRESS', message: bind.reason }
         return status()
@@ -555,6 +1099,8 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
       runtime.handle = handle
       runtime.startedAt = now().toISOString()
       runtime.lastError = null
+      // 意图位跟随真实句柄：起成功就写 true，文件不再出现"写着 false 其实在接连接"。
+      commitEnabledFlag()
       // 上游会话 cookie 有 TTL：后台定期刷新，避免"某天突然全 401"。
       // 走 `mintOnce()`：与 401 重换、门禁自愈共用一个 single-flight，且**成功才替换**
       // （定时刷新失败绝不会把还在用的旧 cookie 清掉）。
@@ -581,6 +1127,8 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
     if (settings.enabled && runtime.handle === null) {
       // no-op：自动启动由 index.ts 在插件挂载时调用一次 start()
     }
+    // 先让路由缓存落地，状态行才可能给出"默认路由地址"这一真因（同步出口只读缓存）。
+    await routeAddressForResolution()
     return { settings: toSettingsView(settings), status: status(), modes: listModes() }
   }
 
@@ -588,10 +1136,21 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
     const previous = readSettings()
     const raw = input !== null && typeof input === 'object' ? input : {}
     const next = normalizeRemoteSettings(raw, previous)
+    // 显式入口：只有调用方**自己带了 `lanAddress` 键**且定为非空值，才算运维覆盖。
+    // 只改端口/令牌的保存不会把磁盘上的自动镜像值"升格"成覆盖。
+    const saidLanAddress =
+      input !== null && typeof input === 'object' && Object.prototype.hasOwnProperty.call(input, 'lanAddress')
+    if (saidLanAddress) {
+      const trimmed = next.lanAddress.trim()
+      explicitLanSave = trimmed === '' ? null : trimmed
+    } else if (next.lanAddress.trim() === '') {
+      explicitLanSave = null
+    }
     store.writeSettings(next)
     // 换方式/换端口：先停掉旧监听，避免出现"状态显示 A、实际监听 B"。
     const modeChanged = next.mode !== previous.mode || next.port !== previous.port || next.lanAddress !== previous.lanAddress
-    if (modeChanged && runtime.handle !== null) await stop()
+    // 这里不是"用户点了停止"：不写 `enabled`，否则改个端口就会把自动启动偏好清掉。
+    if (modeChanged && runtime.handle !== null) await stopInternal(false)
     if (modeChanged) runtime.probe = null
     if (next.enabled && runtime.handle === null) await start()
     return { settings: toSettingsView(next), status: status(), modes: listModes() }
@@ -660,7 +1219,12 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
     const fallback = readTokenValue()
     const token = pasted !== '' ? pasted : fallback === null ? '' : fallback
     if (token === '') throw new Error('还没有访问令牌，请先生成')
-    const built = urlForMode(target, settings, { lanAddress: pickLanAddress(listLanCandidates()), dshPort: dshPort() ?? 0 })
+    const handle = runtime.handle
+    const selection = target === 'lan' ? lanSelectionFor(settings, await routeAddressForResolution()) : null
+    // 与 `status()` 同一条纪律：运行中一律用监听句柄的实际地址（绑什么就广播什么）。
+    const lanAddress = handle !== null ? handle.address : selection === null ? null : selection.address
+    const urlSettings = handle !== null && target === 'lan' ? { ...settings, lanAddress: handle.address } : settings
+    const built = urlForMode(target, urlSettings, { lanAddress, dshPort: dshPort() ?? 0 })
     if (!built.ok) throw new Error(built.reason === '' ? '这种方式暂时生成不出可用地址' : built.reason)
     // 非空令牌却拼不进去（地址非法）→ 空串 → 明确报错，不返回无令牌的假链接。
     const url = appendAccessToken(built.url, token)
@@ -670,12 +1234,16 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
   }
 
   function detectLan(): LanCandidate[] {
-    return listLanCandidates()
+    return listCandidatesNow()
   }
 
   async function dispose(): Promise<void> {
-    await stop().catch(() => undefined)
+    // 进程退出/插件卸载不是"用户点了停止"：**不**改写 `enabled`（否则每次关 DSH 都会清掉自动启动）。
+    await stopInternal(false).catch(() => undefined)
   }
+
+  // 装配完成时后台预热一次路由探测（异步、有界、失败静默）：面板首个 getState 就能拿到真因。
+  void refreshRouteAddress()
 
   return { getState, saveSettings, start, stop, rotateToken, adoptToken, probe, showLink, detectLan, dispose, paths: { configFile: store.configFile, tokenFile: store.tokenFile } }
 }
