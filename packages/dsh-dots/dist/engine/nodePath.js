@@ -24,6 +24,26 @@ export const ASKPASS_PROBE_MARKER = 'DSH_DOTS_ASKPASS_NODE_OK';
 const PROBE_JS = `process.stdout.write(${JSON.stringify(ASKPASS_PROBE_MARKER)})`;
 const PROBE_TIMEOUT_MS = 2000;
 const probeCache = new Map();
+/** 探针输出的**唯一**判据：退出码 0 且 stdout 含固定标记。 */
+export function isProbeOutputAccepted(result) {
+    return (result.status === 0 &&
+        typeof result.stdout === 'string' &&
+        result.stdout.includes(ASKPASS_PROBE_MARKER));
+}
+/**
+ * 真实探针执行器：直接跑候选可执行文件，不经 shell、不经 .cmd。
+ * 退出码 0 只说明「进程起来了」，不说明它是 node —— 判定交给 isProbeOutputAccepted。
+ */
+const spawnProbe = (candidate, childEnv, script) => {
+    const result = spawnSync(candidate.path, ['-e', script], {
+        env: childEnv,
+        encoding: 'utf8',
+        timeout: PROBE_TIMEOUT_MS,
+        windowsHide: true,
+        maxBuffer: 64 * 1024,
+    });
+    return { status: result.status, stdout: result.stdout };
+};
 /** 按平台比较路径：Windows 大小写不敏感且把 / 视为 \ ，POSIX 精确匹配。 */
 function samePath(a, b, win) {
     const norm = (value) => (win ? value.replace(/\//g, '\\').toLowerCase() : value);
@@ -142,31 +162,30 @@ export function withElectronFlag(env, candidate) {
 /**
  * 默认有界探针：只跑一次 `-e` 打印固定标记，短超时，结果按进程缓存。
  * 探针环境 = 真实 askpass 环境的 node 启动部分（由 probeOnlyEnv 去掉所有凭据）。
+ *
+ * 直接 spawn 候选可执行文件本身（`spawnSync(path, ['-e', PROBE_JS])`），**不生成、不经过任何
+ * `.cmd`**：所以本模块与 askpass.cmd 的元字符 / 参数转发缺陷无关。判据见
+ * `isProbeOutputAccepted()`：退出码 0 **且** stdout 含固定标记，缺标记一律拒绝。
  */
-export function defaultAskpassProbe(candidate, context) {
+export function defaultAskpassProbe(candidate, context, runner = spawnProbe) {
     const key = `${candidate.electronRunAsNode ? 'electron' : 'node'}|${candidate.path}`;
-    const cached = probeCache.get(key);
-    if (cached !== undefined)
-        return cached;
+    // 只有默认真实探针才进缓存：注入的 runner 是纯单测替身，缓存它会让下一个用例拿到串味结果。
+    const cacheable = runner === spawnProbe;
+    if (cacheable) {
+        const cached = probeCache.get(key);
+        if (cached !== undefined)
+            return cached;
+    }
     let ok = false;
     try {
         const childEnv = withElectronFlag(context?.env ?? probeOnlyEnv(process.env), candidate);
-        const result = spawnSync(candidate.path, ['-e', PROBE_JS], {
-            env: childEnv,
-            encoding: 'utf8',
-            timeout: PROBE_TIMEOUT_MS,
-            windowsHide: true,
-            maxBuffer: 64 * 1024,
-        });
-        ok =
-            result.status === 0 &&
-                typeof result.stdout === 'string' &&
-                result.stdout.includes(ASKPASS_PROBE_MARKER);
+        ok = isProbeOutputAccepted(runner(candidate, childEnv, PROBE_JS));
     }
     catch {
         ok = false;
     }
-    probeCache.set(key, ok);
+    if (cacheable)
+        probeCache.set(key, ok);
     return ok;
 }
 const resolutionCache = new Map();
@@ -208,6 +227,7 @@ function warmUpKey(inputs) {
         inputs.electronVersion ?? process.versions.electron ?? '',
         functionIdOf(inputs.fileExists),
         functionIdOf(inputs.probe),
+        functionIdOf(inputs.probeRunner),
     ].join('\u0000');
 }
 /**
@@ -229,7 +249,10 @@ export function warmAskpassNode(inputs = {}) {
 }
 /** 按顺序探测候选，第一个通过者胜出；全部失败则 typed 拒绝，不返回任何假解释器。 */
 export function resolveAskpassNode(inputs = {}) {
-    const probe = inputs.probe ?? defaultAskpassProbe;
+    // 注入 `probe` 时它说了算；只注入 `probeRunner` 时判据仍是默认探针的标记判据，被替换的只是
+    // 子进程（这样「退出 0 但输出不对」这条反例也能走真实的决策路径）。
+    const probe = inputs.probe ??
+        ((candidate, context) => defaultAskpassProbe(candidate, context, inputs.probeRunner));
     const candidates = listAskpassNodeCandidates(inputs);
     const probeEnv = probeOnlyEnv(inputs.env ?? process.env);
     for (const candidate of candidates) {

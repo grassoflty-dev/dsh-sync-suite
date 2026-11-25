@@ -17,6 +17,9 @@ import {
   ASKPASS_NODE_MISSING_CODE,
   ASKPASS_NODE_MISSING_REASON,
   ASKPASS_NODE_OVERRIDE_ENV,
+  ASKPASS_PROBE_MARKER,
+  defaultAskpassProbe,
+  isProbeOutputAccepted,
   listAskpassNodeCandidates,
   resolveAskpassNode,
 } from '../dist/engine/nodePath.js'
@@ -201,6 +204,47 @@ test('探针失败：坏候选被拒绝并回落到 PATH node；全部失败则 
   assert.equal(error.code, ASKPASS_NODE_MISSING_CODE)
   assert.equal(error.message, ASKPASS_NODE_MISSING_REASON)
   assert.deepEqual(error.details.tried, [bad])
+})
+
+/* -------------------------------------------------------------------------- */
+/* 3b. 探针判据：退出 0 但输出不含标记 = 拒绝（垃圾输出不得被当成可用解释器）    */
+/* -------------------------------------------------------------------------- */
+
+test('探针只认固定标记：退出 0 而输出是垃圾 ⇒ 拒绝，并冒泡成 typed E_ASKPASS_NODE_MISSING', () => {
+  const fakeCandidate = { path: 'C:\\fake\\garbage-node.exe', source: 'override', electronRunAsNode: false }
+  const env = { Path: '' }
+  // 显式给出这条判据本身：退出码 0 只证明「进程起来了」，不证明它是 node。
+  assert.equal(isProbeOutputAccepted({ status: 0, stdout: 'HARNESS BOOT OK\n' }), false)
+  assert.equal(isProbeOutputAccepted({ status: 0, stdout: '' }), false)
+  assert.equal(isProbeOutputAccepted({ status: 0, stdout: null }), false)
+  assert.equal(isProbeOutputAccepted({ status: null, stdout: ASKPASS_PROBE_MARKER }), false)
+  assert.equal(isProbeOutputAccepted({ status: 1, stdout: ASKPASS_PROBE_MARKER }), false)
+  assert.equal(isProbeOutputAccepted({ status: 0, stdout: `noise ${ASKPASS_PROBE_MARKER} noise` }), true)
+
+  // 垃圾输出（退出 0、无标记）不得被接受；带标记的才算通过。
+  assert.equal(defaultAskpassProbe(fakeCandidate, { env }, () => ({ status: 0, stdout: 'boot ok' })), false)
+  assert.equal(defaultAskpassProbe(fakeCandidate, { env }, () => ({ status: 0, stdout: '' })), false)
+  assert.equal(defaultAskpassProbe(fakeCandidate, { env }, () => ({ status: 0, stdout: ASKPASS_PROBE_MARKER })), true)
+  // 注入的 runner 不进进程缓存：同一条路径下一次仍然按本次输出判定。
+  assert.equal(defaultAskpassProbe(fakeCandidate, { env }, () => ({ status: 0, stdout: 'boot ok' })), false)
+
+  // 走真实的决策路径：唯一的候选只回垃圾 ⇒ typed 拒绝，不是静默接受。
+  const error = captureThrow(() => resolveAskpassNode({
+    env: { Path: 'C:\\only', PATHEXT: '.EXE', [ASKPASS_NODE_OVERRIDE_ENV]: fakeCandidate.path },
+    execPath: '',
+    electronVersion: '',
+    platform: 'win32',
+    pathDelimiter: ';',
+    fileExists: () => true,
+    probeRunner: () => ({ status: 0, stdout: 'this is not the marker' }),
+  }))
+  assert.equal(error.code, ASKPASS_NODE_MISSING_CODE)
+  assert.equal(error.message, ASKPASS_NODE_MISSING_REASON)
+  assert.equal(error.details.tried.length >= 1, true, '被拒的候选必须出现在 typed 详情里')
+
+  // 反向：真实 node 跑默认探针必须打印标记并通过（判据不是「一律拒绝」）。
+  const realNode = { path: process.execPath, source: 'override', electronRunAsNode: false }
+  assert.equal(defaultAskpassProbe(realNode, { env }), true)
 })
 
 /* -------------------------------------------------------------------------- */
@@ -520,10 +564,16 @@ test('凭据唯一来源 = askpass + token：helper 被中和，去掉 token 后
   assert.equal(noPassword.stdout.replace(/\r?\n$/, ''), '', '没有 token 时不得回落到任何缓存凭据')
 
   if (process.platform === 'win32') {
-    // .cmd 不转发 git 的提示文本，按调用顺序：第一次用户名，第二次 token（与既有 M5 测试一致）。
+    // 这里刻意**不传**提示文本（只验证兜底）：一次 git 调用内先用户名、后 token。
+    // 注意每次 cmd.exe 都是新的父进程（实测同一次 git 调用内两次 askpass 的父进程也不同），
+    // 所以「同一次调用」的第二个证据是「上一次还没问满两项」——见 askpass.mjs 的兜底规则。
     const first = await exec('cmd.exe', ['/d', '/c', files.cmd], { env, cwd: dir })
     assert.equal(first.stdout.replace(/\r?\n$/, ''), 'acme')
     const second = await exec('cmd.exe', ['/d', '/c', files.cmd], { env, cwd: dir })
     assert.equal(second.stdout.replace(/\r?\n$/, ''), FAKE_TOKEN)
+    // 同时验证修复后的 .cmd 真的把提示文本转发给 node：带提示时空格之外不依赖任何计数。
+    const forwarded = await exec('cmd.exe', ['/d', '/c', files.cmd, userPrompt], { env, cwd: dir })
+    assert.equal(forwarded.stdout.replace(/\r?\n$/, ''), 'acme', '%* 必须把提示文本送到 node')
+    assert.equal(forwarded.stderr, '')
   }
 })

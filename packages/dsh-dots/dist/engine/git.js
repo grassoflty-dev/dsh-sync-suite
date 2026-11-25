@@ -335,14 +335,34 @@ const ASKPASS_SH = [
     'esac',
     '',
 ].join('\n');
-/** Windows 版 askpass：转交给 node 执行 askpass.mjs，不在 cmd 里展开 token。 */
+/**
+ * Windows 版 askpass：转交给 node 执行 askpass.mjs，不在 cmd 里展开 token。
+ *
+ * 最后一行把 git 的提示文本原样转发给 node（与 POSIX 版对齐）。`%*` 为什么是引号安全的：
+ * 它复制的就是 git 自己拼出来的那段参数字符串（git 只传一句普通提示文本，例如
+ * `Username for 'https://gitee.com':`，其中的单引号、冒号、@ 对 cmd 都没有特殊含义），
+ * cmd 不对参数做变量展开，所以提示文本不会被当成语法；token 永远只在 node 进程的环境变量
+ * DSH_GIT_SYNC_TOKEN 里，既不进 argv，也不进本文件。
+ *
+ * 注释行一律不带 cmd 元字符：cmd 先按元字符切分整行再执行 rem，被切出来的尾巴会被当成命令
+ * 执行，并往 stderr 打一行「不是内部或外部命令」——那会污染失败分类的输入。
+ *
+ * 已知边界（故不改变转发形式）：若仓库地址本身带 `& | < > ^`，git 的提示文本会带上它们，
+ * cmd 仍会在那里切分；分类关键字总在切分点之前，答案仍正确，但尾巴会被当成命令执行。插件只
+ * 接受 `https://host/path` 形式的地址（无空白、无查询串），这种形状不在支持范围内；要彻底
+ * 消除得改成 `set "DSH_GIT_SYNC_PROMPT=%~1"` 让 node 读环境变量，那会偏离与 POSIX 版逐字
+ * 对齐的转发形式。
+ */
 const ASKPASS_CMD = [
     '@echo off',
-    'rem token 只由 node 从环境变量读取；本文件不含 token，也不做 %VAR% 展开（& | < > % 都安全）。',
+    'rem 本文件不含 token：token 只由 node 从环境变量读取，cmd 不对它做变量展开。',
+    'rem 提示文本由 git 作为参数传入，同一行原样转交给 node，node 才能按提示判用户名还是口令。',
+    'rem 注释行不得出现命令解释器元字符：cmd 会先按元字符切分整行再执行 rem，切出来的尾巴被当成命令跑。',
     'rem 探针也按同一份规则清掉这两项：探针环境 = 真实 askpass 环境。',
+    'rem 拿不到提示文本时按调用序兜底，规则见 askpass.mjs：新一次 git 调用从用户名重新开始。',
     'set NODE_OPTIONS=',
     'set NODE_PATH=',
-    '"%DSH_GIT_SYNC_NODE%" "%~dp0askpass.mjs"',
+    '"%DSH_GIT_SYNC_NODE%" "%~dp0askpass.mjs" %*',
     'exit /b %ERRORLEVEL%',
     '',
 ].join('\r\n');
@@ -351,11 +371,25 @@ const ASKPASS_CMD = [
  *
  * Windows 上 cmd 的 `echo %VAR%` 会把 `& | < > %` 当成语法，含这些字符的 token 会被
  * 截断/当命令执行；所以 .cmd 只负责调 node，值由 node 原样输出（审计 M5）。
- * 提示文本由 git 作为 argv 传给 askpass，但这条转发路径不经过 cmd 的变量展开。
- * 若拿不到提示文本（例如 .cmd 未转发参数），按调用顺序：第一次给用户名，之后给 token。
+ * 提示文本由 git 作为 argv 传给 askpass，.cmd 用 `%*` 原样转发，这条路径不经过 cmd 的变量展开。
+ *
+ * 拿不到提示文本时的兜底（本次修复）：**绝不**再用一个跨 git 进程存活的全局计数。旧实现
+ * 先答用户名、之后一律答 token，于是 fetch 之后再 push 时，git 的「用户名问句」被答成
+ * token，Gitee 回 “The token username invalid” 并 403 —— 这就是真实推送一直失败的那个根因。
+ *
+ * 现在的规则（只看「这是不是同一次 git 调用」）：
+ *   1. 提示文本可判 → 直接按提示答（唯一正确路径，兜底根本不参与）；
+ *   2. 同一次调用内继续计数：父进程相同，**或** 计数文件够新且上一次调用显然还没问完
+ *      （一次 git 调用最多问两项：用户名 + 口令）；
+ *   3. 否则一律从 0 重新开始 —— 新一次 git 调用永远先答用户名，绝不把 token 答给用户名问句。
+ *
+ * 为什么 (2) 需要「没问完」这一条而不是只用父进程：实测 Windows 上 git 每次 askpass 都由一个
+ * 新的 cmd.exe 拉起（同一次 git 调用内两次问询的父进程 pid 不同，且都不是 git 自己的 pid），
+ * 只用父进程做键会把每次问询都当成新调用。调用方（`GitRepo.buildEnv()`）在启动每个 git 进程
+ * 前还会删掉计数文件，正常路径上文件总是新的。
  */
 const ASKPASS_MJS = [
-    '// 由 dsh-dots 生成：token 只从环境变量读，直接写 stdout。',
+    '// 由 dsh-dots 生成：token 只从环境变量读，直接写 stdout；本文件不含 token，也不含任何凭据。',
     "import { readFileSync, writeFileSync } from 'node:fs'",
     '',
     "const token = process.env.DSH_GIT_SYNC_TOKEN ?? ''",
@@ -367,14 +401,37 @@ const ASKPASS_MJS = [
     '  process.exit(0)',
     '}',
     '',
+    '// 1) 有提示文本就按提示判（唯一正确路径）：用户名问句答用户名，口令问句答 token。',
     "if (/sername/i.test(prompt)) emit(user)",
     "if (/assword|assphrase/i.test(prompt)) emit(token)",
     '',
+    '// 2) 拿不到提示文本时的兜底：一次 git 调用内先用户名、后 token，绝不跨调用沿用。',
+    '//    判定「同一次调用」的两个证据：父进程相同，或者计数文件够新且上一次调用还没问完',
+    '//    （一次 git 调用最多问两项）。父进程单独不够：Windows 上 git 每次都经新的 cmd.exe 拉起，',
+    '//    同一次调用内两次问询的父进程 pid 不同（实测），所以再加「没问完」这一条。',
     "const counterFile = process.env.DSH_GIT_SYNC_ASKPASS_COUNTER ?? ''",
+    'const WINDOW_MS = 3000',
+    'const ASKS_PER_INVOCATION = 2',
     'let count = 0',
     "if (counterFile !== '') {",
-    "  try { count = Number.parseInt(readFileSync(counterFile, 'utf8'), 10) || 0 } catch { count = 0 }",
-    '  try { writeFileSync(counterFile, String(count + 1)) } catch { /* 计数失败不影响输出 */ }',
+    '  const now = Date.now()',
+    '  try {',
+    "    const state = JSON.parse(readFileSync(counterFile, 'utf8'))",
+    "    if (state !== null && typeof state === 'object') {",
+    "      const sameParent = typeof state.ppid === 'number' && state.ppid === process.ppid",
+    '      const age = now - Number(state.at)',
+    '      const fresh = Number.isFinite(age) && age >= 0 && age <= WINDOW_MS',
+    '      const pending = !(Number(state.count) >= ASKS_PER_INVOCATION)',
+    '      if (sameParent || (fresh && pending)) count = Number.parseInt(String(state.count), 10) || 0',
+    '    }',
+    '  } catch (error) {',
+    '    count = 0 // 旧格式或半截文件一律按新调用处理：宁可先答用户名，绝不继承 token 状态',
+    '  }',
+    '  try {',
+    '    writeFileSync(counterFile, JSON.stringify({ ppid: process.ppid, at: now, count: count + 1 }))',
+    '  } catch (error) {',
+    '    /* 计数写不进去只影响兜底，不影响本次输出 */',
+    '  }',
     '}',
     'emit(count === 0 ? user : token)',
     '',
@@ -604,12 +661,33 @@ export class GitRepo {
         this.askpassCounter = files.counter;
     }
     /**
+     * 每个 git 子进程启动前重置 askpass 兜底计数：**一次 git 调用 = 一次计数生命周期**。
+     *
+     * 提示文本现在已由 askpass.cmd 用 `%*` 原样转发，兜底只在「拿不到提示文本」时才会用到；
+     * 一旦用到，计数就必须从「用户名」开始，绝不能沿用上一个 git 进程留下的状态 —— 那正是 403
+     * 的成因（随后的一次用户名问句被答成 token，Gitee 回 “The token username invalid”）。
+     * 用删文件而不是改文件内容：不改变 env 的任何一个字节（clone / fetch / push 的逐字节一致
+     * 仍然成立），计数文件路径全生命周期不变。.mjs 里的「父进程 + 时间窗」规则是第二道网。
+     */
+    async resetAskpassCounter() {
+        if (this.askpassCounter === null)
+            return;
+        try {
+            await rm(this.askpassCounter, { force: true });
+        }
+        catch {
+            /* 删不掉不阻断：askpass.mjs 里「一次调用问满两项就重置」仍能挡住跨调用沿用 */
+        }
+    }
+    /**
      * 本实例的鉴权环境。所有 git 命令（含 v2 端口的 push）都从这里取 env，
      * 构造细节只在 `gitAuthEnv()` 一份。公开给 sync/gitPort.ts 复用。
      */
     async buildEnv() {
         if (this.usesAskpass())
             await this.ensureAskpass();
+        // 每次取 env = 即将启动一个新的 git 进程：先把兜底计数归零（见 resetAskpassCounter）。
+        await this.resetAskpassCounter();
         // Gitee 的 HTTPS 规则是「用户名（登录名）+ 私人令牌作密码」；x-access-token 只适用于
         // GitHub PAT。登录名优先手填 / DSH_DOTS_GIT_USERNAME，否则按仓库地址推断 owner；
         // 只有 Gitee 且两者都拿不到时才报可读错误（规则只在 gitUsername.ts 一份）。
