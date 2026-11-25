@@ -444,6 +444,18 @@ const ASKPASS_SH = [
  * 注释行一律不带 cmd 元字符：cmd 先按元字符切分整行再执行 rem，被切出来的尾巴会被当成命令
  * 执行，并往 stderr 打一行「不是内部或外部命令」——那会污染失败分类的输入。
  *
+ * **本文件必须是 7-bit ASCII（中文理由只写在这里，不写进生成物）。** 实测（2026-11-25，
+ * `.tmp/gates-stderr-1..5.out`）：git 拉起 askpass 时没有 console（`execFile` + `windowsHide`
+ * ⇒ CREATE_NO_WINDOW），此时 cmd 按 **OEM 代码页 936** 解析批处理文件；UTF-8 的中文注释字节被
+ * 当成 DBCS 双字节对，行尾落单的 lead byte 会跨行吞掉 CRLF，紧接着的注释行就从中间被当成一条
+ * 命令执行，stderr 每次问询吐 1~3 行「'…整行再执行 rem，切出来的尾巴被当成命令跑…'
+ * 不是内部或外部命令」。同一文件在**有 console** 时（继承的 console 代码页）或在 `chcp 437`
+ * 下单字节解析时都是干净的；改成纯 ASCII 后两种形状都干净。奇偶规则实测：注释行 `rem ` 之后的
+ * 非 ASCII 字节数为奇数才会发作（`rem 中`×1/3/5 发作，×2/4/6 干净）。
+ *
+ * 因此：生成物里一个 >0x7F 的字节都不许有（`test/askpass-cmd-shape.test.mjs` 钉住），
+ * 而 node 读的 askpass.mjs 不受影响（node 按 UTF-8 读，不经 cmd 解析）。
+ *
  * 已知边界（故不改变转发形式）：若仓库地址本身带 `& | < > ^`，git 的提示文本会带上它们，
  * cmd 仍会在那里切分；分类关键字总在切分点之前，答案仍正确，但尾巴会被当成命令执行。插件只
  * 接受 `https://host/path` 形式的地址（无空白、无查询串），这种形状不在支持范围内；要彻底
@@ -452,11 +464,12 @@ const ASKPASS_SH = [
  */
 const ASKPASS_CMD = [
   '@echo off',
-  'rem 本文件不含 token：token 只由 node 从环境变量读取，cmd 不对它做变量展开。',
-  'rem 提示文本由 git 作为参数传入，同一行原样转交给 node，node 才能按提示判用户名还是口令。',
-  'rem 注释行不得出现命令解释器元字符：cmd 会先按元字符切分整行再执行 rem，切出来的尾巴被当成命令跑。',
-  'rem 探针也按同一份规则清掉这两项：探针环境 = 真实 askpass 环境。',
-  'rem 拿不到提示文本时按调用序兜底，规则见 askpass.mjs：新一次 git 调用从用户名重新开始。',
+  'rem This file never contains the token: node reads it from the environment.',
+  'rem git passes the prompt as an argument on one line; forward it verbatim to node.',
+  'rem Keep every line 7-bit ASCII: cmd parses .cmd files in the OEM code page, and a',
+  'rem multi-byte comment can swallow a line ending, so a comment tail runs as a command.',
+  'rem The node probe clears the same two variables: probe env equals askpass env.',
+  'rem Without a prompt we fall back to invocation order; see askpass.mjs.',
   'set NODE_OPTIONS=',
   'set NODE_PATH=',
   '"%DSH_GIT_SYNC_NODE%" "%~dp0askpass.mjs" %*',

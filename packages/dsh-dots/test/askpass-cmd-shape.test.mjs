@@ -230,3 +230,66 @@ test('真实 cmd 见证（Windows）：提示文本经 %* 到达 node，stdout �
   assert.equal(password.stdout.replace(/\r?\n$/, ''), FAKE_TOKEN)
   assert.equal(password.stderr, '')
 })
+
+/* -------------------------------------------------------------------------- */
+/* 8. 7-bit ASCII 门禁 + 无 console 形状回归（本轮 stderr 残渣）                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 现场（Lead 真机，2026-11-25，复现见 `.tmp/gates-stderr-1..5.out`）：修好 %* 之后，真机
+ * `git fetch` + `git push` 的 stderr 里，**每次问询**都多出一行把注释尾巴当命令执行的中文报错
+ * （`'…整行再执行 rem，切出来的尾巴被当成命令跑…' 不是内部或外部命令`）。退出码与凭据都对，
+ * 但它污染了失败分类器读的那一行。
+ *
+ * 机制（本机实测，非推测）：git 拉起 askpass 时没有 console（生产是 `execFile` +
+ * `windowsHide:true` ⇒ CREATE_NO_WINDOW），cmd 按 **OEM 代码页 936** 解析批处理文件，于是 UTF-8
+ * 的中文注释字节被当成 DBCS 双字节对；行尾落单的 lead byte 跨行吞掉 CRLF，紧邻的注释行就从
+ * 中间被当成一条命令执行。**同一文件在挂 console 时是干净的**——所以旧用例（`exec('cmd.exe')`
+ * 不传 windowsHide）一直是绿的，缺陷只在无 console 形状里出现。
+ *
+ * 因此下面两条是配套的：
+ *   · 结构门禁：生成物里一个 >0x7F 的字节都不许有（代码页无关，任何 Windows 上都成立）；
+ *   · 形状回归：真按生产形状（无 console）跑两次问询，stderr 必须为空。这一条是本机 CP936 下
+ *     的实测复现，在单字节 OEM 代码页的 Windows 上不会发作（但那时结构门禁仍然成立）。
+ */
+
+test('生成物必须是 7-bit ASCII：askpass.cmd 里不许出现任何 >0x7F 的字节', async (t) => {
+  const { files } = await makeAskpass(t)
+  const bytes = await readFile(files.cmd)
+  assert.ok(Buffer.isBuffer(bytes), '必须按字节读，不能先解码成字符串')
+  const bad = []
+  for (let i = 0; i < bytes.length; i += 1) {
+    if (bytes[i] > 0x7f) bad.push(`${i}:0x${bytes[i].toString(16)}`)
+  }
+  assert.deepEqual(bad, [],
+    'askpass.cmd 必须是纯 ASCII：cmd 用 OEM 代码页解析批处理文件，多字节注释会吞掉行尾，'
+    + '把下一条注释的尾巴当成命令执行，往 stderr 吐「不是内部或外部命令」（分类器的输入被污染）')
+  // 说明理由仍然留在 TypeScript 源码里（给人读），生成物里只留 7-bit 英文。
+  assert.equal(/[^\x00-\x7f]/.test(await readFile(files.cmd, 'utf8')), false,
+    '文本视图也必须全 ASCII')
+})
+
+test('无 console 形状（与生产一致：windowsHide + piped stdio）：两次问询的 stderr 都为空', async (t) => {
+  if (process.platform !== 'win32') {
+    t.skip('只在 Windows 上存在 cmd.exe')
+    return
+  }
+  const { dir, files, env } = await makeAskpass(t)
+  // 生产 `GitRepo.run()` 用的就是 execFile + windowsHide:true ⇒ 子进程没有 console。
+  // 这正是旧用例漏掉的形状：有 console 时 cmd 解析同样的中文注释也不出错。
+  const username = await exec('cmd.exe', ['/d', '/c', files.cmd, USER_PROMPT], {
+    cwd: dir, env, windowsHide: true,
+  })
+  assert.equal(username.stdout.replace(/\r?\n$/, ''), FAKE_USER)
+  assert.equal(username.stderr, '',
+    '无 console 时 stderr 必须为空：注释行的多字节尾巴不得被当成命令执行')
+  assert.equal(username.stderr.includes('不是内部或外部命令'), false)
+  assert.equal(username.stderr.includes('not recognized as an internal or external command'), false)
+
+  const password = await exec('cmd.exe', ['/d', '/c', files.cmd, PASS_PROMPT], {
+    cwd: dir, env, windowsHide: true,
+  })
+  assert.equal(password.stdout.replace(/\r?\n$/, ''), FAKE_TOKEN)
+  assert.equal(password.stderr, '')
+})
+
