@@ -16,6 +16,7 @@
  * 所有注册都包在 `ctx.effect(...)` 里，便于插件卸载时释放路由、预览缓存与工具注册。
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { sweepAskpassDirsAtStartup } from './engine/askpassTemp.js'
 import { createRemoteModule } from './remote/index.js'
 import type { RemoteModule } from './remote/index.js'
 import { createPairingService } from './remote/pairingProvision.js'
@@ -184,11 +185,26 @@ export function apply(ctx: HostContext, config: PluginConfig = {}): void {
     () => ctx.webServer.register({ kind: 'exact', path: LEGACY_RPC_PATH, handler }),
     'dsh-dots: legacy rpc route (临时兼容旧路径、后续删除)',
   )
+  // mod-plugin-askpass-temp-hygiene：插件启动时**顺手**清一次超龄的 askpass 临时目录
+  // （`%TEMP%\dsh-gcs-askpass-*`；`dispose()` 只清自己那一个，崩溃/被杀会留下）。
+  //
+  // 为什么和 RPC dispose 共用同一个 effect，而不是新开一个：
+  //   1. 本仓库的既有测试（`confirm-gate` / `schedule-bridge`）把 ctx.effect **数量**当作
+  //      契约逐一钉住，新开一个会让它们变成假失败，而那些断言不许删也不许放宽；
+  //   2. 这次清理不持有任何可卸载句柄（一次性、跑完即弃），口径与下方 `mountV2Sync`
+  //      的注释一致——"运行时不持有可卸载句柄，故不新增 ctx.effect"。
+  //
+  // 为什么 fire-and-forget（不 await）：清理是尽力而为的收垃圾，绝不许拖慢或阻断插件激活；
+  // `sweepAskpassDirsAtStartup()` 自己从不 throw（失败只进 `failed` 计数、不写日志），这里的
+  // `.catch` 只是最后一道保险，保证"清理故障"永远不会变成"插件激活失败"。
   ctx.effect(
-    () => () => {
-      void service.dispose()
+    () => {
+      void sweepAskpassDirsAtStartup(process.env).catch(() => undefined)
+      return () => {
+        void service.dispose()
+      }
     },
-    'dsh-dots: dispose rpc service',
+    'dsh-dots: dispose rpc service + askpass temp sweep',
   )
 
   if (remote !== null) {
