@@ -62,6 +62,24 @@ export interface RemoteSettings {
    * `remoteShowLink` 的返回里（与自动生成的令牌同一出口规则）。
    */
   token: string
+  /**
+   * **自动启动意图**（mod-plugin-remote-autostart）：插件每次激活时要不要自己把监听拉起来。
+   *
+   * 与 `enabled` 是两个概念，绝不再混用：
+   *   - `autoStart` = **意图**（"下次激活自动起监听"）。写入口只有两个：
+   *     `start()` 被发起时置 `true`（成功、失败都置；失败也留住重试的机会），
+   *     用户显式 `stop()` 时清零。`dispose()`（进程退出/插件卸载）**不**改它。
+   *   - `enabled` = 句柄回声（"上一次是开着的"），见 `RemoteSettingsView.enabled` 的注释；
+   *     挂载路径**不再**读它（旧实现在 `src/index.ts` 用 `enabled` 当意图位，见本模块报告）。
+   *
+   * **可选字段（additive，不做迁移）**：缺键读作 `false` —— 旧 `remote.json` 升级后
+   * 不会凭空多起一个监听（管理过这台机器的人需要再点一次「开始接受连接」）。
+   * 为什么声明成可选：默认值/归一（`accessMode.ts` 的 `defaultRemoteSettings` /
+   * `normalizeRemoteSettings`）不认这个键，旧文件的归一结果里天然没有它；真正的读写口
+   * 在 `service.ts`（`readSettings` / `persistIntent`），它把该键从原始记录里重新挂上，
+   * 因此归一化不会把它抹掉。
+   */
+  autoStart?: boolean
 }
 
 /** 设置项的字段名（RPC 归一、App 侧、UI 表单三处共用）。 */
@@ -81,11 +99,16 @@ export const REMOTE_SETTING_KEYS = [
  * 对外暴露的设置视图（`remoteGetState` 用）：把 `token` 抽成"是否存在 + 打码"，
  * 保证状态响应里不可能出现令牌明文。
  */
-export interface RemoteSettingsView extends Omit<RemoteSettings, 'token'> {
+export interface RemoteSettingsView extends Omit<RemoteSettings, 'token' | 'autoStart'> {
   /** 是否已保存访问令牌（只给布尔，不给值）。 */
   tokenSet: boolean
   /** 打码串（如 `abcd…wxyz`）；未保存为空串。 */
   tokenMasked: string
+  /**
+   * 自动启动意图（mod-plugin-remote-autostart）：**恒为布尔**，缺键/坏值一律 `false`。
+   * 归一后的设置里它是可选的，视图里必须给出确定答案，面板才不用自己猜 `undefined`。
+   */
+  autoStart: boolean
 }
 
 export type RemoteSettingKey = (typeof REMOTE_SETTING_KEYS)[number]
@@ -160,6 +183,14 @@ export interface RemoteStatus {
   boundAddress: string | null
   port: number
   startedAt: string | null
+  /**
+   * 这次监听是谁拉起来的（mod-plugin-remote-autostart）：`auto` = 插件激活时按
+   * `settings.autoStart` 自己恢复的；`manual` = 用户点了「开始接受连接」；`null` = 没在跑。
+   *
+   * 为什么要有它：自动恢复若一声不响，面板上的「已启动」看起来就像"我什么时候点的？"。
+   * 面板据此补一句「已在启动时自动恢复」。可卸载/停止后必须回到 `null`（与 `running` 同源）。
+   */
+  startedBy: 'auto' | 'manual' | null
   /** 启动失败原因（fail-closed 后保留给 UI 显示，不抛给插件启动）。 */
   lastError: { code: string; message: string } | null
   connections: { active: number; total: number }
@@ -221,6 +252,19 @@ export interface RemoteServiceLike {
   saveSettings(input: unknown): Promise<RemoteStateData>
   start(): Promise<RemoteStatus>
   stop(): Promise<RemoteStatus>
+  /**
+   * **激活入口**（mod-plugin-remote-autostart）：插件挂载时调**恰好一次**的自动启动。
+   *
+   * 语义（唯一的一条自动启动路径）：
+   *   - `settings.autoStart !== true` ⇒ 直接返回当前状态，**绝不**起监听；
+   *   - 已经有句柄 ⇒ 直接返回，绝不重复起（幂等）；
+   *   - 满足前提（TLS 材料 + 可绑定地址；仓库/令牌都不是前提）⇒ 起监听；
+   *   - 起不来 ⇒ 只写 `status.lastError`（typed），**绝不抛**，由下次激活再试一次。
+   *
+   * 刻意不 await 在启动路径上（`index.ts` fire-and-forget）：远程访问起不来不许拖慢或
+   * 阻断插件激活。
+   */
+  autoStart(): Promise<RemoteStatus>
   rotateToken(): Promise<RemoteStatus>
   /**
    * mod-plugin-pairing 可选接缝：让磁盘上已生成的配对令牌与内存令牌门同步。

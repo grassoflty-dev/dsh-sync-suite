@@ -82,6 +82,7 @@
   "lean.remote.stop": "Stop accepting connections",
   "lean.remote.start": "Start accepting connections",
   "lean.remote.started": "Started",
+  "lean.remote.autostarted": "Restored automatically at startup",
   "lean.remote.stopped": "Not started",
   "lean.remote.start.failed": "Listener failed to start"
 }

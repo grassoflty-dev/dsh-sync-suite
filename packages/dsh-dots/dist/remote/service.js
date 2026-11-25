@@ -33,6 +33,12 @@ function safeMessage(error) {
         return error.message;
     return String(error);
 }
+/** 原始 JSON 记录 → 普通对象；数组 / 标量 / null 一律 `null`（与 store / accessMode 同一判据）。 */
+function asRecord(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? value
+        : null;
+}
 /**
  * 展示用脱敏：把 URL 里 token 类参数的值换成 `***`。
  *
@@ -59,11 +65,13 @@ export function redactUrlForDisplay(raw) {
  * 所以出口处只留 `tokenSet` / `tokenMasked`；明文唯一的出口是 `showLink()`。
  */
 export function toSettingsView(settings) {
-    const { token, ...rest } = settings;
+    const { token, autoStart, ...rest } = settings;
     return {
         ...rest,
         tokenSet: token !== '',
         tokenMasked: token === '' ? '' : maskToken(token),
+        // 视图里恒为布尔：缺键（旧 remote.json）与坏值都读作 false。
+        autoStart: autoStart === true,
     };
 }
 /* ------------------------------------------------------------------ 局域网选路 */
@@ -421,7 +429,7 @@ export function createRemoteService(options = {}) {
     const now = options.now ?? (() => new Date());
     const sessionCookieName = options.sessionCookieName ?? REMOTE_SESSION_COOKIE;
     const store = new RemoteStore({ homeDir: options.homeDir });
-    const runtime = { handle: null, startedAt: null, lastError: null, probe: null, rejected: 0 };
+    const runtime = { handle: null, startedAt: null, lastError: null, probe: null, rejected: 0, startedBy: null };
     let upstream = null;
     /** 正在进行的换身份 Promise（single-flight）：并发调用共享同一个，绝不并行换两次。 */
     let minting = null;
@@ -436,6 +444,11 @@ export function createRemoteService(options = {}) {
      * 只记住**值**而不是布尔量：之后 provisioning 改写成别的地址时，旧值不会再被误当覆盖。
      */
     let explicitLanSave = null;
+    /**
+     * 本次进程是否已经补写过被外部写入者丢掉的意图位（见 `healClobberedIntent`）。
+     * 每个进程最多补一次：失败也别每读一次状态就写一次盘。
+     */
+    let healedIntent = false;
     /** 这个落盘值是否等于本进程显式保存过的那个值。 */
     function isExplicitLanSave(value) {
         const trimmed = typeof value === 'string' ? value.trim() : '';
@@ -447,11 +460,67 @@ export function createRemoteService(options = {}) {
         if (raw === null)
             return base;
         try {
-            return normalizeRemoteSettings(raw, base);
+            const normalized = normalizeRemoteSettings(raw, base);
+            const intent = readIntent(raw);
+            healClobberedIntent(raw, { ...normalized, autoStart: intent });
+            // mod-plugin-remote-autostart：`autoStart` 是**加法字段**，归一层（accessMode.ts，
+            // 本模块不改它）不认这个键，所以每次读都从原始记录里重新挂上；否则任何一次
+            // "归一后再写盘"都会把意图抹掉。缺键 → false（旧文件不改变行为）。
+            return { ...normalized, autoStart: intent };
         }
         catch {
             // 手工改坏的文件当作默认值：远程访问起不来，不影响配置同步。
             return base;
+        }
+    }
+    /** 从原始 `remote.json` 记录里取意图：只有字面 `true` 才算开（缺键/坏值 → false）。 */
+    function readIntent(raw) {
+        const record = asRecord(raw);
+        return record !== null && record.autoStart === true;
+    }
+    /**
+     * 落盘意图（唯一写入口）。值没变就不写盘：`getState` 这类读路径不该产生写动作。
+     *
+     * 写盘失败只影响"下次激活能不能自动恢复"，绝不影响本次监听：远程访问已经起来了，
+     * 不能因为写配置文件把它拆掉。
+     */
+    function persistIntent(on) {
+        try {
+            const current = readSettings();
+            if ((current.autoStart === true) === on)
+                return;
+            store.writeSettings({ ...current, autoStart: on });
+        }
+        catch {
+            /* 写盘失败只影响下一次自动启动 */
+        }
+    }
+    /**
+     * 自愈：`remote.json` 里**整个键都不见了**，但此刻确实有句柄在接连接。
+     *
+     * 为什么会发生：`pairingProvision.persistEndpoint()`（配对面板每次 attach 都会走
+     * `provision`）用 `normalizeRemoteSettings(raw, defaultRemoteSettings())` 重建设置再整文件
+     * 写回——归一层不认的键会被静默丢掉。也就是说"打开配对面板"这一步就能把意图抹掉，
+     * 下一次重启就不再自动恢复。
+     *
+     * 判据刻意只认「键缺失」而不是「值为 false」：显式 `false` 是用户点了停止的合法结果，
+     * 不许被自愈覆盖。每个进程最多补写一次，且只在有句柄时才补——"正在接连接"本身就是
+     * 意图为真的证据。
+     */
+    function healClobberedIntent(raw, settings) {
+        if (healedIntent || runtime.handle === null)
+            return;
+        const record = asRecord(raw);
+        if (record === null)
+            return;
+        if (Object.prototype.hasOwnProperty.call(record, 'autoStart'))
+            return;
+        healedIntent = true;
+        try {
+            store.writeSettings({ ...settings, autoStart: true });
+        }
+        catch {
+            /* 本进程不再重试补写：写盘失败只影响下次激活能否自动恢复，不影响本次监听 */
         }
     }
     function readTokenValue() {
@@ -761,6 +830,7 @@ export function createRemoteService(options = {}) {
             boundAddress: handle === null ? null : handle.address,
             port: handle === null ? (settings.port > 0 ? settings.port : dshPort() ?? 0) : handle.port,
             startedAt: runtime.startedAt,
+            startedBy: handle === null ? null : runtime.startedBy,
             lastError: runtime.lastError,
             connections: { active: stats.active, total: stats.total },
             rejected: runtime.rejected + stats.rejected,
@@ -800,11 +870,12 @@ export function createRemoteService(options = {}) {
      * `Get-NetTCPConnection -State Listen` 明明是 `192.168.137.1:44996`。旧实现里
      * `remoteStart` 从不写这个位，于是文件读起来像"没有在接连接"，与事实相反 —— 同一类"报告说谎"。
      *
-     * 语义（**重要，别把它当运行时快照**）：`enabled` 仍是**意图位**（"下次挂载时是否自动起监听"，
-     * 见 `src/index.ts:208` 的消费点），只是在**用户点开始/停止的那一刻**由句柄状态同步写入：
-     * 起成功 → `true`；主动停止 → `false`。因此它不会再和刚发生的用户动作相矛盾。
-     * 真正"此刻在接连接"的事实仍然是 `status().running` / `status().listen` / `status().boundAddress`。
-     * 进程被强杀时文件会停在 `true`（意图），下次挂载据此自动重启 —— 这是意图位应有的行为。
+     * 语义（**mod-plugin-remote-autostart 之后**）：`enabled` 是**句柄回声**（"上一次是开着的"），
+     * 不再是自动启动意图位 —— 意图搬到了 `autoStart`（见 `persistIntent`），挂载路径只读意图。
+     * 因此它不会再和刚发生的用户动作相矛盾，也不再被任何启动路径当成"要不要自动起监听"的证据。
+     * 真正"此刻在接连接"的事实仍然是 `status().running` / `status().listen` / `status().boundAddress`
+     * 与 `settings.accepting`（mod-plugin-remote-accepting-surface）。
+     * 进程被强杀时文件会停在 `true`，那只是回声，不再驱动任何自动行为。
      *
      * 写盘失败不影响监听与状态面（监听已经起来了，不能因为写配置文件把它拆掉）。
      */
@@ -825,6 +896,7 @@ export function createRemoteService(options = {}) {
         const handle = runtime.handle;
         runtime.handle = null;
         runtime.startedAt = null;
+        runtime.startedBy = null;
         upstream = null;
         if (refreshTimer !== null) {
             clearInterval(refreshTimer);
@@ -843,13 +915,29 @@ export function createRemoteService(options = {}) {
         return status();
     }
     async function stop() {
+        // 显式停止 = 用户明确不要它了：意图必须一起清掉并落盘，否则下一次激活会把一个
+        // 用户刻意关掉的监听"复活"（本模块的诚实半边）。`dispose()` 不走这里。
+        persistIntent(false);
         return stopInternal(true);
     }
-    async function start() {
+    /**
+     * 起监听。`origin` 只决定 `status.startedBy` 与"要不要记意图"：
+     *   - `manual`（用户点「开始接受连接」，默认）：把意图置 `true` 并落盘——**失败也置**
+     *     （理由见下，这是本模块对"启动失败"的决定）；
+     *   - `auto`（激活时按意图自动恢复）：意图本来就为真，不再写盘。
+     *
+     * 失败语义（**决定并记录在案**）：任何 fail-closed 分支只写 `status.lastError` 并返回，
+     * **不清意图**。于是"启动失败"不会像旧实现那样留下一个读起来像"用户关掉了"的文件：
+     * 意图仍是 `true`，下一次激活会（且只会）再自动试一次。
+     */
+    async function start(origin = 'manual') {
         if (starting)
             return status();
         if (runtime.handle !== null)
             return status();
+        // 手动发起 = 用户在表达"我要它开着"：先记意图再起，起不来也不抹掉这份表达。
+        if (origin === 'manual')
+            persistIntent(true);
         starting = true;
         try {
             const settings = readSettings();
@@ -925,8 +1013,9 @@ export function createRemoteService(options = {}) {
             }
             runtime.handle = handle;
             runtime.startedAt = now().toISOString();
+            runtime.startedBy = origin;
             runtime.lastError = null;
-            // 意图位跟随真实句柄：起成功就写 true，文件不再出现"写着 false 其实在接连接"。
+            // `enabled` 是句柄回声：起成功就写 true，文件不再出现"写着 false 其实在接连接"。
             commitEnabledFlag();
             // 上游会话 cookie 有 TTL：后台定期刷新，避免"某天突然全 401"。
             // 走 `mintOnce()`：与 401 重换、门禁自愈共用一个 single-flight，且**成功才替换**
@@ -950,6 +1039,27 @@ export function createRemoteService(options = {}) {
         finally {
             starting = false;
         }
+    }
+    /**
+     * **激活入口**（mod-plugin-remote-autostart）：插件挂载时调用**恰好一次**。
+     *
+     * 这是整个包里唯一的自动启动路径（旧实现是 `src/index.ts` 读 `settings.enabled` 再调
+     * `start()`，那个消费点已删除）。三条判据，一条都不能省：
+     *   1. 意图不为真 ⇒ 什么都不做（`autoStart` 缺键 = false，旧文件行为不变）；
+     *   2. 已经有句柄 ⇒ 直接返回，绝不重复起（幂等，"双击/重入"不会多出一个监听）；
+     *   3. 前提（TLS 材料 + 可绑定地址）由 `start()` 自己 fail-closed 判定，这里不预检、
+     *      也不因为仓库/令牌没配就跳过——仓库与令牌**不是**起监听的前提。
+     *
+     * 失败 = 只留 typed `status.lastError`，不抛：激活路径不许因为远程访问起不来而失败，
+     * 下一次激活会再试一次（每次都只尝试一次，不做进程内重试）。
+     */
+    async function autoStart() {
+        if (runtime.handle !== null)
+            return status();
+        const settings = readSettings();
+        if (settings.autoStart !== true)
+            return status();
+        return start('auto');
     }
     async function getState() {
         const settings = readSettings();
@@ -1070,12 +1180,13 @@ export function createRemoteService(options = {}) {
         return listCandidatesNow();
     }
     async function dispose() {
-        // 进程退出/插件卸载不是"用户点了停止"：**不**改写 `enabled`（否则每次关 DSH 都会清掉自动启动）。
+        // 进程退出/插件卸载不是"用户点了停止"：**不**改写 `enabled`、也**不**清 `autoStart`——
+        // 否则每次关 DSH 都会把下次激活要用的自动启动意图清掉。
         await stopInternal(false).catch(() => undefined);
     }
     // 装配完成时后台预热一次路由探测（异步、有界、失败静默）：面板首个 getState 就能拿到真因。
     void refreshRouteAddress();
-    return { getState, saveSettings, start, stop, rotateToken, adoptToken, probe, showLink, detectLan, dispose, paths: { configFile: store.configFile, tokenFile: store.tokenFile } };
+    return { getState, saveSettings, start, stop, autoStart, rotateToken, adoptToken, probe, showLink, detectLan, dispose, paths: { configFile: store.configFile, tokenFile: store.tokenFile } };
 }
 /** 默认令牌长度（字节）——与 `auth.ts` 的 `crypto.randomBytes(32)` 对齐。 */
 export const REMOTE_TOKEN_BYTES = 32;

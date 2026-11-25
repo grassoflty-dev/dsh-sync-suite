@@ -215,14 +215,19 @@ export function apply(ctx: HostContext, config: PluginConfig = {}): void {
       },
       'dsh-dots: dispose remote service',
     )
-    // 用户上次开了开关 → 本次挂载后自动起监听。
-    // 刻意 fire-and-forget 且吞错：监听起不来只写 status.lastError，不许冒到插件启动路径。
+    // mod-plugin-remote-autostart：自动恢复监听**只走这一条路径** —— 意图（`remote.json`
+    // 的 `autoStart`）为真时，激活即自己把监听拉起来，不必运维再点一次「开始接受连接」。
+    //
+    // 为什么不再在这里读设置：`settings.enabled` 是句柄回声（见 `remote/service.ts` 的
+    // `commitEnabledFlag`），把它当意图位会让"启动失败"看起来像"用户关掉了"。判据全部
+    // 收在 `service.autoStart()` 里（意图 + 已有句柄幂等 + 前提由 start() fail-closed），
+    // 插件层只负责**什么时候**问一次。
+    //
+    // 刻意 fire-and-forget 且吞错：监听起不来只写 `status.lastError`（typed，面板可显示），
+    // 绝不冒到插件启动路径、也绝不拖慢激活。
     ctx.effect(
       () => {
-        void remoteModule.service
-          .getState()
-          .then((state) => (state.settings.enabled ? remoteModule.service.start() : undefined))
-          .catch(() => undefined)
+        void remoteModule.service.autoStart().catch(() => undefined)
         return () => undefined
       },
       'dsh-dots: remote autostart',

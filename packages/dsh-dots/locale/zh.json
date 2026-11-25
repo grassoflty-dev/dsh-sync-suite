@@ -82,6 +82,7 @@
   "lean.remote.stop": "停止接受连接",
   "lean.remote.start": "开始接受连接",
   "lean.remote.started": "已启动",
+  "lean.remote.autostarted": "已在启动时自动恢复",
   "lean.remote.stopped": "未启动",
   "lean.remote.start.failed": "监听启动失败"
 }

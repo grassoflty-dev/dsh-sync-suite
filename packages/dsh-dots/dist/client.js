@@ -147,6 +147,7 @@ window.__ModuleLoader__.load({
       "lean.remote.stop": "停止接受连接",
       "lean.remote.start": "开始接受连接",
       "lean.remote.started": "已启动",
+      "lean.remote.autostarted": "已在启动时自动恢复",
       "lean.remote.stopped": "未启动",
       "lean.remote.start.failed": "监听启动失败"
     }
@@ -259,6 +260,7 @@ window.__ModuleLoader__.load({
       "lean.remote.stop": "Stop accepting connections",
       "lean.remote.start": "Start accepting connections",
       "lean.remote.started": "Started",
+      "lean.remote.autostarted": "Restored automatically at startup",
       "lean.remote.stopped": "Not started",
       "lean.remote.start.failed": "Listener failed to start"
     }
@@ -1151,6 +1153,12 @@ window.__ModuleLoader__.load({
       const [shown, setShown] = React.useState(null)
       const [audit, setAudit] = React.useState([])
       const [running, setRunning] = React.useState(null)
+      /**
+       * mod-plugin-remote-autostart：这次监听是不是插件激活时**自己**恢复的
+       * （引擎给 `status.startedBy === 'auto'`）。自动恢复若不声不响，面板上的「已启动」
+       * 会像"我什么时候点的？"，所以另起一行说明。
+       */
+      const [autoStarted, setAutoStarted] = React.useState(false)
       const [probe, setProbe] = React.useState(null)
       /**
        * mod-plugin-lan-address-selection：状态里那条「广播哪个地址、为什么」的中文说明
@@ -1172,6 +1180,8 @@ window.__ModuleLoader__.load({
       function applyRemoteStatus(status) {
         if (!status || typeof status !== 'object') return
         setRunning(status.running === true)
+        // 自动恢复的标签必须跟"这次是谁拉起来的"同源；未启动时一律不显示。
+        setAutoStarted(status.running === true && status.startedBy === 'auto')
         if (status.probe) setProbe(status.probe)
         const first = Array.isArray(status.urls) && status.urls.length > 0 ? status.urls[0] : null
         const note = first && typeof first.note === 'string' ? first.note : ''
@@ -1442,6 +1452,11 @@ window.__ModuleLoader__.load({
         h('div', { 'data-lean': 'remote-running', style: S.hint },
           stopped ? tr('lean.remote.stopped') : tr('lean.remote.started')
         ),
+        // mod-plugin-remote-autostart：激活时自动恢复的那一次要留一句说明，
+        // 免得运维以为"我没点它怎么自己开了"。
+        autoStarted && !stopped
+          ? h('div', { 'data-lean': 'remote-autostart', style: S.hint }, tr('lean.remote.autostarted'))
+          : null,
         transports && transports.tls === true
           ? h('div', { 'data-lean': 'remote-transport-honesty', style: S.hint }, tr('lean.remote.transport.encrypted'))
           : (effectiveTransport === 'lan' || effectiveTransport === 'ipv6')
