@@ -799,3 +799,27 @@ B 批 **2179 / 2178 / 0 / 1** 保留在上表，便于对比。）
 **当前唯一阻塞**：平板上 15 条断言（`docs/SELF-TEST-REMOTE.md` §2.6 七条 + §2.7 八条）需要两件外部动作 —— **解锁平板** 与 **重启 DSH**（插件是 junction 链接，重启即加载新代码）。两者都不由代理代做。
 
 **已知未关项**（都已登记，不静默丢弃）：`remote:` 回显里的**句子形状**仍可被识别（判为取舍）；`proxy-auth` 仍写 `reachable:false`（代理其实答了）；`clone` 没有网络预算；真实代理 / 真实远端 401/403/404/302/DNS 一律未跑；Windows 孙进程 `SIGTERM` 结算未验；`mod-remote-command-live`（平板翻闸）在真机门禁前仍是 no-op，不排期。
+
+## 交接：2026-11-26 01:56（HEAD `67df5f7`）
+
+**今天（11-25 20:00 → 11-26 02:00）一共落 9 个提交**，全部推送、打 `module/*` 标签、登记表已回填：
+
+| 提交 | 模块 | 一句话 |
+|---|---|---|
+| `77cd7a8` | `mod-plugin-askpass-cmd-shape` | **真机推送 401/403 的真因**：我们生成的 `askpass.cmd` 没转发 `%*`，退化成跨调用不重置的全局计数，把**令牌当用户名**发给 Gitee |
+| `f6386f2` | `mod-plugin-askpass-stderr-residual` | 生成物改 **7-bit ASCII**：无 console 时 cmd 按 CP936 误读中文注释、把后半截当命令执行 |
+| `ffe708d` | `mod-plugin-lan-address-selection` | **「平板连接失败超时」真因**：配对地址广播的是虚拟网卡 `192.168.137.1`；改为按默认路由选 `192.168.1.5`，绑定 == 公布 |
+| `283a128` | `mod-plugin-askpass-temp-hygiene` | 启动时清扫超龄 `%TEMP%\dsh-gcs-askpass-*`（本机 26 个） |
+| `21b2a34` | `mod-plugin-askpass-error-surface` | `E_ASKPASS_NODE_MISSING` 接进 banner + 表驱动守卫（24 个 typed 码全覆盖） |
+| `473bf13` | `mod-plugin-remote-autostart` | 重启后**自动恢复监听**：意图键 `autoStart` 与活状态 `enabled` 分家 |
+| `0a0d6fe` | `mod-plugin-remote-accepting-surface` | 面板显示**活真相** `accepting`；意图位保真修在归一化处 |
+| `d059808` | （评审文档） | 今日七提交独立只读评审：**P0 0 / P1 1 / P2 12** |
+| `67df5f7` | `mod-plugin-remote-dispose-race` | 关闭 P1（`dispose`/`start` 竞争导致卸载后仍装上监听）+ 计数器复位回归测试 + LAN 手选改记账 + 记账订正 |
+
+**已活体验证（唯一一条真机结论，写进 `VERIFICATION.md` §15.22 H）**：DSH 重启加载修复后，插件**自己**完成「新建日程 → 提交 `28e4e8d` → 推送」，远端 timeline 里能读到该记录，`origin/main...HEAD = 0/0`；另用插件自己的 `gitAuthEnv` 跑 `fetch` 824 ms → `push` 703 ms，**stderr 零碎片**。
+
+**当前唯一阻塞**：还剩四组真机断言全部依赖一次 **DSH 重启**（`%TEMP%` 目录 26→0、监听绑 `192.168.1.5` 且不再是 `192.168.137.1`、面板「已在启动时自动恢复」与「正在接受连接」、平板重扫二维码后看到电脑的 DSH 页面并能发消息）。重启前所有修复都**不会生效** —— 实测 `litter=26`、监听仍 `192.168.137.1` 就是证据。
+
+**注意一件容易误判的事**：本机 `remote.json` 里 `lanAddress=192.168.137.1` 且**没有** `lanAddressChosen` 标记，按新规则**不算手选**，重启后自动选中 `192.168.1.5`，面板会明说「已忽略落盘的 192.168.137.1（未记录为你手选的地址，按自动挑选）」。**不要为此去改文件**；要固定地址就在面板存一次。
+
+**已登记延后（有理由，不静默丢弃）**：`accepting` 缺监听失败通道；`sameParent` 兜底边角（生产形状不可达）；见证捕获里出现真实登录名（**该捕获不得贴进任何 issue**）；`saveSettings`-stop 路径上 `enabled` 不跟随句柄（`enabled` = 上次保存的偏好，唯一活真相是 `accepting`）；真实 `HTTPS_PROXY` 407 与真实远端 401/403/404/302/DNS 仍未跑。
