@@ -16,7 +16,7 @@ import { SyncError, errorMessage, isSyncError, toRpcError } from './engine/error
 import { GitRepo } from './engine/git.js';
 // mod-plugin-repo-precheck：保存前门禁。码 / 中文文案与 App 的 model/repoVisibility.ts 镜像一致，
 // 不 import apps/**；失败时 typed 码同时进 RPC 错误体与 state.json 的 status.repoBlockCode。
-import { E_REPO_AUTH, E_REPO_VISIBILITY_UNKNOWN, createFetchTransport, fetchRepoVisibility, repoPrecheckError, repoTargetFromUrl, } from './remote/repoVisibility.js';
+import { createFetchTransport, fetchRepoVisibility, repoBannerCodeOf, repoPrecheckError, repoTargetFromUrl, } from './remote/repoVisibility.js';
 import { detectDshVersion, repoHash, resolveProfileDir, statePaths } from './engine/paths.js';
 import { PreviewCache, buildPreview, fileDiffOfPreview, settingsFingerprint } from './engine/preview.js';
 import { applySelected, previewRollback, rollbackSnapshot } from './engine/restore.js';
@@ -34,6 +34,38 @@ import { mapRemoteCode, remoteToolError, REMOTE_TOOL_ERROR_CODES } from './remot
 // RPC 只依赖服务结构类型 + 拒绝文案表；缺省构造出的服务没有标记 ⇒ 一律 E_CHANNEL_UNVERIFIED。
 import { createSessionPromptService } from './remote/sessionPrompt.js';
 import { PROMPT_CODE_BY_KEY, PROMPT_WORDING } from './remote/promptWording.js';
+/**
+ * mod-plugin-askpass-error-surface：typed 码 → 横幅码（`state.json` 的 `status.repoBlockCode`）
+ * 的**唯一判定点**。
+ *
+ * 导出是为了让用例直接钉住映射（`test/error-surface.test.mjs`）；`withRepo()` 里用的就是这个
+ * 函数本身，中间没有第二份判断，所以"测过的"就是"落盘的"。
+ *
+ * 判定顺序：
+ *   1. 非 SyncError → null（未预期异常不冒充仓库码）；
+ *   2. 本地 git 缺失（`E_GIT` + `details.reason === 'git-missing'`）→ null：连远端都没走到，
+ *      横幅不许说"仓库不可用"；
+ *   3. `E_REPO_*` 家族原样透传（可见性判定的六个码 + `E_REPO_ROOT_UNAVAILABLE`）；
+ *   4. 其余查 `REPO_BANNER_RULES`（映射或**明确豁免**，每条都带中文理由）。
+ *
+ * 第 4 步取代了旧实现里「只认 E_AUTH，其余一律 null」的硬编码分支：askpass 层的
+ * `E_ASKPASS_NODE_MISSING`（本机没有 node ⇒ HTTPS 推送根本无法鉴权）就是这么丢掉的。
+ */
+export function repoCodeOfError(error) {
+    if (!isSyncError(error))
+        return null;
+    if (error.code === 'E_GIT') {
+        const details = error.details;
+        if (details !== null && typeof details === 'object') {
+            const record = details;
+            if (record.reason === 'git-missing')
+                return null;
+        }
+    }
+    if (error.code.startsWith('E_REPO_'))
+        return error.code;
+    return repoBannerCodeOf(error.code);
+}
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 /**
  * 远端只读响应的字节硬上限 4 MiB（4 * 1024 * 1024）。
@@ -125,28 +157,9 @@ export function createRpcService(options = {}) {
         return settings;
     }
     /**
-     * 把网络 / clone 失败收敛成 App 同词汇的 typed 码；本地工具缺失（git-missing）不算仓库阻断。
-     * 只返回码字符串，不带出任何错误正文（正文可能含远端回显的凭据）。
+     * 把网络 / clone 失败收敛成 App 同词汇的 typed 码（判定规则只在模块级 `repoCodeOfError()`
+     * 一份，本函数不再有第二份实现）；本地工具缺失（git-missing）不算仓库阻断。
      */
-    function repoCodeOfError(error) {
-        if (!isSyncError(error))
-            return null;
-        if (error.code.startsWith('E_REPO_'))
-            return error.code;
-        if (error.code === 'E_AUTH')
-            return E_REPO_AUTH;
-        if (error.code !== 'E_GIT')
-            return null;
-        const details = error.details;
-        if (details !== null && typeof details === 'object') {
-            const record = details;
-            if (record.reason === 'git-missing')
-                return null;
-        }
-        // 网络失败 / 超时 / clone 403 之外的一切 git 失败都按「无法确认」处理：
-        // 绝不因为读不到远端就假装配置仍然健康。
-        return E_REPO_VISIBILITY_UNKNOWN;
-    }
     async function withRepo(settings, task, options2 = {}) {
         const token = store.readToken();
         const repo = new GitRepo({

@@ -23,6 +23,15 @@ export const E_REPO_NOT_FOUND = 'E_REPO_NOT_FOUND';
 export const E_REPO_HOST_UNSUPPORTED = 'E_REPO_HOST_UNSUPPORTED';
 export const E_REPO_VISIBILITY_UNKNOWN = 'E_REPO_VISIBILITY_UNKNOWN';
 export const E_REPO_BAD_RESPONSE = 'E_REPO_BAD_RESPONSE';
+/**
+ * mod-plugin-askpass-error-surface：askpass 层的 typed 拒绝在**横幅**上的码。
+ *
+ * 与上面六个同属 `E_REPO_*` 家族（既有契约与用例都按这个前缀认"仓库阻断码"），但它不是
+ * 可见性判定的产物，而是 `engine/nodePath.ts` 抛出的 `E_ASKPASS_NODE_MISSING` 经
+ * `rpc.ts` 的 `repoCodeOfError()` 映射得到的。之前没有这条映射，于是最可执行的一个失败
+ * （本机没有 node）在 state.json 里**没有码**、面板什么都不显示。
+ */
+export const E_REPO_ASKPASS = 'E_REPO_ASKPASS';
 /** 唯一规则行：同步仓库字段下方的常驻说明（与 App 逐字一致）。 */
 export const REPO_PRIVATE_RULE_TEXT = '仓库必须是私有仓库（日程、聊天与远程控制配置会提交到这里）';
 /** typed 码 → 逐字中文文案（成功是空串：没有拒绝就没有理由）。 */
@@ -33,7 +42,137 @@ export const REPO_VISIBILITY_MESSAGES = {
     E_REPO_HOST_UNSUPPORTED: '不支持自动校验该仓库的可见性。请改用 Gitee 或 GitHub 的私有仓库；本应用不会把无法校验的仓库当作私有',
     E_REPO_VISIBILITY_UNKNOWN: '暂时无法确认仓库可见性：请检查网络后重试（未确认私有前不会提交任何数据）',
     E_REPO_BAD_RESPONSE: '仓库接口返回了非预期内容（可能被代理或登录页拦截）：请检查网络后重试',
+    // mod-plugin-askpass-error-surface：askpass 层失败的唯一横幅文案（逐字，运维要能照着做）。
+    E_REPO_ASKPASS: '找不到可用的 Node.js：HTTPS 推送要靠它把令牌交给 git，没有它就无法完成鉴权。请安装 Node.js，或把环境变量 DSH_GIT_SYNC_NODE 指向 node.exe 的完整路径后重试',
+    // 本批顺手补上的空洞（不是可见性判定的码，但同样会被 `repoCodeOfError()` 原样写进
+    // state.json）：透传的 `E_REPO_*` 里只有它一直没有文案，正好复现本模块要修的"有码无文案"。
+    // `sync/repoRoot.ts` 的报错正文仍逐字不变，这里只是给横幅补一句最终可执行的下一步。
+    E_REPO_ROOT_UNAVAILABLE: '共享工作目录无法创建或写入：请检查该路径的权限与磁盘剩余空间后重试，或把环境变量 DSH_DOTS_REPO_ROOT 指向一个可写目录',
 };
+/**
+ * mod-plugin-askpass-error-surface：typed 码 → 横幅码的**唯一映射表**。
+ *
+ * 这张表覆盖 `packages/dsh-dots/src/engine/**` + `src/sync/**` 里出现过的**全部** `E_*`
+ * 字面量（`test/error-surface.test.mjs` 每次运行都重新扫源码核对：新增一个码而不登记，
+ * 测试直接失败，不会静默丢掉文案）。`rpc.ts` 的 `repoCodeOfError()` 只查这张表 +
+ * `E_REPO_*` 原样透传，不再有第二份判断。
+ *
+ * 为什么不是每个码都给横幅：横幅语义是"仓库/凭据这一侧有事实被阻断"，
+ * 本地 IO、参数校验、完整性校验、v2 周期结果码都各有自己的中文原因与下一步，
+ * 硬塞进横幅只会把"本地文件损坏"谎报成"无法确认仓库可见性"。
+ */
+export const REPO_BANNER_RULES = {
+    /* ---------------------------------------------------------------- 映射（3 条） */
+    E_ASKPASS_NODE_MISSING: {
+        banner: E_REPO_ASKPASS,
+        reason: '本机解析不到可用的 node 解释器 ⇒ HTTPS 推送拿不到令牌、根本无法鉴权；这是操作者能立刻修好的一类失败，必须有横幅',
+    },
+    E_AUTH: {
+        banner: E_REPO_AUTH,
+        reason: '既有行为逐字保留：远端拒绝凭据对操作者而言等价于「令牌无权读取该仓库」',
+    },
+    E_GIT: {
+        banner: E_REPO_VISIBILITY_UNKNOWN,
+        reason: '既有行为逐字保留：其它 git 失败一律按「无法确认仓库可用」处理；本地 git 缺失（details.reason === "git-missing"）由 rpc 层先豁免',
+    },
+    /* ---------------------------------------------------------------- 豁免（本地事实） */
+    E_VALIDATION: {
+        banner: null,
+        reason: '参数/配置校验失败，覆盖面太宽（branch、repoUrl、entries、deviceId…）；映射成横幅会把普通输入错误伪装成仓库阻断，原始中文原因已在 RPC 错误体里',
+    },
+    E_CONFIRM_REQUIRED: {
+        banner: null,
+        reason: '写操作缺 confirm 的交互前置条件，不是仓库事实',
+    },
+    E_NOT_FOUND: {
+        banner: null,
+        reason: '本地快照 / 预览条目不存在，属本地读取问题，与仓库是否可用无关',
+    },
+    E_IO: {
+        banner: null,
+        reason: '本地文件读写失败（写 profile patch、读快照），不是仓库阻断',
+    },
+    E_SHA_MISMATCH: {
+        banner: null,
+        reason: '完整性校验失败需要人工确认（错误体里已给下一步）；横幅语义是「仓库是否可用」，套上去会误导',
+    },
+    E_CONFLICT: {
+        banner: null,
+        reason: 'rebase 分叉冲突要人处理，错误体已给下一步；这不是「仓库不可用」',
+    },
+    E_PUSH_REJECTED: {
+        banner: null,
+        reason: '推送被拒的逐字原因与下一步由 sync/cycle.ts 给出（含 details.budgetMs）；横幅没有对应句子，硬映射成「可见性未知」会谎报原因',
+    },
+    E_UNCONFIGURED: {
+        banner: null,
+        reason: '还没配置仓库地址：面板本来就有专门的未配置态，横幅是多余的',
+    },
+    E_CORRUPT: {
+        banner: null,
+        reason: 'outbox / records.json 等本地状态损坏，重试无意义，也与仓库可用性无关',
+    },
+    E_REPO_ROOT_UNAVAILABLE: {
+        banner: null,
+        reason: '共享工作根本地不可写（权限 / 磁盘 / 路径被占用）：它自带透传的 E_REPO_* 码与逐字文案，不经本表映射',
+    },
+    /* ---------------------------------------------------------------- 豁免（v2 周期结果码） */
+    E_SCHEMA_UNKNOWN: {
+        banner: null,
+        reason: '只作为 v2 周期结果码出现，不经 SyncError 抛出；原因由周期层文案给出',
+    },
+    E_BRANCH_MISMATCH: {
+        banner: null,
+        reason: '只作为 v2 周期结果码出现（远端分支不符），下一步由周期层文案给出',
+    },
+    E_NOT_SYNCED: {
+        banner: null,
+        reason: '只作为 v2 周期结果码出现（尚未同步），属提示而非阻断',
+    },
+    E_LOCAL_PENDING: {
+        banner: null,
+        reason: '只作为 v2 周期结果码出现（本地待推送），由 LOCAL_PENDING_MESSAGE 给出下一步',
+    },
+    E_PULL_FAILED: {
+        banner: null,
+        reason: '只作为 v2 周期结果码出现（拉取失败），真实原因由周期层保留',
+    },
+    /* ---------------------------------------------------------------- 豁免（安装期一次性拒绝） */
+    E_LEGACY_UNPUSHED: {
+        banner: null,
+        reason: '安装期迁移的一次性 typed 拒绝（旧工作副本还有未推送提交），必须人工 push，与仓库可见性无关',
+    },
+    E_MIGRATION_TARGET_MISMATCH: {
+        banner: null,
+        reason: '安装期迁移的一次性 typed 拒绝（目标目录不符），重启 / 重装才能解决',
+    },
+    /* ---------------------------------------------------------------- 豁免（非仓库路径） */
+    E_CHAT_TOOLS_NOT_ISOLATED: {
+        banner: null,
+        reason: 'chat 域安全边界码，不在仓库 / 推送路径上',
+    },
+    E_CHAT_DENY_FAILED: {
+        banner: null,
+        reason: 'chat 域内部防御性码，不在仓库 / 推送路径上',
+    },
+    E_INTERNAL: {
+        banner: null,
+        reason: '未预期异常的兜底码，没有任何可执行的下一步可写进横幅',
+    },
+    E_UNKNOWN_ACTION: {
+        banner: null,
+        reason: 'RPC 动作名不认识，属调用方错误',
+    },
+};
+/**
+ * typed 码 → 横幅码；豁免（含表外未知码）返回 `null`。
+ *
+ * 唯一入口：`rpc.ts` 的 `repoCodeOfError()` 用它决定 `state.json` 的 `status.repoBlockCode`。
+ */
+export function repoBannerCodeOf(typedCode) {
+    const rule = REPO_BANNER_RULES[typedCode];
+    return rule === undefined ? null : rule.banner;
+}
 /** 内部构造：拒绝。 */
 function refuse(code) {
     const message = REPO_VISIBILITY_MESSAGES[code];
