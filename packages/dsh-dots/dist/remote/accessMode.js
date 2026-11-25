@@ -281,7 +281,15 @@ export function findMode(raw) {
         return null;
     return REMOTE_MODE_ORDER.includes(raw) ? REMOTE_MODES[raw] : null;
 }
-/** 默认设置：默认关闭，方式 lan，端口跟随 DSH，所有地址留空（由用户在设置页选/填）。 */
+/**
+ * 默认设置：默认关闭，方式 lan，端口跟随 DSH，所有地址留空（由用户在设置页选/填）。
+ *
+ * **刻意不声明 `autoStart`**（mod-plugin-remote-accepting-surface 的决定，别"顺手补上"）：
+ * 这个默认值对象的**精确形状**（9 个键）被既有断言按深度相等钉住，加键会当场把它打红；
+ * 而"重建不丢意图"并不需要它在这里——`normalizeRemoteSettings` 以 `previous` 起步，
+ * 真正的保真靠它直接读记录里的 `autoStart`（见该函数内注释）。把键加在这里反而会给出
+ * 一种"默认有意图位"的假象：重建路径传的 `previous` 就是本对象，值永远是 `false`。
+ */
 export function defaultRemoteSettings() {
     return {
         enabled: false,
@@ -477,6 +485,15 @@ export function normalizeRemoteSettings(input, previous) {
             next.token = trimmed;
         }
     }
+    // mod-plugin-remote-accepting-surface：`autoStart` 是**意图位**（不是表单字段，不在
+    // `REMOTE_SETTING_KEYS` 里）。这里唯一的职责是"**重建不丢**"：`pairingProvision.persistEndpoint()`
+    // 用 `normalizeRemoteSettings(raw, defaultRemoteSettings())` 把整份设置重写一遍，旧实现只把
+    // 认识的表单字段搬进 `next`，于是键被静默丢掉（运行中靠 `service.ts` 的自愈代偿，停机状态
+    // 直接丢意图）。**判据刻意写死成字面布尔**：缺键 / `null` / 字符串一律不写，`previous` 里
+    // 的值原样留着（缺键 = `false` 由读侧解释），绝不因为一个坏值把整份设置判成 E_VALIDATION
+    // ——那会让旧文件升级路径直接读不出设置。
+    if (record.autoStart === true || record.autoStart === false)
+        next.autoStart = record.autoStart;
     return next;
 }
 /**

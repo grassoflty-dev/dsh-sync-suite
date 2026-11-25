@@ -147,6 +147,7 @@ window.__ModuleLoader__.load({
       "lean.remote.stop": "停止接受连接",
       "lean.remote.start": "开始接受连接",
       "lean.remote.started": "已启动",
+      "lean.remote.accepting": "正在接受连接（{addr}）",
       "lean.remote.autostarted": "已在启动时自动恢复",
       "lean.remote.stopped": "未启动",
       "lean.remote.start.failed": "监听启动失败"
@@ -260,6 +261,7 @@ window.__ModuleLoader__.load({
       "lean.remote.stop": "Stop accepting connections",
       "lean.remote.start": "Start accepting connections",
       "lean.remote.started": "Started",
+      "lean.remote.accepting": "Accepting connections ({addr})",
       "lean.remote.autostarted": "Restored automatically at startup",
       "lean.remote.stopped": "Not started",
       "lean.remote.start.failed": "Listener failed to start"
@@ -1159,6 +1161,14 @@ window.__ModuleLoader__.load({
        * 会像"我什么时候点的？"，所以另起一行说明。
        */
       const [autoStarted, setAutoStarted] = React.useState(false)
+      /**
+       * mod-plugin-remote-accepting-surface：**此刻在不在接**（引擎给的 `settings.accepting`，
+       * 与 `status.running` 同一个句柄）。与 `settings.enabled` 无关——后者是"上次保存的偏好"，
+       * 崩溃后可能停在 true，**绝不允许**拿来推断这一句。
+       */
+      const [accepting, setAccepting] = React.useState(null)
+      /** 活真相同源的 `host:port`（`settings.listen`）；未在接为空串。 */
+      const [acceptAddr, setAcceptAddr] = React.useState('')
       const [probe, setProbe] = React.useState(null)
       /**
        * mod-plugin-lan-address-selection：状态里那条「广播哪个地址、为什么」的中文说明
@@ -1174,10 +1184,14 @@ window.__ModuleLoader__.load({
       function activeOverride() { return override === '' ? 'auto' : override }
 
       /**
-       * 唯一的远程状态落地口：running / probe / 地址说明一起更新，避免三个 setState 各自漂移。
-       * `addressNote` 只取引擎算好的那一行（`urls[].note`），前端不自己拼地址判断。
+       * 唯一的远程状态落地口：running / probe / 地址说明 / **活真相**一起更新，
+       * 避免四个 setState 各自漂移。`addressNote` 只取引擎算好的那一行（`urls[].note`），
+       * 前端不自己拼地址判断。
+       *
+       * `settings` 是 `remoteGetState` 的 settings 视图；`remoteStart` 只回 `RemoteStatus`，
+       * 那种调用方只把 `status` 传进来（活真相留空等下一次 getState，绝不靠猜）。
        */
-      function applyRemoteStatus(status) {
+      function applyRemoteStatus(status, settings) {
         if (!status || typeof status !== 'object') return
         setRunning(status.running === true)
         // 自动恢复的标签必须跟"这次是谁拉起来的"同源；未启动时一律不显示。
@@ -1186,6 +1200,11 @@ window.__ModuleLoader__.load({
         const first = Array.isArray(status.urls) && status.urls.length > 0 ? status.urls[0] : null
         const note = first && typeof first.note === 'string' ? first.note : ''
         setAddressNote(note)
+        // 活真相只认引擎派生的 `accepting` / `listen`（同一份句柄），**不看** `enabled`。
+        if (settings && typeof settings === 'object') {
+          setAccepting(settings.accepting === true)
+          setAcceptAddr(typeof settings.listen === 'string' ? settings.listen : '')
+        }
       }
 
       async function refreshProvision(which) {
@@ -1230,7 +1249,7 @@ window.__ModuleLoader__.load({
             })(),
             (async function () {
               const result = await rpcCall('remoteGetState', {})
-              if (!stopped && result.ok && result.data) applyRemoteStatus(result.data.status)
+              if (!stopped && result.ok && result.data) applyRemoteStatus(result.data.status, result.data.settings)
             })(),
           ])
         })()).catch(function () { /* rpcCall 不抛；这里只兜住意外 */ })
@@ -1332,7 +1351,7 @@ window.__ModuleLoader__.load({
           setShown(null)
           setRunning(false)
           const state = await rpcCall('remoteGetState', {})
-          if (state.ok && state.data) applyRemoteStatus(state.data.status)
+          if (state.ok && state.data) applyRemoteStatus(state.data.status, state.data.settings)
         })
       }
 
@@ -1365,6 +1384,11 @@ window.__ModuleLoader__.load({
           setRotated(false)
           // 启动返回的就是最新状态：地址说明（广播哪个地址 / 为什么）跟着一起落地。
           applyRemoteStatus(status)
+          // mod-plugin-remote-accepting-surface：`remoteStart` 只回 RemoteStatus，没有 settings 视图，
+          // 所以这里再读一次状态，让 `settings.accepting` / `settings.listen` 这**唯一**一组成分落地
+          // （停止路径本来就这么做）。读失败不影响"已启动"：那一行由 status 决定。
+          const live = await rpcCall('remoteGetState', {})
+          if (live.ok && live.data) applyRemoteStatus(live.data.status, live.data.settings)
           // 旧二维码（若曾由枚举产生）在真正启动后作废；配对串只由新的 pairingShow 取。
           setShown(null)
           await refreshProvision(activeOverride())
@@ -1452,6 +1476,13 @@ window.__ModuleLoader__.load({
         h('div', { 'data-lean': 'remote-running', style: S.hint },
           stopped ? tr('lean.remote.stopped') : tr('lean.remote.started')
         ),
+        // mod-plugin-remote-accepting-surface：**只有真的在接**才说「正在接受连接（addr:port）」。
+        // 判据是引擎派生的 `accepting`（= 监听句柄存在）与同源的 `listen`，
+        // **绝不**用 `enabled`（保存的偏好 / 句柄回声）冒充活真相。
+        accepting === true && acceptAddr !== ''
+          ? h('div', { 'data-lean': 'remote-accepting', style: S.hint },
+              tr('lean.remote.accepting', { addr: acceptAddr }))
+          : null,
         // mod-plugin-remote-autostart：激活时自动恢复的那一次要留一句说明，
         // 免得运维以为"我没点它怎么自己开了"。
         autoStarted && !stopped

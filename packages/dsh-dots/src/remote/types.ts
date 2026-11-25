@@ -10,6 +10,17 @@
  *
  * 与 App（`apps/arkui-schedule/entry/src/main/ets/model/remoteAccess.ts`）共享同一套
  * 字段语义：字段名、枚举值、必填规则必须逐字一致，见 `docs/REMOTE-ACCESS-OPTIONS.md`。
+ *
+ * ## 三个"看起来都在说开关"的位（mod-plugin-remote-accepting-surface：禁止互相代用）
+ *
+ * | 位 | 唯一含义 | 谁写 | 谁读 |
+ * | --- | --- | --- | --- |
+ * | `enabled` | **上一次保存的偏好**（start/stop 时按监听句柄回声写，进程被强杀后可能过期） | `commitEnabledFlag()`（起成功 / 显式 stop）、`saveSettings` 原样落盘 | 只给人看；**任何情况下不得**被当成"此刻在接"或"下次自动起" |
+ * | `autoStart` | **意图**：下次激活时要不要自己起监听 | `start()`（manual 来源置 `true`，失败也置）、`stop()` 清零落盘、`dispose()` 不动 | 激活唯一入口 `service.autoStart()` |
+ * | `accepting` | **活真相**：此刻监听句柄是否存在（与 `RemoteStatus.running` **同一个**表达式 `runtime.handle !== null`） | 无人写；每次读状态时派生 | 面板那句「正在接受连接（addr:port）」 |
+ *
+ * 一句话记法：`enabled` = 上次存了什么偏好，`autoStart` = 下次要不要自己起，
+ * `accepting` = **此刻**在不在接。三者不准互相推断，也不准合并成一个字段。
  */
 
 /**
@@ -74,10 +85,12 @@ export interface RemoteSettings {
    *
    * **可选字段（additive，不做迁移）**：缺键读作 `false` —— 旧 `remote.json` 升级后
    * 不会凭空多起一个监听（管理过这台机器的人需要再点一次「开始接受连接」）。
-   * 为什么声明成可选：默认值/归一（`accessMode.ts` 的 `defaultRemoteSettings` /
-   * `normalizeRemoteSettings`）不认这个键，旧文件的归一结果里天然没有它；真正的读写口
-   * 在 `service.ts`（`readSettings` / `persistIntent`），它把该键从原始记录里重新挂上，
-   * 因此归一化不会把它抹掉。
+   * 为什么声明成可选：`defaultRemoteSettings()` 的**精确形状**（9 个键）被既有断言按
+   * 深度相等钉住，本模块不往默认值里加键；真正保证"重建不丢"的是
+   * `normalizeRemoteSettings`（mod-plugin-remote-accepting-surface）：记录里有字面布尔就
+   * 沿用，所以 `pairingProvision.persistEndpoint()` 那种
+   * `normalizeRemoteSettings(raw, defaultRemoteSettings())` 的整文件重写**不会再把它抹掉**。
+   * 缺键仍然读作 `false`（`service.ts` 的 `readSettings` 不再单独兜这一层）。
    */
   autoStart?: boolean
 }
@@ -109,6 +122,33 @@ export interface RemoteSettingsView extends Omit<RemoteSettings, 'token' | 'auto
    * 归一后的设置里它是可选的，视图里必须给出确定答案，面板才不用自己猜 `undefined`。
    */
   autoStart: boolean
+  /**
+   * **此刻是不是真的有监听句柄在接连接**（mod-plugin-remote-accepting-surface）。
+   *
+   * 与 `RemoteStatus.running` 是**同一个**表达式（`runtime.handle !== null`），不是第二份判断；
+   * 与 `RemoteSettings.enabled`（保存的偏好 / 句柄回声）**没有任何关系**——崩溃后文件可能停在
+   * `enabled:true` 而这里必须是 `false`，反过来也一样。面板据此决定那句「正在接受连接」。
+   */
+  accepting: boolean
+  /**
+   * 与 `accepting` 同源同值的 `host:port`：就是 `RemoteStatus.listen`（未在接 ⇒ `null`）。
+   *
+   * 为什么选 `listen` 而不是 `boundAddress`：面板那一句要一次说完「哪个地址、哪个端口」，
+   * `listen` 已经是引擎拼好的唯一字符串（`${handle.address}:${String(handle.port)}`）；
+   * 同时再暴露 `boundAddress` 只会给前端第二种拼法，正是本模块要消灭的"两处口径"。
+   */
+  listen: string | null
+}
+
+/**
+ * **活真相快照**：`toSettingsView()` 的第二参数，唯一来源是监听句柄（`runtime.handle`）。
+ *
+ * 单独成型而不是让调用方自己传两个布尔/字符串，是为了让"同一时刻"这件事在类型上不可拆：
+ * `accepting` 与 `listen` 必须来自同一次句柄读取，否则面板可能显示"在接但没地址"。
+ */
+export interface RemoteLiveListener {
+  accepting: boolean
+  listen: string | null
 }
 
 export type RemoteSettingKey = (typeof REMOTE_SETTING_KEYS)[number]

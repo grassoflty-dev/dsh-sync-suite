@@ -115,7 +115,7 @@ test('shipped 面板的文案 key 双份都在；dormant 旧面板文案已删�
     'error.badResponse', 'error.unknown',
     'lean.repo.url', 'lean.repo.token', 'lean.actions.save',
     'lean.remote.qr.show', 'lean.remote.copy', 'lean.remote.generate', 'lean.remote.selfcheck',
-    'lean.remote.autostarted',
+    'lean.remote.autostarted', 'lean.remote.accepting',
     'lean.status.failed', 'lean.status.synced', 'lean.status.never'
   ]
   for (const [lang, dict] of [['en', en], ['zh', zh]]) {
@@ -129,13 +129,22 @@ test('shipped 面板的文案 key 双份都在；dormant 旧面板文案已删�
   }
   // 246 个 dormant-only key 已删除：324 -> 78；mod-plugin-remote-hints-mode-keyed 新增 5 个
   // 按方式唯一的提示 key（auto/tailscale/lan/ipv6/fallback）→ 83；
-  // mod-plugin-remote-autostart 新增 1 个 `lean.remote.autostarted`（自动恢复那一句）→ 84。
+  // mod-plugin-remote-autostart 新增 1 个 `lean.remote.autostarted`（自动恢复那一句）→ 84；
+  // mod-plugin-remote-accepting-surface 新增 1 个 `lean.remote.accepting`
+  // （活真相那一句「正在接受连接（{addr}）」，带一个 `{addr}` 占位符）→ 85。
   // 精确计数同时阻止整批复活与误删；新 key 还必须在上面逐条点名，改名会当场失败。
-  assert.equal(Object.keys(en).length, 84, `locale 应恰好 84 个 shipped key，实际 ${Object.keys(en).length}`)
+  assert.equal(Object.keys(en).length, 85, `locale 应恰好 85 个 shipped key，实际 ${Object.keys(en).length}`)
   // 点名（不靠计数代替）：这一句两边都必须真的有翻译，照抄英文也算没做。
   assert.equal(typeof en['lean.remote.autostarted'], 'string')
   assert.equal(typeof zh['lean.remote.autostarted'], 'string')
   assert.notEqual(en['lean.remote.autostarted'], zh['lean.remote.autostarted'], '中英文案必须各自翻译，不许照抄')
+  // 活真相那一句：除了"两边都有"，还必须真的带 `{addr}` 占位符——写成固定文案就等于
+  // 只说"在接"而不说"在哪个地址端口上接"，面板那一行的意义就没了。
+  for (const [lang, dict] of [['en', en], ['zh', zh]]) {
+    assert.equal(typeof dict['lean.remote.accepting'], 'string', `${lang} 缺少 lean.remote.accepting`)
+    assert.ok(dict['lean.remote.accepting'].includes('{addr}'), `${lang}.lean.remote.accepting 必须含 {addr} 占位符`)
+  }
+  assert.notEqual(en['lean.remote.accepting'], zh['lean.remote.accepting'], '中英文案必须各自翻译，不许照抄')
 })
 
 test('src/client.js 内置字典与 locale JSON 完全一致（key 与文案）', () => {

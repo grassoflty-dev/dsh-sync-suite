@@ -59,12 +59,16 @@ export function redactUrlForDisplay(raw) {
     }
 }
 /**
- * 设置 → 对外视图：把 `token` 明文抽成"是否存在 + 打码"。
+ * 设置 → 对外视图：把 `token` 明文抽成"是否存在 + 打码"，并挂上**活真相**。
  *
  * `remoteGetState` / `remoteSaveSettings` 的响应都会被设置页渲染进 DOM 并可能被日志记录，
  * 所以出口处只留 `tokenSet` / `tokenMasked`；明文唯一的出口是 `showLink()`。
+ *
+ * `live`（mod-plugin-remote-accepting-surface）是**必填**参数而不是可选默认值：
+ * 少传一次就会悄悄对外宣称"没在接"（或更糟：让调用方改从 `enabled` 猜）。
+ * 两个字段必须来自同一次句柄读取，见 `RemoteLiveListener`。
  */
-export function toSettingsView(settings) {
+export function toSettingsView(settings, live) {
     const { token, autoStart, ...rest } = settings;
     return {
         ...rest,
@@ -72,6 +76,9 @@ export function toSettingsView(settings) {
         tokenMasked: token === '' ? '' : maskToken(token),
         // 视图里恒为布尔：缺键（旧 remote.json）与坏值都读作 false。
         autoStart: autoStart === true,
+        // 活真相：直接抄句柄派生的结论，**不读** `enabled`（保存的偏好 / 句柄回声）。
+        accepting: live.accepting,
+        listen: live.listen,
     };
 }
 /* ------------------------------------------------------------------ 局域网选路 */
@@ -454,6 +461,11 @@ export function createRemoteService(options = {}) {
         const trimmed = typeof value === 'string' ? value.trim() : '';
         return explicitLanSave !== null && trimmed !== '' && trimmed === explicitLanSave;
     }
+    /**
+     * 读一份**已归一**的设置。意图位 `autoStart` 不再在这里单独兜一层：
+     * `normalizeRemoteSettings` 已经从原始记录里把它带出来了（mod-plugin-remote-accepting-surface），
+     * 缺键/坏值一律读作 `false`。**读路径绝不写盘**（除了下面那条只在"键真的不见了"时才动的自愈）。
+     */
     function readSettings() {
         const raw = store.readRawSettings();
         const base = defaultRemoteSettings();
@@ -461,22 +473,13 @@ export function createRemoteService(options = {}) {
             return base;
         try {
             const normalized = normalizeRemoteSettings(raw, base);
-            const intent = readIntent(raw);
-            healClobberedIntent(raw, { ...normalized, autoStart: intent });
-            // mod-plugin-remote-autostart：`autoStart` 是**加法字段**，归一层（accessMode.ts，
-            // 本模块不改它）不认这个键，所以每次读都从原始记录里重新挂上；否则任何一次
-            // "归一后再写盘"都会把意图抹掉。缺键 → false（旧文件不改变行为）。
-            return { ...normalized, autoStart: intent };
+            healClobberedIntent(raw, normalized);
+            return normalized;
         }
         catch {
             // 手工改坏的文件当作默认值：远程访问起不来，不影响配置同步。
             return base;
         }
-    }
-    /** 从原始 `remote.json` 记录里取意图：只有字面 `true` 才算开（缺键/坏值 → false）。 */
-    function readIntent(raw) {
-        const record = asRecord(raw);
-        return record !== null && record.autoStart === true;
     }
     /**
      * 落盘意图（唯一写入口）。值没变就不写盘：`getState` 这类读路径不该产生写动作。
@@ -496,16 +499,20 @@ export function createRemoteService(options = {}) {
         }
     }
     /**
-     * 自愈：`remote.json` 里**整个键都不见了**，但此刻确实有句柄在接连接。
+     * 自愈（mod-plugin-remote-autostart 遗留，**保留**：见下）：`remote.json` 里**整个键都不见了**，
+     * 但此刻确实有句柄在接连接。
      *
-     * 为什么会发生：`pairingProvision.persistEndpoint()`（配对面板每次 attach 都会走
-     * `provision`）用 `normalizeRemoteSettings(raw, defaultRemoteSettings())` 重建设置再整文件
-     * 写回——归一层不认的键会被静默丢掉。也就是说"打开配对面板"这一步就能把意图抹掉，
-     * 下一次重启就不再自动恢复。
+     * 为什么会发生：旧版 `pairingProvision.persistEndpoint()` 用
+     * `normalizeRemoteSettings(raw, defaultRemoteSettings())` 重建设置再整文件写回，归一层不认的键
+     * 会被静默丢掉。**这条根因已被 mod-plugin-remote-accepting-surface 从源头堵住**
+     * （`normalizeRemoteSettings` 现在会带上该键），`test/remote-accepting.test.mjs` 的 ACC-4/ACC-5
+     * 用"监听运行中 / 已停止"两种状态的重建回归钉住了它。
      *
-     * 判据刻意只认「键缺失」而不是「值为 false」：显式 `false` 是用户点了停止的合法结果，
-     * 不许被自愈覆盖。每个进程最多补写一次，且只在有句柄时才补——"正在接连接"本身就是
-     * 意图为真的证据。
+     * **为什么还留着**（如实登记）：`test/remote-autostart.test.mjs` 的 A8（:236-258）直接把这个
+     * 进程内补写当作断言对象（"运行中的下一次读会把整个键补写回 true"），而那份文件不在本模块的
+     * 文件集里，删掉自愈就必须同步改写 A8，属于跨模块改动。因此这里只降级为**双保险**：判据仍是
+     * 「键缺失」而不是「值为 false」（显式 `false` 是用户点了停止的合法结果，绝不许覆盖），
+     * 每个进程最多补写一次，且只在有句柄时才补。根因既然已消除，它不再承担任何"正常路径"的职责。
      */
     function healClobberedIntent(raw, settings) {
         if (healedIntent || runtime.handle === null)
@@ -802,10 +809,28 @@ export function createRemoteService(options = {}) {
         const expected = selection.address === null ? '（当前设置选不出可用地址）' : selection.address;
         return `实际绑定并广播的是 ${handle.address}（以监听句柄为准）；设置那边选出的是 ${expected}：${selection.explain}`;
     }
+    /**
+     * **活真相的唯一取值口**（mod-plugin-remote-accepting-surface）。
+     *
+     * `status.running` / `status.listen` / `status.boundAddress` 与设置视图的
+     * `settings.accepting` / `settings.listen` **全部**出自这一个函数，判据只有一条：
+     * `runtime.handle !== null`。谁都不许再从 `enabled`（保存的偏好 / 句柄回声）推断"此刻在接"，
+     * 也不许在前端另拼一个 `host:port`——那正是本模块要消灭的第二口径。
+     */
+    function listenerLive() {
+        const handle = runtime.handle;
+        return {
+            handle,
+            accepting: handle !== null,
+            listen: handle === null ? null : `${handle.address}:${String(handle.port)}`,
+            boundAddress: handle === null ? null : handle.address,
+        };
+    }
     function status() {
         const settings = readSettings();
         const tokenRecord = store.readToken();
-        const handle = runtime.handle;
+        const live = listenerLive();
+        const handle = live.handle;
         const stats = handle === null ? { active: 0, total: 0, rejected: 0 } : handle.stats();
         const token = readTokenValue();
         const urls = [];
@@ -825,9 +850,9 @@ export function createRemoteService(options = {}) {
             });
         }
         return {
-            running: handle !== null,
-            listen: handle === null ? null : `${handle.address}:${String(handle.port)}`,
-            boundAddress: handle === null ? null : handle.address,
+            running: live.accepting,
+            listen: live.listen,
+            boundAddress: live.boundAddress,
             port: handle === null ? (settings.port > 0 ? settings.port : dshPort() ?? 0) : handle.port,
             startedAt: runtime.startedAt,
             startedBy: handle === null ? null : runtime.startedBy,
@@ -1061,20 +1086,29 @@ export function createRemoteService(options = {}) {
             return status();
         return start('auto');
     }
+    /**
+     * 读状态。**不**隐式拉起监听（mod-plugin-remote-accepting-surface 已删掉原来那段
+     * `if (settings.enabled && handle === null) { /* no-op *\/ }` 死逻辑：自动启动的唯一路径是
+     * `autoStart()`，由插件激活调用一次）。
+     *
+     * 设置视图带上 `accepting` / `listen`（与 `status.running` / `status.listen` 同一次句柄读取），
+     * 读者据此区分「保存的偏好」与「此刻在接」。
+     */
     async function getState() {
-        const settings = readSettings();
-        // 开关是"下次启动 DSH 时是否自动起监听"，不在这里隐式拉起，避免 UI 刷新触发网络动作。
-        if (settings.enabled && runtime.handle === null) {
-            // no-op：自动启动由 index.ts 在插件挂载时调用一次 start()
-        }
         // 先让路由缓存落地，状态行才可能给出"默认路由地址"这一真因（同步出口只读缓存）。
         await routeAddressForResolution();
-        return { settings: toSettingsView(settings), status: status(), modes: listModes() };
+        const live = listenerLive();
+        return { settings: toSettingsView(readSettings(), live), status: status(), modes: listModes() };
     }
     async function saveSettings(input) {
         const previous = readSettings();
         const raw = input !== null && typeof input === 'object' ? input : {};
-        const next = normalizeRemoteSettings(raw, previous);
+        // mod-plugin-remote-accepting-surface：`autoStart` **不是**表单字段，绝不让远程 RPC 变成
+        // 意图位的第三个写入口（写入口只有 `start()` / `stop()`，见 `types.ts` 头表）。这里把
+        // payload 里的同名键摘掉，值一律沿用磁盘上的 `previous`（读路径已经把它归一进来了）。
+        const payload = { ...raw };
+        delete payload.autoStart;
+        const next = normalizeRemoteSettings(payload, previous);
         // 显式入口：只有调用方**自己带了 `lanAddress` 键**且定为非空值，才算运维覆盖。
         // 只改端口/令牌的保存不会把磁盘上的自动镜像值"升格"成覆盖。
         const saidLanAddress = input !== null && typeof input === 'object' && Object.prototype.hasOwnProperty.call(input, 'lanAddress');
@@ -1093,9 +1127,15 @@ export function createRemoteService(options = {}) {
             await stopInternal(false);
         if (modeChanged)
             runtime.probe = null;
-        if (next.enabled && runtime.handle === null)
-            await start();
-        return { settings: toSettingsView(next), status: status(), modes: listModes() };
+        // 原 `if (next.enabled && runtime.handle === null) await start()` 已删除
+        // （mod-plugin-remote-accepting-surface 的死点清理）：`enabled` 是**保存的偏好 / 句柄回声**，
+        // 不是"要不要起监听"的命令。按它起监听有两个真实后果——① 一保存就把用户刻意停掉的监听
+        // 拉起来；② `start()` 失败时又走 `commitEnabledFlag()` 把偏好写回 false，形成"保存即改偏好"
+        // 的隐式写。真正要起监听有两条显式路径：面板「开始接受连接」（`remoteStart`）与激活时的
+        // `autoStart()`（读意图 `settings.autoStart`）。仓库内也没有依赖它的调用方：shipped 面板
+        // 明确不写设置（`test/client-lean-inventory.test.mjs:453`），平板侧不调 `remoteSaveSettings`
+        // （`apps/**` 零引用）。
+        return { settings: toSettingsView(next, listenerLive()), status: status(), modes: listModes() };
     }
     async function rotateToken() {
         const generate = options.generateToken ?? (() => {
