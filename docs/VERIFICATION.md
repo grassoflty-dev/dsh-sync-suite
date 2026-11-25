@@ -2324,3 +2324,16 @@ Gitee 上看得到 `main` 分支及对应提交时间；**除这四项外，本�
   "凭据被拒"也不再冒充"网络不可达"。见 `docs/MODULES.md` §6 的 `mod-plugin-push-auth-vs-network`
   与 `mod-plugin-push-classify-hardening` 两行，以及 `docs/REVIEW-b11b-batch.md` §5。
 - 本订正**只追加**，不改写上文任何一句当时观测。
+
+#### H. 2026-11-25 追记：推送 403 的真因在我们自己的 askpass shim（已修并活体验证）
+
+昨天 A–G 记录时把「推送失败」归结为分类问题与凭据缓存。今天在 DSH 重启后做活体验收，把**真因**定位到我们生成的 `askpass.cmd`：
+
+1. **令牌本身没问题**：Gitee API `/user` 返回 `ding_haoran`，`/repos/ding_haoran/dsh-dots-test` 返回 `private=true, permission.push=true`；把同一令牌**内联进 URL** 真推两次都成功（`7390e8f`、`ec1ccd8..694c10e`）。
+2. **走 askpass 就 403**：`remote: [session-…] The token username invalid`。
+3. **机制**：`askpass.cmd` 的 node 行缺 `%*`（`"%DSH_GIT_SYNC_NODE%" "%~dp0askpass.mjs"`），`askpass.mjs` 收不到 git 的提示文本，退化成「全局计数器」判断（`count===0 ? 用户名 : 令牌`），而计数器从不按 git 调用重置 —— 一次周期里 fetch 先用掉第 1 次调用，push 的**用户名**提示便拿到**令牌**，Gitee 判 `username=<token>` ⇒ 403。这正是「fetch 成功、push 必 403」。
+4. **第二个缺陷**：`rem` 注释里的 `& | < >` 与**中文**共同作用 —— 生产形状无 console（`execFile` + `windowsHide`）时 cmd 按 OEM 代码页（本机 CP936）把 UTF-8 注释当 DBCS 读，某行末尾落在悬空字节上就吃掉行尾、从下一行中间续读并把后半截当命令执行，于是每次调用都往 stderr 刷 `'<乱码尾巴>' 不是内部或外部命令`（有 console 时同一文件干净，`chcp 437` 干净而 `936/65001` 脏）。
+5. **修法**：`77cd7a8` 转发 `%*` + 兜底计数按 git 调用重置（并记录 `{ppid,at,count}`；实测 Git for Windows 每次 askpass 都新起 `cmd.exe`，纯 ppid 键控会把两次都答成用户名）；`f6386f2` 把生成物改成 **7-bit ASCII**（中文理由搬到 TS 注释），凭证路径逐字节未变。
+6. **活体验证（本节最硬的证据）**：用修复后的代码跑当初失败的那条序列 —— `git fetch origin` OK 824 ms → `git push origin HEAD:main` OK 703 ms（`Everything up-to-date`），**stderr 中「不是内部或外部命令」出现 0 次**，两条积压提交推上去，`origin/main...HEAD = 0/0`。
+7. **如实记录的缺口**：lane 给的「奇数非 ASCII 字节必触发」奇偶规则独立复现不出来，故不主张其为机制；`%TEMP%` 残留 25 个历史 askpass 目录（`dispose()` 只清自己那个）未修；「每次调用几次碎片」本机 2 次 vs lane 3 次，取决于哪条注释落在悬空字节上。
+8. **仍未验**：运行中的 DSH 进程是否仍持有旧 shim（修复在下次插件加载后生效）；真实代理链路与真实 407；平板侧 §2.6/§2.7 的 15 条断言。
