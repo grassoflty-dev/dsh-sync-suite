@@ -105,7 +105,6 @@ async function makeService(t, options = {}) {
     // 选路全部注入：不依赖本机 NIC，也不碰 provisioning 的自动镜像逻辑。
     interfaces: () => [{ address: LAN, iface: 'WLAN', family: 'IPv4', virtual: false }],
     routeProbeAddress: () => LAN,
-    provisionedLanAddress: () => null,
     ...options.service,
   })
   t.after(() => service.dispose())
@@ -229,6 +228,83 @@ test('A6：手动启动失败也记住意图 ⇒ 重启后的激活会补起监�
   assert.equal(status.running, true, JSON.stringify(status.lastError))
   assert.equal(second.listener.calls.length, 1)
   assert.equal(status.startedBy, 'auto')
+})
+
+/* ------------------------------------------- 在飞的 start() 撞上 dispose()（P1-1） */
+
+/**
+ * A9（评审 P1-1，本模块存在的理由）：卸载/停用**恰好落在启动的几百毫秒里**时，
+ * `dispose()` 那一刻还没有句柄可关，而启动继续跑到「装句柄」那一步——于是留下一个
+ * **没有任何人持有**的监听（端口与令牌门一起活着），面板还会自称 `accepting=true`。
+ *
+ * 本用例钉的是**可观察行为**，不是"有没有那个标志位"：
+ *   1. 监听工厂被挂住时 dispose() ⇒ 句柄**不许**被装进服务（running/accepting 恒 false）；
+ *   2. 刚建好的句柄必须被关掉，且**恰好一次**（不多关、不泄漏）；
+ *   3. 已经 dispose 的服务再调 `autoStart()` 什么都不做（不再碰监听工厂、不再关一次）；
+ *   4. `dispose()` 幂等。
+ */
+test('A9：在飞的 start() 撞上 dispose() ⇒ 无监听、accepting=false、close 恰好一次，之后 autoStart() 什么都不做', async (t) => {
+  const home = await makeHome(t)
+  seedCert(home)
+  await seedSettings(home, { ...BASE_SETTINGS, autoStart: true })
+  const fake = await startFakeDsh(t)
+  const calls = []
+  let closes = 0
+  let release = () => {}
+  const held = new Promise((resolve) => { release = resolve })
+  const service = createRemoteService({
+    homeDir: home,
+    createGate: () => fakeGate(),
+    // 关键：监听工厂在 await 处挂住，直到用例主动放行（模拟"启动还没跑完就被卸载"）。
+    startListener: async (options) => {
+      calls.push(options)
+      await held
+      return {
+        address: options.bindAddress,
+        port: options.port,
+        close: async () => { closes += 1 },
+        stats: () => ({ active: 0, total: 0, rejected: 0 }),
+        lastError: null,
+      }
+    },
+    webServer: { port: fake.port },
+    connection: { authenticatedUrl: (base) => `${base}?token=launch` },
+    interfaces: () => [{ address: LAN, iface: 'WLAN', family: 'IPv4', virtual: false }],
+    routeProbeAddress: () => LAN,
+  })
+  t.after(() => service.dispose())
+
+  const inflight = service.start()
+  // 在飞的 start 还要先换上游身份、再选路；等它真的走到监听工厂，否则本用例什么都没证明。
+  for (let i = 0; i < 400 && calls.length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.equal(calls.length, 1, '前提：start() 必须已经走到注入的监听工厂（否则这条用例是空跑）')
+
+  // 卸载发生在启动仍在飞的时候：此刻还没有句柄可关。
+  await service.dispose()
+  const afterDispose = await service.getState()
+  assert.equal(afterDispose.status.running, false)
+  assert.equal(afterDispose.settings.accepting, false, 'dispose 之后不许自称"正在接受连接"')
+
+  release() // 放行监听工厂：start() 从 await 处继续
+  const settled = await inflight
+  assert.equal(closes, 1, '刚建好的句柄必须被关掉，且恰好关一次（不许留下没人能关的监听）')
+  assert.equal(settled.running, false, 'start() 不许在 dispose 之后把句柄装进服务')
+  assert.equal(settled.listen, null)
+  assert.equal(settled.boundAddress, null)
+  assert.equal(settled.startedBy, null, 'startedBy 与句柄同生同灭')
+
+  const state = await service.getState()
+  assert.equal(state.status.running, false, '句柄没有被装上：状态里不许出现活监听')
+  assert.equal(state.settings.accepting, false)
+
+  // 已 dispose 的服务：后续激活什么也不做（这是"每次激活都会踩"的那个窗口的封口）。
+  const late = await service.autoStart()
+  assert.equal(late.running, false)
+  assert.equal(calls.length, 1, 'dispose 之后 autoStart() 绝不许再碰监听工厂')
+  assert.equal(closes, 1, '也不许再关一次')
+
+  await service.dispose() // 幂等：不抛、不再关任何东西
+  assert.equal(closes, 1, 'dispose() 必须幂等')
 })
 
 /* ------------------------------------------------------------------ 意图被外部写入者抹掉 */

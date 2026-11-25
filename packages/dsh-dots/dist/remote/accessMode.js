@@ -284,11 +284,13 @@ export function findMode(raw) {
 /**
  * 默认设置：默认关闭，方式 lan，端口跟随 DSH，所有地址留空（由用户在设置页选/填）。
  *
- * **刻意不声明 `autoStart`**（mod-plugin-remote-accepting-surface 的决定，别"顺手补上"）：
- * 这个默认值对象的**精确形状**（9 个键）被既有断言按深度相等钉住，加键会当场把它打红；
- * 而"重建不丢意图"并不需要它在这里——`normalizeRemoteSettings` 以 `previous` 起步，
- * 真正的保真靠它直接读记录里的 `autoStart`（见该函数内注释）。把键加在这里反而会给出
- * 一种"默认有意图位"的假象：重建路径传的 `previous` 就是本对象，值永远是 `false`。
+ * **刻意不声明 `autoStart` / `lanAddressChosen`**（mod-plugin-remote-accepting-surface 与
+ * mod-plugin-remote-dispose-race 的决定，别"顺手补上"）：这个默认值对象的**精确形状**（9 个键）
+ * 被既有断言按深度相等钉住，加键会当场把它打红；而"重建不丢意图/不丢来源标记"并不需要它们在
+ * 这里——`normalizeRemoteSettings` 以 `previous` 起步，真正的保真靠它直接读记录里的这两个键
+ * （见该函数内注释）。把键加在这里反而会给出一种"默认有意图位 / 默认是手选"的假象：重建路径
+ * 传的 `previous` 就是本对象，`autoStart` 永远是 `false`、`lanAddressChosen` 永远是"缺键"，
+ * 而缺键在选路规则里等价于"没记录过 = 不是运维选的"。
  */
 export function defaultRemoteSettings() {
     return {
@@ -494,6 +496,16 @@ export function normalizeRemoteSettings(input, previous) {
     // ——那会让旧文件升级路径直接读不出设置。
     if (record.autoStart === true || record.autoStart === false)
         next.autoStart = record.autoStart;
+    // mod-plugin-remote-dispose-race：`lanAddressChosen` 是**落盘的来源标记**（不是表单字段，不在
+    // `REMOTE_SETTING_KEYS` 里）。这里与 `autoStart` 只共享"保真"这一件事：
+    //   · **保留**：记录里有字面布尔就沿用 —— `pairingProvision.persistEndpoint()` 的整文件重写
+    //     （`normalizeRemoteSettings(raw, defaultRemoteSettings())`）因此不会把运维的手选标记抹掉；
+    //   · **绝不设置**：`lanAddress` 非空 ≠ 运维选的（自动镜像写进去的也是非空值）。设置成 `true`
+    //     的入口只有 `service.saveSettings()` 里那条"调用方自己给了非空 lanAddress"的规则。
+    // 缺键 / null / 字符串一律不写，也绝不因为坏值把整份设置判成 E_VALIDATION（同 autoStart）。
+    if (record.lanAddressChosen === true || record.lanAddressChosen === false) {
+        next.lanAddressChosen = record.lanAddressChosen;
+    }
     return next;
 }
 /**

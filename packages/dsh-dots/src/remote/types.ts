@@ -53,6 +53,29 @@ export interface RemoteSettings {
   port: number
   /** 局域网方式要绑的**具体** IPv4；空串 = 自动挑选（绝不落到 0.0.0.0）。 */
   lanAddress: string
+  /**
+   * **来源标记**：这里的 `lanAddress` 是**运维手选的**（mod-plugin-remote-dispose-race）。
+   *
+   * 为什么需要它：磁盘上的 `lanAddress` 三义——运维手填、`pairingProvision.persistEndpoint()`
+   * 的**自动镜像**、旧版本留下的值。旧规则靠"落盘值是否等于冻结启发式的当前输出"来猜来源，
+   * 而那条启发式的输出随**网卡集合**变化：机器上一旦出现枚举更靠前的非虚拟网卡，落盘的
+   * `192.168.137.1` 就不再等于它 ⇒ 被升格成"可信覆盖" ⇒ `autoStart()` 把虚拟网卡绑回去
+   * （评审 P2-10 复现）。**猜来源这件事本身不可靠**，所以改成**记下来源**。
+   *
+   * 语义（写读各一处，别再加第三个入口）：
+   *   - 写 `true` 的唯一入口 = `service.saveSettings()` 收到**非空** `lanAddress`（那次调用本身
+   *     就是运维在选地址，**不做任何数值比较**）；清空该字段 = 改回自动挑选，标记一并清掉。
+   *   - provisioning / 自愈等**整文件重写**只**保留**已有标记，绝不设置它
+   *     （`normalizeRemoteSettings` 只管"记录里有字面布尔就沿用"）。
+   *   - 读：只有 `lanAddressChosen === true` 才把 `lanAddress` 当覆盖；否则一律自动选路
+   *     （路由 → 候选规则），并在原因行明说「已忽略落盘的 X（未记录为你手选的地址，按自动挑选）」。
+   *
+   * **可选字段（additive，不做迁移）**：缺键 = 没记录过 = **不是**运维选的。因此旧文件里那个
+   * 非空的 `lanAddress`（哪怕当年真是手填的）升级后一律按自动值处理 —— 这是诚实的代价：
+   * 无法证明来源时，宁可回到"路由地址"这个今天能证明可用的答案，也不把一台机器钉在
+   * 一条历史启发式的输出上。运维若确实要固定地址，在面板里重填一次即可重新盖章。
+   */
+  lanAddressChosen?: boolean
   /** Tailscale 方式的 MagicDNS 名或 100.64.0.0/10 地址。 */
   tailscaleHost: string
   /** Cloudflare 隧道方式的公网主机（`xxx.trycloudflare.com` 或自有域名）。 */
@@ -111,8 +134,11 @@ export const REMOTE_SETTING_KEYS = [
 /**
  * 对外暴露的设置视图（`remoteGetState` 用）：把 `token` 抽成"是否存在 + 打码"，
  * 保证状态响应里不可能出现令牌明文。
+ *
+ * `lanAddressChosen` 与 `token` / `autoStart` 一样**不进视图**：它是落盘的来源标记，不是面板
+ * 字段（面板读的是引擎给的原因行）。少了这个键，视图形状对既有读者完全不变。
  */
-export interface RemoteSettingsView extends Omit<RemoteSettings, 'token' | 'autoStart'> {
+export interface RemoteSettingsView extends Omit<RemoteSettings, 'token' | 'autoStart' | 'lanAddressChosen'> {
   /** 是否已保存访问令牌（只给布尔，不给值）。 */
   tokenSet: boolean
   /** 打码串（如 `abcd…wxyz`）；未保存为空串。 */

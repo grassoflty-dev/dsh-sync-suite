@@ -69,7 +69,7 @@ export function redactUrlForDisplay(raw) {
  * 两个字段必须来自同一次句柄读取，见 `RemoteLiveListener`。
  */
 export function toSettingsView(settings, live) {
-    const { token, autoStart, ...rest } = settings;
+    const { token, autoStart, lanAddressChosen, ...rest } = settings;
     return {
         ...rest,
         tokenSet: token !== '',
@@ -291,9 +291,11 @@ function summarizeRejected(items) {
 /**
  * 纯函数：**唯一**的局域网选路规则。优先级（高 → 低）：
  *
- *   1. **显式覆盖**：设置里的 `lanAddress` 非空且可绑定 → 用它并说明"这是你手填的"。
- *      这是运维唯一的逃生舱（例如机器多网卡、要固定绑第二块网卡）。
+ *   1. **显式覆盖**：`lanAddress` 非空、**带 `lanAddressChosen` 标记**且可绑定 → 用它并说明
+ *      "这是你手填的"。这是运维唯一的逃生舱（例如机器多网卡、要固定绑第二块网卡）。
  *      若它与默认路由地址不一致，就在原因行里**明说**平板可能连不上，并给出清空办法。
+ *      没有标记的落盘值（provisioning 自动镜像 / 旧文件）**一律按自动值**，原因行说明它被忽略，
+ *      绝不因为"数值恰好等于某条启发式的输出"就升格成覆盖。
  *   2. **默认路由地址**：探测到且确实在本机网卡表里 → 用它（这是本模块的核心修复：
  *      先问路由，不按枚举顺序猜）。
  *   3. **候选规则兜底**（没有默认路由 / 探测失败）：排除回环、APIPA `169.254/16`、
@@ -318,15 +320,24 @@ export function resolveLanSelection(input) {
     const skipped = candidates.filter((item) => item.rejected !== '');
     const skipTail = summarizeRejected(skipped);
     const override = typeof input.override === 'string' ? input.override.trim() : '';
-    /** overrideTrusted=false ⇒ 这个值是 provisioning 自动镜像写入的，不能当运维覆盖。 */
-    const overrideTrusted = input.overrideTrusted !== false;
-    const mirrorTail = !overrideTrusted && override !== ''
-        ? `；已忽略落盘的 ${override}（与自动挑选结果相同，按自动值处理）`
+    /** overrideChosen=false ⇒ 落盘值没有选择标记，不能当运维覆盖（按自动值处理）。 */
+    const overrideChosen = input.overrideChosen !== false;
+    const mirrorTail = !overrideChosen && override !== ''
+        ? `；已忽略落盘的 ${override}（未记录为你手选的地址，按自动挑选）`
         : '';
-    if (override !== '' && overrideTrusted) {
+    if (override !== '' && overrideChosen) {
         if (!isBindableLanAddress(override)) {
             const explain = '「局域网地址」不是可绑定的具体私网 IPv4（不能是 0.0.0.0 / 127.x / 169.254.x）；请改成电脑网卡上的地址';
             return { address: null, source: 'none', reason: explain, explain, routeAddress, candidates };
+        }
+        // 明确选过、但那个地址**已经不在本机网卡上**（换了网络 / 网卡被删除 / 虚拟适配器被移除）：
+        // 仍然绑它（运维的选择优先，绝不静默改绑别的地址），但原因行必须**先**说清它绑不上 ——
+        // 真实监听会以 typed `E_LISTEN_FAILED` 失败，面板据此给出可执行的下一步。
+        const stillOnMachine = candidates.some((item) => item.address === override && item.family === 'IPv4') || routeAddress === override;
+        if (!stillOnMachine) {
+            const explain = `你手填的局域网地址；它已不在本机网卡上（换了网络或被删除），绑定会失败 ——` +
+                '请清空这一项改用自动挑选，或填当前网卡上的地址';
+            return { address: override, source: 'override', reason: `广播 ${override}（${explain}）`, explain, routeAddress, candidates };
         }
         if (routeAddress === override) {
             const explain = `你手填的局域网地址，与默认路由一致${skipTail}`;
@@ -368,63 +379,22 @@ export function pickLanAddress(candidates) {
 /**
  * 与 `createRemoteService().lanSelectionFor` **同一条规则**的可复用入口（干跑/排查用）。
  *
- * 存在的唯一理由：不允许出现"服务里一套、脚本里另一套"的判断 —— 尤其是
- * "落盘值是不是 provisioning 自动镜像"这条最容易两边写成不同结论的规则。
+ * 存在的唯一理由：不允许出现"服务里一套、脚本里另一套"的判断。
+ *
+ * **判据是来源标记，不是数值**（mod-plugin-remote-dispose-race 的 P2-1/P2-10 收口）：
+ * 落盘值只有带着 `lanAddressChosen` 标记才算覆盖；没有标记（旧文件 / provisioning 自动镜像）
+ * 一律按自动选路，原因行说明它被忽略。**不再**把落盘值和某条启发式的当前输出做比较 ——
+ * 那条比较在网卡集合变化时会把旧地址升格成可信覆盖（评审复现过 `192.168.137.1` 被绑回去）。
  */
 export function resolveLanSelectionForSettings(input) {
     const override = typeof input.lanAddress === 'string' ? input.lanAddress.trim() : '';
-    let auto = null;
-    if (input.provisionedAddress !== undefined) {
-        auto = input.provisionedAddress;
-    }
-    else {
-        try {
-            auto = provisionedMirrorLanAddress();
-        }
-        catch {
-            auto = null;
-        }
-    }
-    const trusted = input.explicitSave === true || override === '' || auto === null || auto === undefined || auto.trim() !== override;
-    return resolveLanSelection({ candidates: input.candidates, routeAddress: input.routeAddress, override, overrideTrusted: trusted });
-}
-/**
- * provisioning 落盘时用的**旧启发式**（冻结在此，故意不随本文件的新规则演进）。
- *
- * 为什么需要它：`pairingProvision.persistEndpoint()` 会把自动挑选结果**镜像**写进
- * `remote.json` 的 `lanAddress`，所以磁盘上的值天然分不清"运维手填"与"自动镜像"。
- * 本机就是这样把 `192.168.137.1`（`本地连接* 16`）写进设置、又按"显式覆盖"绑了上去。
- *
- * 这份实现逐字对齐当时的规则（名字正则 + 枚举顺序取第一个**非虚拟** RFC1918），
- * 用途只有一个：回答"这个落盘值是不是当初那条自动写进去的？"。
- * **不能**跟着新规则一起改：provisioning 将来若改成路由选路，历史镜像值就不会再等于
- * 新规则的输出，那时把旧值误判成"手填"会重新引入本模块要修的缺陷。
- */
-const PROVISIONED_VIRTUAL_RE = /(vEthernet|VMware|VirtualBox|Hyper-V|Loopback|Teredo|isatap|docker|veth|br-|WSL|Tailscale)/i;
-export function provisionedMirrorLanAddress(table) {
-    let source;
-    try {
-        source = table ?? os.networkInterfaces();
-    }
-    catch {
-        return null;
-    }
-    for (const [name, infos] of Object.entries(source)) {
-        if (infos === undefined)
-            continue;
-        for (const info of infos) {
-            if (info.internal)
-                continue;
-            if (info.family !== 'IPv4')
-                continue;
-            if (PROVISIONED_VIRTUAL_RE.test(name))
-                continue;
-            if (!RFC1918_RE.test(info.address))
-                continue;
-            return info.address;
-        }
-    }
-    return null;
+    return resolveLanSelection({
+        candidates: input.candidates,
+        routeAddress: input.routeAddress,
+        override,
+        // 空值谈不上"选择"；有值但没标记 ⇒ 不是运维选的 ⇒ 按自动值。
+        overrideChosen: override !== '' && input.chosen === true,
+    });
 }
 function isIPv4(value) {
     const parts = value.split('.');
@@ -443,24 +413,20 @@ export function createRemoteService(options = {}) {
     let starting = false;
     let refreshTimer = null;
     /**
-     * 本进程里**显式保存过**的「局域网地址」取值（没有就是 null）。
+     * 服务是否已经被卸载（`dispose()` 调过）。
      *
-     * 为什么需要：磁盘上的 `lanAddress` 既可能是运维手填，也可能是 provisioning 自动镜像
-     * （`remote.json` 没有来源标记）。`saveSettings` 是唯一的显式入口，因此"本进程刚被
-     * 显式保存过的那个值"可以无条件当成覆盖；从磁盘读到、且恰好等于自动镜像值的，按自动值处理。
-     * 只记住**值**而不是布尔量：之后 provisioning 改写成别的地址时，旧值不会再被误当覆盖。
+     * 为什么必须有它（评审 P1-1，本模块存在的理由）：`dispose()` 那一刻可能**还没有句柄**可关
+     * ——启动正卡在 `await` 里。没有这个位，启动醒来后照样把句柄装进 `runtime.handle`，留下一个
+     * **没有任何人持有、也没人能关**的监听（端口与令牌门一起活着，`accepting` 还会自称 true）。
+     * 因此 `start()` / `autoStart()` 入口都拒绝已卸载的服务，且启动路径上**每一个 `await` 之后**
+     * 都复检它（卸载可能就落在任意一次等待里）。
      */
-    let explicitLanSave = null;
+    let disposed = false;
     /**
      * 本次进程是否已经补写过被外部写入者丢掉的意图位（见 `healClobberedIntent`）。
      * 每个进程最多补一次：失败也别每读一次状态就写一次盘。
      */
     let healedIntent = false;
-    /** 这个落盘值是否等于本进程显式保存过的那个值。 */
-    function isExplicitLanSave(value) {
-        const trimmed = typeof value === 'string' ? value.trim() : '';
-        return explicitLanSave !== null && trimmed !== '' && trimmed === explicitLanSave;
-    }
     /**
      * 读一份**已归一**的设置。意图位 `autoStart` 不再在这里单独兜一层：
      * `normalizeRemoteSettings` 已经从原始记录里把它带出来了（mod-plugin-remote-accepting-surface），
@@ -607,28 +573,20 @@ export function createRemoteService(options = {}) {
     function routeAddressCached() {
         return routeCache === null ? null : routeCache.address;
     }
-    /** 当前设置下的局域网选路结论（一个地址 + 一行原因 + 候选表）。 */
+    /**
+     * 当前设置下的局域网选路结论（一个地址 + 一行原因 + 候选表）。
+     *
+     * 覆盖是否可信**只看落盘标记** `lanAddressChosen`（运维真的手选过），**不比数值**：
+     * provisioning 自动镜像、旧版保存、手工改文件都会留下"非空的 lanAddress 但没有标记"，
+     * 那种值一律按自动选路（原因行说明被忽略）。
+     */
     function lanSelectionFor(settings, routeAddress) {
         return resolveLanSelectionForSettings({
             candidates: listCandidatesNow(),
             routeAddress,
             lanAddress: settings.lanAddress,
-            explicitSave: isExplicitLanSave(settings.lanAddress),
-            provisionedAddress: provisionedNow(),
+            chosen: settings.lanAddressChosen === true,
         });
-    }
-    /** provisioning 自动镜像值（可注入；任何时候都不抛）。 */
-    function provisionedNow() {
-        const source = options.provisionedLanAddress;
-        if (source === undefined)
-            return provisionedMirrorLanAddress();
-        try {
-            const value = source();
-            return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
-        }
-        catch {
-            return null;
-        }
     }
     /**
      * 当前方式下应当绑定的**具体**地址；返回 null 表示"这种方式不需要/不能起监听"。
@@ -956,6 +914,9 @@ export function createRemoteService(options = {}) {
      * 意图仍是 `true`，下一次激活会（且只会）再自动试一次。
      */
     async function start(origin = 'manual') {
+        // 已经卸载：绝不写意图、绝不碰监听工厂（评审 P1-1；卸载后的服务对象会被丢弃）。
+        if (disposed)
+            return status();
         if (starting)
             return status();
         if (runtime.handle !== null)
@@ -989,12 +950,19 @@ export function createRemoteService(options = {}) {
                 return status();
             }
             // 先尝试换一次上游身份：换不到就不起监听（避免起了个全 503 的端口）。
+            // 注意：这是启动路径上的第一个 `await` —— 卸载可能就落在里面，醒来后立刻复检。
             const identity = await upstreamCookie();
+            if (disposed)
+                return status();
             if (identity === null) {
                 runtime.lastError = { code: 'E_NO_UPSTREAM_IDENTITY', message: '拿不到 DSH 的本机会话（DSH 版本不支持或会话换取失败），远程访问已拒绝启动' };
                 return status();
             }
-            const bind = resolveBindAddress(settings.mode, settings, await routeAddressForResolution());
+            // 第二个 `await`（路由探测）：同样在醒来后复检。
+            const routeAddress = await routeAddressForResolution();
+            if (disposed)
+                return status();
+            const bind = resolveBindAddress(settings.mode, settings, routeAddress);
             if (!bind.ok) {
                 runtime.lastError = { code: 'E_NO_BIND_ADDRESS', message: bind.reason };
                 return status();
@@ -1034,6 +1002,21 @@ export function createRemoteService(options = {}) {
             }
             catch (error) {
                 runtime.lastError = { code: 'E_LISTEN_FAILED', message: `监听启动失败：${safeMessage(error)}` };
+                // 失败分支没有句柄可关；服务若已被卸载，这份 lastError 只是留给"已丢弃"的对象，不装任何东西。
+                return status();
+            }
+            // **卸载竞态的唯一必守点**（评审 P1-1）：句柄已经建好，而服务可能已经在上面那次
+            // `await` 里被 `dispose()` 掉了（那时 `runtime.handle` 还是 null，什么也没关）。
+            // 此时绝不能把它装进 `runtime.handle` —— 卸载后的服务对象会被丢弃，装进去就等于
+            // 留下一个没人持有、也没人能关的监听（端口 + 令牌门一起活着）。就地关掉并丢弃：
+            // 本函数是它此刻唯一的持有者，所以 `close` 恰好一次。
+            if (disposed) {
+                try {
+                    await handle.close();
+                }
+                catch {
+                    /* 关闭失败不改变"已丢弃"这一事实：句柄没有被任何状态引用 */
+                }
                 return status();
             }
             runtime.handle = handle;
@@ -1079,6 +1062,9 @@ export function createRemoteService(options = {}) {
      * 下一次激活会再试一次（每次都只尝试一次，不做进程内重试）。
      */
     async function autoStart() {
+        // 已卸载的服务：激活入口什么也不做（评审 P1-1 的第三道口）。
+        if (disposed)
+            return status();
         if (runtime.handle !== null)
             return status();
         const settings = readSettings();
@@ -1106,18 +1092,23 @@ export function createRemoteService(options = {}) {
         // mod-plugin-remote-accepting-surface：`autoStart` **不是**表单字段，绝不让远程 RPC 变成
         // 意图位的第三个写入口（写入口只有 `start()` / `stop()`，见 `types.ts` 头表）。这里把
         // payload 里的同名键摘掉，值一律沿用磁盘上的 `previous`（读路径已经把它归一进来了）。
+        // 同理摘掉 `lanAddressChosen`：来源标记只能由下面那条**由 `lanAddress` 触发**的规则写，
+        // 不许 RPC 直接指定（否则"标记"就不再等价于"运维在这个入口给了地址"）。
         const payload = { ...raw };
         delete payload.autoStart;
+        delete payload.lanAddressChosen;
         const next = normalizeRemoteSettings(payload, previous);
-        // 显式入口：只有调用方**自己带了 `lanAddress` 键**且定为非空值，才算运维覆盖。
-        // 只改端口/令牌的保存不会把磁盘上的自动镜像值"升格"成覆盖。
+        // **来源标记**（mod-plugin-remote-dispose-race 的 P2-1/P2-10 收口）：只有调用方**自己带了
+        // `lanAddress` 键**且给了非空值，才算"运维手选了它"——这一次保存本身就是证据，**不比数值**
+        // （不跟任何启发式的输出比，也不跟旧值比）。清空该字段 = 运维改回"自动挑选"，标记一起清掉。
+        // provisioning 的自动镜像写入走的是 `normalizeRemoteSettings` + 整文件写回，不经过这里，
+        // 因此**永远不会**盖上这个章；它只会原样保留已有的标记（见 `normalizeRemoteSettings`）。
         const saidLanAddress = input !== null && typeof input === 'object' && Object.prototype.hasOwnProperty.call(input, 'lanAddress');
         if (saidLanAddress) {
-            const trimmed = next.lanAddress.trim();
-            explicitLanSave = trimmed === '' ? null : trimmed;
-        }
-        else if (next.lanAddress.trim() === '') {
-            explicitLanSave = null;
+            if (next.lanAddress.trim() === '')
+                delete next.lanAddressChosen;
+            else
+                next.lanAddressChosen = true;
         }
         store.writeSettings(next);
         // 换方式/换端口：先停掉旧监听，避免出现"状态显示 A、实际监听 B"。
@@ -1219,9 +1210,22 @@ export function createRemoteService(options = {}) {
     function detectLan() {
         return listCandidatesNow();
     }
+    /**
+     * 卸载：停掉监听、拒绝之后的启动，**幂等**。
+     *
+     * 三条语义（评审 P1-1 之后写死在这里）：
+     *   1. 第一步就置 `disposed`：在飞的 `start()` 醒来后会复检并**关掉自己刚建好的句柄**，
+     *      绝不会把它装进 `runtime.handle`（没有这一步就会出现"卸载后仍有监听、没人能关"）；
+     *   2. 卸载后 `accepting` 恒为 false（`runtime.handle` 不会被任何路径再赋值）；
+     *   3. 第二次调用什么也不做（不重复关、不重复清理）。
+     *
+     * 进程退出/插件卸载不是"用户点了停止"：**不**改写 `enabled`、也**不**清 `autoStart`——
+     * 否则每次关 DSH 都会把下次激活要用的自动启动意图清掉。
+     */
     async function dispose() {
-        // 进程退出/插件卸载不是"用户点了停止"：**不**改写 `enabled`、也**不**清 `autoStart`——
-        // 否则每次关 DSH 都会把下次激活要用的自动启动意图清掉。
+        if (disposed)
+            return;
+        disposed = true;
         await stopInternal(false).catch(() => undefined);
     }
     // 装配完成时后台预热一次路由探测（异步、有界、失败静默）：面板首个 getState 就能拿到真因。
