@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
 import { readSettingsPage, readSettingsRoot } from './settingsSources.mjs';
+import { countRows, rowBindingRe } from './helpers/settingsRowBinding.mjs';
 
 // 纯逻辑：homeRefresh.ts 零 SDK import，编译产物可直接 import（无运行时相对依赖）。
 const { SAVED_MARKER_KEY, encodeSavedMarker, decodeSavedMarker, containsRecordVersion } =
@@ -305,7 +306,7 @@ describe('B3 C（retarget）：远程组删除后，地址归一仍在实例页�
     const root = readSettingsRoot();
     assert.equal((root.match(/'pages\/Instances'/g) ?? []).length, 1, '设置树唯一 Instances 路由在根页');
     assert.match(root, /const ROUTE_INSTANCES: string = 'pages\/Instances'/, '根页路由常量');
-    assert.match(root, /this\.MenuRow\('远程实例', this\.instanceSummary, ROUTE_INSTANCES\)/, '四行菜单的「远程实例」行');
+    assert.match(root, rowBindingRe('远程实例', 'instanceSummary', 'ROUTE_INSTANCES'), '四行菜单的「远程实例」行');
     assert.equal(/ChatEntryRow\(|openInstances\(|RemoteGroup\(/.test(SETTINGS), false, '旧入口 builder / handler / 组已删');
     // 归一规则本身仍在 model 层，由实例面板 submitForm 复用（不是删掉校验）。
     // mod-shell-instances-pane（old→new）：锚点 pages/Instances.ets → pages/panes/InstancesPane.ets。

@@ -14,6 +14,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, test } from 'node:test';
 import { readSettingsFile, readSettingsPage, readSettingsRoot, readSettingsSources, readSyncPage, readSyncSection } from './settingsSources.mjs';
 import { stripComments } from './helpers/etsSource.mjs';
+import { countRows, rowBindingRe } from './helpers/settingsRowBinding.mjs';
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -74,7 +75,7 @@ describe('mod-settings-remote-dedupe：设置页不再重复配置，只留唯�
     // 现在正向钉「唯一的新行 + 旧行绝迹」——不是删断言、也不是只查 absence。
     const root = readSettingsRoot();
     assert.match(root, /const ROUTE_INSTANCES: string = 'pages\/Instances'/, '唯一入口的路由常量');
-    assert.match(root, /this\.MenuRow\('远程实例', this\.instanceSummary, ROUTE_INSTANCES\)/, '四行菜单的「远程实例」行');
+    assert.match(root, rowBindingRe('远程实例', 'instanceSummary', 'ROUTE_INSTANCES'), '四行菜单的「远程实例」行');
     assert.equal((root.match(/'pages\/Instances'/g) ?? []).length, 1, '根页只有一处 Instances 路由');
     for (const gone of [/ChatEntryRow\(/, /openInstances\(/, /RemoteGroup\(/, /远程实例与云端对话/]) {
       assert.equal(gone.test(PAGE), false, `实现宿主残留旧入口：${gone}`);

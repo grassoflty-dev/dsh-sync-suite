@@ -11,6 +11,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
+import { countRows, rowBindingRe } from './helpers/settingsRowBinding.mjs';
 
 const ETS = new URL('../../entry/src/main/ets/', import.meta.url);
 
@@ -52,7 +53,7 @@ describe('mod-settings-instances-entry-dedupe', () => {
     const root = SETTINGS_TREE.find(([file]) => file === 'pages/Settings.ets')[1];
     assert.match(root, /const ROUTE_INSTANCES: string = 'pages\/Instances';/,
       '唯一一处必须是根页的路由常量');
-    assert.match(root, /this\.MenuRow\('远程实例', this\.instanceSummary, ROUTE_INSTANCES\)/,
+    assert.match(root, rowBindingRe('远程实例', 'instanceSummary', 'ROUTE_INSTANCES'),
       '四行菜单的「远程实例」行及其摘要接线仍在');
     assert.match(root, /private push\(route: string\): void \{[\s\S]{0,160}router\.pushUrl\(\{ url: route \}\)/,
       '根行仍经唯一的 push() 落到 router');

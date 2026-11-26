@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
 import { readSettingsFile, readSettingsPage, readSettingsRoot } from './settingsSources.mjs';
+import { countRows, rowBindingRe } from './helpers/settingsRowBinding.mjs';
 
 const STORE = readSettingsFile('services/settingsStore.ets');
 const PAGE = readSettingsPage();
@@ -165,7 +166,7 @@ describe('B/C. 设置页远程配置删除 + 唯一入口 + 旧值迁移（retar
     // 现在正向钉住四行菜单根页那一行 + 旧组/builder/handler 消失，强度不降。
     const root = readSettingsRoot();
     assert.equal((root.match(/'pages\/Instances'/g) ?? []).length, 1, '唯一 Instances 路由在根页');
-    assert.match(root, /this\.MenuRow\('远程实例', this\.instanceSummary, ROUTE_INSTANCES\)/, '四行菜单的「远程实例」行');
+    assert.match(root, rowBindingRe('远程实例', 'instanceSummary', 'ROUTE_INSTANCES'), '四行菜单的「远程实例」行');
     assert.equal(/RemoteGroup\(|ChatEntryRow\(|openInstances\(/.test(PAGE), false, '旧入口组/builder/handler 已删');
   });
 

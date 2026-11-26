@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ETS_ROOT, readApiPage, readExportPage, readSettingsFile, readSettingsPage, readSettingsRoot, readSettingsSources } from './settingsSources.mjs';
+import { countRows, rowBindingRe } from './helpers/settingsRowBinding.mjs';
 
 const FILES = [
   'pages/Settings.ets',
@@ -242,14 +243,14 @@ test('C4 AI 配置无「高级」按钮与手输模型名文案，预设服务/�
 
 test('C5 根页恰好四行菜单：标题 / 摘要来源 / 页脚版本号', () => {
   const root = readSettingsRoot();
-  assert.equal((root.match(/this\.MenuRow\(/g) ?? []).length, 4, '根页只能有四行菜单');
+  assert.equal(countRows(root), 4, '根页只能有四行菜单');
   for (const [title, summary, route] of [
     ['同步仓库', 'repoSummary', 'ROUTE_SYNC'],
     ['远程实例', 'instanceSummary', 'ROUTE_INSTANCES'],
     ['数据导入导出', 'dataSummary', 'ROUTE_DATA'],
     ['API 配置', 'apiSummary', 'ROUTE_API']
   ]) {
-    assert.match(root, new RegExp(`this\\.MenuRow\\('${title}', this\\.${summary}, ${route}\\)`),
+    assert.match(root, rowBindingRe(title, summary, route),
       `缺少「${title}」行或其摘要接线`);
   }
   // 摘要来源必须读真实持久化状态，不允许写死文案。

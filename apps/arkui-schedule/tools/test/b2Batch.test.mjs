@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
 import { readSettingsRoot } from './settingsSources.mjs';
+import { countRows, rowBindingRe } from './helpers/settingsRowBinding.mjs';
 
 const PANEL = readFileSync(
   new URL('../../entry/src/main/ets/components/ExportImportPanel.ets', import.meta.url),
@@ -238,15 +239,18 @@ describe('B2 设置根页 Settings.ets（四行菜单）：行级路由跳转的
     assert.equal(/ROUTE_[A-Z]+: string = 'pages\/Settings';/.test(PAGE), false, '子页路由不得指回根页造成循环');
   });
 
-  test('B2-19 四行按 同步仓库 / 远程实例 / 数据导入导出 / API 配置 顺序，且恰好 4 次 MenuRow', () => {
+  test('B2-19 四行按 同步仓库 / 远程实例 / 数据导入导出 / API 配置 顺序，且恰好 4 次 MenuSummaryRow', () => {
+    // mod-app-settings-summary-resolve（old→new，收紧）：行的形状从按值 @Builder `this.MenuRow('标题', …)`
+    // 换成真组件 `MenuSummaryRow({ title: '标题', … })`（@Builder 按值参数不随 @State 重建，
+    // 那正是真机「永远停在读取中…」的根因）。断言本身一条不删：仍是四条、顺序不变。
     assertOrdered(ROOT_BUILD, [
-      "this.MenuRow('同步仓库'",
-      "this.MenuRow('远程实例'",
-      "this.MenuRow('数据导入导出'",
-      "this.MenuRow('API 配置'"
+      "title: '同步仓库'",
+      "title: '远程实例'",
+      "title: '数据导入导出'",
+      "title: 'API 配置'"
     ], 'Settings.build()');
-    const rows = PAGE.match(/this\.MenuRow\(/g) ?? [];
-    assert.equal(rows.length, 4, `契约丢了：根页恰好四行，实际 ${rows.length}`);
+    const rows = countRows(PAGE);
+    assert.equal(rows, 4, `契约丢了：根页恰好四行，实际 ${rows}`);
   });
 
   test('B2-20 每行都接自己的摘要状态并真的 push 对应路由', () => {
@@ -256,7 +260,7 @@ describe('B2 设置根页 Settings.ets（四行菜单）：行级路由跳转的
       ['数据导入导出', 'dataSummary', 'ROUTE_DATA'],
       ['API 配置', 'apiSummary', 'ROUTE_API']
     ]) {
-      assert.match(PAGE, new RegExp(`this\\.MenuRow\\('${title}', this\\.${summary}, ${route}\\)`),
+      assert.match(PAGE, rowBindingRe(title, summary, route),
         `契约丢了：「${title}」行没有接摘要 / 路由`);
     }
     assert.match(PAGE, /private push\(route: string\): void/, '跳转必须集中在 push()');
@@ -264,9 +268,14 @@ describe('B2 设置根页 Settings.ets（四行菜单）：行级路由跳转的
   });
 
   test('B2-21 行是 Row + onClick，命中区 ≥ TOUCH_MIN，无 .enabled(false) 静默禁用', () => {
-    const row = bodyFrom(PAGE, 'MenuRow(title: string, summary: string, route: string) {');
+    // mod-app-settings-summary-resolve（old→new）：行体从根页的 @Builder 搬进真组件
+    // `components/settings/MenuSummaryRow.ets`（渲染绑定修复的唯一形状），断言逐条不变。
+    const row = bodyFrom(readFileSync(
+      new URL('../../entry/src/main/ets/components/settings/MenuSummaryRow.ets', import.meta.url),
+      'utf8'
+    ).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, ''), 'build() {');
     assert.match(row, /Row\(\{ space: SPACING\.sm \}\)/, '行必须是 Row');
-    assert.match(row, /\.onClick\(\(\) => \{\s*this\.push\(route\);/, '点击必须调 push(route)');
+    assert.match(row, /\.onClick\(\(\) => \{\s*this\.onTap\(\);/, '点击必须经唯一出口 onTap()（页面决定重试/跳转）');
     // ArkTS RowAttribute has no .minHeight(); the ≥ TOUCH_MIN hit area is set via constraintSize.
     assert.match(row, /\.constraintSize\(\{\s*minHeight:\s*TOUCH_MIN \+ SPACING\.md\s*\}\)/,
       '命中区必须 ≥ TOUCH_MIN（用 constraintSize({ minHeight })）');

@@ -23,11 +23,27 @@
  *   读取自带预算，所以「读取中…」不可能无限挂着（旧实现 catch 里不写，行就永远停在占位）；
  * - 失败行的点击语义变成**重试本行**（不跳转），重试会清失败态、重新判一次内核就绪并重读；
  * - 「远程实例」行**读不到就说读不到**，绝不渲染 `0 个实例`（真机那次把 2 个实例显示成 0 个）。
+ *
+ * mod-app-settings-summary-resolve（新构建真机缺陷的修法，21:36 复测）：
+ * - **症状**：外层两行永远停在「读取中…」（等 43 秒），typed 失败行一次都不出现，
+ *   而同入口的子页健康、hilog 里没有任何 `E_*` 行。**结论**：数据层没坏，是**绑定**坏了。
+ * - **根因**：行原先经 `@Builder MenuRow(title: string, summary: string, route: string)` **按值**
+ *   传参。ArkUI 的 @Builder 参数是调用那一刻的快照，Text 节点的更新闭包里没有状态读取，
+ *   于是 `@State` 改变不会重建那个 Text —— `applyRows()` 写了终态、屏幕仍停在初值。
+ *   仓库内同族证据：`docs/VERIFICATION.md` §15.6.1 真机抓过同一形状（`@Builder HintLine(text)`
+ *   按值传参不随 `@Prop` 重建），修法是让状态读取发生在节点闭包里。
+ * - **修法**：行改成真子组件 `components/settings/MenuSummaryRow.ets`（`@Prop summary` /
+ *   `@Prop retryable`），父 → @Prop → 子 Text 才是 ArkUI 跟踪的那条链。三态模型一字未改。
+ * - **终态保证**：`bootstrap()` 的每一条出口（成功 / 超时 / 抛错 / 页面已销毁）都落到
+ *   `applyRows()` / `settleFailed()`，且赋值段不再调用任何可能抛错的函数；`aboutToAppear`
+ *   里的 Promise 一定挂 `.catch`（旧写法没有 void 也没有 catch，异步拒绝是静默的）。
+ * - **重试**：`rowsBusy` 防重入；重试也有同一份预算，**重试又超时**时文案变成
+ *   「第 N 次仍没读到：…（E_SETTINGS_READ_FAILED）」，不是悄悄退回「读取中…」。
  */
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { APP_VERSION } from '../common/version';
-import { DIVIDER, FONT, LINE_HEIGHT, SPACING, TOUCH_MIN } from '../common/uiTokens';
+import { DIVIDER, FONT, LINE_HEIGHT, SPACING } from '../common/uiTokens';
 import { settingsStore } from '../services/settingsStore';
 import type { ScheduleSettings } from '../services/settingsStore';
 import { instanceStore } from '../services/instanceStore';
@@ -51,6 +67,7 @@ import { problemText } from '../model/instances';
 import type { InstanceProblem } from '../model/instances';
 // mod-app-git-bridge-ready：四行摘要的「读取中 → 值 / 失败」与「读不到 ≠ 空」全在纯模型里判定。
 import {
+  E_INSTANCES_READ_FAILED,
   E_SETTINGS_READ_FAILED,
   instancesReadOf,
   instancesRow,
@@ -59,12 +76,12 @@ import {
   rowValue
 } from '../model/bridgeReadiness';
 import type { InstancesRead, RowView } from '../model/bridgeReadiness';
+// mod-app-settings-summary-resolve：行的渲染绑定换成真组件；重试文案的「第几次」在纯模型里。
+import { MenuSummaryRow } from '../components/settings/MenuSummaryRow';
+import { nextAttemptOf, retryReasonOf } from '../model/summaryResolve';
 
 /** 摘要读取预算：超时就按 typed 失败上屏——「读取中…」因此不可能无限挂着。 */
 const ROW_READ_BUDGET_MS: number = 4000;
-/** 行尾提示：失败态显示「重试」（点本行即重试），正常态是进入箭头。 */
-const ROW_HINT_RETRY: string = '重试';
-const ROW_HINT_OPEN: string = '›';
 
 /** 一次摘要读取的结论（`ok === false` 时 `settings` 为 null，`reason` 一定有话说）。 */
 interface RowRead {
@@ -137,12 +154,19 @@ struct Settings {
   /** 本行当前是否处于「读不到」态：是 → 点本行重试（不跳转），并显示行尾「重试」。 */
   @State repoRetryable: boolean = false;
   @State instancesRetryable: boolean = false;
-  private disposed: boolean = false;
   /** 重试去抖：正在读时再点多下只算一次。 */
   private rowsBusy: boolean = false;
+  /** 已完成的读取次数（0 = 首次；每点一次「重试」+1，成功后归零）。 */
+  private retryAttempt: number = 0;
+  /** 页面已销毁：不再为一个已经不在的页面发起新的读取（已发出的结论照常落终态）。 */
+  private disposed: boolean = false;
 
   aboutToAppear(): void {
-    this.bootstrap();
+    // 显式挂 .catch：异步拒绝不许静默（旧写法 `this.bootstrap();` 既没有 void 也没有 catch，
+    // 一旦在预算武装之前抛错，两行就永远停在「读取中…」且没有任何 typed 文案上屏）。
+    this.bootstrap().catch((error: Object): void => {
+      this.settleFailed(error);
+    });
   }
 
   aboutToDisappear(): void {
@@ -152,62 +176,138 @@ struct Settings {
   /**
    * 读一次持久化状态铺到四行摘要（**一定有结论**：值、或 typed 失败行）。
    *
-   * 旧实现在 catch 里什么都不写，于是「同步仓库」永久停在「读取中…」、实例行永久停在
-   * 「0 个实例」——真机冷启动那两个症状就是同一段代码的两面。
+   * 三条出口都落终态：读取本身永不 reject（超时 / 抛错都收成 `ok:false`），
+   * 读取之外的意外异常由 `readRowsWithinBudget()` 的 try/catch 兜住，
+   * 再由 `aboutToAppear` / `retryRows` 的 `.catch` 兜底成失败行。
+   * 页面销毁不改变这条规则：晚到的结论照写（对已销毁的组件是空操作，不会有可见刷新）。
    */
   private async bootstrap(): Promise<void> {
-    const context = getContext(this) as common.UIAbilityContext;
-    const read: RowRead = await readSettingsWithinBudget(context, ROW_READ_BUDGET_MS);
-    if (this.disposed) {
-      return;
-    }
+    const read: RowRead = await this.readRowsWithinBudget();
     this.applyRows(read);
+  }
+
+  /**
+   * 有界读取的唯一入口：**永不 reject**。
+   *
+   * `getContext(this)` 这类同步抛错以前会直接冒泡成一次未处理的 Promise 拒绝（静默），
+   * 现在同样收敛成一条 typed 失败结论。
+   */
+  private async readRowsWithinBudget(): Promise<RowRead> {
+    try {
+      const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      return await readSettingsWithinBudget(context, ROW_READ_BUDGET_MS);
+    } catch (error) {
+      return { ok: false, settings: null, reason: describeReadFailure(error) };
+    }
   }
 
   /** 把一次读取结论落到四行：成功给值（可带内核附注），失败给「读不到 + 原因 + 重试」。 */
   private applyRows(read: RowRead): void {
     const note: string = this.engineNote();
+    // 重试过的失败换一句话说（typed 码不变）：同一句重复上屏等于没说。
+    const reason: string = retryReasonOf(this.retryAttempt, read.reason);
     if (!read.ok || read.settings === null) {
-      const repoView: RowView = rowFailed(E_SETTINGS_READ_FAILED, read.reason, note);
-      this.repoSummary = repoView.text;
-      this.repoRetryable = repoView.canRetry;
       // 这次连设置都没读到，实例表根本没被读取：同样只能说「读不到」，不许退化成「0 个实例」。
-      const unread: InstancesRead = instancesReadOf(0, 'E_STORAGE_UNAVAILABLE',
-        '这次读取没有完成（设置也没读到）');
-      const instanceView: RowView = instancesRow(unread, note);
-      this.instanceSummary = instanceView.text;
-      this.instancesRetryable = instanceView.canRetry;
+      this.writeRows(rowFailed(E_SETTINGS_READ_FAILED, reason, note), this.unreadInstancesView(note));
       return;
     }
     const settings: ScheduleSettings = read.settings;
-    const host: string = repoHostOf(settings.repoUrl);
-    // 状态文案只看权威最新尝试（git_sync_status）；lastSyncAt 只是比较证据，不渲染。
-    const syncText: string = syncRowSummary(
-      settings.lastSyncAt, settings.lastSyncError, syncStatusStore.latestAttempt()
-    );
-    // 阻断是独立问题：已配置但仓库公开 / 不可确认 → 「已配置（可见性阻断…）」，不是「未配置」。
-    const blocked: boolean = isRepoBlockedStatus(syncStatusStore.snapshot());
-    const repoView: RowView = rowValue(
-      repoRowSummary(host, syncText, repoConfigStateOf(settings), blocked), note
-    );
+    this.writeRows(this.repoViewOf(settings, note), this.instancesViewOf(note));
+    // 成功即归零：下一轮若再失败，文案从「首次」重新说起。
+    this.retryAttempt = 0;
+    this.apiSummary = this.apiSummaryOf(settings);
+    this.dataSummary = this.dataSummaryOf();
+  }
+
+  /**
+   * 两行终态的唯一写入口。
+   *
+   * 赋值段（这个方法体）里**不调用任何可能抛错的函数**：调用方先把两个 `RowView` 算完
+   * （各自的细节读取都在自己的 try/catch 里降级成 typed 失败行），再进来一次性落状态。
+   * 这样「两行一定会离开在飞态」是从代码形状上可判定的，不靠运气。
+   */
+  private writeRows(repoView: RowView, instanceView: RowView): void {
     this.repoSummary = repoView.text;
     this.repoRetryable = repoView.canRetry;
-    this.apiSummary = apiRowSummary(
-      findProvider(settings.aiProviderId).label,
-      this.modelLabelOf(settings.aiProviderId, settings.aiModel)
-    );
-    // 实例行：「读不到」与「空」是两件事，判定在纯模型 instancesReadOf / instancesRow 里。
-    const count: number = instanceStore.list().length;
-    const problem: InstanceProblem = instanceStore.lastProblem();
-    const read2: InstancesRead = instancesReadOf(count, problem, problemText(problem));
-    const instanceView: RowView = instancesRow(read2, note);
     this.instanceSummary = instanceView.text;
     this.instancesRetryable = instanceView.canRetry;
-    const exported: string | undefined = AppStorage.get<string>(LAST_EXPORT_AT_KEY);
-    const imported: string | undefined = AppStorage.get<string>(LAST_IMPORT_AT_KEY);
-    this.dataSummary = dataRowSummary(
-      exported === undefined ? '' : exported,
-      imported === undefined ? '' : imported
+  }
+
+  /** 「同步仓库」行：值来自 settingsStore + syncStatusStore + repoConfigured（与子页同一套事实）。 */
+  private repoViewOf(settings: ScheduleSettings, note: string): RowView {
+    try {
+      const host: string = repoHostOf(settings.repoUrl);
+      // 状态文案只看权威最新尝试（git_sync_status）；lastSyncAt 只是比较证据，不渲染。
+      const syncText: string = syncRowSummary(
+        settings.lastSyncAt, settings.lastSyncError, syncStatusStore.latestAttempt()
+      );
+      // 阻断是独立问题：已配置但仓库公开 / 不可确认 → 「已配置（可见性阻断…）」，不是「未配置」。
+      const blocked: boolean = isRepoBlockedStatus(syncStatusStore.snapshot());
+      return rowValue(repoRowSummary(host, syncText, repoConfigStateOf(settings), blocked), note);
+    } catch (error) {
+      return rowFailed(E_SETTINGS_READ_FAILED, describeReadFailure(error), note);
+    }
+  }
+
+  /** 「远程实例」行：「读不到」与「空」是两件事，判定在纯模型 instancesReadOf / instancesRow 里。 */
+  private instancesViewOf(note: string): RowView {
+    try {
+      const count: number = instanceStore.list().length;
+      const problem: InstanceProblem = instanceStore.lastProblem();
+      const read2: InstancesRead = instancesReadOf(count, problem, problemText(problem));
+      return instancesRow(read2, note);
+    } catch (error) {
+      return this.unreadInstancesViewWith(describeReadFailure(error), note);
+    }
+  }
+
+  /** 设置都没读到时的实例行：明确说「这次读取没有完成」，绝不写成 0 条。 */
+  private unreadInstancesView(note: string): RowView {
+    return this.unreadInstancesViewWith('这次读取没有完成（设置也没读到）', note);
+  }
+
+  private unreadInstancesViewWith(reason: string, note: string): RowView {
+    const unread: InstancesRead = instancesReadOf(0, 'E_STORAGE_UNAVAILABLE', reason);
+    return instancesRow(unread, note);
+  }
+
+  /** 「API 配置」行：源 / 模型展示名；算不出来就保留上一次的值（不把这两行拖回占位）。 */
+  private apiSummaryOf(settings: ScheduleSettings): string {
+    try {
+      return apiRowSummary(
+        findProvider(settings.aiProviderId).label,
+        this.modelLabelOf(settings.aiProviderId, settings.aiModel)
+      );
+    } catch (error) {
+      return this.apiSummary;
+    }
+  }
+
+  /** 「数据导入导出」行：上次导出 / 导入时刻或「未导出」；读不到就保留上一次的值。 */
+  private dataSummaryOf(): string {
+    try {
+      const exported: string | undefined = AppStorage.get<string>(LAST_EXPORT_AT_KEY);
+      const imported: string | undefined = AppStorage.get<string>(LAST_IMPORT_AT_KEY);
+      return dataRowSummary(
+        exported === undefined ? '' : exported,
+        imported === undefined ? '' : imported
+      );
+    } catch (error) {
+      return this.dataSummary;
+    }
+  }
+
+  /**
+   * 兜底终态：**任何**意外拒绝（`bootstrap()` 之外也没想到的路径）都把两行写成 typed 失败行。
+   *
+   * 这一段刻意不调用 `repoViewOf()` / `instancesViewOf()` 之类可能再次抛错的函数，
+   * 只用纯模型拼两句文案：兜底本身不许再有失败模式。
+   */
+  private settleFailed(error: Object): void {
+    const reason: string = retryReasonOf(this.retryAttempt, describeReadFailure(error));
+    this.writeRows(
+      rowFailed(E_SETTINGS_READ_FAILED, reason, ''),
+      rowFailed(E_INSTANCES_READ_FAILED, reason, '')
     );
   }
 
@@ -217,12 +317,16 @@ struct Settings {
    *
    * 内核仍然没就绪时：读取照样有结论（读到就显示值 + 附注「同步内核未就绪」，读不到就显示
    * 带 typed 码的失败行），绝不停在「读取中…」；再点一次仍是同样的有界过程。
+   *
+   * 重试**又**超时：`retryAttempt` 已经 +1，`applyRows()` 会把原因拼成
+   * 「第 2 次仍没读到：读取超时（超过 4 秒）」——句子不同、typed 码相同，行仍可再点。
    */
   private async retryRows(): Promise<void> {
-    if (this.rowsBusy) {
+    if (this.rowsBusy || this.disposed) {
       return;
     }
     this.rowsBusy = true;
+    this.retryAttempt = nextAttemptOf(this.retryAttempt);
     const loading: RowView = rowLoading();
     this.repoSummary = loading.text;
     this.instanceSummary = loading.text;
@@ -230,6 +334,9 @@ struct Settings {
     this.instancesRetryable = false;
     try {
       await this.bootstrap();
+    } catch (error) {
+      // bootstrap 自身已保证不 reject；这一层是形状上的兜底，不留未处理拒绝。
+      this.settleFailed(error);
     } finally {
       this.rowsBusy = false;
     }
@@ -242,10 +349,14 @@ struct Settings {
    * 同一句话，让用户知道「这次读不到」有没有内核那一半的原因。重试时重算。
    */
   private engineNote(): string {
-    if (syncController.isReady()) {
+    try {
+      if (syncController.isReady()) {
+        return '';
+      }
+      return '同步内核未就绪（页面加载完会自行恢复）';
+    } catch (error) {
       return '';
     }
-    return '同步内核未就绪（页面加载完会自行恢复）';
   }
 
   /** 模型展示名：预设表命中走 label；存量手输名原样显示（不迁移、不丢失）。 */
@@ -267,14 +378,15 @@ struct Settings {
    * 失败掩进子页。重试成功后本行显示真实值，再点一下就是正常的进子页。
    */
   private push(route: string): void {
-    if (this.isRetryable(route)) {
-      this.retryRows().catch((): void => {
-        // 重试路径内部已把结论写进行状态；这里只兜住 Promise，不留未处理拒绝
+    if (!this.isRetryable(route)) {
+      router.pushUrl({ url: route }).catch(() => {
+        // 路由失败保持在本页；不做「假装已打开」的假反馈。
       });
       return;
     }
-    router.pushUrl({ url: route }).catch(() => {
-      // 路由失败保持在本页；不做「假装已打开」的假反馈。
+    this.retryRows().catch((error: Object): void => {
+      // 重试路径内部已把结论写进行状态；这里只兜住 Promise，不留未处理拒绝
+      this.settleFailed(error);
     });
   }
 
@@ -289,51 +401,6 @@ struct Settings {
     return false;
   }
 
-  /** 行尾提示：失败态是「重试」（点本行即重试），其余是进入箭头。 */
-  private rowHint(route: string): string {
-    return this.isRetryable(route) ? ROW_HINT_RETRY : ROW_HINT_OPEN;
-  }
-
-  /** 一行菜单：标题 + 摘要 + 行尾提示（失败态是「重试」，其余是 ›），命中区 ≥ TOUCH_MIN。 */
-  @Builder
-  MenuRow(title: string, summary: string, route: string) {
-    Row({ space: SPACING.sm }) {
-      Column({ space: SPACING.xs }) {
-        Text(title)
-          .fontSize(FONT.body)
-          .lineHeight(LINE_HEIGHT.body)
-          .fontColor($r('app.color.text_primary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-          .textAlign(TextAlign.Start)
-        Text(summary)
-          .fontSize(FONT.caption)
-          .lineHeight(LINE_HEIGHT.caption)
-          .fontColor($r('app.color.text_secondary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-          .textAlign(TextAlign.Start)
-      }
-      .layoutWeight(1)
-      .alignItems(HorizontalAlign.Start)
-
-      Text(this.rowHint(route))
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.text_secondary'))
-        .flexShrink(0)
-        .textAlign(TextAlign.Center)
-    }
-    .width('100%')
-    .constraintSize({ minHeight: TOUCH_MIN + SPACING.md })
-    .alignItems(VerticalAlign.Center)
-    .onClick(() => {
-      this.push(route);
-    })
-  }
-
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
       PageLayout({
@@ -345,19 +412,49 @@ struct Settings {
       }) {
         Scroll() {
           Column({ space: SPACING.md }) {
-            this.MenuRow('同步仓库', this.repoSummary, ROUTE_SYNC)
+            // 四行都是真子组件 + @Prop（不是 @Builder 按值传参）：摘要 @State 变化时，
+            // 父 → @Prop → 子 Text 这条链会被 ArkUI 跟踪，行才会真的刷新。
+            MenuSummaryRow({
+              title: '同步仓库',
+              summary: this.repoSummary,
+              retryable: this.repoRetryable,
+              onTap: () => {
+                this.push(ROUTE_SYNC);
+              }
+            })
             Divider()
               .strokeWidth(DIVIDER)
               .color($r('app.color.divider'))
-            this.MenuRow('远程实例', this.instanceSummary, ROUTE_INSTANCES)
+            MenuSummaryRow({
+              title: '远程实例',
+              summary: this.instanceSummary,
+              retryable: this.instancesRetryable,
+              onTap: () => {
+                this.push(ROUTE_INSTANCES);
+              }
+            })
             Divider()
               .strokeWidth(DIVIDER)
               .color($r('app.color.divider'))
-            this.MenuRow('数据导入导出', this.dataSummary, ROUTE_DATA)
+            MenuSummaryRow({
+              title: '数据导入导出',
+              summary: this.dataSummary,
+              retryable: false,
+              onTap: () => {
+                this.push(ROUTE_DATA);
+              }
+            })
             Divider()
               .strokeWidth(DIVIDER)
               .color($r('app.color.divider'))
-            this.MenuRow('API 配置', this.apiSummary, ROUTE_API)
+            MenuSummaryRow({
+              title: 'API 配置',
+              summary: this.apiSummary,
+              retryable: false,
+              onTap: () => {
+                this.push(ROUTE_API);
+              }
+            })
 
             Text(`关于 · v${APP_VERSION}`)
               .fontSize(FONT.caption)

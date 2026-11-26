@@ -10,6 +10,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { matchBrace, stripComments } from './helpers/etsSource.mjs';
+import { countRows, rowBindingRe } from './helpers/settingsRowBinding.mjs';
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -390,7 +391,7 @@ describe('静态断言：页面、入口与存储接线', () => {
   // 现在是四行菜单中的「远程实例」行，摘要从实例数派生，仍指向同一个 pages/Instances 路由。
   test('U-07 设置入口升级为四行菜单的「远程实例」行且指向 pages/Instances', () => {
     assert.match(SETTINGS, /ROUTE_INSTANCES: string = 'pages\/Instances'/);
-    assert.match(SETTINGS, /this\.MenuRow\('远程实例', this\.instanceSummary, ROUTE_INSTANCES\)/);
+    assert.match(SETTINGS, rowBindingRe('远程实例', 'instanceSummary', 'ROUTE_INSTANCES'));
     assert.match(SETTINGS, /instanceStore\.list\(\)\.length/, '摘要必须是真实实例数');
     assert.equal(SETTINGS.includes("router.pushUrl({ url: 'pages/Chats' })"), false, '旧入口不得残留');
     assert.equal(SETTINGS.includes('远程实例与云端对话'), false, '旧入口文案已从根页移除');

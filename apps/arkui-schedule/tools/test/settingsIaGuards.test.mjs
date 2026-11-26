@@ -33,6 +33,7 @@ import {
   readSettingsSources,
   readSyncPage
 } from './settingsSources.mjs';
+import { countRows, rowBindingRe } from './helpers/settingsRowBinding.mjs';
 
 /** 与 instancesEntryDedupe 同款：去块注释与整行行注释，只数可执行源码（注释里的说明不算控件/路由）。 */
 const stripComments = (source) => source
@@ -101,7 +102,7 @@ describe('mod-settings-ia-guards：设置信息架构整体契约', () => {
       assert.equal(root.includes(control), false, `根页只做导航，不得出现配置控件 ${control}`);
     }
     // 正证据：根页不是被删空，而是仍有导航骨架（四行的细节由 B2-19/B2-20、C5 钉住）。
-    assert.equal((root.match(/this\.MenuRow\(/g) ?? []).length, 4, '根页仍是四行导航菜单');
+    assert.equal(countRows(root), 4, '根页仍是四行导航菜单');
     assert.match(
       root,
       /private push\(route: string\): void \{[\s\S]{0,160}router\.pushUrl\(\{ url: route \}\)/,
@@ -173,7 +174,7 @@ describe('mod-settings-ia-guards：设置信息架构整体契约', () => {
       assert.equal(root.includes(token), false, `根页不得声明锚点机制 ${token}`);
     }
     // 正证据：被检查的确实是四行导航菜单，不是一个恰好为空的文件（非空 sanity 另见 IA-08）。
-    assert.equal((root.match(/this\.MenuRow\(/g) ?? []).length, 4, '根页仍是四行导航菜单，不是空文件');
+    assert.equal(countRows(root), 4, '根页仍是四行导航菜单，不是空文件');
   });
 
   test('IA-08 读者读到真实字节：每个页面源码非空且 struct 名正确（改名 / 截断不能静默过关）', () => {

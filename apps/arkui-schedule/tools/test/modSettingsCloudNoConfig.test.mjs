@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { readSettingsFile, readSettingsPage, readSettingsRoot, readSettingsSources } from './settingsSources.mjs';
+import { countRows, rowBindingRe } from './helpers/settingsRowBinding.mjs';
 
 // mod-settings-root（old→new）：入口行随实现从 pages/Settings.ets 搬到组件宿主；
 // 本用例只查「导航入口里没有配置控件」，断言不变，只换锚点。
@@ -35,7 +36,7 @@ describe('mod-settings-cloud-no-config：设置页没有云端会话配置', () 
     // 导航行已删除，唯一入口是四行菜单根页的「远程实例」行；它同样只是导航，不是配置行。
     const root = readSettingsRoot();
     assert.equal(/TextInput\(/.test(root), false, '根页入口行不该有输入框');
-    assert.match(root, /this\.MenuRow\('远程实例', this\.instanceSummary, ROUTE_INSTANCES\)/, '入口只做路由跳转');
+    assert.match(root, rowBindingRe('远程实例', 'instanceSummary', 'ROUTE_INSTANCES'), '入口只做路由跳转');
     assert.equal(SOURCES.includes('远程实例与云端对话'), false, '旧入口文案绝迹，不再假设它仍在');
   });
 

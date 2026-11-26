@@ -25,6 +25,7 @@ import vm from 'node:vm';
 
 import { readEts, stripComments } from './helpers/etsSource.mjs';
 import { requireOverlayRestored } from './guard.mjs';
+import { countRows, rowBindingRe } from './helpers/settingsRowBinding.mjs';
 
 requireOverlayRestored('bridgeReadiness.test.mjs');
 
@@ -71,6 +72,17 @@ const {
   instancesCountLine,
   instancesMayShowEmpty
 } = await import('../.build/model/bridgeReadiness.js');
+
+// mod-app-settings-summary-resolve：重试序号 / 「重试也没读到」的文案 / 终态判定（纯模型）。
+const {
+  ROW_HINT_RETRY,
+  ROW_HINT_OPEN,
+  rowHintOf,
+  nextAttemptOf,
+  readNoOf,
+  retryReasonOf,
+  isTerminalRowText
+} = await import('../.build/model/summaryResolve.js');
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP = join(HERE, '..', '..');
@@ -484,16 +496,16 @@ function loopbackPageAt(bridge) {
   return bridge.internals.pageLoadedAtOf();
 }
 
-test('W-09 Settings.ets：四行仍是 4 次 MenuRow，摘要仍来自权威来源（未被本次改动放宽）', () => {
+test('W-09 Settings.ets：四行仍是 4 次 MenuSummaryRow（真组件绑定），摘要仍来自权威来源（未被本次改动放宽）', () => {
   const page = docker('pages/Settings.ets');
-  assert.equal((page.match(/this\.MenuRow\(/g) ?? []).length, 4, '四行菜单不许变成别的形状');
+  assert.equal(countRows(page), 4, '四行菜单不许变成别的形状');
   for (const [title, summary, route] of [
     ['同步仓库', 'repoSummary', 'ROUTE_SYNC'],
     ['远程实例', 'instanceSummary', 'ROUTE_INSTANCES'],
     ['数据导入导出', 'dataSummary', 'ROUTE_DATA'],
     ['API 配置', 'apiSummary', 'ROUTE_API']
   ]) {
-    assert.match(page, new RegExp(`this\\.MenuRow\\('${title}', this\\.${summary}, ${route}\\)`));
+    assert.match(page, rowBindingRe(title, summary, route));
   }
   assert.match(page, /syncRowSummary\(\s*settings\.lastSyncAt, settings\.lastSyncError, syncStatusStore\.latestAttempt\(\)\s*\)/);
   assert.match(page, /instanceStore\.list\(\)\.length/);
@@ -507,10 +519,18 @@ test('W-10 Settings.ets：读取有界 + 失败态 typed + 重试，实例行不
   assert.match(page, /readSettingsWithinBudget\(context, ROW_READ_BUDGET_MS\)/, '读取必须有预算');
   assert.match(page, /setTimeout\(\(\): void => \{\s*finish\(\{ ok: false, settings: null,/, '超时必须收敛成失败态');
   assert.match(page, /rowLoading\(\)/, '重试先回「读取中…」');
-  assert.match(page, /rowFailed\(E_SETTINGS_READ_FAILED, read\.reason, note\)/);
+  // mod-app-settings-summary-resolve（old→new，收紧）：失败原因先过 retryReasonOf（重试要换句子），
+  // 再进 rowFailed —— 断言仍然钉住「typed 码 + 原因 + 附注」三件套，另加「重试文案」这一层。
+  assert.match(page, /const reason: string = retryReasonOf\(this\.retryAttempt, read\.reason\)/);
+  assert.match(page, /rowFailed\(E_SETTINGS_READ_FAILED, reason, note\)/);
   assert.match(page, /instancesRow\(read2, note\)/);
   assert.match(page, /private async retryRows\(\): Promise<void> \{/);
-  assert.match(page, /if \(this\.isRetryable\(route\)\) \{\s*this\.retryRows\(\)/, '失败行的点击语义 = 重试');
+  // mod-app-settings-summary-resolve（old→new，等价）：点击出口仍只有 push(route) 一个，
+  // 但重试分支改成早返回（`!isRetryable` → 直接 pushUrl；否则 → retryRows），
+  // 于是「唯一出口 + 失败态重试」两件事都要钉住。
+  assert.match(page, /if \(!this\.isRetryable\(route\)\) \{[\s\S]{0,80}router\.pushUrl\(\{ url: route \}\)/,
+    '正常态必须直接 pushUrl（唯一出口仍是 push）');
+  assert.match(page, /this\.retryRows\(\)\.catch\(/, '失败行的点击语义 = 重试本行');
   assert.match(page, /this\.engineNote\(\)/, '重试会重新判一次内核就绪');
 });
 
@@ -532,4 +552,67 @@ test('W-12 无 any / 无结构性赋值：新模型只导出具名接口，.ets 
     'pages/Settings.ets', 'pages/panes/InstancesPane.ets']) {
     assert.equal(/as any|as unknown/.test(docker(rel)), false, `${rel} 不得用 any / unknown 断言`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// W-13..W-17 mod-app-settings-summary-resolve：重试语义 + 终态不变量
+// （真机症状：两行停在「读取中…」、typed 失败行一次都不出现。绑定修复在
+//   settingsSummaryResolve.test.mjs 的 S-01；这里钉住「重试又超时」与「任何出口都离开在飞态」。）
+// ---------------------------------------------------------------------------
+
+test('W-13 尝试序号：首次 0，每点一次「重试」+1；非法值归一成 0（不产生负序号）', () => {
+  assert.equal(nextAttemptOf(0), 1);
+  assert.equal(nextAttemptOf(1), 2);
+  assert.equal(nextAttemptOf(-5), 1, '负数归一成 0 再加一，不产生第 0 次这种说法');
+  assert.equal(nextAttemptOf(Number.NaN), 1);
+  assert.equal(readNoOf(0), 1, '序号 0 = 第 1 次读取');
+  assert.equal(readNoOf(3), 4);
+});
+
+test('W-14 重试文案：首次原样、重试后一定换一句（空原因也给确定说法）', () => {
+  assert.equal(retryReasonOf(0, '读取超时（超过 4 秒）'), '读取超时（超过 4 秒）', '首次不加前缀');
+  const second = retryReasonOf(1, '读取超时（超过 4 秒）');
+  assert.equal(second, '第 2 次仍没读到：读取超时（超过 4 秒）');
+  assert.notEqual(second, retryReasonOf(0, '读取超时（超过 4 秒）'), '重试必须换句子');
+  assert.equal(retryReasonOf(2, ''), '第 3 次仍没读到');
+  assert.equal(retryReasonOf(0, ''), '', '首次的空原因保持空（由 rowFailed 给兜底句）');
+});
+
+test('W-15 「重试又超时」仍是 typed 失败行：码不变、句子变了、行仍可再点', () => {
+  const first = rowFailed(E_SETTINGS_READ_FAILED, retryReasonOf(0, '读取超时（超过 4 秒）'), '');
+  const again = rowFailed(E_SETTINGS_READ_FAILED, retryReasonOf(1, '读取超时（超过 4 秒）'), '');
+  for (const view of [first, again]) {
+    assert.equal(view.phase, 'failed');
+    assert.equal(view.code, E_SETTINGS_READ_FAILED, 'typed 码不因重试而改变');
+    assert.equal(view.canRetry, true, '仍然可以再点本行重试（不需要重启 App）');
+    assert.ok(view.text.includes(E_SETTINGS_READ_FAILED));
+    assert.ok(view.text.includes(RETRY_HINT), '失败行必须带「轻点本行重试」');
+    assert.equal(isTerminalRowText(view.text), true, '失败行是终态');
+  }
+  assert.notEqual(again.text, first.text, '重试又超时不能是同一句（否则像是没反应）');
+  assert.ok(again.text.includes('第 2 次'));
+});
+
+test('W-16 终态不变量：三态模型的每个出口都离开「读取中…」，只有 rowLoading() 在飞', () => {
+  const exits = [
+    rowValue('已同步 · 21:36', ''),
+    rowValue('—', '同步内核未就绪（页面加载完会自行恢复）'),
+    rowFailed(E_SETTINGS_READ_FAILED, '读取超时（超过 4 秒）', ''),
+    instancesRow(instancesReadOf(2, 'ok', 'ok'), ''),
+    instancesRow(instancesReadOf(0, 'E_ENVELOPE_EMPTY', '还没有实例'), ''),
+    instancesRow(instancesReadOf(0, 'E_STORAGE_UNAVAILABLE', '本地实例表读不出来'), '')
+  ];
+  for (const view of exits) {
+    assert.equal(isTerminalRowText(view.text), true, `出口文案必须是终态：${view.text}`);
+  }
+  assert.equal(isTerminalRowText(rowLoading().text), false, 'rowLoading() 是唯一的在飞态');
+  assert.equal(isTerminalRowText('   '), false, '空串不算终态（会把行显示成空白）');
+  assert.equal(rowLoading().text, LOADING_TEXT);
+});
+
+test('W-17 行尾提示：失败态「重试」/ 正常态「›」，两个常量各只有一处来源', () => {
+  assert.equal(rowHintOf(true), ROW_HINT_RETRY);
+  assert.equal(rowHintOf(false), ROW_HINT_OPEN);
+  assert.equal(ROW_HINT_RETRY, '重试');
+  assert.equal(ROW_HINT_OPEN, '›');
 });
