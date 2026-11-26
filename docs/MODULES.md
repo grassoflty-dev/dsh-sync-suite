@@ -728,4 +728,57 @@ c41eb（v2 唯一路径；删除激活闸与双存储兼容；评审 P1-1/P1-2 �
 
 > **2026-11-26 记账订正（`REVIEW-b11-today` 诚实性项，只加不改写）**：① `283a128`（askpass-temp-hygiene）与 `21b2a34`（askpass-error-surface）两个**提交信息**里的插件总数都写成 **1029**，与它们各自声明的 +14 / +10 不自洽（1005+14=1019；1029+10=1039≠1037），且 **`21b2a34` 没有属于它自己的 capture**——那一份 capture 装的是另一个模块的用例。**引用这两条提交的测试数字时必须带上本注**，不要把 1029 当基线；② `mod-plugin-askpass-stderr-residual` 的 ASCII 奇偶规律在源码注释里曾被写成"实测"，已由本模块改成"现象、机制未确认"；③ 本文件 `:714` 早前的"未做真实推送"已按 §15.22 H 的活体证据升级，`:718` 的"`enabled` 跟随句柄"已加边界订正——两条都保留原文，只追加订正。
 
+---
+
+## 7. 2026-11-26 夜间批次：app 侧四模块登记 + 插件十一行哈希对账
+
+> 本节是**补登记**，不是改写：`§6` 里那十一行插件的状态列仍写「已写完，待 Lead 提交」、哈希列仍写「（Lead 填）」，那是当时的事实；下面的对照表把它们**逐条点名到提交**，避免"没有名字的历史"。
+> 之所以用表格对账而不是逐行改单元格：那十一行每行都是一整篇变更说明，逐行改写有把历史说明改坏的风险，而"点名提交"才是账本真正要的性质。
+
+### 7.1 插件十一行 → 提交
+
+| 模块 | 提交 |
+| --- | --- |
+| `mod-plugin-push-auth-vs-network` | `7a34b70` |
+| `mod-plugin-gui-proxy-r2` | `2b22e8c` |
+| `mod-plugin-push-classify-hardening` | `fc62951` |
+| `mod-plugin-classify-hardening-r2` | `20e5360` |
+| `mod-plugin-askpass-cmd-shape` | `77cd7a8` |
+| `mod-plugin-askpass-stderr-residual` | `f6386f2` |
+| `mod-plugin-lan-address-selection` | `ffe708d` |
+| `mod-plugin-askpass-temp-hygiene` | `283a128` |
+| `mod-plugin-askpass-error-surface` | `21b2a34` |
+| `mod-plugin-remote-autostart` | `473bf13` |
+| `mod-plugin-remote-accepting-surface` | `0a0d6fe`（登记行 `e4f7873` 由 Lead 代填） |
+| `mod-plugin-remote-dispose-race` | `67df5f7` |
+
+### 7.2 app 侧四模块（此前**未登记**，本批补上；每行都拆开「测试能证明」与「只有真机能确认」）
+
+| 模块 id | 一句话目的 | 状态 / 提交 | 回滚 | 依赖 / 证据 | 测试能证明的 | 只有真机能确认的（`unverified`） |
+| --- | --- | --- | --- | --- | --- | --- |
+| `mod-app-git-bridge-ready` | 冷启动桥接竞态：桥就绪改由**页面回 calling `host.onBridgeReady`** 证明（`window.__dshGitBridgeReady` 只说明脚本加载完），`gitRunner` 改 `awaitBridgeReady(remaining)` 不再轮询 `onPageEnd` 位上那一位；每次桥调用有界超时 + typed 中文失败态；运行失败显示「读不到」而非「0 个实例」 | 已提交 `6e92960`（verify 追记 `c0e64f6`） | `git revert 6e92960`（独立叶子） | `model/bridgeReadiness.ts`（纯模型）+ `model/bridgeReadiness` 的 45 例；app 套件 **3279/3279/0/0**；`validate-app` 8/8；构建 `build-20261126-195444.log`（`CompileArkTS` EXECUTED 1 min 41 s、0 条 `UP-TO-DATE … CompileArkTS`、`BUILD SUCCESSFUL in 2 min 24 s`），日志副本 `.tmp/build-mod-app-git-bridge-ready.out` | 就绪/超时状态机、`读不到 ≠ 空`、`E_BRIDGE_*` 路径、`.ets` 编译 | 真机上「冷启动不再出现 `FindObject Unknown object`」「同步仓库行不再永久读中」——**已在 21:36 新构建上部分观察，但用户随后断了无线调试，本行按 `unverified` 记** |
+| `mod-app-remote-page-pure` | 远程页只留 DSH 原生页面：删自造 chrome（传输分类/指纹/限定语/URL）与「发指令到这台电脑」面板，诊断移入 `bindSheet`（`ⓘ` 或长按 `↻` 600 ms），错误块整屏替换页面 | 已提交 `855def7`（verify 追记 `7d82dfb`） | `git revert 855def7` | `model/remotePageChrome.ts` + `remotePagePure.test.mjs`（29 例，含 D 组「被删文案绝迹」与 `G2`「标签只在 `TransportInfo()` 里」）；app 套件 **3308/3308/0/0**；构建 `build-20261126-210830.log`（`CompileArkTS` EXECUTED 1 min 19 s、0 条 UP-TO-DATE、`BUILD SUCCESSFUL`） | 四个表面状态、可点项集合、被删字符串绝迹、错误文案仍在、token 不被渲染 | 浮层布局/关闭手势、字形渲染、长按与 Web 层的手势仲裁、浮轨与 DSH 侧栏的遮挡——**截图已由 Lead 拍到「只有 `‹`/`↻`/`ⓘ`」，但交互仍 `unverified`** |
+| `mod-app-settings-summary-resolve` | 设置四行摘要永久「读取中…」的根因：**按值 `@Builder` 不随 `@State` 重建**（同 §15.6.1 旧疤）。改为真组件 `MenuSummaryRow`（`@Prop summary`/`@Prop retryable`）+ 纯模型 `summaryResolve.ts`；`bootstrap()` 补 `.catch`；每行必有终态，失败可轻点重试 | 已提交 `762cf44`（verify 追记 `7d82dfb`/`e7a10a8` 段） | `git revert 762cf44` | 守卫 `settingsSummaryResolve.test.mjs` S-01…S-04：**S-01/S-04 对修复前的 `Settings.ets` 实测为红**（`.tmp/gates-sr-prefix-guard.out`，controlled swap，恢复后 SHA-256 一致）；app 套件 **3317/3317/0/0** 两次；构建 `CompileArkTS` EXECUTED 58 s、`BUILD SUCCESSFUL` | 绑定形状（真组件 `@Prop`，无参数 `@Builder`）、同源 resolver、终态穷举、`.catch` 必在 | 真机上 13 s/30 s 后两行是否真的落成「值 / 读不到·轻点重试」——**设备已不可用，`unverified`** |
+| `mod-repo-overlay-hygiene` | 「构建会弄脏仓库」的真因：仓库**跟踪了 6 个 hvigor ohosTest 中间产物**（每次构建删了重写 ⇒ 固定 6 条 `D`），加 5 个 overlay 派生物入 ignore 并与 `GENERATED_PATHS` 对齐；`overlay.mjs` 备份改原子写、`restore` 按 manifest 逐字节还原、manifest 丢失时拒绝假装干净 | 已提交 `b4a7e5b`（Lead 补 `git rm -r --cached`；verify 追记 `e7a10a8` 段 L） | `git revert b4a7e5b`（独立叶子）+ 恢复索引跟踪若需回退 | 守卫 `overlayHygiene.test.mjs` 7/7（apply→status→restore 逐字节、apply 后硬杀、拷贝中被终止、manifest 被删、每条生成路径已入库或被忽略）；**独立实测**：干净克隆 `b4a7e5b` → `git ls-files entry/.test` = 0 → clone 内跑完整 `build-harmony.ps1` → `BUILD SUCCESSFUL` → `git status --porcelain` **0 行**（`.tmp/gates-lead-hygiene-clone-buildlog.out` 111,564 B、`.tmp/gates-lead-hygiene-clone-status.out` 44 B） | 构建后仓库是否干净（已在干净克隆里实测）、overlay 逐字节还原、中断可恢复、绑定一致性 | 无（本模块不需要设备） |
+### 7.3 2026-11-27 夜间续批：插件侧四条残留收口
+
+| 模块 id | 一句话目的 | 状态 / 提交 | 回滚 | 依赖 / 证据 | 测试能证明的 | 只有真机能确认的（`unverified`） |
+| --- | --- | --- | --- | --- | --- | --- |
+| `mod-plugin-dispose-hygiene-residuals` | 收 `REVIEW-b11-today` §4 的四条残留，**四条全部 DONE，没有一条被丢弃**：① **`accepting` 的监听失败通道**——读 state 时对 `handle.lastError` 做一次存活判定，**只认监听作用域**的那一行（`listener.ts` 的 `server.on('error')` 写的那一行，`LF-4` 钉住该约定）；命中即 `accepting=false`、`listen=null`、typed 原因上屏、**恰好 close 一次**（端口释放）、`enabled` 回写 false，且 `start()` 真能重新起；业务级 lastError（代理/上游/鉴权）**不**翻转（`LF-2` 负向对照）；中文行 `lean.remote.listener-failed` 带 `{code}`/下一步（`LF-3` 走真实 `dist/client.js` 渲染）。② **askpass 兜底边角**（修，不丢）：先锚定疑问词（`Password`/`Passphrase` 先于 `Username`），旧子串规则退为兜底；`sameParent` 兜底**封顶两次回答**——修前 `USR→TOK→TOK`、`Password for '…sername…'` 答成用户名（E-1/E-2 实测红）。③ **witness capture 泄露真登录名**：生成器不再读 env/系统身份（固定 `witness-user`），canonical capture 重新生成（`.tmp/gates-askpass-witness.out` 1,946 B，全合成）；守卫只存真实登录名的 SHA-256，扫生成器源码 + 一次真实生成 + canonical capture（WHO-1/2/3）。④ **`saveSettings` 触发停止后 `enabled` 仍为 true**：该路径改 `stopInternal(true)` 提交句柄回写（`dispose` 仍 `false`，`lanSelection` L-12 不动仍绿），并断言 `autoStart` 不被波及、不出现第二个监听 | **待 Lead 提交**（本行哈希待填） | 提交前回滚 = 撤销 `src/remote/{service,types}.ts`、`src/engine/git.ts`、`src/client.js` 与两份 locale 的增量、删除四个新测试、还原 `test/{askpass-counter-reset,locale}.test.mjs` 的 retarget 与 3 份 dist；提交后 `git revert <hash>` | 新增 **12 例**（listener 4 / fallback 4 / save-stop 1 / witness 3）；插件套件 **1066 / 1064 / 0 / 2** 两次；`dist` 与新鲜 tsc 一致 76 文件 0 mismatch；**失败先红后绿**：`.tmp/gates-dr2-prefix-newtests.out`（15,616 B，LF-1/2/3 + E-1/E-2 + SS-1 红）→ `.tmp/gates-dr2-newtests-after.out`（2,484 B，全绿） | 注入监听级错误 ⇒ `accepting=false` + typed 原因 + 恰好一次 close + `enabled` 回写 + 可重启；业务错误不翻转；中文行逐字渲染；兜底封顶两次；疑问词锚定双向；`stopInternal(true)` 不动 `autoStart`；witness 生成器与 capture 不含真登录名哈希；两套件全绿 | Windows/Node 是否真会在**绑定丢失 / 套接字被 OS 关闭**时发出 server 级 `'error'` 以及多快；真平板面板是否在重启前后如实显示该行；真实 `cmd`+git 的第三次问询形态；`close()` 后端口释放的真实时序；真实局域网错误循环下的行为——**全 `unverified`（设备已断）** |
+
+> **witness 历史文件说明（2026-11-27）**：`.tmp/stderr-lab/**` 与 `.tmp/gates-stderr-*` 等**未跟踪的历史证据**里仍含真实登录名，本批**故意不改写**（改写证据比留证更糟）；生成器已经不可能再产出它，任何人**不得**把那些文件贴进 issue。本批只保证"以后不会再产生"。
+
+### 7.4 2026-11-27 夜间续批：app 侧「待上传」定性结论
+
+| 模块 id | 一句话目的 | 状态 / 提交 | 回滚 | 依赖 / 证据 | 测试能证明的 | 只有真机能确认的（`unverified`） |
+| --- | --- | --- | --- | --- | --- | --- |
+| `mod-app-pending-upload-diagnosis` | 「本地改动 12 处（本机未上传·待上传）」的定性结论：**（b）真·卡住的队列 +（c）次要的计数口径缺陷**。根因链：计数取自**整个工作树**（`git-bridge.js` `report.changedCount = status.changed.length`，`statusMatrix` 里非 `(1,1,1)` 的行）→ 但修复前的周期**只提交"union 重写过的字节"**（`syncCycle.ts` `union.text !== read.local` 才进 `changedPaths`），而 app 是**先写工作树再同步**（`recordWriter` → `timelineWriteStore.append` → 周期），union 算出来的字节与本地已经一样 ⇒ 提交集合为空 ⇒ 这些字节永远到不了远端，而那一行永远写着「待上传」。次要缺陷：计数**不区分"本机可上传"与"本机永远传不了"**（外来设备目录、`.tmp-` 残留），所以用户看不出哪部分是在骗他。修法：新增纯模型 `model/syncUploadScope.ts`（`isUploadableTimelinePath` / `isTempLeftoverPath` / `partitionDirtyPaths` / `notUploadableCount` / `stagePathsForCycle` / `daysInStageSet`）；周期第 5 步的暂存集合 = union 重写 ∪ **git 实测脏行 ∩ 可上传 ∩ 本次 days**（新增可选第 8 参 `dirtyPathsOf`，问 git 而不是盲加，避免空提交）；文案按三段（全可上传 / 部分 / 全都不可上传）分开说，**绝不使用云端/已上传/已同步**，计数**永不为了好看而减少** | **待 Lead 提交**（本行哈希待填） | 提交前回滚 = 删除 `model/syncUploadScope.ts` 与 `test/pendingUploadDiagnosis.test.mjs`、撤销 `syncCycle.ts` / `syncError.ts` / `GitSyncService.ets` / `syncProtocolStore.ets` 的增量与构建产物；提交后 `git revert <hash>` | `test/pendingUploadDiagnosis.test.mjs` 7 例（PUD-01…07）；app 套件 **3331/3331/0/0** 两次；`validate-app` 8/8；构建 `CompileArkTS` EXECUTED 35 s 150 ms、0 条 UP-TO-DATE、`BUILD SUCCESSFUL in 51 s 100 ms`（`.tmp/build-mod-app-pending-upload-diagnosis.out` 101,908 B） | ① 计数来自 `statusMatrix`，gitignore/untracked 不会虚增（真 git + 真 `.gitignore` 探针：4→4→2）；② 本机写下的当日文件修前**不进**提交集合、修后**进**（mutation 证明：把第 5 步改回旧写法 ⇒ PUD-01/02/03 变红）；③ 没有提交就不会自愈；④ 外来/残留路径仍被计数并被点名；⑤ 该行永不宣称云端已有；⑥ 没有脏路径来源时退化为旧行为而不是说谎 | 平板那 12 条到底是哪些路径（未看过）；一次成功周期后是否真的落成 0 或"剩余 N 处不可上传"且设置页会刷新；保存路径里 `callBridge('status')` 在真机上是否解析到对的 service 实例；每周期多一次 `statusMatrix` 遍历会不会让保存变慢；真实推送是否真的把这些字节送达、PC/插件读侧是否原样接受 `summary.json`/`media`——**全部 `unverified`（设备已断）** |
+
+
+### 7.5 2026-11-27 夜间续批：远程页图标轨不再压住页面内容
+
+| 模块 id | 一句话目的 | 状态 / 提交 | 回滚 | 依赖 / 证据 | 测试能证明的 | 只有真机能确认的（`unverified`） |
+| --- | --- | --- | --- | --- | --- | --- |
+| `mod-app-remote-glyph-rail-polish` | `‹`/`↻`/`ⓘ` 浮轨压住了 DSH 页面正文（真机截图上可见）。修法**模型先行**：新增纯模型 `model/glyphRailLayout.ts`（输入视口 + 安全区 + 字形尺寸/间距/数量 ⇒ `railRect` / `contentRect` / `gutter` / `railVisible`），**预留左侧沟槽**：轨道占 `[safeLeft+gap, +glyphSize]`，页面从再右一个 gap 开始，**DSH 页面自己的布局整体右移**——所以页面任何部分都不可能落在轨道下面；窄视口阈值 **480vp**（低于此：字形压到 44、gap 压到 4 ⇒ 沟槽 52vp）；六类退化一律 typed（`E_VIEWPORT_INVALID` / `E_SAFE_AREA_INVALID` / `E_CONTENT_TOO_NARROW` / `E_CONTENT_TOO_SHORT` / `E_RAIL_TOO_TALL`，`ok=false` + `railVisible=false`），**"静默重叠"不可表达**。`.ets` 只做适配：`RemoteControl.ets` 的轨道尺寸/位置/间距、Web 盒子的宽高与 `position` 全部取自模型，`onAreaChange → applyArea` 送视口，`railVisible` 门控轨道；页面表面（page/error/empty/loading）、错误块、`bindSheet` 诊断、字形常量一字未改 | **待 Lead 提交**（本行哈希待填） | 提交前回滚 = 删除 `model/glyphRailLayout.ts` 与 `tools/test/glyphRailLayout.test.mjs`、把 `RemoteControl.ets` 恢复为 `100%×100%` Web + 硬编码轨道（不删任何既有断言）；提交后 `git revert <hash>` | `tools/test/glyphRailLayout.test.mjs` **38 例**（23 行真机/边界表 + 密集扫描 + `rectsIntersect` 真值表 + 源码守卫 F1–F5）；app 套件 **3369/3369/0/0** 两次（473,846 / 473,802 B）；`validate-app` 8/8（402 B）；**源码守卫对修复前的页面实测为红**：`.tmp\gates-gr-prefix-fail.out` 60,492 B，F1 未 import 模型 / F2 写死数字 / F3 Web 用 `100%` / F4 无 `onAreaChange` 四条红，改后 38/38 绿；构建 `build-20261127-001406.log`（`CompileArkTS` EXECUTED 6 s 272 ms、**0** 条 UP-TO-DATE CompileArkTS、`BUILD SUCCESSFUL in 22 s 292 ms`，控制台 `✓ 产物验收通过` + `applied=false`），副本 101,904 B | 每一行表值的几何不相交、轨道 ⊆ 安全区、字形 ≥ 44vp、页面 ≥ 240×160vp 或返回 typed 退化、页面右移一个 gap、全部尺寸来自模型（无硬编码）、未新增 chrome、ArkTS 真编译 | **真机观感全部 `unverified`**：(a) 轨道落在页面背景的左侧条内、任何会话文字都不在轨道下；(b) DSH 页面变窄后是否正常重排（自身响应式、滚动条、弹层、软键盘）；(c) 进入页面首帧轨道必须出现（不能一直隐藏）、横竖屏切换后轨道重新居中且 Web 重新量；(d) ArkUI 是否真的把页面放进安全区（本模块按 insets=0 传，若实际是贴边就要把 inset 传进去，`railLayout()` 一行改动）；(e) 44–48vp 字形是否仍好点、`↻` 长按是否仍能开诊断浮层 |
+
 > **真机验收断言（尚未通过；重装前保持 `unverified`）**：① 平板打开已配对地址的 `/` 应看到**电脑自己的 DSH 页面**（品牌、侧栏、设置页都在），且能发一条消息收到回复（证明 `/api` 不被 403、WS 隧道通）；② 电脑上**没在跑 DSH**（或插件没拿到上游身份）时，平板应看到**中文错误页**并写明下一步，不得是 401 英文页或空白页；③ 断开电脑侧后重连，不需要在平板上加任何新字段、新按钮或重配对；④ 在电脑上把 DSH 页面关掉再打开，平板刷新一次即可继续用（无需重启插件）。以上是**验收标准**，不是已观察结果。
