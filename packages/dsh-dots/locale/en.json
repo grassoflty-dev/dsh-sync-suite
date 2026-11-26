@@ -85,5 +85,6 @@
   "lean.remote.accepting": "Accepting connections ({addr})",
   "lean.remote.autostarted": "Restored automatically at startup",
   "lean.remote.stopped": "Not started",
-  "lean.remote.start.failed": "Listener failed to start"
+  "lean.remote.start.failed": "Listener failed to start",
+  "lean.remote.listener-failed": "Listener failed ({code}): {message}. The panel no longer claims it is accepting. Click “Stop accepting connections”, then “Start accepting connections”; if it keeps failing, check whether another program took the port or the network adapter is still connected."
 }

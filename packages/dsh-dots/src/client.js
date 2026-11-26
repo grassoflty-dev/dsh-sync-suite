@@ -150,7 +150,8 @@ window.__ModuleLoader__.load({
       "lean.remote.accepting": "正在接受连接（{addr}）",
       "lean.remote.autostarted": "已在启动时自动恢复",
       "lean.remote.stopped": "未启动",
-      "lean.remote.start.failed": "监听启动失败"
+      "lean.remote.start.failed": "监听启动失败",
+      "lean.remote.listener-failed": "监听已失效（{code}）：{message}。面板不再显示「正在接受连接」。请点「停止接受连接」再点「开始接受连接」；若反复失败，请检查端口是否已被别的程序占用、网卡是否还连着。"
     }
 
     const en = {
@@ -264,7 +265,8 @@ window.__ModuleLoader__.load({
       "lean.remote.accepting": "Accepting connections ({addr})",
       "lean.remote.autostarted": "Restored automatically at startup",
       "lean.remote.stopped": "Not started",
-      "lean.remote.start.failed": "Listener failed to start"
+      "lean.remote.start.failed": "Listener failed to start",
+      "lean.remote.listener-failed": "Listener failed ({code}): {message}. The panel no longer claims it is accepting. Click “Stop accepting connections”, then “Start accepting connections”; if it keeps failing, check whether another program took the port or the network adapter is still connected."
     }
 
     const DICTS = { zh: zh, en: en }
@@ -1169,6 +1171,12 @@ window.__ModuleLoader__.load({
       const [accepting, setAccepting] = React.useState(null)
       /** 活真相同源的 `host:port`（`settings.listen`）；未在接为空串。 */
       const [acceptAddr, setAcceptAddr] = React.useState('')
+      /**
+       * mod-plugin-dispose-hygiene-residuals item 1：监听在启动**之后**失效的 typed 原因
+       * （引擎的 `status.listenerFailure`，只在句柄报到 server 级错误时出现）。
+       * 它不为 null 时面板必须说出「监听已失效（code）」并给下一步——不能只留一个字段。
+       */
+      const [listenerFailure, setListenerFailure] = React.useState(null)
       const [probe, setProbe] = React.useState(null)
       /**
        * mod-plugin-lan-address-selection：状态里那条「广播哪个地址、为什么」的中文说明
@@ -1205,6 +1213,13 @@ window.__ModuleLoader__.load({
           setAccepting(settings.accepting === true)
           setAcceptAddr(typeof settings.listen === 'string' ? settings.listen : '')
         }
+        // 监听失败通道：typed 原因由引擎给（server 级错误才出现），前端只负责说出来。
+        const failed = status.listenerFailure
+        setListenerFailure(
+          failed && typeof failed === 'object' && typeof failed.code === 'string'
+            ? { code: failed.code, message: typeof failed.message === 'string' ? failed.message : '' }
+            : null
+        )
       }
 
       async function refreshProvision(which) {
@@ -1365,6 +1380,8 @@ window.__ModuleLoader__.load({
        */
       function doStart() {
         runTask('start', async function () {
+          // 重试 = 运维已经动手：旧的监听事故不再挂在面板上（新状态回来后再按引擎说）。
+          setListenerFailure(null)
           const result = await rpcCall('remoteStart', {})
           if (!result.ok) {
             setFailure(localizeError(tr, result.error).message)
@@ -1476,6 +1493,13 @@ window.__ModuleLoader__.load({
         h('div', { 'data-lean': 'remote-running', style: S.hint },
           stopped ? tr('lean.remote.stopped') : tr('lean.remote.started')
         ),
+        // mod-plugin-dispose-hygiene-residuals item 1：监听在启动之后死掉时，必须有一句中文
+        // 说明它已经不在接（含 typed code、原因与下一步），而不是继续显示「正在接受连接」。
+        // 这句话与 accepting 互斥：失败态下 accepting 必为 false，于是上面那一句不会渲染。
+        listenerFailure
+          ? h('div', { 'data-lean': 'remote-listener-failed', style: S.hint },
+              tr('lean.remote.listener-failed', { code: listenerFailure.code, message: listenerFailure.message }))
+          : null,
         // mod-plugin-remote-accepting-surface：**只有真的在接**才说「正在接受连接（addr:port）」。
         // 判据是引擎派生的 `accepting`（= 监听句柄存在）与同源的 `listen`，
         // **绝不**用 `enabled`（保存的偏好 / 句柄回声）冒充活真相。

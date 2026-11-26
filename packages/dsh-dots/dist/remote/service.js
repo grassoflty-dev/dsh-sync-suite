@@ -406,7 +406,15 @@ export function createRemoteService(options = {}) {
     const now = options.now ?? (() => new Date());
     const sessionCookieName = options.sessionCookieName ?? REMOTE_SESSION_COOKIE;
     const store = new RemoteStore({ homeDir: options.homeDir });
-    const runtime = { handle: null, startedAt: null, lastError: null, probe: null, rejected: 0, startedBy: null };
+    const runtime = {
+        handle: null,
+        startedAt: null,
+        lastError: null,
+        listenerFailure: null,
+        probe: null,
+        rejected: 0,
+        startedBy: null,
+    };
     let upstream = null;
     /** 正在进行的换身份 Promise（single-flight）：并发调用共享同一个，绝不并行换两次。 */
     let minting = null;
@@ -768,27 +776,57 @@ export function createRemoteService(options = {}) {
         return `实际绑定并广播的是 ${handle.address}（以监听句柄为准）；设置那边选出的是 ${expected}：${selection.explain}`;
     }
     /**
+     * **监听失败通道的判据**（mod-plugin-dispose-hygiene-residuals item 1）。
+     *
+     * 句柄的 `lastError` 是 listener 的运行期错误环，成功请求之外的一切失败都会写它
+     * （代理请求 / 上游 / 鉴权 / 升级握手），所以**不能**把"有 lastError"当成"监听死了"。
+     * 唯一能区分 server 级（= 监听本身）错误的东西是 listener 写下的 scope：`server.on('error')`
+     * 那条路径固定用「监听 <addr>:<port>」开头（`listener.ts`）。本层按这个 scope 判，
+     * 业务级错误一律不参与（`test/listener-failure-channel.test.mjs` LF-2/LF-4 双向钉住）。
+     *
+     * 覆盖什么：server 级 error（bind 丢失、OS 关掉监听 socket、accept 失败等能冒到
+     * `server.on('error')` 的形态）。**不覆盖**：内核静默丢弃监听、且不产生任何 error 事件的形态
+     * —— 那种情况下没有任何本地信号可读，本层不会凭空猜。
+     */
+    function listenerFatal(handle) {
+        if (handle === null)
+            return null;
+        const last = handle.lastError ?? null;
+        if (last === null || typeof last !== 'object')
+            return null;
+        if (typeof last.message !== 'string' || !/^监听 \S+失败（/.test(last.message))
+            return null;
+        return { code: last.code, message: last.message };
+    }
+    /**
      * **活真相的唯一取值口**（mod-plugin-remote-accepting-surface）。
      *
      * `status.running` / `status.listen` / `status.boundAddress` 与设置视图的
      * `settings.accepting` / `settings.listen` **全部**出自这一个函数，判据只有一条：
-     * `runtime.handle !== null`。谁都不许再从 `enabled`（保存的偏好 / 句柄回声）推断"此刻在接"，
+     * `runtime.handle !== null` **且** 句柄没有被记录成监听级失败
+     * （mod-plugin-dispose-hygiene-residuals item 1：死监听不许再自称"正在接受连接"）。
+     * 谁都不许再从 `enabled`（保存的偏好 / 句柄回声）推断"此刻在接"，
      * 也不许在前端另拼一个 `host:port`——那正是本模块要消灭的第二口径。
      */
     function listenerLive() {
         const handle = runtime.handle;
+        const fatal = listenerFatal(handle);
+        const alive = handle !== null && fatal === null;
         return {
             handle,
-            accepting: handle !== null,
-            listen: handle === null ? null : `${handle.address}:${String(handle.port)}`,
-            boundAddress: handle === null ? null : handle.address,
+            accepting: alive,
+            listen: alive && handle !== null ? `${handle.address}:${String(handle.port)}` : null,
+            boundAddress: alive && handle !== null ? handle.address : null,
+            // 句柄还在但已判死：先报这次的死因；句柄已收尸：报留下的事故记录。
+            listenerFailure: fatal !== null ? fatal : handle === null ? runtime.listenerFailure : null,
         };
     }
     function status() {
         const settings = readSettings();
         const tokenRecord = store.readToken();
         const live = listenerLive();
-        const handle = live.handle;
+        // 监听被判死时，句柄本身不再参与任何"在接"的派生（统计/URL/TLS 一律按没有句柄处理）。
+        const handle = live.accepting ? live.handle : null;
         const stats = handle === null ? { active: 0, total: 0, rejected: 0 } : handle.stats();
         const token = readTokenValue();
         const urls = [];
@@ -815,6 +853,7 @@ export function createRemoteService(options = {}) {
             startedAt: runtime.startedAt,
             startedBy: handle === null ? null : runtime.startedBy,
             lastError: runtime.lastError,
+            listenerFailure: live.listenerFailure,
             connections: { active: stats.active, total: stats.total },
             rejected: runtime.rejected + stats.rejected,
             token: { exists: token !== null, masked: token === null ? '' : maskToken(token), createdAt: tokenRecord?.createdAt ?? null },
@@ -874,12 +913,24 @@ export function createRemoteService(options = {}) {
             /* 写盘失败只影响下一次自动启动，不影响本次监听 */
         }
     }
-    /** 停监听：`persistEnabled=false` 用于 `dispose()`（进程退出不是"用户点了停止"）。 */
-    async function stopInternal(persistEnabled) {
+    /**
+     * 停监听。
+     *
+     * `commitEcho`（原 `persistEnabled`）决定要不要把 `enabled` 这个**句柄回声**写成 false：
+     *   - `stop()`、`saveSettings` 触发的换方式/换端口、死监听收尸 ⇒ true：句柄真的被摘掉了，
+     *     文件必须与 `running:false` 一致（mod-plugin-dispose-hygiene-residuals item 4）。
+     *     写回声**不会**清掉自动启动意图（意图在 `autoStart`），旧理由已随意图搬家失效；
+     *   - `dispose()` ⇒ false：进程退出/插件卸载不是一次操作，且这个对象马上被丢弃。
+     *
+     * `failure` 只由死监听收尸传入（item 1）：它是"为什么句柄被摘掉"的 typed 记录；
+     * `stop()` 传 null（用户显式停止 = 这次事故翻篇）。
+     */
+    async function stopInternal(commitEcho, failure = null) {
         const handle = runtime.handle;
         runtime.handle = null;
         runtime.startedAt = null;
         runtime.startedBy = null;
+        runtime.listenerFailure = failure;
         upstream = null;
         if (refreshTimer !== null) {
             clearInterval(refreshTimer);
@@ -893,7 +944,7 @@ export function createRemoteService(options = {}) {
                 /* 关闭失败不改变"已停止"这一事实：句柄已摘除 */
             }
         }
-        if (persistEnabled && handle !== null)
+        if (commitEcho && handle !== null)
             commitEnabledFlag();
         return status();
     }
@@ -902,6 +953,25 @@ export function createRemoteService(options = {}) {
         // 用户刻意关掉的监听"复活"（本模块的诚实半边）。`dispose()` 不走这里。
         persistIntent(false);
         return stopInternal(true);
+    }
+    /**
+     * **死监听收尸**（mod-plugin-dispose-hygiene-residuals item 1）。
+     *
+     * 只在读/启动路径上调用（`getState` / `start` / `autoStart`），没有后台巡检定时器：
+     * 本层不新增任何常驻资源。收尸动作 = 摘句柄 → 关句柄（端口不再被占）→ 把 typed 原因
+     * 留在 `runtime.listenerFailure`，下一次成功启动或显式停止才清掉。
+     *
+     * 返回 true 表示"确实收了一具尸体"（调用方可以继续走启动流程）。
+     */
+    async function reapDeadListener() {
+        const handle = runtime.handle;
+        if (handle === null)
+            return false;
+        const failure = listenerFatal(handle);
+        if (failure === null)
+            return false;
+        await stopInternal(true, failure);
+        return true;
     }
     /**
      * 起监听。`origin` 只决定 `status.startedBy` 与"要不要记意图"：
@@ -919,7 +989,8 @@ export function createRemoteService(options = {}) {
             return status();
         if (starting)
             return status();
-        if (runtime.handle !== null)
+        // 句柄在：活着就幂等返回；监听级失败（item 1）则先收尸，让这次 start 真的能重起。
+        if (runtime.handle !== null && !(await reapDeadListener()))
             return status();
         // 手动发起 = 用户在表达"我要它开着"：先记意图再起，起不来也不抹掉这份表达。
         if (origin === 'manual')
@@ -1023,6 +1094,8 @@ export function createRemoteService(options = {}) {
             runtime.startedAt = now().toISOString();
             runtime.startedBy = origin;
             runtime.lastError = null;
+            // 一次成功启动把上一次的监听事故翻篇（item 1：失败原因只活到下一次成功启动）。
+            runtime.listenerFailure = null;
             // `enabled` 是句柄回声：起成功就写 true，文件不再出现"写着 false 其实在接连接"。
             commitEnabledFlag();
             // 上游会话 cookie 有 TTL：后台定期刷新，避免"某天突然全 401"。
@@ -1065,7 +1138,8 @@ export function createRemoteService(options = {}) {
         // 已卸载的服务：激活入口什么也不做（评审 P1-1 的第三道口）。
         if (disposed)
             return status();
-        if (runtime.handle !== null)
+        // 句柄在：活着就什么都不做；是死句柄就先收尸，再按意图决定要不要重起（item 1）。
+        if (runtime.handle !== null && !(await reapDeadListener()))
             return status();
         const settings = readSettings();
         if (settings.autoStart !== true)
@@ -1083,6 +1157,8 @@ export function createRemoteService(options = {}) {
     async function getState() {
         // 先让路由缓存落地，状态行才可能给出"默认路由地址"这一真因（同步出口只读缓存）。
         await routeAddressForResolution();
+        // 面板刷新是"读"路径：顺手收掉已经判死的句柄，于是下一帧的 accepting 与端口占用都符合事实。
+        await reapDeadListener();
         const live = listenerLive();
         return { settings: toSettingsView(readSettings(), live), status: status(), modes: listModes() };
     }
@@ -1113,9 +1189,12 @@ export function createRemoteService(options = {}) {
         store.writeSettings(next);
         // 换方式/换端口：先停掉旧监听，避免出现"状态显示 A、实际监听 B"。
         const modeChanged = next.mode !== previous.mode || next.port !== previous.port || next.lanAddress !== previous.lanAddress;
-        // 这里不是"用户点了停止"：不写 `enabled`，否则改个端口就会把自动启动偏好清掉。
+        // mod-plugin-dispose-hygiene-residuals item 4：这里虽然**不是**"用户点了停止"，但句柄真的被摘掉了，
+        // 所以 `enabled`（句柄回声）必须跟着写 false —— 否则磁盘写着 `enabled:true` 而 `running:false`，
+        // 文件与事实相反。旧理由（"写 enabled 会清掉自动启动偏好"）在意图搬到 `autoStart` 之后已不成立：
+        // 这条路径**不**碰 `persistIntent`，改端口不会清掉自动启动意图（SS-1 钉住）。
         if (modeChanged && runtime.handle !== null)
-            await stopInternal(false);
+            await stopInternal(true);
         if (modeChanged)
             runtime.probe = null;
         // 原 `if (next.enabled && runtime.handle === null) await start()` 已删除

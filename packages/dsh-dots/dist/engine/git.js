@@ -397,9 +397,14 @@ const ASKPASS_CMD = [
  * token，Gitee 回 “The token username invalid” 并 403 —— 这就是真实推送一直失败的那个根因。
  *
  * 现在的规则（只看「这是不是同一次 git 调用」）：
- *   1. 提示文本可判 → 直接按提示答（唯一正确路径，兜底根本不参与）；
- *   2. 同一次调用内继续计数：父进程相同，**或** 计数文件够新且上一次调用显然还没问完
- *      （一次 git 调用最多问两项：用户名 + 口令）；
+ *   1. 提示文本可判 → 直接按提示答（唯一正确路径，兜底根本不参与）；判定顺序是**先锚定问句词**
+ *      （`Password for …` / `Username for …`），再落回子串规则。锚定这一步是必须的：
+ *      主机名/路径里也可能出现 `sername`（例如 `https://my-sername@gitee.com`），只按子串判会把
+ *      **口令问句**答成用户名；而反过来把 `/assword/` 提到 `/sername/` 前面，又会把用户名问句
+ *      答成 token —— 两个方向都错过，所以只能按问句词判。
+ *   2. 同一次调用内继续计数：父进程相同，**或** 计数文件够新，**且上一次调用还没问完**
+ *      （一次 git 调用最多问两项：用户名 + 口令）。两个证据都要过「没问完」这道门：
+ *      只按父进程相同就继承，会让第 3 次无提示问询（父进程稳定的调用器）把 token 答给用户名问句。
  *   3. 否则一律从 0 重新开始 —— 新一次 git 调用永远先答用户名，绝不把 token 答给用户名问句。
  *
  * 为什么 (2) 需要「没问完」这一条而不是只用父进程：实测 Windows 上 git 每次 askpass 都由一个
@@ -421,13 +426,18 @@ const ASKPASS_MJS = [
     '}',
     '',
     '// 1) 有提示文本就按提示判（唯一正确路径）：用户名问句答用户名，口令问句答 token。',
+    '//    先按行首的问句词判：主机名/路径里的 sername / assword 不得改变问句的性质。',
+    'const question = prompt.trimStart().toLowerCase()',
+    "if (/^(password|passphrase)\\b/.test(question)) emit(token)",
+    "if (/^(username|user\\s*name)\\b/.test(question)) emit(user)",
     "if (/sername/i.test(prompt)) emit(user)",
     "if (/assword|assphrase/i.test(prompt)) emit(token)",
     '',
     '// 2) 拿不到提示文本时的兜底：一次 git 调用内先用户名、后 token，绝不跨调用沿用。',
-    '//    判定「同一次调用」的两个证据：父进程相同，或者计数文件够新且上一次调用还没问完',
-    '//    （一次 git 调用最多问两项）。父进程单独不够：Windows 上 git 每次都经新的 cmd.exe 拉起，',
-    '//    同一次调用内两次问询的父进程 pid 不同（实测），所以再加「没问完」这一条。',
+    '//    判定「同一次调用」的两个证据：父进程相同，或者计数文件够新；两者都必须先过',
+    '//    「上一次没问满两项」这道门（一次 git 调用最多问两项）。父进程单独不够：Windows 上',
+    '//    git 每次都经新的 cmd.exe 拉起，同一次调用内两次问询的父进程 pid 不同（实测）；',
+    '//    反过来，只看父进程相同就继承会让稳定的调用器在第 3 次把 token 答给用户名问句。',
     "const counterFile = process.env.DSH_GIT_SYNC_ASKPASS_COUNTER ?? ''",
     'const WINDOW_MS = 3000',
     'const ASKS_PER_INVOCATION = 2',
@@ -441,7 +451,7 @@ const ASKPASS_MJS = [
     '      const age = now - Number(state.at)',
     '      const fresh = Number.isFinite(age) && age >= 0 && age <= WINDOW_MS',
     '      const pending = !(Number(state.count) >= ASKS_PER_INVOCATION)',
-    '      if (sameParent || (fresh && pending)) count = Number.parseInt(String(state.count), 10) || 0',
+    '      if (pending && (sameParent || fresh)) count = Number.parseInt(String(state.count), 10) || 0',
     '    }',
     '  } catch (error) {',
     '    count = 0 // 旧格式或半截文件一律按新调用处理：宁可先答用户名，绝不继承 token 状态',

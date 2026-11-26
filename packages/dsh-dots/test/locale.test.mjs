@@ -115,7 +115,7 @@ test('shipped 面板的文案 key 双份都在；dormant 旧面板文案已删�
     'error.badResponse', 'error.unknown',
     'lean.repo.url', 'lean.repo.token', 'lean.actions.save',
     'lean.remote.qr.show', 'lean.remote.copy', 'lean.remote.generate', 'lean.remote.selfcheck',
-    'lean.remote.autostarted', 'lean.remote.accepting',
+    'lean.remote.autostarted', 'lean.remote.accepting', 'lean.remote.listener-failed',
     'lean.status.failed', 'lean.status.synced', 'lean.status.never'
   ]
   for (const [lang, dict] of [['en', en], ['zh', zh]]) {
@@ -132,8 +132,10 @@ test('shipped 面板的文案 key 双份都在；dormant 旧面板文案已删�
   // mod-plugin-remote-autostart 新增 1 个 `lean.remote.autostarted`（自动恢复那一句）→ 84；
   // mod-plugin-remote-accepting-surface 新增 1 个 `lean.remote.accepting`
   // （活真相那一句「正在接受连接（{addr}）」，带一个 `{addr}` 占位符）→ 85。
+  // mod-plugin-dispose-hygiene-residuals 新增 1 个 `lean.remote.listener-failed`
+  // （监听在启动后死掉那一句，带 `{code}` 与 `{message}` 两个占位符）→ **86**。
   // 精确计数同时阻止整批复活与误删；新 key 还必须在上面逐条点名，改名会当场失败。
-  assert.equal(Object.keys(en).length, 85, `locale 应恰好 85 个 shipped key，实际 ${Object.keys(en).length}`)
+  assert.equal(Object.keys(en).length, 86, `locale 应恰好 86 个 shipped key，实际 ${Object.keys(en).length}`)
   // 点名（不靠计数代替）：这一句两边都必须真的有翻译，照抄英文也算没做。
   assert.equal(typeof en['lean.remote.autostarted'], 'string')
   assert.equal(typeof zh['lean.remote.autostarted'], 'string')
@@ -145,6 +147,15 @@ test('shipped 面板的文案 key 双份都在；dormant 旧面板文案已删�
     assert.ok(dict['lean.remote.accepting'].includes('{addr}'), `${lang}.lean.remote.accepting 必须含 {addr} 占位符`)
   }
   assert.notEqual(en['lean.remote.accepting'], zh['lean.remote.accepting'], '中英文案必须各自翻译，不许照抄')
+  // 监听失败那一句（mod-plugin-dispose-hygiene-residuals item 1）：必须同时带 typed code 与原因
+  // （错误行只说"失败了"而不给 code，运维无法把面板与日志对上），并且必须给下一步动作。
+  for (const [lang, dict] of [['en', en], ['zh', zh]]) {
+    assert.equal(typeof dict['lean.remote.listener-failed'], 'string', `${lang} 缺少 lean.remote.listener-failed`)
+    assert.ok(dict['lean.remote.listener-failed'].includes('{code}'), `${lang}.lean.remote.listener-failed 必须含 {code} 占位符`)
+    assert.ok(dict['lean.remote.listener-failed'].includes('{message}'), `${lang}.lean.remote.listener-failed 必须含 {message} 占位符`)
+    assert.match(dict['lean.remote.listener-failed'], /接受连接|accepting connections/i, `${lang} 必须把下一步（停止/重新开始）说清楚`)
+  }
+  assert.notEqual(en['lean.remote.listener-failed'], zh['lean.remote.listener-failed'], '中英文案必须各自翻译，不许照抄')
 })
 
 test('src/client.js 内置字典与 locale JSON 完全一致（key 与文案）', () => {

@@ -259,6 +259,16 @@ export interface RemoteStatus {
   startedBy: 'auto' | 'manual' | null
   /** 启动失败原因（fail-closed 后保留给 UI 显示，不抛给插件启动）。 */
   lastError: { code: string; message: string } | null
+  /**
+   * **监听在 start 之后失效**的 typed 原因（mod-plugin-dispose-hygiene-residuals item 1）。
+   *
+   * 与 `lastError` 分开：`lastError` 讲"这次启动为什么没起来"或最近一次错误，
+   * 而本字段只表示"句柄已经不可信，`running`/`accepting` 必须为 false"。
+   * 触发条件：注入的监听句柄报出 **server 级**错误（listener 以「监听 <addr>:<port>」为 scope
+   * 记录的那一条）；业务级错误（代理/上游/鉴权）不会出现在这里。
+   * 面板必须为它渲染一句中文（含 code、原因与下一步），否则就是"有 typed 状态却没有可执行信息"。
+   */
+  listenerFailure: { code: string; message: string } | null
   connections: { active: number; total: number }
   /** 被限速/鉴权拒绝的累计次数。 */
   rejected: number

@@ -19,7 +19,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -114,8 +114,12 @@ test('C-2 负向对照：不复位计数（脏计数夹具）⇒ 命令 2 的第
   assert.equal(await ask(one.js, [], env1, dir), FAKE_USER)
   assert.equal(await ask(one.js, [], env1, dir), FAKE_TOKEN)
 
-  // **不复位**：把命令 2 的 env 直接用命令 1 的那一份（= 删掉 reset 之后的真实行为，
-  // 计数文件留在 `{ppid: 本进程, count: 2}`）。不 revert 源码，夹具就是"脏计数"本身。
+  // retarget（mod-plugin-dispose-hygiene-residuals item 2）：兜底现在**无论父进程是否相同**都
+  // 最多答两项 —— 问满两项后（count=2）第三次会自动从用户名重来，所以「问满两项后不复位」
+  // 不再是脏状态（那正是修好的安全门）。复位真正兜住的是**只问了一项就结束**的调用
+  // （git 失败/中途退出）：那个遗留的 count=1 会让下一条命令的第一次问询直接答 token。
+  // 这里把计数写回 1 来构造这个脏状态（等价于一次只问了一项的调用），断言强度不变。
+  await writeFile(one.counter, JSON.stringify({ ppid: process.pid, at: Date.now(), count: 1 }))
   const dirty = await ask(one.js, [], env1, dir)
   assert.equal(dirty, FAKE_TOKEN, '脏计数下命令 2 的第一次问询会答成 token —— 修前就是这个答案')
   assert.notEqual(dirty, FAKE_USER, '这必须是个错误答案，否则本对照为空')

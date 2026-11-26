@@ -85,5 +85,6 @@
   "lean.remote.accepting": "正在接受连接（{addr}）",
   "lean.remote.autostarted": "已在启动时自动恢复",
   "lean.remote.stopped": "未启动",
-  "lean.remote.start.failed": "监听启动失败"
+  "lean.remote.start.failed": "监听启动失败",
+  "lean.remote.listener-failed": "监听已失效（{code}）：{message}。面板不再显示「正在接受连接」。请点「停止接受连接」再点「开始接受连接」；若反复失败，请检查端口是否已被别的程序占用、网卡是否还连着。"
 }
