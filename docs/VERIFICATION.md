@@ -2389,3 +2389,23 @@ Gitee 上看得到 `main` 分支及对应提交时间；**除这四项外，本�
 **Lead 的判断更正（写进档案）**：我先前以「今晚没装过新 HAP」为依据否定「症状 B（汇总行与子页两套路径）」的存在。该依据当时成立，但**结论是错的** —— 修复装进设备后症状仍在，B 成立。已派 `mod-app-settings-summary-resolve`，验收标准：汇总行走**同一套**就绪状态机（结构性证明，不许再加定时器）、失败出 typed 文案 +「轻点本行重试」且**不需重启 App**、并加一条能抓住「一个能用一个卡死」的测试。
 
 **仍未验**：「重启 DSH 后自动恢复监听」（`autoStart=true` 已写入，需下一次重启才成立）；设置页三态与「读不到 ≠ 空」的失败分支（本轮只见到健康路径）。
+
+#### L. 2026-11-26 23:12 «构建会弄脏仓库» 已修并**独立实测**：干净克隆构建后 `git status` 为 0
+
+**根因**（不是「overlay 不还原」，我先前那个判断是错的，错在我于**构建进行中**取了 `git status`）：仓库**跟踪着 6 个 hvigor 的 ohosTest 中间产物** `apps/arkui-schedule/entry/.test/default/intermediates/src/ohosTest/**`，而 `:entry:clean`/测试构建**每次都会删掉并重写**它们 —— 所以任何人干净克隆构建一次，`git status` 就固定多出 6 条 `D`。
+
+**修法**（`b4a7e5b`）：
+1. `git rm -r --cached apps/arkui-schedule/entry/.test` 并在根 `.gitignore` 加 `apps/arkui-schedule/entry/.test/`（**解除跟踪这步由 Lead 补做**：只加 ignore 不改索引，构建后照样 6 条 `D`）；
+2. 五个 overlay 派生物（`handwriting/*`、`ocr/*`、`pages/Handwriting.ets`、`services/rc3GateHarness.ets`）入 ignore，并与 `overlay.mjs` 导出的 `GENERATED_PATHS` **逐条对齐**（守卫强制）；**产品源码仍在 `entry/src/harmony/**`（7 个文件入库）**，故不会丢产品；
+3. `overlay.mjs` 加固：备份改**原子写**（`<backup>.tmp` → rename，进程被杀不留半个备份）；`restore` 按 manifest 逐字节还原并能清残留；manifest 丢失时 `status` 仍报 `applied=true` / `orphans=5`，**拒绝假装干净**。
+
+**独立证明（Lead 亲跑，不是引用车道）**：
+```
+clone HEAD b4a7e5b → tracked under entry/.test = 0（原为 6）
+clone 初始 git status = 干净
+在 clone 内跑 tools/build-harmony.ps1 → BUILD SUCCESSFUL / CompileArkTS finished
+构建后 git status --porcelain = 0 行          ← 关键结论
+```
+捕获：`.tmp/gates-lead-hygiene-clone-buildlog.out`（111,564 B）、`.tmp/gates-lead-hygiene-clone-status.out`（44 B）。车道守卫 `overlayHygiene.test.mjs` **7/7**（`.tmp/gates-oh-guard.out`，1,152 B），覆盖 apply→status→restore 逐字节、**apply 后硬杀**、**拷贝中被 TerminateProcess**、manifest 被删、以及「每条生成路径都已入库或被忽略」。
+
+**仍未验**：平板端无设备（无线调试已断），所有设备相关结论维持 `unverified`。
