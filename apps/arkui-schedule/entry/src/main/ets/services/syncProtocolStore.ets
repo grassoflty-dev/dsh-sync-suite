@@ -50,6 +50,10 @@ import { repoCycleGuard } from '../model/repoConfigured';
 import type { RepoConfigInput, RepoCycleGuardResult } from '../model/repoConfigured';
 import { settingsStore } from './settingsStore';
 import type { ScheduleSettings } from './settingsStore';
+// mod-app-pending-upload-diagnosis：周期需要「git 实测的脏路径」才能把「写入器已落盘、
+// union 无需改写」的本机改动纳入提交集合（否则它们永远留在工作区，状态行永久「待上传」）。
+import { GitSyncService } from './GitSyncService';
+import { syncController } from './syncController';
 
 /** git 命令执行器：接收参数数组，返回 stdout；非 0 退出由 runner 抛错。 */
 export type GitRunner = (args: string[]) => Promise<string>;
@@ -392,9 +396,34 @@ export class SyncProtocolStore {
         this.writeOutbox(entries);
       }
     };
-    const outcome: CycleOutcome = await runCyclePure(port, days, readDay, outbox, now, write);
+    const outcome: CycleOutcome = await runCyclePure(port, days, readDay, outbox, now, write, false,
+      async (): Promise<string[]> => await this.dirtyPathsOf());
     this.writeOutbox(outcome.resultOutbox);
     return this.outcomeToResult(outcome);
+  }
+
+  /**
+   * 工作副本脏路径（mod-app-pending-upload-diagnosis）：周期用它算出「本机真正该提交的路径」。
+   *
+   * 口径与 `services/gitRunner.ets` 的 `resolveService` 一致：优先 `syncController` 绑定的启动链服务，
+   * 只有它尚未就绪时才退回落 `GitSyncService.active()`——设置页会 new 第二个实例并抢走 active，
+   * 盯着错误实例会拿到「桥没就绪」而白等。
+   *
+   * 只读：`v2DirtyPaths` 走桥的 `status`（fetchRemote=false），不 fetch、不写盘、不触发同步。
+   * 任何失败都返回空数组（= 退回「只提交 union 改写路径」的旧行为）：少传不谎报，
+   * 剩余改动仍会被状态行如实计入「本地改动 N 处」。
+   */
+  private async dirtyPathsOf(): Promise<string[]> {
+    const canonical: GitSyncService | null = syncController.readyService();
+    const service: GitSyncService | null = canonical !== null ? canonical : GitSyncService.active();
+    if (service === null) {
+      return [];
+    }
+    try {
+      return await service.v2DirtyPaths();
+    } catch (error) {
+      return [];
+    }
   }
 
   /** union 结果的单日落盘：records 原子替换 + 账本只追加（前缀守卫）+ conflicts 去重追加。 */

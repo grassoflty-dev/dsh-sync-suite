@@ -75,6 +75,8 @@ import {
   filterPathsForDevice,
   normalizeDeviceId
 } from '../model/syncScope';
+// mod-app-pending-upload-diagnosis：脏路径分区口径与同步周期的提交集合共用同一份纯逻辑。
+import { partitionDirtyPaths } from '../model/syncUploadScope';
 import {
   checkDeviceIdentity,
   describeAttachmentPushBlock,
@@ -383,6 +385,15 @@ interface PreservePayload {
   kept?: string[];
 }
 
+/**
+ * `status` 里的一行工作区改动（桥 `changedFromStatusMatrix` 的形状）。
+ *
+ * 只取 `path`：诊断行要按路径判断「这处改动本机能不能上传」，不读 head/workdir/stage 数值。
+ */
+interface StatusChangedRow {
+  path?: string | null;
+}
+
 interface StatusPayload {
   initialized?: boolean;
   /** 桥用 null 表示「没有值」（未初始化/空仓库），读取时必须过 `textOf`。 */
@@ -391,6 +402,8 @@ interface StatusPayload {
   remoteUrl?: string | null;
   repoRoot?: string | null;
   changedCount?: number | null;
+  /** 脏路径前 100 行（`opStatus` 的 `changed`）：分区「可上传 / 不在上传范围」的唯一事实来源。 */
+  changed?: StatusChangedRow[] | null;
   lastCommit?: CommitPayload | null;
   /** 目标分支（配置里的分支名，可能是本地还没建出来的）。 */
   targetBranch?: string | null;
@@ -1590,6 +1603,7 @@ export class GitSyncService {
     if (lastCommit !== undefined && lastCommit !== null) {
       lastCommitMessage = GitSyncService.textOf(lastCommit.message, '');
     }
+    const changedCount: number = GitSyncService.numberOf(data.changedCount, 0);
     const view: SyncStatusView = {
       initialized: data.initialized === true,
       branch: branch,
@@ -1598,13 +1612,48 @@ export class GitSyncService {
       behind: GitSyncService.numberOf(data.behind, 0),
       diverged: data.diverged === true,
       conflicts: GitSyncService.numberOf(data.conflicts, 0),
-      changedCount: GitSyncService.numberOf(data.changedCount, 0),
+      changedCount: changedCount,
+      // mod-app-pending-upload-diagnosis：脏路径里有本机永远不会上传的部分（devices/**、仓库根文件、
+      // 写入残留），单独计数交给措辞层点名——不能把它们继续算进「待上传」的承诺里。
+      notUploadableCount: GitSyncService.notUploadableOf(data.changed, changedCount),
       // mod-sync-silence-phase-b：改动数与上传状态成对输出，绝不暗示云端已经拿到这些改动。
       uploadState: GitSyncService.uploadStateOf(),
       remoteConfigured: remoteUrl.length > 0,
       lastCommitMessage: lastCommitMessage
     };
     return view;
+  }
+
+  /**
+   * 脏路径前 100 行 → 「不在本机上传范围」的处数；拿不到全量时返回 `undefined`（不猜、不编造分区）。
+   *
+   * 只有桥回的行数与 `changedCount` 完全一致（说明没被 100 行截断）且每行都有字符串 path 时才计数；
+   * 任何一行不合形就整体放弃分区，措辞退回单一「本机未上传」。分区口径由纯模型
+   * `model/syncUploadScope.ts` 的 `partitionDirtyPaths` 决定（与 `syncCycle` 的提交集合同一份规则）。
+   */
+  private static notUploadableOf(
+    rows: StatusChangedRow[] | null | undefined,
+    changedCount: number
+  ): number | undefined {
+    if (changedCount <= 0 || rows === null || rows === undefined || !Array.isArray(rows)) {
+      return undefined;
+    }
+    if (rows.length !== changedCount) {
+      return undefined;
+    }
+    const paths: string[] = [];
+    for (let index = 0; index < rows.length; index++) {
+      const row: StatusChangedRow | null = rows[index];
+      if (row === null || row === undefined) {
+        return undefined;
+      }
+      const path: string | null | undefined = row.path;
+      if (typeof path !== 'string' || path.length === 0) {
+        return undefined;
+      }
+      paths.push(path);
+    }
+    return partitionDirtyPaths(paths).notUploadable.length;
   }
 
   /** 当前上传处境 → 诊断词；只读 status snapshot，不写盘、不触发任何同步。 */
@@ -1625,6 +1674,40 @@ export class GitSyncService {
   /** 桥字段 → 字符串：非字符串（含 null/undefined）一律回落（桥用 null 表示「没有值」）。 */
   private static textOf(value: string | null | undefined, fallback: string): string {
     return typeof value === 'string' ? value : fallback;
+  }
+
+  /**
+   * 工作副本脏路径（只读，给 v2 周期性决定提交集合用）。
+   *
+   * 与 `status()` 的区别：不 fetch（`fetchRemote=false`）、不探测远端、不改任何状态，
+   * 只把桥 `status` 的 `changed` 行原样回传（最多 100 行，桥侧上限）。
+   *
+   * 为什么需要它（mod-app-pending-upload-diagnosis）：v2 周期原先只提交 union 重算过字节的路径，
+   * 而应用写入器是「先写工作副本、再触发同步」，union 往往无需改写 → 本机改动永远不被提交，
+   * 状态行于是永久显示「本地改动 N 处（本机未上传·待上传）」。周期拿这份实测脏路径与
+   * `model/syncUploadScope.ts` 的可上传口径求交，才能把用户自己的改动真正推上去。
+   */
+  async v2DirtyPaths(): Promise<string[]> {
+    const args: Record<string, string> = this.configArgs();
+    args['fetchRemote'] = 'false';
+    const event: BridgeEvent = await this.callBridge('status', args);
+    const data: StatusPayload = event.data === undefined ? {} : event.data as StatusPayload;
+    const rows: StatusChangedRow[] | null | undefined = data.changed;
+    const out: string[] = [];
+    if (rows === null || rows === undefined || !Array.isArray(rows)) {
+      return out;
+    }
+    for (let index = 0; index < rows.length; index++) {
+      const row: StatusChangedRow | null = rows[index];
+      if (row === null || row === undefined) {
+        continue;
+      }
+      const path: string | null | undefined = row.path;
+      if (typeof path === 'string' && path.length > 0) {
+        out.push(path);
+      }
+    }
+    return out;
   }
 
   /** 桥字段 → 数字：非有限数字一律回落。 */

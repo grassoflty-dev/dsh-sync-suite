@@ -25,6 +25,7 @@ import type { OutboxEntry, WriteGateResult, DayTexts, DayUnion } from './syncPro
 import { parseSchemaMarker, parseTimelineDay } from './timeline';
 import { decideFreshStart } from './freshStart';
 import type { FreshStartDecision } from './freshStart';
+import { stagePathsForCycle, daysInStageSet } from './syncUploadScope';
 
 /**
  * mod-sync-empty-repo-bootstrap：首次同步的远端状态探测（只读，不依赖 fetch 是否成功）。
@@ -477,7 +478,8 @@ async function bootstrapEmptyRemote(
   readDay: DayReader,
   outbox: OutboxEntry[],
   now: Date,
-  write?: WritePort
+  write?: WritePort,
+  dirtyPathsOf?: () => Promise<string[]>
 ): Promise<CycleOutcome> {
   const branch: string = (await port.branchName()).trim();
   if (branch !== 'main') {
@@ -617,7 +619,7 @@ async function bootstrapEmptyRemote(
   await port.fetchMain();
 
   // 阶段 5：回到普通周期过完整门禁。意图已落在初始提交里，union 幂等判定把它们出队，用户看到「已同步」。
-  const resumed: CycleOutcome = await runCyclePure(port, days, readDay, outbox, now, write, true);
+  const resumed: CycleOutcome = await runCyclePure(port, days, readDay, outbox, now, write, true, dirtyPathsOf);
   resumed.bootstrapped = true;
   return resumed;
 }
@@ -626,6 +628,9 @@ async function bootstrapEmptyRemote(
  * 单一同步周期（纯决策）。详见文件头；write 缺省时只产出决策（预览），
  * 生产调用（syncProtocolStore）必须注入 WritePort，否则 union 文本不会落盘。
  * `skipBootstrapProbe` 只由首跑引导的「继续普通周期」内部使用，防止递归回引导。
+ * `dirtyPathsOf`（可选）返回 **git 实测的脏路径**（工作副本 ≠ HEAD，含未跟踪），
+ * 用于把「写入器已落盘、union 无需改写」的本机改动纳入提交集合（见步骤 5）；
+ * 缺省时行为与旧版一致（只提交 union 改写路径）。
  */
 export async function runCyclePure(
   port: GitPort,
@@ -634,7 +639,8 @@ export async function runCyclePure(
   outbox: OutboxEntry[],
   now: Date,
   write?: WritePort,
-  skipBootstrapProbe?: boolean
+  skipBootstrapProbe?: boolean,
+  dirtyPathsOf?: () => Promise<string[]>
 ): Promise<CycleOutcome> {
   // 步骤 0（可选）：远端引用探测在 fetch 之前 —— 空远端的 `fetch origin main` 会直接抛
   // "Could not find origin/main"，那是首跑态而非传输故障，必须先分流。未注入该端口的调用保持原行为。
@@ -651,7 +657,7 @@ export async function runCyclePure(
     }
     const decision: RemoteStateDecision = remoteStateDecision(layout.hasMain, layout.isEmpty);
     if (decision === 'bootstrap') {
-      return await bootstrapEmptyRemote(port, days, readDay, outbox, now, write);
+      return await bootstrapEmptyRemote(port, days, readDay, outbox, now, write, dirtyPathsOf);
     }
     if (decision === 'no-main') {
       // 把服务端实际分支名带进用户可见文案；这里只产出 typed 结果，不做任何 git 写入。
@@ -775,9 +781,28 @@ export async function runCyclePure(
     pushUnique(allDropped, attemptDropped);
     current = dequeueIds(current, allDropped);
 
-    // 步骤 5：只 add 受影响日 → commit `[v2] sync <n> days`。
-    if (changedPaths.length > 0) {
-      await port.addPaths(changedPaths);
+    // 步骤 5：提交集合 = union 改写的路径 ∪ git 实测「已脏且本机可上传」的 timeline 路径。
+    //
+    // mod-app-pending-upload-diagnosis：只提交前者会漏掉「写入器已经落盘、union 无需改写」的改动
+    // （应用自己的 append/scheduleDelete/appendSummary/导入都会先写工作副本再触发同步），
+    // 于是这些路径永远留在工作区：状态行报「本地改动 N 处（本机未上传·待上传）」，远端却永远拿不到。
+    // 第二项必须来自 **git 实测的脏路径**（`dirtyPathsOf`，与状态行计数同一份事实），
+    // 不能靠「把工作副本全量再 add 一遍」猜——那会在每个周期制造一次空提交。
+    let dirtyPaths: string[] | undefined = undefined;
+    if (dirtyPathsOf !== undefined) {
+      try {
+        dirtyPaths = await dirtyPathsOf();
+      } catch (error) {
+        // 查不到脏路径就退回旧行为（只提交 union 改写路径）：少传不谎报，工作区剩余改动
+        // 仍会被 status 如实计入「本地改动 N 处」。
+        dirtyPaths = undefined;
+      }
+    }
+    const stagePaths: string[] = stagePathsForCycle(changedPaths, dirtyPaths, days);
+    if (stagePaths.length > 0) {
+      // 提交信息形状不变（跨包契约 isV2CommitSubject）：n 取「union 动过的日」与「本次提交覆盖的日」的较大者。
+      touchedDays = Math.max(touchedDays, daysInStageSet(stagePaths));
+      await port.addPaths(stagePaths);
       await port.commit(`${COMMIT_PREFIX}${touchedDays} days`);
     }
 

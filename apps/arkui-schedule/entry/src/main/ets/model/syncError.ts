@@ -653,6 +653,14 @@ export interface SyncStatusView {
   /** 工作区改动数（本机尚未上传的事实，绝不暗示云端已有）。 */
   changedCount: number;
   /**
+   * 「这些本机改动里有多少处**不在本机上传范围**」（mod-app-pending-upload-diagnosis）。
+   *
+   * 由 `status` 实测的脏路径分区得到（`model/syncUploadScope.ts`：`devices/**`、仓库根文件、
+   * 写入残留等），不是用总数减出来的。`undefined` = 调用方没有全量脏路径，措辞退回单一
+   * 「本机未上传」，**不编造分区**；有值时才在括号里如实点名，绝不把不可上传的路径说成「待上传」。
+   */
+  notUploadableCount?: number;
+  /**
    * 这些本机改动的上传状态（mod-sync-silence-phase-b）：只用于诊断措辞，
    * 与 `changedCount` 成对出现，绝不把「本机未上传」写成「云端已同步」。
    * 缺省按 `pending`，保证任何调用点都不会输出无状态的裸改动数。
@@ -688,6 +696,34 @@ export function describeUploadState(state: UploadState | undefined): string {
 }
 
 /**
+ * 「本地改动 N 处」这半句的唯一构造点（mod-app-pending-upload-diagnosis）。
+ *
+ * 三种形态，互斥且穷尽：
+ * - 无分区信息（`notUploadableCount` 缺省 / 0）：沿用原措辞 `本地改动 N 处（本机未上传·状态）`；
+ * - 0 < M < N：`本地改动 N 处（本机未上传·状态；其中 M 处不在本机上传范围，不会被本机上传）`；
+ * - M ≥ N：`本地改动 N 处（其中 M 处不在本机上传范围，不会被本机上传）`——此时没有可上传的
+ *   本机改动，**不再**说「待上传」，因为本机确实不会上传它们。
+ *
+ * 三种形态都只说「本机没有上传」，绝不说云端已有（措辞禁令见 `docs/`「本机未上传」规则）。
+ */
+export function describeChangedCount(
+  changedCount: number,
+  state: UploadState | undefined,
+  notUploadable?: number
+): string {
+  const total: number = changedCount > 0 ? changedCount : 0;
+  const foreignRaw: number = typeof notUploadable === 'number' && notUploadable > 0 ? Math.floor(notUploadable) : 0;
+  const foreign: number = foreignRaw > total ? total : foreignRaw;
+  if (total === 0 || foreign === 0) {
+    return `本地改动 ${total} 处（本机未上传·${describeUploadState(state)}）`;
+  }
+  if (foreign >= total) {
+    return `本地改动 ${total} 处（其中 ${foreign} 处不在本机上传范围，不会被本机上传）`;
+  }
+  return `本地改动 ${total} 处（本机未上传·${describeUploadState(state)}；其中 ${foreign} 处不在本机上传范围，不会被本机上传）`;
+}
+
+/**
  * 同步状态一行文案（A2）：分支 / HEAD / ahead / behind / 本机未上传改动 / 冲突 / 远端。
  *
  * 例：`分支 main｜HEAD a1b2c3d｜领先远端 2 个提交｜本地改动 3 处（本机未上传·待上传）｜冲突 0｜远端 已配置`
@@ -710,7 +746,9 @@ export function describeSyncStatus(view: SyncStatusView): string {
   );
   // mod-sync-silence-phase-b：本机改动 ≠ 云端已有。改动数永远与上传状态成对出现，
   // 措辞明确「本机未上传」，避免把本地工作区事实读成云端同步成功。
-  parts.push(`本地改动 ${view.changedCount} 处（本机未上传·${describeUploadState(view.uploadState)}）`);
+  // mod-app-pending-upload-diagnosis：本机根本不会上传的脏路径（不属于时间线 / 写入残留）
+  // 单独点名，别让用户以为它们在排队等上传。
+  parts.push(describeChangedCount(view.changedCount, view.uploadState, view.notUploadableCount));
   parts.push(`冲突 ${view.conflicts}`);
   parts.push(`远端 ${view.remoteConfigured === true ? '已配置' : '未配置'}`);
   const message: string = trimText(view.lastCommitMessage);
