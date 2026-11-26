@@ -8,8 +8,10 @@
  * 分支恒为 main、force 恒为 false、唯一的 reset 是 resetHard（本地分支指回 origin/main）。
  * addPaths 只缓冲路径，commit 时一次性经白名单提交（桥侧拒绝任何非 timeline/** 路径）。
  *
- * 未绑定 / 桥未就绪时先有界等待（首轮周期早于 WebView onPageEnd 是常态）；超时才抛带中文下一步的
- * `E_SYNC_UNAVAILABLE`，由 syncStatusStore 显示为可点「重试同步」的失败行，绝不静默降级为「假同步」。
+ * 未绑定 / 桥未就绪时先**等页面回传的就绪信号**（首轮周期早于 WebView onPageEnd 是常态）；
+ * 超时才抛带中文下一步的 `E_SYNC_UNAVAILABLE`，由 syncStatusStore 显示为可点「重试同步」的
+ * 失败行，绝不静默降级为「假同步」。为什么信号而不是 `onPageEnd`：`onPageEnd` 只证明页面加载完，
+ * 不证明代理可调用（真机 `FindObject Unknown object: objectId = 10737418` 就是反证）。
  */
 import { GitSyncService } from './GitSyncService';
 import { syncController } from './syncController';
@@ -18,8 +20,12 @@ import { runnerReadyDecision, E_SYNC_UNAVAILABLE_MESSAGE } from '../model/syncCy
 import type { GitPort, RemoteLayout, RunnerReadyDecision } from '../model/syncCycle';
 import type { common } from '@kit.AbilityKit';
 
-/** 首轮周期早于隐藏 Web 的 onPageEnd 时，最多等 10 秒再报 typed 错（不静默失败、不无限等）。 */
+/**
+ * 等就绪信号的总预算：首轮周期早于隐藏 Web 的就绪信号时，最多等 10 秒再报 typed 错
+ * （不静默失败、不无限等）。这个预算是**上限**，不是轮询间隔。
+ */
 const READY_TIMEOUT_MS: number = 10000;
+/** 只在「连服务实例都还没有」时按此节拍再取一次（等页面交出控制器；不是就绪判定）。 */
 const READY_POLL_MS: number = 50;
 
 export class BridgeGitRunner implements GitPort {
@@ -39,21 +45,37 @@ export class BridgeGitRunner implements GitPort {
   }
 
   /**
-   * 取可用的服务实例：隐藏 Web 的 onPageEnd 与首条记录写入的先后是不确定的。
-   * 旧实现一上来就抛 E_SYNC_UNAVAILABLE，导致「建记录→自动同步」总在内核就绪前失败、
-   * 用户不得不手动再点一次同步。这里改为**有界等待**：就绪后照常跑 pull→append→push；
-   * 只有超时才抛带中文下一步的 typed 错（状态行可点「重试同步」）。
+   * 取可用的服务实例，并**等页面自己的就绪信号**（不是靠定时器猜）。
+   *
+   * 旧实现每 50ms 轮询 `isBridgeReady()`，而那个位是在 `onPageEnd` 里直接置上的——真机冷启动
+   * 证明这句话不成立：`onPageEnd` 之后代理仍未注册，窗口里的第一次调用打在空对象上
+   * （`FindObject Unknown object: objectId = 10737418`），设置页就永久停在「读取中…」。
+   * 现在改成向服务要「就绪信号」（页面真的调到代理之后才回传），拿到才算可用；
+   * 总预算仍是 `READY_TIMEOUT_MS`，超时才抛带中文下一步的 typed `E_SYNC_UNAVAILABLE`
+   * （状态行可点重试），绝不无限等、也不静默降级为「假同步」。
+   *
+   * `setTimeout(READY_POLL_MS)` 只剩一个用途：**连服务实例都还没有**时按节拍再取一次
+   * （等页面把控制器交出来）；那一步没有信号可等，不构成就绪判定。
    */
   private async requireService(): Promise<GitSyncService> {
     const started: number = Date.now();
     for (;;) {
       const active: GitSyncService | null = this.resolveService();
-      const ready: boolean = active !== null && active.isBridgeReady();
-      const waited: number = Date.now() - started;
-      const decision: RunnerReadyDecision = runnerReadyDecision(ready, waited, READY_TIMEOUT_MS);
-      if (decision === 'ready' && active !== null) {
-        return active;
+      if (active !== null) {
+        const remaining: number = READY_TIMEOUT_MS - (Date.now() - started);
+        const ready: boolean = await active.awaitBridgeReady(remaining);
+        const waited: number = Date.now() - started;
+        const decision: RunnerReadyDecision = runnerReadyDecision(ready, waited, READY_TIMEOUT_MS);
+        if (decision === 'ready') {
+          return active;
+        }
+        if (decision === 'unavailable') {
+          throw new Error(E_SYNC_UNAVAILABLE_MESSAGE);
+        }
+        continue;
       }
+      const waited: number = Date.now() - started;
+      const decision: RunnerReadyDecision = runnerReadyDecision(false, waited, READY_TIMEOUT_MS);
       if (decision === 'unavailable') {
         throw new Error(E_SYNC_UNAVAILABLE_MESSAGE);
       }

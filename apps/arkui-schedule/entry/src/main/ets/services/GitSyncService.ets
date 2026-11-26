@@ -42,6 +42,21 @@ import {
 } from '../model/syncGuard';
 import { assertHttpsUsername, describeAuthModeBlocker, httpsAuthUsername, resolveGitUsername } from '../model/gitAuth';
 import { AUTH_HTTPS } from '../model/settingsForm';
+// mod-app-git-bridge-ready：就绪信号状态机、有界超时的 typed 文案全部在纯模型里，本文件只做适配。
+import {
+  E_BRIDGE_CALL_TIMEOUT,
+  E_BRIDGE_NOT_READY,
+  bridgeCallTimeoutText,
+  bridgeNotReadyText,
+  readinessAccept,
+  readinessArm,
+  readinessExpired,
+  readinessFail,
+  readinessIdle,
+  readinessIsStale,
+  readinessReady
+} from '../model/bridgeReadiness';
+import type { BridgeReadiness, BridgeSignal } from '../model/bridgeReadiness';
 import {
   DEFAULT_BRANCH,
   describeSyncStatus,
@@ -257,6 +272,30 @@ interface PendingRequest {
   timer: number;
 }
 
+/**
+ * 页面回传的就绪信号（`dshGitHost.onBridgeReady(json)` 的入参）。
+ *
+ * 三个字段缺一不可：`token` 认世代（刷新后旧页面的信号带旧令牌）、`pageAtMs` 认新旧页面
+ * （必须是本次武装之后才加载的页面）、`pageId` 只做幂等（同一页面重复回传不产生第二次就绪）。
+ */
+interface HostSignal {
+  token?: string;
+  pageId?: string;
+  pageAtMs?: number;
+}
+
+/** 就绪信号的应答（页面据此采纳当前令牌 / 知道已被接受）。 */
+interface HostSignalReply {
+  accept: boolean;
+  token: string;
+}
+
+/** 等就绪信号的等待者（一个计时器 + 一个 resolve，超时即结束，绝不无限挂）。 */
+interface ReadyWaiter {
+  resolve: (value: boolean) => void;
+  timer: number;
+}
+
 /** 写入 zip 的一个条目（`data` 由调用方分块成 base64，每块 ≤256KB 文本）。 */
 export interface ZipEntryInput {
   name: string;
@@ -440,6 +479,14 @@ interface PushAttachmentGuard {
 // ---------------------------------------------------------------- 常量
 
 const REQUEST_TIMEOUT_MS: number = 60000;
+/**
+ * 每次桥调用前等「就绪信号」的上限（mod-app-git-bridge-ready）。
+ *
+ * 为什么不靠 `onPageEnd` 置位：真机冷启动里 `onPageEnd` 之后代理仍未注册，UI 的第一句调用
+ * 打在空对象上（`FindObject Unknown object: objectId = 10737418`）。这里改为**等页面自己回传
+ * 的就绪信号**；等不到就抛 typed `E_BRIDGE_NOT_READY`（可重试），绝不把调用打到未注册的代理上。
+ */
+const READY_SIGNAL_BUDGET_MS: number = 10000;
 const HTTP_CONNECT_TIMEOUT_MS: number = 15000;
 const HTTP_READ_TIMEOUT_MS: number = 45000;
 const REPO_DIR_NAME: string = 'git-repo';
@@ -628,6 +675,7 @@ export class GitSyncService {
    */
   static readonly proxyMethodList: string[] = [
     'onEvent',
+    'onBridgeReady',
     'onHttpResult',
     'readFileBase64',
     'writeFileBase64',
@@ -657,8 +705,25 @@ export class GitSyncService {
   private pending: Map<string, PendingRequest> = new Map<string, PendingRequest>();
   private requestSeq: number = 0;
   private ready: boolean = false;
-  /** 桥（WebView 内核）是否真的可用：注册成功 + 页面加载完成（闪退回归：未就绪必须先拦住）。 */
+  /**
+   * 桥是否已被页面证明可调用（就绪信号的派生位；`onPageEnd` / registerProxy 都不再直接置位）。
+   *
+   * 闪退回归约束仍在：未就绪时所有操作必须先被拦住。
+   */
   private bridgeReady: boolean = false;
+  /**
+   * 就绪状态机快照（纯模型 `model/bridgeReadiness.ts` 持有全部判定）。
+   *
+   * `bridgeReady` 只是它的派生位：**只有**页面在「本次武装之后」把信号回传过来才会置 true。
+   * 为什么不能用 `onPageEnd` 或定时器代表就绪：`onPageEnd` 早于代理可调用（真机
+   * `FindObject Unknown object: objectId = 10737418` 就是那句话作废的证据），定时器更是只能
+   * 证明「时间过去了」，两样都证明不了「代理解得通」。
+   */
+  private bridgeState: BridgeReadiness = readinessIdle();
+  /** 握手令牌序号（每次武装 +1，令牌里带序号与时刻 ⇒ 刷新前后一定不同）。 */
+  private handshakeSeq: number = 0;
+  /** 等就绪信号的等待者；收到信号或超时统一结算，等待者不会无限挂。 */
+  private readyWaiters: ReadyWaiter[] = [];
   /** 桥不可用的原因（空串表示没有失败）。 */
   private bridgeError: string = '';
   /**
@@ -744,18 +809,36 @@ export class GitSyncService {
    * **闪退回归点**：`registerJavaScriptProxy` / `refresh` 在控制器尚未绑定到任何 `Web`
    * 组件时会抛 `BusinessError`（17100001 等）。历史上这条异常一路上抛到 UI 线程，
    * 把进程带走。现在整段包 try/catch，失败只把桥标记为「未就绪 + 原因」。
+   *
+   * **mod-app-git-bridge-ready（关键语义变更）**：本方法**不再**把桥标成就绪。注册代理只说明
+   * 「宿主交出了代理」，不说明「页面已经能调到它」；真机冷启动正是 `onPageEnd` 之后代理仍未
+   * 注册，UI 第一句调用落在空对象上（`FindObject Unknown object: objectId = 10737418`）。
+   * 现在的就绪只由页面回传的信号（`onBridgeReady`）置位：
+   * - 每次调用都**重新武装**握手（新令牌）⇒ 刷新 / 重建后旧页面的信号一律作废（不会残留 stale ready）；
+   * - 首次调用才 register + `refresh()`（幂等：重复调用只重新武装，不反复刷新页面）；
+   * - 武装后主动 `announceReady()` 唤醒页面：页面自己重试调用 `dshGitHost.onBridgeReady`，
+   *   调得通才回传，才有资格把桥标成就绪。
    */
   registerProxy(): void {
+    this.handshakeSeq = this.handshakeSeq + 1;
+    const token: string = `h${this.handshakeSeq}-${Date.now()}`;
+    const freshPage: boolean = !this.ready;
+    this.bridgeState = readinessArm(this.bridgeState, token, Date.now(), freshPage);
+    this.bridgeReady = false;
     try {
-      this.controller.registerJavaScriptProxy(this, BRIDGE_PROXY_NAME, GitSyncService.proxyMethodList);
-      this.controller.refresh();
-      this.ready = true;
-      this.bridgeReady = true;
+      if (!this.ready) {
+        this.controller.registerJavaScriptProxy(this, BRIDGE_PROXY_NAME, GitSyncService.proxyMethodList);
+        this.controller.refresh();
+        this.ready = true;
+      }
       this.bridgeError = '';
+      this.wakePageHandshake();
     } catch (error) {
       this.ready = false;
       this.bridgeReady = false;
       this.bridgeError = `同步内核注册失败：${describeBridgeFailure(error as Object)}`;
+      this.bridgeState = readinessFail(this.bridgeState, E_BRIDGE_NOT_READY);
+      this.settleWaiters(false);
     }
   }
 
@@ -892,8 +975,11 @@ export class GitSyncService {
    * 通用桥调用（args 是任意 JSON 对象，不像 `callBridge` 只接受字符串表）。
    *
    * 复用同一套 `pending` 机制与超时：失败一律抛 `SyncError`。
+   * mod-app-git-bridge-ready：下发前先过就绪闸（等页面信号，最多 `READY_SIGNAL_BUDGET_MS`），
+   * 超时给 typed `E_BRIDGE_CALL_TIMEOUT` + 中文一句话（含下一步），绝不无限挂。
    */
-  private callBridgeJson<T>(op: string, args: Object): Promise<T> {
+  private async callBridgeJson<T>(op: string, args: Object): Promise<T> {
+    await this.ensureBridgeReady();
     const id: string = 'g' + Date.now().toString() + '-' + (++this.requestSeq).toString();
     const payload: string = JSON.stringify({ id: id, op: op, args: args });
     return new Promise<T>((resolve: (value: T) => void, reject: (error: Object) => void) => {
@@ -901,8 +987,8 @@ export class GitSyncService {
         this.pending.delete(id);
         reject(
           new SyncError(
-            'E_GIT',
-            '同步超时（' + (REQUEST_TIMEOUT_MS / 1000).toString() + ' 秒）：Web 页面可能未就绪或网络不可用'
+            E_BRIDGE_CALL_TIMEOUT,
+            `${E_BRIDGE_CALL_TIMEOUT}：${bridgeCallTimeoutText(REQUEST_TIMEOUT_MS)}`
           )
         );
       }, REQUEST_TIMEOUT_MS);
@@ -1193,20 +1279,164 @@ export class GitSyncService {
 
   // -------------------------------------------------------------- 就绪状态与前置守卫
 
-  /** 桥（WebView 内核）是否已注册代理并完成刷新。 */
+  /**
+   * 同步内核现在**能不能接调用**（幂等判定，不产生副作用）。
+   *
+   * 语义（mod-app-git-bridge-ready 明确写死，改之前先读 `model/bridgeReadiness.ts`）：
+   * - `ready`：页面回传过就绪信号（代理真的调得通），可以直接下发；
+   * - `waiting`：握手在飞（刚 register + refresh，页面正在重试调用代理）。这里返回 true 是
+   *   **允许发起**而不是**允许盲调**：每一次真正的桥调用入口都会先 `awaitBridgeReady()`，
+   *   等不到信号就抛 typed `E_BRIDGE_NOT_READY`（可重试），绝不会把调用打到未注册的代理上。
+   *   把 waiting 也算「可以接」的原因：启动自动同步只被触发一次（`homeStartupSync` 的
+   *   deferred 只有一次消费机会），若这里报未就绪，冷启动的那次同步就再也没人补。
+   */
   isBridgeReady(): boolean {
+    return this.bridgeReady || this.handshakePending();
+  }
+
+  /** 是否已收到过就绪信号（严格版：只认页面回传，供诊断 / 断言用）。 */
+  isBridgeVerified(): boolean {
     return this.bridgeReady;
   }
 
-  /** 标记桥就绪（由页面 `onPageEnd`/`Web` 回调调用）。 */
+  /** 握手是否在飞（已武装、还没被接受、也没超时）。 */
+  private handshakePending(): boolean {
+    return this.bridgeState.phase === 'waiting';
+  }
+
+  /**
+   * 等就绪信号（**有界**）。
+   *
+   * 这是「不盲调」的唯一闸：返回 true 才允许下发桥调用；false 表示预算内没等到信号
+   * （调用方据此给 typed `E_BRIDGE_NOT_READY` + 中文下一步，UI 必须离开「读取中…」）。
+   * 不靠定时器轮询判断就绪，定时器只用来**给等待设上限**。
+   */
+  awaitBridgeReady(budgetMs: number): Promise<boolean> {
+    if (this.bridgeReady) {
+      return Promise.resolve(true);
+    }
+    if (this.bridgeState.token.length === 0) {
+      // 从没武装过：先按「注册 + 刷新」武装一次，再等信号
+      this.registerProxy();
+    } else if (this.bridgeState.phase === 'failed') {
+      // 上一轮已失败：重新武装（同一页面，不重复刷新），等下一次信号
+      this.handshakeSeq = this.handshakeSeq + 1;
+      this.bridgeState = readinessArm(this.bridgeState, `h${this.handshakeSeq}-${Date.now()}`, Date.now(), false);
+    }
+    this.wakePageHandshake();
+    const budget: number = budgetMs > 0 ? budgetMs : 1;
+    return new Promise<boolean>((resolve: (value: boolean) => void): void => {
+      const waiter: ReadyWaiter = { resolve: resolve, timer: 0 };
+      waiter.timer = setTimeout((): void => {
+        this.removeWaiter(waiter);
+        this.bridgeState = readinessExpired(this.bridgeState, Date.now(), budget);
+        resolve(false);
+      }, budget);
+      this.readyWaiters.push(waiter);
+    });
+  }
+
+  /**
+   * 页面回传就绪信号（new proxy method；JS 同步调用，返回值是应答 JSON）。
+   *
+   * 接受条件是三件事同时成立：令牌等于当前握手令牌、页面在本次武装之后加载、页面身份没被更旧的
+   * 一页占过。第一条挡「刷新前的旧页面」，第二条挡「旧页面抢在销毁前发信号」，第三条只做幂等。
+   * 令牌对不上时把**当前令牌递回去**，页面下一轮就用新令牌重发——不靠 ArkTS 主动轮询。
+   */
+  onBridgeReady(json: string): string {
+    let signal: BridgeSignal = { token: '', pageId: '', pageAtMs: 0 };
+    try {
+      const parsed: HostSignal = JSON.parse(json) as HostSignal;
+      signal = {
+        token: parsed.token === undefined ? '' : parsed.token,
+        pageId: parsed.pageId === undefined ? '' : parsed.pageId,
+        pageAtMs: parsed.pageAtMs === undefined ? 0 : parsed.pageAtMs
+      };
+    } catch (error) {
+      return this.signalReply(false);
+    }
+    if (readinessIsStale(this.bridgeState, signal)) {
+      // 旧页面 / 旧令牌：不认，但把当前令牌递回去让它自己跟上（不做第二套轮询）
+      return this.signalReply(false);
+    }
+    const next: BridgeReadiness = readinessAccept(this.bridgeState, signal);
+    const accepted: boolean = readinessReady(next);
+    if (accepted) {
+      this.bridgeState = next;
+      this.bridgeReady = true;
+      this.bridgeError = '';
+      this.settleWaiters(true);
+    }
+    return this.signalReply(accepted);
+  }
+
+  /** 握手应答：`{ accept, token }`（页面据此采纳令牌 / 决定是否停下来）。 */
+  private signalReply(accepted: boolean): string {
+    const reply: HostSignalReply = { accept: accepted, token: this.bridgeState.token };
+    return JSON.stringify(reply);
+  }
+
+  /** 唤醒页面握手：让页面重新尝试调用代理（脚本注入，不是就绪判定）。 */
+  private wakePageHandshake(): void {
+    this.runScript(
+      'window.DshGitBridge && window.DshGitBridge.announceReady && window.DshGitBridge.announceReady()'
+    );
+  }
+
+  /** 结算全部等待者：收到信号 → true；注册失败 → false。 */
+  private settleWaiters(ok: boolean): void {
+    const waiters: ReadyWaiter[] = this.readyWaiters;
+    this.readyWaiters = [];
+    for (let index = 0; index < waiters.length; index++) {
+      clearTimeout(waiters[index].timer);
+      waiters[index].resolve(ok);
+    }
+  }
+
+  /** 从等待队列里摘掉一个（超时路径用；已结算的队列会被整体替换，摘不到也无害）。 */
+  private removeWaiter(waiter: ReadyWaiter): void {
+    const index: number = this.readyWaiters.indexOf(waiter);
+    if (index >= 0) {
+      this.readyWaiters.splice(index, 1);
+    }
+  }
+
+  /**
+   * 每次桥调用前的就绪闸：没收到信号就先有界等待，等不到抛 typed 中文失败。
+   *
+   * 为什么每次调用都过一遍而不是只在第一次：`refresh()` / 页面重建会把「就绪」清掉，
+   * 上一次的 ready 不能当作这一次的许可证。
+   */
+  private async ensureBridgeReady(): Promise<void> {
+    if (this.bridgeReady) {
+      return;
+    }
+    const ok: boolean = await this.awaitBridgeReady(READY_SIGNAL_BUDGET_MS);
+    if (ok) {
+      return;
+    }
+    throw new SyncError(
+      E_BRIDGE_NOT_READY,
+      `${E_BRIDGE_NOT_READY}：${bridgeNotReadyText(READY_SIGNAL_BUDGET_MS)}`
+    );
+  }
+
+  /**
+   * 标记桥就绪（旧入口，保留兼容）。
+   *
+   * **不再直接置 true**：`onPageEnd` 只说明页面加载完了，不说明代理解得通。现在等价于
+   * 「重新武装握手」，真正的置位只发生在页面回传信号之后。
+   */
   markBridgeReady(): void {
-    this.bridgeReady = true;
+    this.registerProxy();
   }
 
   /** 桥加载失败：置未就绪并记下原因（页面据此禁用「立即同步」并展示）。 */
   markBridgeFailed(reason: string): void {
     this.bridgeReady = false;
     this.bridgeError = reason;
+    this.bridgeState = readinessFail(this.bridgeState, E_BRIDGE_NOT_READY);
+    this.settleWaiters(false);
   }
 
   /** 桥不可用的原因（`bridgeReady === true` 时为空串）。 */
@@ -1222,7 +1452,8 @@ export class GitSyncService {
     const input: SyncPreconditionInput = {
       repoUrl: this.config.repoUrl,
       token: this.config.token,
-      bridgeReady: this.bridgeReady,
+      // 「能不能接调用」：ready 或握手在飞都算可接；真正的盲调风险由 ensureBridgeReady() 兜住。
+      bridgeReady: this.isBridgeReady(),
       busy: busy
     };
     return checkSyncPrecondition(input);
@@ -2422,7 +2653,9 @@ export class GitSyncService {
 
   // -------------------------------------------------------------- 内部：桥调用
 
-  private callBridge(op: string, args: Record<string, string>): Promise<BridgeEvent> {
+  private async callBridge(op: string, args: Record<string, string>): Promise<BridgeEvent> {
+    // 先过就绪闸：页面没回传就绪信号就绝不把调用打到未注册的代理上（真机 FindObject 的根因）。
+    await this.ensureBridgeReady();
     const id: string = 'g' + Date.now().toString() + '-' + (++this.requestSeq).toString();
     const request: BridgeCallRequest = { id: id, op: op, args: args };
     const payload: string = JSON.stringify(request);
@@ -2431,8 +2664,8 @@ export class GitSyncService {
         this.pending.delete(id);
         reject(
           new SyncError(
-            'E_GIT',
-            '同步超时（' + (REQUEST_TIMEOUT_MS / 1000).toString() + ' 秒）：Web 页面可能未就绪或网络不可用'
+            E_BRIDGE_CALL_TIMEOUT,
+            `${E_BRIDGE_CALL_TIMEOUT}：${bridgeCallTimeoutText(REQUEST_TIMEOUT_MS)}`
           )
         );
       }, REQUEST_TIMEOUT_MS);
@@ -2602,14 +2835,14 @@ export class GitSyncService {
       return usernameProblem;
     }
     if (!this.ready) {
-      return '同步页面尚未就绪：请等待 Web 组件加载完成（onPageEnd 会自动注册代理）';
+      return '同步页面尚未就绪：请等待 Web 页面回传就绪信号（注册代理后会自动重试，无需手动操作）';
     }
     return '';
   }
 
   private validateForStatus(): string {
     if (!this.ready) {
-      return '同步页面尚未就绪：请等待 Web 组件加载完成（onPageEnd 会自动注册代理）';
+      return '同步页面尚未就绪：请等待 Web 页面回传就绪信号（注册代理后会自动重试，无需手动操作）';
     }
     return '';
   }

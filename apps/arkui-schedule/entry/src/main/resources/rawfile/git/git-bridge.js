@@ -18,6 +18,14 @@
  *         window.dshGitHost.onEvent(JSON.stringify({ id, ok: false, error: { code, message } }))
  *         code ∈ E_GIT | E_HTTP | E_AUTH | E_FS
  *
+ *   就绪握手（mod-app-git-bridge-ready，**先握手上限、再发请求**）：
+ *         页面 → dshGitHost.onBridgeReady(JSON.stringify({ token, pageId, pageAtMs }))
+ *         宿主 → 返回 JSON.stringify({ accept, token })
+ *         `token` 由宿主每次武装握手时新发；页面首次回传空串，宿主把当前令牌递回，页面采纳后重发。
+ *         只有「代理真的被调通一次」才算就绪——`onPageEnd` / 定时器都不算（真机冷启动里
+ *         onPageEnd 之后代理仍未注册，第一句调用会撞 FindObject Unknown object）。
+ *         刷新会换掉页面与令牌，所以旧页面的信号永远落不到当前这一代（不存在 stale ready）。
+ *
  * 文件系统代理（**同步**方法，桥内包成 Promise 以满足 isomorphic-git 的 fs.promises 语义）：
  *   dshGitHost.readFileBase64(path) -> string     不存在返回 ''（桥内先 fileExists 判定再抛 ENOENT）
  *   dshGitHost.writeFileBase64(path, base64) -> boolean
@@ -430,6 +438,7 @@
   function getHost() {
     var host = global.dshGitHost;
     if (!host || typeof host !== 'object') {
+      noteHostLost();
       throw bridgeError(
         'E_FS',
         '宿主代理 dshGitHost 未注册：请在 Web 页面 onPageEnd 后调用 GitSyncService.registerProxy()'
@@ -450,11 +459,112 @@
       if (error && error.isBridgeError === true) {
         throw error;
       }
+      // 代理调用本身抛错（含 FindObject「未知对象」）：宿主那一侧已经换了/没了，标记未就绪并重握手
+      noteHostLost();
       throw bridgeError(
         'E_FS',
         '本地文件操作失败（' + name + '）：' + sanitizeMessage(error && error.message !== undefined ? error.message : error)
       );
     }
+  }
+
+  // ---------------------------------------------------------------- 就绪握手（宿主就绪信号）
+
+  /**
+   * 「桥已就绪」的唯一判据：宿主的 onBridgeReady **真的被调通了一次**。
+   *
+   * 为什么不是 `window.__dshGitBridgeReady`：那个标志只说明本页脚本加载完了，不说明 ArkTS 侧
+   * 的 registerJavaScriptProxy 已经生效。真机冷启动里 onPageEnd 之后代理仍未注册，UI 的第一句
+   * 调用就撞在空对象上（`FindObject Unknown object: objectId = 10737418`），页面于是永久停在
+   * 「读取中…」。唯一能证明「代理解得通」的动作就是真的调一次：调得通 = 就绪，抛异常 = 再等。
+   *
+   * 令牌往返（防止 stale ready）：页面首次回传空令牌 → 宿主把当前令牌递回 → 页面采纳后重发 →
+   * 宿主接受。刷新会换掉页面与令牌，旧页面的信号因此永远落不到当前这一代上。
+   */
+  var pageLoadedAt = Date.now();
+  var pageId = 'p' + pageLoadedAt.toString(36) + '-' + Math.floor(Math.random() * 1000000).toString(36);
+  var hostReady = false;
+  var announceToken = '';
+  var announceTimer = null;
+  var announceAttempts = 0;
+  var ANNOUNCE_RETRY_MS = 50;
+  var ANNOUNCE_MAX_ATTEMPTS = 240;   // 约 12 秒；之后由宿主的 announceReady() 唤醒再继续
+  /**
+   * 是否允许**自启**握手重试：只有真实页面（有 document）才有计时器。
+   * Node 单测（require / vm.runInThisContext）没有 document，这条路径整体关闭，
+   * 否则「宿主未注册」的用例会在后台留下最多 12 秒的计时器，污染测试进程。
+   */
+  var canScheduleAnnounce = typeof global.document === 'object' && global.document !== null;
+
+  function scheduleAnnounce() {
+    if (!canScheduleAnnounce) {
+      return;
+    }
+    if (hostReady || announceAttempts >= ANNOUNCE_MAX_ATTEMPTS) {
+      return;
+    }
+    announceAttempts++;
+    announceTimer = setTimeout(announceAttempt, ANNOUNCE_RETRY_MS);
+  }
+
+  function announceAttempt() {
+    announceTimer = null;
+    if (hostReady) {
+      return;
+    }
+    var host = global.dshGitHost;
+    if (!host || typeof host !== 'object' || typeof host.onBridgeReady !== 'function') {
+      scheduleAnnounce();
+      return;
+    }
+    var reply = null;
+    try {
+      reply = host.onBridgeReady(JSON.stringify({
+        token: announceToken,
+        pageId: pageId,
+        pageAtMs: pageLoadedAt
+      }));
+    } catch (error) {
+      // FindObject / 代理未注册 / 页面正在切换：都只是「还没就绪」，按节奏重试（有界）
+      scheduleAnnounce();
+      return;
+    }
+    var parsed = null;
+    try {
+      parsed = typeof reply === 'string' ? JSON.parse(reply) : reply;
+    } catch (error) {
+      parsed = null;
+    }
+    if (parsed && typeof parsed.token === 'string' && parsed.token.length > 0 &&
+        parsed.token !== announceToken) {
+      announceToken = parsed.token;   // 采纳宿主当前令牌，下一轮用它重新对账
+      scheduleAnnounce();
+      return;
+    }
+    if (parsed && parsed.accept === true) {
+      hostReady = true;               // 宿主收下了：从现在起每次调用都打在已注册的代理上
+      announceToken = typeof parsed.token === 'string' ? parsed.token : announceToken;
+      return;
+    }
+    scheduleAnnounce();
+  }
+
+  /** 重新开始握手（宿主注入 announceReady() 调用 / 页面自启；幂等，重试中直接返回）。 */
+  function announceReady() {
+    if (hostReady) {
+      return;
+    }
+    if (announceTimer !== null) {
+      return;
+    }
+    announceAttempts = 0;
+    announceAttempt();
+  }
+
+  /** 宿主不可用（调用/回传抛错）：就绪标记打回未就绪并重新握手（自愈，不装死）。 */
+  function noteHostLost() {
+    hostReady = false;
+    announceReady();
   }
 
   function emitResult(id, error, data) {
@@ -472,7 +582,7 @@
     try {
       hostCall('onEvent', [JSON.stringify(payload)]);
     } catch (ignored) {
-      // 宿主已不可用（页面销毁等）：没有回传通道，只能丢弃本次结果
+      // 宿主已不可用（页面销毁等）：没有回传通道，只能丢弃本次结果（noteHostLost 已在 hostCall 里做过）
     }
   }
 
@@ -2902,6 +3012,12 @@
     sanitizeStack: sanitizeStack,
     toBridgeFailure: toBridgeFailure,
     bridgeErrorCode: E_BRIDGE,
+    // 就绪握手（mod-app-git-bridge-ready）：页面自检与 Node 单测共用，不属于跨端协议
+    announceReady: announceReady,
+    hostReadyOf: function () { return hostReady; },
+    pageLoadedAtOf: function () { return pageLoadedAt; },
+    announceRetryMs: ANNOUNCE_RETRY_MS,
+    announceMaxAttempts: ANNOUNCE_MAX_ATTEMPTS,
     pushPlan: pushPlan,
     branchState: branchState,
     ensureOnBranch: ensureOnBranch,
@@ -2922,14 +3038,19 @@
     supportedOps: SUPPORTED_OPS.slice(),
     call: call,
     onHttpResult: onHttpResult,
+    /** 重新开始就绪握手（宿主在 registerProxy 后注入调用；幂等）。 */
+    announceReady: announceReady,
     /** 取出当前会话的 fs 适配器（测试/调试用；正常流程由 op 内部使用）。 */
     getInternalFs: function () {
       ensureRepo();
       return session.fs;
     },
-    /** 宿主代理是否已就绪（供页面自检）。 */
+    /**
+     * 宿主代理是否**被证明**可调用：真的调通过一次 onBridgeReady。
+     * （旧实现只判断 `dshGitHost` 对象存在——那正是「对象在、代理还没注册」的误判来源。）
+     */
     isHostReady: function () {
-      return !!(global.dshGitHost && typeof global.dshGitHost === 'object');
+      return hostReady === true;
     },
     internals: internals
   };
@@ -2937,5 +3058,8 @@
   global.DshGitBridge = DshGitBridge;
   if (typeof module === 'object' && module && module.exports) {
     module.exports = DshGitBridge;
+  } else if (canScheduleAnnounce) {
+    // 只在真实页面里自启握手：Node（vm / require）不会留下后台计时器
+    announceReady();
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -40,6 +40,13 @@ import {
   redactUrl
 } from '../../model/instances';
 import type { DsInstance, InstanceProblem, RawInstance, RedactedInstance } from '../../model/instances';
+// mod-app-git-bridge-ready：「读不到 ≠ 空」的判定在纯模型里，本面板只把结论摆上屏。
+import {
+  instancesCountLine,
+  instancesMayShowEmpty,
+  instancesReadOf
+} from '../../model/bridgeReadiness';
+import type { InstancesRead } from '../../model/bridgeReadiness';
 import { reachabilityLabel, relativeLastSeen } from '../../model/instanceSeed';
 import { REMOTE_MODE_LAN, REMOTE_MODE_ORDER, findRemoteMode } from '../../model/remoteAccess';
 import { mergeRemoteToken, normalizeRemoteUrl, routeToRemote, stripRemoteToken } from '../../model/remoteUrl';
@@ -218,6 +225,25 @@ export struct InstancesPane {
     this.views = instanceStore.redacted();
     this.problem = instanceStore.lastProblem();
     this.loading = false;
+  }
+
+  /**
+   * 本次读取的结论（纯模型判定：`ok` 问题码与「确实还没有实例」才算读到）。
+   *
+   * `build()` 里现算，不另建 @State：问题码与本地面板是同一份内存镜像，多存一份只会不同步。
+   */
+  private readOf(): InstancesRead {
+    return instancesReadOf(this.views.length, this.problem, problemText(this.problem));
+  }
+
+  /** 顶部计数行：「读不到实例表」绝不写成「共 0 个实例」。 */
+  private countLine(): string {
+    return instancesCountLine(this.readOf());
+  }
+
+  /** 空态只在**读成功且确实为 0** 时渲染；读失败时上行已经说了读不到（以及下一步）。 */
+  private mayShowEmpty(): boolean {
+    return instancesMayShowEmpty(this.readOf());
   }
 
   /** 按 id 取真身（拼打开地址 / 令牌；徽章只读它的 pin / 可达 / scheme，绝不读令牌）。 */
@@ -1058,7 +1084,7 @@ export struct InstancesPane {
     Scroll() {
       Column({ space: SPACING.md }) {
         this.Header()
-        Text(`共 ${this.views.length} 个实例`)
+        Text(this.countLine())
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.text_secondary'))
@@ -1077,7 +1103,7 @@ export struct InstancesPane {
             .fontColor($r('app.color.text_secondary'))
             .width('100%')
             .textAlign(TextAlign.Start)
-        } else if (this.views.length === 0) {
+        } else if (this.mayShowEmpty()) {
           this.EmptyView()
         } else {
           ForEach(this.views, (view: RedactedInstance): void => {
