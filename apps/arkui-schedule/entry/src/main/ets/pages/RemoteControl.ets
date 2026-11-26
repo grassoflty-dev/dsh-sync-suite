@@ -40,6 +40,16 @@
  * 没有任何我们自己的东西；`error` 时错误块**整屏**替换页面（原因 + 下一步 + 重试），
  * 绝不出现空白页，也绝不出现英文错误页。
  *
+ * mod-app-remote-glyph-rail-polish（本批次）：浮动图标轨此前是 `Stack` 的最后一个孩子，
+ * **浮在页面上面**——Lead 截图里 `‹`/`↻`/`ⓘ` 就压在 DSH 页面的会话正文上。产品决定不变
+ * （仍然只有 DSH 页面，不加标题栏 / 说明文字），因此这里**只改几何**：
+ * - 几何全部由纯模型 `model/glyphRailLayout.ts` 算：`railRect`（图标轨盒子）与
+ *   `contentRect`（WebView 盒子）在模型里保证**永不相交**（页面右移出一条保留槽）；
+ * - 本页只做三件接线：把 `onAreaChange` 的真实视口交给 `railLayout()`、用 `railRect` 摆图标轨、
+ *   用 `contentRect` 定 Web 的位置与尺寸；**页面里没有一处写死的几何数字**；
+ * - 模型给 `railVisible=false`（视口还没量到 / 放不下）时连图标轨都不画，宁可这一帧没有图标，
+ *   也不留一个压在页面上的图标。真机观感仍是 `unverified`（本批次无设备）。
+ *
  * mod-remote-page-webview（前一批次，仍有效）：地址归一、传输方式、标签与一次性放行凭据分别收在纯模型
  * `model/remoteAddress.ts` / `model/pageTransport.ts` / `model/sslAllowance.ts`，本页只做接线：
  * 1. `normalizeHostPort` → `classifyTransport`（chip 文案）→ `pageDecision`（标签 + load/refuse）；
@@ -94,7 +104,7 @@ import { ErrorState } from '../components/state/ErrorState';
 import { LoadingState } from '../components/state/LoadingState';
 import { settingsStore } from '../services/settingsStore';
 import { describeError } from '../services/scheduleStore';
-import { FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
+import { FONT, LINE_HEIGHT, RADIUS, SPACING } from '../common/uiTokens';
 import { Rc3GatePanel, rc3GateRequested } from '../components/Rc3GatePanel';
 import {
   DIAGNOSTICS_GLYPH,
@@ -119,6 +129,8 @@ import {
   outcomeForRefusal
 } from '../model/remoteOutcome';
 import type { RemoteOutcome, RemoteRefusalKind } from '../model/remoteOutcome';
+import { GAP_DEFAULT_VP, GLYPH_DEFAULT_VP, glyphRailLayout } from '../model/glyphRailLayout';
+import type { GlyphRailInput, GlyphRailLayout } from '../model/glyphRailLayout';
 
 /** 页面状态：加载中 / 没有地址 / 已挂载 Web。 */
 const PHASE_LOADING: string = 'loading';
@@ -176,6 +188,13 @@ struct RemoteControl {
 
   @State rc3Gate: boolean = false;
 
+  /**
+   * 根容器实测视口（vp）：`onAreaChange` 送进来，是图标轨 / WebView 几何的唯一来源。
+   * 还没量到（0）时模型给退化结论（图标轨不画、页面铺满），绝不猜一个尺寸去摆位置。
+   */
+  @State viewportW: number = 0;
+  @State viewportH: number = 0;
+
   private controller: webview.WebviewController = new webview.WebviewController();
   private disposed: boolean = false;
   /**
@@ -212,6 +231,72 @@ struct RemoteControl {
    */
   private affordances(): ChromeAffordances {
     return chromeAffordances(this.surface(), this.url.length > 0, this.tlsBlocked);
+  }
+
+  // ------------------------------------------- 浮动图标轨几何（mod-app-remote-glyph-rail-polish）
+
+  /** `Area` 的 `Length` → vp 数字（非数字 / 非有限 / ≤0 一律 0，与 `Home.applyArea` 同一口径）。 */
+  private toVp(value: Length): number {
+    if (typeof value === 'number') {
+      return Number.isFinite(value) && value > 0 ? value : 0;
+    }
+    if (typeof value === 'string') {
+      const parsed: number = Number(value);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    }
+    return 0;
+  }
+
+  /** 面积变化 → 视口状态（只存真实量到的宽高；量不到就保持退化，不猜）。 */
+  private applyArea(area: Area): void {
+    const width: number = this.toVp(area.width);
+    const height: number = this.toVp(area.height);
+    if (width <= 0 || height <= 0) {
+      return;
+    }
+    if (this.viewportW !== width) {
+      this.viewportW = width;
+    }
+    if (this.viewportH !== height) {
+      this.viewportH = height;
+    }
+  }
+
+  /**
+   * 当前可见字形个数：返回恒在（用户的出口），刷新看 `affordances()`，诊断看 `phase`。
+   * 个数只影响图标轨高度，不影响保留槽宽度（槽只由字形宽 + gap 决定）。
+   */
+  private railGlyphCount(): number {
+    let count: number = 1;
+    if (this.affordances().reload) {
+      count += 1;
+    }
+    if (this.phase === PHASE_READY) {
+      count += 1;
+    }
+    return count;
+  }
+
+  /**
+   * 图标轨 + WebView 的盒子（纯模型，唯一几何来源）。
+   *
+   * 安全区：本页没有 `expandSafeArea`，ArkUI 默认把页面内容排在安全区内，
+   * 所以根容器的矩形**就是**安全区，这里四个 inset 传 0；模型本身支持非零 inset
+   * （`glyphRailLayout.test.mjs` 的表格覆盖零 / 小 / 大安全区），要沉浸式时只改这一处。
+   */
+  private railLayout(): GlyphRailLayout {
+    const input: GlyphRailInput = {
+      viewportW: this.viewportW,
+      viewportH: this.viewportH,
+      safeAreaTop: 0,
+      safeAreaBottom: 0,
+      safeAreaLeft: 0,
+      safeAreaRight: 0,
+      glyphSize: GLYPH_DEFAULT_VP,
+      gap: GAP_DEFAULT_VP,
+      glyphCount: this.railGlyphCount()
+    };
+    return glyphRailLayout(input);
   }
 
   // ------------------------------------------------------------------ 地址解析
@@ -750,22 +835,24 @@ struct RemoteControl {
   /**
    * 浮动图标轨（屏幕上我们唯一常驻的东西）：返回 ‹ / 刷新 ↻ / 连接诊断 ⓘ。
    *
-   * 三条约束：
+   * 四条约束：
    * - **没有文字**：不写标题、不写分类、不写说明——用户看到的字全部来自 DSH 页面；
-   * - 尺寸与颜色只取设计令牌，深色模式下由资源覆盖；
+   * - 尺寸与颜色只取设计令牌 / 纯模型，深色模式下由资源覆盖；
    * - `back` 恒可见（不能被关在页面里），`reload` 只在有地址、已到终态且不是证书拒绝终态时出现
-   *   （纯模型判定），`ⓘ` 只在 `ready` 出现（那时才有配对/传输可诊断）。
+   *   （纯模型判定），`ⓘ` 只在 `ready` 出现（那时才有配对/传输可诊断）；
+   * - **位置与尺寸全部来自 `railLayout().railRect` / `glyphSize` / `gap`**（mod-app-remote-glyph-rail-polish）：
+   *   页面已经按模型给出的 `contentRect` 右移，图标轨落在自己的保留槽里，**不可能压到页面内容上**。
    */
   @Builder
   Rail() {
-    Column({ space: SPACING.xs }) {
+    Column({ space: this.railLayout().gap }) {
       Text(BACK_GLYPH)
         .fontSize(FONT.title)
         .lineHeight(LINE_HEIGHT.title)
         .fontColor($r('app.color.text_primary'))
         .textAlign(TextAlign.Center)
-        .width(TOUCH_MIN)
-        .height(TOUCH_MIN)
+        .width(this.railLayout().glyphSize)
+        .height(this.railLayout().glyphSize)
         .backgroundColor($r('app.color.control_fill'))
         .borderRadius(RADIUS.sm)
         .onClick((): void => {
@@ -777,8 +864,8 @@ struct RemoteControl {
           .lineHeight(LINE_HEIGHT.title)
           .fontColor($r('app.color.text_primary'))
           .textAlign(TextAlign.Center)
-          .width(TOUCH_MIN)
-          .height(TOUCH_MIN)
+          .width(this.railLayout().glyphSize)
+          .height(this.railLayout().glyphSize)
           .backgroundColor($r('app.color.control_fill'))
           .borderRadius(RADIUS.sm)
           .onClick((): void => {
@@ -798,8 +885,8 @@ struct RemoteControl {
           .lineHeight(LINE_HEIGHT.title)
           .fontColor($r('app.color.text_secondary'))
           .textAlign(TextAlign.Center)
-          .width(TOUCH_MIN)
-          .height(TOUCH_MIN)
+          .width(this.railLayout().glyphSize)
+          .height(this.railLayout().glyphSize)
           .backgroundColor($r('app.color.control_fill'))
           .borderRadius(RADIUS.sm)
           .onClick((): void => {
@@ -807,7 +894,12 @@ struct RemoteControl {
           })
       }
     }
-    .padding({ left: SPACING.xs })
+    .width(this.railLayout().railRect.width)
+    .height(this.railLayout().railRect.height)
+    .position({
+      x: this.railLayout().railRect.x,
+      y: this.railLayout().railRect.y
+    })
   }
 
   /**
@@ -886,13 +978,21 @@ struct RemoteControl {
    *
    * 成功路径（`surface() === 'page'`）上这个 Stack 只有 Web 一个孩子——没有横幅、没有分类、
    * 没有说明文字；加载失败时错误块**整屏**盖住 Web（Web 仍挂着，所以「重试」只是 refresh）。
+   *
+   * Web 的盒子（位置 + 尺寸）来自 `railLayout().contentRect`：左边让出一条保留槽，
+   * DSH 页面整体右移，因此页面自己的排版里没有任何一处落在图标轨下面
+   * （mod-app-remote-glyph-rail-polish；此前 Web 是 100%×100%，图标轨就压在页面正文上）。
    */
   @Builder
   RemoteBody() {
     Stack({ alignContent: Alignment.TopStart }) {
       Web({ src: this.url, controller: this.controller })
-        .width('100%')
-        .height('100%')
+        .width(this.railLayout().contentRect.width)
+        .height(this.railLayout().contentRect.height)
+        .position({
+          x: this.railLayout().contentRect.x,
+          y: this.railLayout().contentRect.y
+        })
         .javaScriptAccess(true)
         .domStorageAccess(true)
         .onPageEnd(() => {
@@ -965,10 +1065,16 @@ struct RemoteControl {
       } else {
         this.RefusedView()
       }
-      this.Rail()
+      // 图标轨只在模型允许时画：视口还没量到 / 放不下就这一帧不画，绝不压在页面上
+      if (this.railLayout().railVisible) {
+        this.Rail()
+      }
     }
     .width('100%')
     .height('100%')
+    .onAreaChange((_oldValue: Area, newValue: Area) => {
+      this.applyArea(newValue);
+    })
     .backgroundColor($r('app.color.page_background'))
     .bindSheet(this.showDiagnostics, this.DiagnosticsSheet(), {
       height: SheetSize.MEDIUM,
