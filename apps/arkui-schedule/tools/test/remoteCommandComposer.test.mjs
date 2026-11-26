@@ -260,44 +260,36 @@ describe('F. 组件源码形状（诚实、无投递、令牌化）', () => {
 });
 
 describe('G. RemoteControl.ets 接线形状', () => {
-  test('G1 import + mount 唯一一次，且钉在真实可达的 PHASE_READY 主体内（含三个 prop）', () => {
-    assert.match(remoteSrc,
-      /import \{ RemoteCommandComposer \} from '\.\.\/components\/RemoteCommandComposer';/);
-    assert.equal((remoteSrc.match(/RemoteCommandComposer\(\{/g) ?? []).length, 1,
-      'composer 只能挂载一次');
+  // retarget（mod-app-remote-page-pure，不放松）：产品决定把「发指令到这台电脑」整块从远程页删除，
+  // 本组件因此成为零 importer 的死文件（仍可编译，组件级断言见 A–F 全部保留）。旧的「import + 挂载
+  // 唯一一次 + 钉在 PHASE_READY 主体内 + 三个 prop」失去主体，改为同一套切片/同一份组件名的**取反**
+  // 期望：0 次 import、0 次挂载（整页 + live 主体区都查）、页面不再有那三个 prop。
+  test('G1 远程页不再 import / 挂载 composer，且页面侧不再有命令通道接线', () => {
+    assert.equal(remoteSrc.includes('RemoteCommandComposer'), false,
+      '远程页不得 import RemoteCommandComposer');
+    assert.equal((remoteSrc.match(/RemoteCommandComposer\(\{/g) ?? []).length, 0,
+      'composer 挂载 0 次');
 
-    // 全文件只有一次挂载调用（import 语句不算调用点）。
+    // 全文件只有零次挂载调用（import 语句也没有）。
     const allMounts = remoteSrc.match(/RemoteCommandComposer\s*\(/g) ?? [];
-    assert.equal(allMounts.length, 1, '整页只允许一处 composer 挂载调用');
+    assert.equal(allMounts.length, 0, '整页不允许 composer 挂载调用');
 
-    // 区域切片：从 PHASE_READY 分支标记到同缩进的下一个分支标记（PHASE_EMPTY）。
-    // 挂载移到 loading / empty / build 之外都会落在这个切片外而失败。
-    const readyMarker = '} else if (this.phase === PHASE_READY) {';
-    const readyAt = remoteSrc.indexOf(readyMarker);
-    assert.ok(readyAt > 0, '必须存在 PHASE_READY 分支标记');
-    const nextBranchAt = remoteSrc.indexOf('} else if (this.phase === PHASE_EMPTY) {',
-      readyAt + readyMarker.length);
-    assert.ok(nextBranchAt > readyAt, '必须存在同缩进的下一个分支标记');
-    const readyBody = remoteSrc.slice(readyAt + readyMarker.length, nextBranchAt);
-    const regionMounts = readyBody.match(/RemoteCommandComposer\s*\(/g) ?? [];
-    assert.equal(regionMounts.length, 1, '唯一的挂载必须落在 PHASE_READY 分支主体内');
+    // 区域切片：真正的页面主体分支（webMounted，挂 Web 的那一侧）内也必须 0 次。
+    // 挂载挪回 loading / empty / refused 任一侧都会重新出现在这之外，仍然会被抓到。
+    const pageMarker = '} else if (this.webMounted) {';
+    const pageAt = remoteSrc.indexOf(pageMarker);
+    assert.ok(pageAt > 0, '必须存在 webMounted 主体分支标记');
+    const nextBranchAt = remoteSrc.indexOf('} else {', pageAt + pageMarker.length);
+    assert.ok(nextBranchAt > pageAt, '必须存在同缩进的下一个分支标记');
+    const pageBody = remoteSrc.slice(pageAt + pageMarker.length, nextBranchAt);
+    const regionMounts = pageBody.match(/RemoteCommandComposer\s*\(/g) ?? [];
+    assert.equal(regionMounts.length, 0, '页面主体分支内不得再有 composer 挂载');
 
-    // 可达性：挂载必须在 RefusedView() 之后，而不是 debug-only 的 rc3Gate 子分支里。
-    const mountAt = remoteSrc.indexOf('RemoteCommandComposer({');
-    const refusedAt = remoteSrc.indexOf('this.RefusedView()', readyAt);
-    assert.ok(refusedAt > readyAt && mountAt > refusedAt,
-      '挂载必须在 RefusedView() 之后（今天唯一可达的 PHASE_READY 路径），不能在 rc3Gate 子分支');
-
-    // 三个 prop 必须全部出现在挂载调用文本里，不能只传子集。
-    const mountEnd = remoteSrc.indexOf('})', mountAt);
-    assert.ok(mountEnd > mountAt, '挂载调用必须闭合');
-    const mountCall = remoteSrc.slice(mountAt, mountEnd + 2);
-    for (const prop of ['instanceId:', 'instanceName:', 'commandGranted:']) {
-      assert.ok(mountCall.includes(prop), `挂载必须传 ${prop}，不能只传子集`);
+    // 三个 prop 的来源在页面上必须彻底消失（不只是不传）。
+    for (const prop of ['instanceId: this.targetInstanceId()', 'instanceName: this.targetDisplayName()',
+      'commandGranted: this.targetCommandGranted()']) {
+      assert.equal(remoteSrc.includes(prop), false, `页面不得再传 ${prop}`);
     }
-    assert.match(remoteSrc, /instanceId: this\.targetInstanceId\(\)/);
-    assert.match(remoteSrc, /instanceName: this\.targetDisplayName\(\)/);
-    assert.match(remoteSrc, /commandGranted: this\.targetCommandGranted\(\)/);
   });
 
   // retarget（mod-remote-page-webview）：页面路径不再显示「未向电脑发送凭据」——页面本身
@@ -315,26 +307,34 @@ describe('G. RemoteControl.ets 接线形状', () => {
     assert.match(componentSrc, /composerReason\(this\.currentState\(\), this\.commandGranted\)/);
   });
 
-  test('G3 实例 id 派生只有一处，授权只读且 fail-closed', () => {
+  // retarget（mod-app-remote-page-pure）：发指令面板删除后，页面不再读授权表、不再拼目标名；
+  // 旧的「授权只读且 fail-closed」失去主体（那段代码已不存在）。改为钉住替代事实：URL→实例 id
+  // 派生仍只有一处，pin 读取仍然 fail-closed（缺行 / 无字段 ⇒ 空串 ⇒ 拒绝），且页面上没有任何
+  // 命令授权读；同一处切片、同一组函数名，期望值取反，不是删断言。
+  test('G3 实例 id 派生只有一处；页面无命令授权读；pin 读取仍 fail-closed', () => {
     assert.equal((remoteSrc.match(/instanceIdFromUrl\(this\.url\)/g) ?? []).length, 1,
       'URL→实例 id 派生不得重复');
-    assert.match(remoteSrc, /canPrompt\(instanceGrantStore\.list\(\), id, Date\.now\(\)\)/);
-    assert.match(remoteSrc, /instanceGrantStore\.lastProblem\(\) !== 'ok'/);
-    assert.match(remoteSrc, /findInstance\(instanceStore\.list\(\), id\) === null/);
+    assert.equal(remoteSrc.includes('canPrompt('), false, '页面不得再读 session.prompt 授权');
+    assert.equal(remoteSrc.includes('instanceGrantStore'), false, '页面不得再依赖授权表');
+    const pin = remoteSrc.slice(remoteSrc.indexOf('private storedPin(): string'),
+      remoteSrc.indexOf('private handleSslError('));
+    assert.ok(pin.length > 0, 'storedPin 必须仍在页面上');
+    assert.match(pin, /found === null \|\| found\.tlsFingerprint === undefined[\s\S]*?return '';/,
+      'pin 读取仍 fail-closed：实例缺行 / 无指纹字段一律空串');
   });
 
   // G4 retarget（mod-pinned-view-removal）：旧对照组的前提「死文件 PinnedRemoteView.ets 在磁盘上且零 importer」
   // 已被本模块删除。删除事实：零 importer、从未进 entry 图、旧产物 abc 命中 0——不可能回归行为，也不省字节。
   // 新对照组保留同一套 importer 扫描：
   //   (a) 钉住死文件已不存在；
-  //   (b) 正对照不变——composer 的唯一 importer 仍是入口图里的 RemoteControl.ets；
+  //   (b) 正对照（再次 retarget，mod-app-remote-page-pure）：产品决定下架「发指令」面板后，composer 成为
+  //       **零 importer 的死文件**（文件保留在磁盘上、仍可编译，组件级断言 A–F 仍在跑）。同一套扫描必须
+  //       把它扫成 []，而不是删掉文件——删文件会连带删掉那些断言；
   //   (c) 负对照从「磁盘上但零 importer」改写为「删除后无任何悬空 import PinnedRemoteView」——
   //       仍真实遍历同一套扫描的零分支，且是删除后的真实完整性不变量（悬空 import 会断编译）。
-  // 「编译 vs 仅存在于磁盘」的另一端由 G1（挂载钉在 live PHASE_READY 主体内）证明，未放宽。
-  // 未做全局「每个 .ets 至少 1 importer」不变量：删除后 24 个（删除前 25 个）合法零 importer 源文件
-  //（删除后共 153 个源文件；@Entry 页 / EntryAbility / scaffold 桩 / 纯 model 辅助，例见 .tmp/enumerate-zero-importers.mjs），
-  // 需要一份本模块无法证明合理的白名单，故不引入。
-  test('G4 对照组：死渲染器已删除、无悬空 import，composer 仍恰有一个入口图 importer', () => {
+  // 未做全局「每个 .ets 至少 1 importer」不变量：composer 下架后又多了一个合法零 importer 源文件
+  //（@Entry 页 / EntryAbility / scaffold 桩 / 纯 model 辅助同样如此），需要一份本模块无法证明合理的白名单，故不引入。
+  test('G4 对照组：死渲染器已删除、无悬空 import，composer 现为零 importer 死文件', () => {
     const etsRoot = resolve(HERE, '../../entry/src/main/ets');
     const sources = [];
     const walk = (dir) => {
@@ -362,10 +362,14 @@ describe('G. RemoteControl.ets 接线形状', () => {
     const pinnedImporters = sources.filter((file) => importsNamed(file, 'PinnedRemoteView'));
     assert.deepEqual(pinnedImporters, [], '删除后不得有任何文件仍 import PinnedRemoteView（悬空 import）');
 
-    // (b) 正对照：同一套扫描必须找到本模块 composer 的唯一 importer = 远程控制页。
+    // (b) 正对照（retarget）：composer 文件仍在磁盘（组件级断言仍跑），但已无任何 importer。
     const composer = resolve(etsRoot, 'components/RemoteCommandComposer.ets');
+    assert.equal(existsSync(composer), true, 'composer 文件保留在磁盘上，仍可编译');
+    assert.equal(sources.includes(composer), true, '扫描必须仍能枚举到 composer（不是被删掉）');
     const composerImporters = sources.filter((file) =>
       file !== composer && importsNamed(file, 'RemoteCommandComposer'));
-    assert.deepEqual(composerImporters, [REMOTE_ETS], 'composer 的唯一 importer 必须是入口图里的 RemoteControl.ets');
+    assert.deepEqual(composerImporters, [],
+      '下架后不得有任何文件 import RemoteCommandComposer（含 RemoteControl.ets）');
+    assert.equal(composerImporters.includes(REMOTE_ETS), false, '远程页不得再 import composer');
   });
 });

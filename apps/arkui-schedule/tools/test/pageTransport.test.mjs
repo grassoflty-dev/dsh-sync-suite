@@ -141,13 +141,18 @@ describe('C. RemoteControl 接线形状（没有内联分类/标签、只有决�
     assert.equal(apply.includes('sslGrant('), false, '决策拒绝路径不得预授权');
   });
 
-  test('C4 composer 挂载调用逐字节未变（props 与 reason 接线原样）', () => {
-    const mount = `        RemoteCommandComposer({
-          instanceId: this.targetInstanceId(),
-          instanceName: this.targetDisplayName(),
-          commandGranted: this.targetCommandGranted()
-        })`;
-    assert.equal(PAGE.split(mount).length - 1, 1, 'composer 挂载调用必须与 batch-1 逐字一致');
+  // retarget（mod-app-remote-page-pure，不放松）：产品决定把「发指令到这台电脑」整块从本页删除，
+  // 旧的「挂载调用逐字节未变」因此失去主体（那段调用已不存在）。改为钉住新事实——同一处切片位置、
+  // 同一组组件名，期望值取反：0 次 import、0 次挂载、命令通道的页面侧接线（目标名 / 授权查询）0 处。
+  // 下架不等于放宽：以前要求「恰好一次」，现在要求「一处都没有」，两边都是精确计数。
+  test('C4 composer 已从本页删除：0 次 import / 0 次挂载 / 无命令通道接线', () => {
+    assert.equal(PAGE.includes('RemoteCommandComposer'), false,
+      '远程页不得再 import 或挂载 composer（发指令面板已下架）');
+    assert.equal((PAGE.match(/RemoteCommandComposer\s*\(/g) ?? []).length, 0,
+      '整页不允许任何 composer 挂载调用');
+    for (const gone of ['targetDisplayName', 'targetCommandGranted', 'instanceGrantStore', 'canPrompt(']) {
+      assert.equal(PAGE.includes(gone), false, `页面不得再有命令通道接线 ${gone}`);
+    }
   });
 
   test('C5 TOCTOU 行只在预检真正通过后显示（httpsVerified 守卫），全页恰好一处', () => {

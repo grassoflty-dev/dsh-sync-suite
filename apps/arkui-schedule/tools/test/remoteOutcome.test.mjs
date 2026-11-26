@@ -263,14 +263,17 @@ describe('E. RemoteControl：每次尝试只写一次，失败一律 fail', () =
       'ok 只来自真正的页面加载完成');
   });
 
-  // retarget（同上）：旧「页面必须出现硬拒绝句一次」转红，改为「页面 0 命中 +
-  // composer 挂载仍恰好一次」。命令通道的诚实原因由 composer 的闸门 wording 承载。
-  test('E5 batch-1 的 composer 挂载逐字保留；旧页面级凭据拒绝句已绝迹', () => {
-    assert.equal((REMOTE.match(/RemoteCommandComposer\(\{/g) ?? []).length, 1, 'composer 只能挂载一次');
+  // retarget（同上）：旧「页面必须出现硬拒绝句一次」转红，改为「页面 0 命中 + 命令面板接线 0 命中」。
+  // 命令通道的诚实原因仍由 composer 的闸门 wording 承载（组件级断言在 remoteCommandComposer.test.mjs）。
+  // 再 retarget（mod-app-remote-page-pure）：产品决定把「发指令到这台电脑」整块下架，页面不再挂载
+  // composer，也不再 import 它；同一处切片、同一份计数，期望值由 1 变 0（精确计数，不是放宽）。
+  test('composer 已从远程页下架（0 次挂载 / 0 次 import）；旧页面级凭据拒绝句仍绝迹', () => {
+    assert.equal((REMOTE.match(/RemoteCommandComposer\(\{/g) ?? []).length, 0,
+      '发指令面板下架后 composer 挂载 0 次');
+    assert.equal(REMOTE.includes('RemoteCommandComposer'), false,
+      '远程页不得再 import RemoteCommandComposer');
     assert.equal(REMOTE.includes('安全连接尚未启用'), false);
     assert.equal(REMOTE.includes('未向电脑发送凭据'), false);
-    assert.match(REMOTE,
-      /import \{ RemoteCommandComposer \} from '\.\.\/components\/RemoteCommandComposer';/);
     assert.match(REMOTE, /instanceIdFromUrl\(this\.url\)/, '唯一 URL→id 派生仍在');
   });
 });

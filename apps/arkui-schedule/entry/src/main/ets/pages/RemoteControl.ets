@@ -13,7 +13,7 @@
  * - `loading`：刚进页面，正在读参数/本机设置 → `LoadingState`（不渲染 Web，避免闪一下空页）；
  *              3 秒后出现的「取消」= 回设置页看看，**只停止这次等待**，不代表连接被取消；
  * - `empty`  ：没有可用地址（或读设置失败）→ `EmptyState`（原因 + 「去设置」）；
- * - `ready`  ：地址可用 → 挂载 `Web`；加载失败时**不**卸载 Web，只在其上叠 `ErrorState`
+ * - `ready`  ：地址可用 → 挂载 `Web`；加载失败时**不**卸载 Web，只在其上整屏叠错误块
  *              （三段式 + 诊断行 + 重试 + 「用浏览器打开」），
  *              这样「重试」只是 `controller.refresh()`，不会丢历史/会话。
  * 状态只在「初始化」与「重试/刷新」时变化：`ready` 内部错误态由 `loadError` 单独表达。
@@ -23,17 +23,35 @@
  * - 除 `domStorageAccess` 外不加实验属性：DSH 是纯前端 SPA，需要 JS + localStorage
  *   （token/偏好落在这里），这两项是功能必需，其余一律用默认值。
  *
- * mod-remote-page-webview（本批次）：地址归一、传输分类、标签与一次性放行凭据分别收在纯模型
+ * mod-app-remote-page-pure（本批次）：**本页只显示电脑自己的 DSH 页面**。我们此前加在页面上的
+ * 东西全部下架，全部判断收进纯模型 `model/remotePageChrome.ts`：
+ * - 发指令面板（目标 / 工具 / 确认勾选 / 发送按钮）整块删除。本页没有命令入口，
+ *   `session.prompt` 在平板上**没有** UI 入口；唯一交互面就是 DSH 页面本身。
+ *   那个只读命令面板组件因此变成零 importer 的死文件（仍可编译），保留是因为
+ *   它自己的组件级守卫测试仍在跑，删文件会连带删掉那些断言。
+ * - 顶部整块删除：传输方式标签、证书比对标签、「两次连接之间更换证书不会发现」的 caveat、URL 行。
+ * - CDP 实时视图与预览标记的说明位删除（本版本页面源码里本来就没有这两处文案）。
+ * - 我们自己的标题栏（返回 + 「远程控制」+ 刷新按钮）删除，改成左侧居中的浮动图标轨：
+ *   返回 `‹` / 刷新 `↻` / 连接诊断 `ⓘ`，**无文字、无标题栏、无 chip**，透明度与尺寸都取设计令牌。
+ * - 配对 / 指纹诊断没有删，只是搬进「连接诊断」浮层：点 `ⓘ` 或长按 `↻` 打开；地址行先
+ *   `stripRemoteToken()` 再显示（浮层里也不出现令牌）。成功路径上它不渲染。
+ *
+ * 成功路径只有 Web：`remoteSurface()` 是唯一表面决策，`page` 时屏幕上除了 Web 与浮动图标轨
+ * 没有任何我们自己的东西；`error` 时错误块**整屏**替换页面（原因 + 下一步 + 重试），
+ * 绝不出现空白页，也绝不出现英文错误页。
+ *
+ * mod-remote-page-webview（前一批次，仍有效）：地址归一、传输方式、标签与一次性放行凭据分别收在纯模型
  * `model/remoteAddress.ts` / `model/pageTransport.ts` / `model/sslAllowance.ts`，本页只做接线：
- * 1. `normalizeHostPort` → `classifyTransport`（chip）→ `pageDecision`（标签 + load/refuse）；
- * 2. http ⇒ 直接 load，标签逐字取「明文传输，令牌随地址明文发送，仅在你信任的网络内使用」；
+ * 1. `normalizeHostPort` → `classifyTransport`（chip 文案）→ `pageDecision`（标签 + load/refuse）；
+ * 2. http ⇒ 直接 load；
  * 3. https ⇒ 查实例的配对 pin；无 pin / 不匹配在 `pageDecision` 处拒绝，绝不挂 Web；
  *    pin 存在时经 `services/remotePinnedClient.ets` 发**一条不带凭证**的预检请求，
  *    用 `verifyLeafPin` 比对叶证书指纹；通过才 `sslAllowance.grant()` 并挂 Web；
  * 4. `onSslErrorEventReceive` 只在 `sslAllowance.consume()` 为真时 `handleConfirm()`，
  *    否则 `handleCancel(true)` + typed 原因。**这里不写 pin、不改实例表**。
- * 预检是一次连接，WebView 握手是另一次独立连接：页面逐字显示这条残留 TOCTOU 风险，
- * 不假装两次连接是同一条，也不写任何过度承诺的安全形容词（禁用词见 pageTransport 模型头）。
+ * 预检是一次连接，WebView 握手是另一次独立连接：这条残留 TOCTOU 风险仍逐字保留在
+ * `TransportInfo()` 里（现在只在诊断浮层可见），不假装两次连接是同一条，
+ * 也不写任何过度承诺的安全形容词（禁用词见 pageTransport 模型头）。
  *
  * 旧页面级「安全已启用才发凭据」式拒绝句已从页面路径删除：页面本身不发送任何来自 App 的
  * 敏感数据，那条话只属于命令通道（composer 的 `E_COMMAND_REMOTE_UNVERIFIED`）。
@@ -76,11 +94,24 @@ import { ErrorState } from '../components/state/ErrorState';
 import { LoadingState } from '../components/state/LoadingState';
 import { settingsStore } from '../services/settingsStore';
 import { describeError } from '../services/scheduleStore';
-import { DIVIDER, FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
+import { FONT, LINE_HEIGHT, RADIUS, SPACING, TOUCH_MIN } from '../common/uiTokens';
 import { Rc3GatePanel, rc3GateRequested } from '../components/Rc3GatePanel';
-import { canPrompt } from '../model/instanceGrant';
-import { instanceGrantStore } from '../services/instanceGrantStore';
-import { RemoteCommandComposer } from '../components/RemoteCommandComposer';
+import {
+  DIAGNOSTICS_GLYPH,
+  DIAGNOSTICS_LONG_PRESS_MS,
+  DIAGNOSTICS_TITLE,
+  BACK_GLYPH,
+  RELOAD_GLYPH,
+  chromeAffordances,
+  pairingDiagnostics,
+  remoteSurface
+} from '../model/remotePageChrome';
+import type {
+  ChromeAffordances,
+  PairingDiagnosticsInput,
+  RemoteSurface,
+  RemoteSurfaceInput
+} from '../model/remotePageChrome';
 import {
   REMOTE_OUTCOME_KEY,
   encodeRemoteOutcome,
@@ -113,9 +144,7 @@ const ERROR_NEXT: string = '确认电脑上的 DSH 已启动、平板与电脑�
 const ERROR_CODE_PATTERN: RegExp = /-?\d{2,5}/;
 const FALLBACK_ERROR_CODE: string = 'WEB_LOAD';
 
-/** 标题栏「刷新」：没地址时点不动，但必须说出原因（不静默）。 */
-const REFRESH_LABEL: string = '刷新';
-const REFRESH_BLOCKED_REASON: string = '还没有可用地址';
+/** 兜底按钮：把地址交给系统浏览器（只在错误块里出现）。 */
 const OPEN_BROWSER_LABEL: string = '用浏览器打开';
 
 @Entry
@@ -123,7 +152,7 @@ const OPEN_BROWSER_LABEL: string = '用浏览器打开';
 struct RemoteControl {
   /** 归一后的 DSH 地址；空串 = 没有可用地址（空状态）。 */
   @State url: string = '';
-  /** 加载失败文案（空串 = 无错误）；非空时在 Web 上叠错误卡片。 */
+  /** 加载失败文案（空串 = 无错误）；非空时在 Web 上整屏叠错误块。 */
   @State loadError: string = '';
   /** 空状态的补充原因（读设置失败 / 地址非法），空串 = 不显示。 */
   @State emptyReason: string = '';
@@ -134,14 +163,16 @@ struct RemoteControl {
 
   /** mod-remote-page-webview：归一后的 host/port/scheme；null = 地址非法。 */
   private address: HostPortCheck | null = null;
-  /** 分类 chip 文案（只从 TRANSPORT_LABELS 取，不在组件里写死）。 */
+  /** 传输方式文案（只从 TRANSPORT_LABELS 取，不在组件里写死；只在诊断浮层里显示）。 */
   @State transportLabel: string = '';
-  /** pageDecision 的标签（唯一决策文案出口）。 */
+  /** pageDecision 的标签（唯一决策文案出口；只在诊断浮层里显示）。 */
   @State pageLabel: string = '';
   /** 只有决策 action='load' 才为 true；Web 只在此为真时挂载。 */
   @State webMounted: boolean = false;
   /** https 预检通过过：刷新时需要重新发放一次性放行凭据。 */
   @State httpsVerified: boolean = false;
+  /** 连接诊断浮层是否展开（默认关：成功路径上不渲染任何诊断内容）。 */
+  @State showDiagnostics: boolean = false;
 
   @State rc3Gate: boolean = false;
 
@@ -161,6 +192,26 @@ struct RemoteControl {
 
   aboutToDisappear(): void {
     this.disposed = true;
+  }
+
+  // ------------------------------------------------------------------ 表面与浮动操作
+
+  /** 唯一表面决策（纯模型）：loading / empty / page / error。 */
+  private surface(): RemoteSurface {
+    const input: RemoteSurfaceInput = {
+      phase: this.phase,
+      webMounted: this.webMounted,
+      hasLoadError: this.loadError.length > 0
+    };
+    return remoteSurface(input);
+  }
+
+  /**
+   * 浮动操作可见性（纯模型）：返回永远有；刷新只在有地址、已到终态且**不是**证书拒绝终态时出现
+   * （拒绝不会因为重新加载而改变，留一个没反应的图标就是假动作）。
+   */
+  private affordances(): ChromeAffordances {
+    return chromeAffordances(this.surface(), this.url.length > 0, this.tlsBlocked);
   }
 
   // ------------------------------------------------------------------ 地址解析
@@ -221,6 +272,7 @@ struct RemoteControl {
     this.pageLabel = '';
     this.webMounted = false;
     this.httpsVerified = false;
+    this.showDiagnostics = false;
 
     const addr: HostPortCheck = normalizeHostPort(raw);
     if (!addr.ok) {
@@ -365,8 +417,8 @@ struct RemoteControl {
   /**
    * 当前地址对应的实例 id：整个页面**唯一**一处 URL→实例 id 派生。
    *
-   * 证书 pin 查询与「发指令」目标都走这里，绝不各写一次 URL 派生调用——
-   * 两处派生一旦漂移，pin 校验的就会是另一台电脑。
+   * 证书 pin 查询走这里，绝不另写一次 URL 派生调用——两处派生一旦漂移，
+   * pin 校验的就会是另一台电脑。（发指令面板已删除，不再有第二个消费者。）
    */
   private targetInstanceId(): string {
     return instanceIdFromUrl(this.url);
@@ -403,34 +455,6 @@ struct RemoteControl {
       return;
     }
     this.writeOutcome(outcomeForLoadSuccess(id, Date.now()));
-  }
-
-  /** 发指令目标展示名：有实例行用其名字，缺行退回 id（不编造名字）。 */
-  private targetDisplayName(): string {
-    const id: string = this.targetInstanceId();
-    if (id.length === 0) {
-      return '';
-    }
-    const found: DsInstance | null = findInstance(instanceStore.list(), id);
-    return found === null ? id : found.name;
-  }
-
-  /**
-   * 发指令授权：只认显式授予的 session.prompt。
-   * 实例行缺失或授权表损坏 / 存储不可用时一律 false（fail-closed），不猜测、不放行。
-   */
-  private targetCommandGranted(): boolean {
-    const id: string = this.targetInstanceId();
-    if (id.length === 0) {
-      return false;
-    }
-    if (findInstance(instanceStore.list(), id) === null) {
-      return false;
-    }
-    if (instanceGrantStore.lastProblem() !== 'ok') {
-      return false;
-    }
-    return canPrompt(instanceGrantStore.list(), id, Date.now());
   }
 
   /**
@@ -510,7 +534,7 @@ struct RemoteControl {
     });
   }
 
-  /** 刷新：先清错误态，再让 Web 重新加载（错误卡片上的「重试」与标题栏「刷新」共用）。 */
+  /** 刷新：先清错误态，再让 Web 重新加载（错误块上的「重试」与浮动 ↻ 共用）。 */
   private refresh(): void {
     // 拒绝是一次性终态：不静默重试、不借刷新绕过校验；恢复需重新进入本页
     //（无 pin 的情形仍须先回设置页配对）。
@@ -566,6 +590,11 @@ struct RemoteControl {
     }
   }
 
+  /** 浮动返回：不用读文字就能找到的出口（系统返回手势不是保证）。 */
+  private goBack(): void {
+    router.back();
+  }
+
   /**
    * `onErrorReceive` 的文案：把 Chromium 错误码一起展示，真机上据此判断原因。
    *
@@ -615,6 +644,7 @@ struct RemoteControl {
    * 诊断行（`docs/STATE-UI.md` §4.3）：版本 / 设备 / 错误码 / 时间四段永远都在。
    *
    * 设备 id 留空（本页没有设备身份）→ `formatDiagnostics` 兜底「未登记」，不编造。
+   * 只用在**错误块**里；成功路径上不渲染（诊断浮层是另一套配对诊断，见下）。
    */
   private diagnosticsText(): string {
     const input: DiagnosticsInput = {
@@ -626,48 +656,16 @@ struct RemoteControl {
     return formatDiagnostics(input);
   }
 
-  // ------------------------------------------------------------------ UI
-
-  /** 标题栏：返回 ‹ + 标题 + 刷新（没地址时点不动，但会 toast 出原因）。 */
-  @Builder
-  Header() {
-    Row({ space: SPACING.sm }) {
-      Text('‹')
-        .fontSize(FONT.title)
-        .lineHeight(LINE_HEIGHT.title)
-        .fontColor($r('app.color.text_primary'))
-        .width(TOUCH_MIN)
-        .height(TOUCH_MIN)
-        .textAlign(TextAlign.Center)
-        .onClick(() => {
-          router.back();
-        })
-      Text('远程控制')
-        .fontSize(FONT.title)
-        .lineHeight(LINE_HEIGHT.title)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.text_primary'))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
-        .textAlign(TextAlign.Start)
-      ActionButton({
-        label: REFRESH_LABEL,
-        actionEnabled: this.url.length > 0,
-        disabledReason: REFRESH_BLOCKED_REASON,
-        busy: false,
-        variant: 'ghost',
-        block: false,
-        onTap: (): void => {
-          this.refresh();
-        },
-        onBlockedTap: null
-      })
-    }
-    .width('100%')
-    .alignItems(VerticalAlign.Center)
-    .padding({ left: SPACING.sm, right: SPACING.sm, top: SPACING.md, bottom: SPACING.md })
+  /** 配对诊断正文：地址先剥 token，再交给纯模型拼行（浮层专用，成功路径不渲染）。 */
+  private pairingText(): string {
+    const input: PairingDiagnosticsInput = {
+      address: stripRemoteToken(this.url),
+      pin: this.storedPin()
+    };
+    return pairingDiagnostics(input);
   }
+
+  // ------------------------------------------------------------------ UI
 
   /** 加载态：读地址/设置的那几毫秒也必须有反馈；取消 = 回设置页（停止等待，不是断开连接）。 */
   @Builder
@@ -682,7 +680,7 @@ struct RemoteControl {
       })
     }
     .width('100%')
-    .layoutWeight(1)
+    .height('100%')
     .justifyContent(FlexAlign.Center)
   }
 
@@ -700,15 +698,16 @@ struct RemoteControl {
       })
     }
     .width('100%')
-    .layoutWeight(1)
+    .height('100%')
     .justifyContent(FlexAlign.Center)
   }
 
   /**
-   * 错误卡片：叠在 Web 之上，说明原因 + 诊断行 + 「重试」+「用浏览器打开」。
+   * 错误块：说明原因 + 诊断行 + 「重试」+「用浏览器打开」。
    *
    * 第二按钮**不**走 `ErrorState.onOpenSettings`（那里的文案固定是「去设置」，本页要的是
    * 「用浏览器打开」），所以 `onOpenSettings` 传 `null`，在组件外自己放一个 `ActionButton`。
+   * 调用方负责把它整屏摆出来（成功路径上不渲染）。
    */
   @Builder
   ErrorView() {
@@ -749,32 +748,145 @@ struct RemoteControl {
   }
 
   /**
-   * 传输信息行：分类 chip + 决策标签 + 残留 TOCTOU 风险各一行（第三行只在预检真正通过后显示）。
+   * 浮动图标轨（屏幕上我们唯一常驻的东西）：返回 ‹ / 刷新 ↻ / 连接诊断 ⓘ。
+   *
+   * 三条约束：
+   * - **没有文字**：不写标题、不写分类、不写说明——用户看到的字全部来自 DSH 页面；
+   * - 尺寸与颜色只取设计令牌，深色模式下由资源覆盖；
+   * - `back` 恒可见（不能被关在页面里），`reload` 只在有地址、已到终态且不是证书拒绝终态时出现
+   *   （纯模型判定），`ⓘ` 只在 `ready` 出现（那时才有配对/传输可诊断）。
+   */
+  @Builder
+  Rail() {
+    Column({ space: SPACING.xs }) {
+      Text(BACK_GLYPH)
+        .fontSize(FONT.title)
+        .lineHeight(LINE_HEIGHT.title)
+        .fontColor($r('app.color.text_primary'))
+        .textAlign(TextAlign.Center)
+        .width(TOUCH_MIN)
+        .height(TOUCH_MIN)
+        .backgroundColor($r('app.color.control_fill'))
+        .borderRadius(RADIUS.sm)
+        .onClick((): void => {
+          this.goBack();
+        })
+      if (this.affordances().reload) {
+        Text(RELOAD_GLYPH)
+          .fontSize(FONT.title)
+          .lineHeight(LINE_HEIGHT.title)
+          .fontColor($r('app.color.text_primary'))
+          .textAlign(TextAlign.Center)
+          .width(TOUCH_MIN)
+          .height(TOUCH_MIN)
+          .backgroundColor($r('app.color.control_fill'))
+          .borderRadius(RADIUS.sm)
+          .onClick((): void => {
+            this.refresh();
+          })
+          // 长按同一个图标也能打开诊断：与 ⓘ 等价，不需要读文字就能发现。
+          .gesture(
+            LongPressGesture({ repeat: false, duration: DIAGNOSTICS_LONG_PRESS_MS })
+              .onAction((): void => {
+                this.showDiagnostics = true;
+              })
+          )
+      }
+      if (this.phase === PHASE_READY) {
+        Text(DIAGNOSTICS_GLYPH)
+          .fontSize(FONT.title)
+          .lineHeight(LINE_HEIGHT.title)
+          .fontColor($r('app.color.text_secondary'))
+          .textAlign(TextAlign.Center)
+          .width(TOUCH_MIN)
+          .height(TOUCH_MIN)
+          .backgroundColor($r('app.color.control_fill'))
+          .borderRadius(RADIUS.sm)
+          .onClick((): void => {
+            this.showDiagnostics = true;
+          })
+      }
+    }
+    .padding({ left: SPACING.xs })
+  }
+
+  /**
+   * 连接诊断浮层（`bindSheet`）：配对 / 指纹 / 传输诊断的**唯一**展示位。
+   *
+   * 首行固定是 `DIAGNOSTICS_TITLE`（「连接诊断」）；之后依次是传输方式行、证书比对行、
+   * 预检通过才有的 TOCTOU caveat（都来自 `TransportInfo()`）、以及地址 + 配对指纹。
+   * 地址已剥 token；浮层默认关闭，成功路径上不渲染。
+   */
+  @Builder
+  DiagnosticsSheet() {
+    Column({ space: SPACING.md }) {
+      Text(DIAGNOSTICS_TITLE)
+        .fontSize(FONT.title)
+        .lineHeight(LINE_HEIGHT.title)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+      this.TransportInfo()
+      Text(this.pairingText())
+        .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
+        .fontFamily('monospace')
+        .fontColor($r('app.color.text_primary'))
+        .copyOption(CopyOptions.LocalDevice)
+        .width('100%')
+        .textAlign(TextAlign.Start)
+      if (this.rc3Gate) {
+        Rc3GatePanel({ endpoint: this.url })
+      }
+    }
+    .width('100%')
+    .padding(SPACING.lg)
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  /**
+   * 诊断内容：传输方式 + 决策标签 + 残留 TOCTOU 风险各一行（第三行只在预检真正通过后显示）。
+   *
    * 文案全部来自纯模型（TRANSPORT_LABELS / PAGE_TRANSPORT_TABLE / TOCTOU_SENTENCE），
    * 组件里没有任何内联分类/IP 嗅探；Tailscale 不额外加任何形容词。
+   * 本 builder **只被 `DiagnosticsSheet()` 调用**，成功路径上不渲染。
    */
   @Builder
   TransportInfo() {
     Column({ space: SPACING.xs }) {
-      Text(`传输分类：${this.transportLabel}`)
+      Text(`传输：${this.transportLabel}`)
         .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
         .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
       Text(this.pageLabel)
         .fontSize(FONT.caption)
+        .lineHeight(LINE_HEIGHT.caption)
         .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
       // 只有预检真正通过（verifyLeafPin 命中且已放行）才显示；无 pin / 拒绝 / http 都没发生过预检。
       if (this.httpsVerified) {
         Text(TOCTOU_SENTENCE)
           .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
       }
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
-    .padding({ left: SPACING.lg, right: SPACING.lg, top: SPACING.sm })
   }
 
-  /** 主体：内嵌 Web + 错误卡片遮罩（决策成功后才挂，重试不丢会话）。 */
+  /**
+   * 主体：内嵌 Web + 整屏错误块（决策成功后才挂，重试不丢会话）。
+   *
+   * 成功路径（`surface() === 'page'`）上这个 Stack 只有 Web 一个孩子——没有横幅、没有分类、
+   * 没有说明文字；加载失败时错误块**整屏**盖住 Web（Web 仍挂着，所以「重试」只是 refresh）。
+   */
   @Builder
   RemoteBody() {
     Stack({ alignContent: Alignment.TopStart }) {
@@ -814,61 +926,58 @@ struct RemoteControl {
           this.loadError = `电脑上的 DSH 返回 HTTP ${status}：地址或 token 可能不对，请回设置页检查`;
           this.reportRefusal('web-load-error');
         })
-      if (this.loadError.length > 0) {
+      if (this.surface() === 'error') {
         Column() {
           this.ErrorView()
         }
         .width('100%')
+        .height('100%')
         .padding(SPACING.lg)
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor($r('app.color.page_background'))
       }
     }
     .width('100%')
-    .layoutWeight(1)
+    .height('100%')
   }
 
-  /** 证书拒绝终态：只渲染错误卡，Web 根本不挂载（页面从未加载）。 */
+  /** 证书拒绝终态：只渲染整屏错误块，Web 根本不挂载（页面从未加载）。 */
   @Builder
   RefusedView() {
     Column() {
       this.ErrorView()
     }
     .width('100%')
+    .height('100%')
     .padding(SPACING.lg)
-    .layoutWeight(1)
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor($r('app.color.page_background'))
   }
 
   build() {
-    Column() {
-      this.Header()
-      Divider()
-        .strokeWidth(DIVIDER)
-        .color($r('app.color.divider'))
+    Stack({ alignContent: Alignment.Start }) {
       if (this.phase === PHASE_LOADING) {
         this.LoadingView()
-      } else if (this.phase === PHASE_READY) {
-        if (this.rc3Gate) {
-          Rc3GatePanel({ endpoint: this.url })
-        }
-        this.TransportInfo()
-        // 决策 action='load' 才挂 Web；拒绝路径只有错误卡，没有「静默 WebView」。
-        if (this.webMounted) {
-          this.RemoteBody()
-        } else {
-          this.RefusedView()
-        }
-        // mod-remote-command-wire：单次确认闸的真实界面，挂在唯一可达的 PHASE_READY 态；
-        // 目标派生与 pin 预检共用一处 storedPin() 派生源，composer 的 props / reason 未改。
-        RemoteCommandComposer({
-          instanceId: this.targetInstanceId(),
-          instanceName: this.targetDisplayName(),
-          commandGranted: this.targetCommandGranted()
-        })
       } else if (this.phase === PHASE_EMPTY) {
         this.EmptyView()
+      } else if (this.webMounted) {
+        this.RemoteBody()
+      } else {
+        this.RefusedView()
       }
+      this.Rail()
     }
     .width('100%')
     .height('100%')
     .backgroundColor($r('app.color.page_background'))
+    .bindSheet(this.showDiagnostics, this.DiagnosticsSheet(), {
+      height: SheetSize.MEDIUM,
+      dragBar: true,
+      showClose: true,
+      backgroundColor: $r('app.color.surface'),
+      onDisappear: (): void => {
+        this.showDiagnostics = false;
+      }
+    })
   }
 }
