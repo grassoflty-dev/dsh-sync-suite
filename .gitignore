@@ -40,3 +40,16 @@ apps/arkui-schedule/signing/
 # 真机验收截图（本地产物）
 apps/arkui-schedule/.tmp-accept/
 dist-*/
+
+# 平台覆盖层生成物（tools/overlay.mjs apply 写入 entry/src/main，构建结束 restore 删除）
+# 产品源码是已入库的 entry/src/harmony/**；下面这些只是构建期拷贝，绝不入库。
+# 新增生成路径必须同时登记进 tools/overlay.mjs 的 GENERATED_PATHS（guard 测试核对两边一致）。
+apps/arkui-schedule/entry/src/main/ets/handwriting/HandwritingPager.ets
+apps/arkui-schedule/entry/src/main/ets/handwriting/StylusAssist.ets
+apps/arkui-schedule/entry/src/main/ets/ocr/OcrBatchManager.ets
+apps/arkui-schedule/entry/src/main/ets/pages/Handwriting.ets
+apps/arkui-schedule/entry/src/main/ets/services/rc3GateHarness.ets
+
+# hvigor 的 ohosTest 中间产物：`entry/.test/**` 由 `:entry:clean` / 测试构建生成，
+# 每次干净构建都会把它们删掉/重写；入库只会让 `git status` 在构建后永远显示 6 个 D。
+apps/arkui-schedule/entry/.test/
