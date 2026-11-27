@@ -7,8 +7,11 @@
  * 2. push 参数固定为 `{ remote:'origin', branch:'main', force:false }`，
  *    测试可直接断言调用实参；push 失败只把意图停放进仓库外 outbox 并报 typed 错误，
  *    绝不把「本地已提交但没推成功」报成成功。
- * 3. 门槛顺序固定：schema 判定 → 分支 main → fetch → HEAD == origin/main →
- *    才会发生第一个写句柄。未知 schema / 分叉都零写入。
+ * 3. 门槛顺序固定：schema 判定 → 分支 main → fetch → 同步事实纯判定
+ *    （proceed / fast-forward / recover / refuse）→ 才会发生第一个写句柄。
+ *    未知 schema / 真分叉 / 事实自相矛盾都零写入；「本地只落后」只做**一次** ff-only
+ *    快进（`merge --ff-only`，绝不造合并提交、绝不强制、绝不丢弃本地改动），
+ *    快进成功后在同一周期继续，用户看不到任何新错误。
  *
  * 绑定决策 ④：`decideFreshStart`（共享读侧的语义）——缺 schema 标记 = 正常空起点，
  * 首个运行者幂等创建规范 `FRESH_SCHEMA_TEXT`；标记存在但版本不认识 → E_SCHEMA_UNKNOWN。
@@ -23,6 +26,7 @@ import { ASKPASS_NODE_MISSING_CODE } from '../engine/nodePath.js';
 import { FRESH_SCHEMA_TEXT, byteCompare, canonicalRecordLine, decideFreshStart, deletionState, parseLedger, parseTimelineDay, sha256Hex, tsMillis, } from '../timeline/records.js';
 import { SCHEMA_MARKER_PATH, timelineRecordsPath, timelineDeletedPath, timelineRestorePath, timelineSummaryPath, } from '../timeline/paths.js';
 import { atomicReplace, conflictRowOf, deletedLedgerLine, isValidTsShape, mergeLedgerText, planUpsert, recordsTextOf, restoredLedgerLine, } from '../timeline/write.js';
+import { SYNC_GATE_REASON, decideSyncGate, refuseInvalidFacts, } from './syncGate.js';
 // ---------------------------------------------------------------- typed 错误与常量
 export const V2_ERROR = {
     SCHEMA_UNKNOWN: 'E_SCHEMA_UNKNOWN',
@@ -45,6 +49,23 @@ export const MAX_ATTEMPTS = 4;
 export const MAX_CYCLE_RETRIES = 2;
 /** 有界恢复耗尽后的 typed 终态文案：点名 operator 必须做什么，绝不静默。 */
 export const LOCAL_PENDING_MESSAGE = 'E_LOCAL_PENDING: 本地存在尚未推送的 v2 提交，已按有界重试仍未能推送；下一步：请核对远端是否被其他设备推进（查看远端日志与本地 git status），确认后手工协调并重新运行同步；本层绝不改写历史、绝不强制推送。';
+/*
+ * 门禁文案（`mod-plugin-behind-fastforward`）：四种结局各有**自己的**一句话，
+ * 不许互相借用——用户看到的必须是「这次到底卡在哪」。
+ */
+/**
+ * 真分叉 / 领先提交不是本模块产生时的文案：**逐字保持原样**（老 `gateOfFacts` 的那一句）。
+ * 快进通道上线后它依然准确：只有双方各有对方没有的提交时才会走到这里。
+ */
+export const NOT_SYNCED_MESSAGE = '本地 HEAD 与 origin/main 不一致，本层不改写历史；下一步：确认本地领先提交是否带 dsh-dots-v2 尾注且只改 timeline/**，否则请人工协调后重试';
+/** 快进成功之后本地仍未对齐（含事实自相矛盾）：点名「是快进没到位」，且说明不会循环重试。 */
+export const FF_INCOMPLETE_MESSAGE = 'E_NOT_SYNCED: 快进 origin/main 后本地与远端仍未对齐（本周期只允许一次快进，绝不循环重试）；下一步：稍后重试同步；若重复出现，请在本机仓库执行 git log / git status 人工核对';
+/** 快进失败且**不是**本地改动造成的（远端又动了、仓库有未完成合并等）：不借用「分叉」的措辞。 */
+export const FF_FAILED_MESSAGE = 'E_PULL_FAILED: 快进 origin/main 失败（不是本地改动造成的：git 判定不能快进，或仓库状态不允许合并）；本层不改写历史、绝不强制推送；下一步：在本机仓库确认没有未完成的合并或未提交的冲突后重试';
+/** 本地改动挡住了快进、且本周期没有可提交的时间线改动：既不丢改动，也绝不报成功。 */
+export const FF_BLOCKED_PENDING_MESSAGE = 'E_NOT_SYNCED: 本地工作树有未提交改动，挡住了到 origin/main 的快进，本周期也没有新的时间线改动可提交；本层不会丢弃这些改动；下一步：先确认并提交（或放弃）这些本地改动，再重试同步';
+/** 同步事实读不出来 / 自相矛盾：fail-closed 的 typed 拒绝，措辞只描述「事实不可用」。 */
+export const FACTS_INVALID_MESSAGE = 'E_NOT_SYNCED: 读不到可用的同步事实（本地 HEAD、origin/main 与领先/落后计数缺失或自相矛盾），本层拒绝写入；下一步：稍后重试同步；若重复出现，请在本机仓库执行 git fetch 与 git status 人工核对';
 /** push 的唯一合法实参：固定 origin/main、永不 force。 */
 export const PUSH_ARGS = Object.freeze({ remote: 'origin', branch: 'main', force: false });
 /** 提交信息形如 `[v2] sync <N> days`。 */
@@ -194,11 +215,60 @@ export function gateOfFacts(schemaText, branch, head, origin) {
     if (head !== origin) {
         return {
             ok: false, code: V2_ERROR.NOT_SYNCED,
-            message: '本地 HEAD 与 origin/main 不一致，本层不改写历史；下一步：确认本地领先提交是否带 dsh-dots-v2 尾注且只改 timeline/**，否则请人工协调后重试',
+            message: NOT_SYNCED_MESSAGE,
             needSchema: fresh.needSchema,
         };
     }
     return { ok: true, code: V2_ERROR.OK, message: '可写', needSchema: fresh.needSchema };
+}
+// ---------------------------------------------------------------- 同步事实 → 纯判定
+/**
+ * 只读地算一次同步事实并交给纯函数 `decideSyncGate()` 定动作。
+ *
+ * 两条硬规则：
+ * 1. **交叉校验**：`HEAD === origin/main`（字符串事实）与 `ahead === behind === 0`
+ *    （计数事实）必须同真同假。两者不一致说明端口给的事实自相矛盾（例如 origin/main
+ *    引用缺失时计数端口降级成 0/0），此时按「非法事实」fail-closed，绝不静默 proceed。
+ * 2. **归属只在 ahead>0 时读取**：behind-only 的快进不需要判断领先提交是谁的；
+ *    读失败按「非本模块」处理（更保守，不会有任何主动权落到陌生提交上）。
+ */
+export async function readSyncFacts(git, instanceId, head, origin) {
+    let ahead = 0;
+    let behind = 0;
+    try {
+        const ab = await git.aheadBehind();
+        ahead = ab.ahead;
+        behind = ab.behind;
+    }
+    catch {
+        return { ahead, behind, decision: refuseInvalidFacts(), consistent: false };
+    }
+    const sameCommit = head === origin;
+    const noDelta = ahead === 0 && behind === 0;
+    if (sameCommit !== noDelta) {
+        return { ahead, behind, decision: refuseInvalidFacts(), consistent: false };
+    }
+    let ours = false;
+    if (ahead > 0) {
+        try {
+            ours = await aheadCommitsAreOurs(git, instanceId);
+        }
+        catch {
+            ours = false;
+        }
+    }
+    return { ahead, behind, decision: decideSyncGate({ ahead, behind, ours }), consistent: true };
+}
+/** 门禁拒绝的文案映射：真分叉用逐字不变的原文案，其余用自己的 typed 说明。 */
+export function refuseMessageOf(decision) {
+    if (decision.reason === SYNC_GATE_REASON.DIVERGED_FOREIGN ||
+        decision.reason === SYNC_GATE_REASON.AHEAD_ONLY_FOREIGN) {
+        return NOT_SYNCED_MESSAGE;
+    }
+    if (decision.reason === SYNC_GATE_REASON.INVALID_FACTS)
+        return FACTS_INVALID_MESSAGE;
+    // 走到这里只可能是「快进后仍未对齐」这类一致性拒绝：绝不退回分叉的措辞。
+    return FF_INCOMPLETE_MESSAGE;
 }
 // ---------------------------------------------------------------- B1：意图形状硬守卫
 /**
@@ -462,6 +532,14 @@ export function dayIntegrityError(date, remote, local) {
     return '';
 }
 /**
+ * 领先提交是否**全部**由本模块产生（三条严格谓词见 `isOursCommit`）。
+ * 只看提交本身，不看 behind —— 快进判定与分叉判定共用同一个归属口径。
+ */
+async function aheadCommitsAreOurs(git, instanceId) {
+    const commits = await git.aheadCommits();
+    return commits.length > 0 && commits.every((commit) => isOursCommit(commit, instanceId));
+}
+/**
  * 领先提交是否全部是本模块自己产生的：behind===0 + 每条提交都带 body 尾注 +
  * subject 形状正确 + diff 只碰 timeline/**。subject 相同但无尾注的 App 提交一律不算。
  */
@@ -469,8 +547,7 @@ async function pendingIsOurs(git, instanceId) {
     const ab = await git.aheadBehind();
     if (ab.behind !== 0 || ab.ahead <= 0)
         return false;
-    const commits = await git.aheadCommits();
-    return commits.length > 0 && commits.every((commit) => isOursCommit(commit, instanceId));
+    return await aheadCommitsAreOurs(git, instanceId);
 }
 /**
  * 逐意图对照认领它的提交树（m2：只读 HEAD 的**已提交字节**，工作树不算证据）。
@@ -959,23 +1036,74 @@ export async function runV2Cycle(options) {
     }
     facts.head = await git.headSha();
     facts.origin = await git.originMainSha();
+    // 门禁仍然先看 schema / 分支 / 字符串事实；needSchema 只与 schema 文本有关，后面还要用。
     const gate = gateOfFacts(facts.schemaText, facts.branch, facts.head, facts.origin);
-    // M3：本地领先提交若全部是本模块的 [v2] 提交，不判永久 E_NOT_SYNCED，
-    // 进入有界恢复（重取远端 → 重算 union → 重试推送），全程无硬回退 / 无变基。
-    if (!gate.ok && gate.code === V2_ERROR.NOT_SYNCED) {
-        let ours = false;
+    /*
+     * ── 阶段 0.5：同步事实 → 纯判定 → 至多一次快进。
+     *
+     * 顺序是关键：fetch 之后、**任何本地写入之前**。旧实现要求 `HEAD === origin/main`
+     * 严格相等，于是「本地只落后」被判成 E_NOT_SYNCED，而恢复通道又要求 `behind === 0`，
+     * 两条路都走不通 —— 另一台设备先推一次，本机保存就永远失败（本次要修的 bug）。
+     *
+     * 快进预算：本周期**至多一次**（`ffAttempted`）。成功就在同一周期继续（重读事实，
+     * 不再尝试第二次）；被本地改动挡住就记下来走「先提交本地写入、再按分叉处理」；
+     * 其它失败升级成 typed 错误。任何路径都不会循环、不会重试、不会改写历史。
+     */
+    let ffAttempted = false;
+    let ffBlocked = false;
+    let syncFacts = await readSyncFacts(git, instanceId, facts.head, facts.origin);
+    if (!syncFacts.consistent) {
+        // 事实自相矛盾：fail-closed，绝不在这上面继续写。
+        return failure(V2_ERROR.NOT_SYNCED, FACTS_INVALID_MESSAGE, all, 0);
+    }
+    let decision = syncFacts.decision;
+    if (decision.action === 'fast-forward') {
+        if (ffAttempted) {
+            // 防御：同一周期绝不允许第二次快进（预算用完就拒绝，绝不循环）。
+            return failure(V2_ERROR.NOT_SYNCED, FF_INCOMPLETE_MESSAGE, all, 0);
+        }
+        ffAttempted = true;
+        let outcome;
         try {
-            ours = await pendingIsOurs(git, instanceId);
+            outcome = await git.fastForward();
         }
-        catch {
-            ours = false;
+        catch (error) {
+            const decided = gitStageFailure(error, { code: V2_ERROR.PULL_FAILED, message: FF_FAILED_MESSAGE });
+            if (typedCodeOf(error) !== '')
+                all = await parkTypedFailure(all, outbox, decided.message);
+            return failure(decided.code, decided.message, all, 0);
         }
-        if (ours) {
-            return await recoverPendingLocalCommit({ git, fs, outbox, days, now, all, instanceId });
+        if (outcome.status === 'fast-forwarded') {
+            // 成功：同一周期继续，用**新的** HEAD 重算事实；必须真的对齐，否则 fail-closed。
+            facts.head = await git.headSha();
+            facts.origin = await git.originMainSha();
+            syncFacts = await readSyncFacts(git, instanceId, facts.head, facts.origin);
+            if (!syncFacts.consistent || syncFacts.decision.action !== 'proceed') {
+                return failure(V2_ERROR.NOT_SYNCED, FF_INCOMPLETE_MESSAGE, all, 0);
+            }
+            decision = syncFacts.decision;
+        }
+        else if (outcome.status === 'blocked-by-local-changes') {
+            /*
+             * 确定性规则（本地改动绝不丢弃）：不在这里硬来，也不做任何「先抹掉工作树」的动作。
+             * 记下 ffBlocked，继续走下面的完整性检查 + union + 落盘 + 提交：本地改动会被并进
+             * 本周期写出的时间线文件，由**既有安全提交路径**提交（用户的记录因此不会丢）。提交后
+             * 本地必然 ahead>0，于是落到既有分叉判定（ours → 有界恢复；非本模块 → 拒绝）。
+             * 本周期不再尝试快进，也绝不调用第二次。
+             */
+            ffBlocked = true;
+        }
+        else {
+            return failure(V2_ERROR.PULL_FAILED, FF_FAILED_MESSAGE, all, 0);
         }
     }
-    if (!gate.ok)
-        return failure(gate.code, gate.message, all, 0);
+    // 领先提交全部是本模块产生（only-ahead 或真分叉）→ 既有的有界恢复通道，无硬回退 / 无变基。
+    if (decision.action === 'recover') {
+        return await recoverPendingLocalCommit({ git, fs, outbox, days, now, all, instanceId });
+    }
+    if (decision.action === 'refuse') {
+        return failure(V2_ERROR.NOT_SYNCED, refuseMessageOf(decision), all, 0);
+    }
     // ── 阶段一前置（只读）：所有受影响日先做完整性检查，任一日坏则整周期零写入。
     const reads = [];
     for (const date of days) {
@@ -1092,6 +1220,23 @@ export async function runV2Cycle(options) {
             : entry);
         await outbox.save(all);
         attempts = 1;
+        /*
+         * 本地改动挡住了快进时，本地写入已经被上面这一笔**安全提交**接住（用户的记录不丢）。
+         * 现在重新读事实并按既有分叉判定分流：领先提交是本模块的 → 有界恢复；不是 → 拒绝。
+         * 本周期不再尝试快进（预算只有一次），因此这里绝不会循环。
+         */
+        if (ffBlocked) {
+            const after = await readSyncFacts(git, instanceId, await git.headSha(), await git.originMainSha());
+            if (after.behind > 0) {
+                if (after.consistent && after.decision.action === 'recover') {
+                    return await recoverPendingLocalCommit({ git, fs, outbox, days, now, all, instanceId });
+                }
+                const message = after.decision.action === 'fast-forward'
+                    ? FF_BLOCKED_PENDING_MESSAGE
+                    : refuseMessageOf(after.decision);
+                return failure(V2_ERROR.NOT_SYNCED, message, all, attempts);
+            }
+        }
         try {
             await git.pushMain(PUSH_ARGS);
         }
@@ -1108,6 +1253,12 @@ export async function runV2Cycle(options) {
             await outbox.save(all);
             return failure(decided.code, reason, all, attempts);
         }
+    }
+    // 本地改动挡住了快进、本周期又没写出任何时间线文件：既不能推送、也绝不报成功。
+    if (ffBlocked && writtenPaths.length === 0) {
+        const after = await readSyncFacts(git, instanceId, await git.headSha(), await git.originMainSha());
+        if (after.behind > 0)
+            return failure(V2_ERROR.NOT_SYNCED, FF_BLOCKED_PENDING_MESSAGE, all, 0);
     }
     all = dequeueIntents(all, applied);
     await outbox.save(all);

@@ -18,6 +18,7 @@ import {
   MAX_CYCLE_RETRIES,
   PUSH_ARGS,
   V2_ERROR,
+  FACTS_INVALID_MESSAGE,
   assertUpsertIntent,
   DEFAULT_V2_INSTANCE_ID,
   dequeueIntents,
@@ -182,11 +183,13 @@ test('C03 分支不是 main → typed E_BRANCH_MISMATCH，fetch/写入都不发�
   assert.deepEqual(fs.writeCalls(), [])
 })
 
-test('C04 HEAD != origin/main 且 fetch 在前 → E_NOT_SYNCED，零 add/commit/push、无任何历史改写', async () => {
+test('C04 字符串事实与计数事实自相矛盾（HEAD≠origin 但 ahead=behind=0）→ fail-closed E_NOT_SYNCED，零 add/commit/push、无任何历史改写', async () => {
   const git = new FakeGit({ origin: 'rival-sha' })
   const fs = new MemFs()
   const result = await runV2Cycle(opts({ fs, git }))
   assert.equal(result.code, V2_ERROR.NOT_SYNCED)
+  // 事实自相矛盾时的文案只说明「事实不可用」，不是分叉文案、更不是静默 proceed。
+  assert.equal(result.message, FACTS_INVALID_MESSAGE)
   assert.deepEqual(git.writes(), [])
   assert.deepEqual(fs.writeCalls(), [])
   assert.deepEqual(git.calls[0], ['fetch']) // fetch 先于 HEAD 断言
@@ -337,6 +340,7 @@ test('C15 源码守卫（M6）：四个源码 + 全部编译产物均无历史�
     '../src/timeline/write.ts',
     '../src/sync/cycle.ts',
     '../src/sync/gitPort.ts',
+    '../src/sync/syncGate.ts',
     '../src/sync/repoPath.ts',
     '../src/sync/outbox.ts',
     '../src/sync/bootstrap.ts',

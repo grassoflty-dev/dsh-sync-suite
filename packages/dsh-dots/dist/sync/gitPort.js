@@ -56,7 +56,7 @@ export const GIT_SUBCOMMANDS = Object.freeze(new Set([
     'fetch', 'diff', 'add', 'commit', 'push',
 ]));
 /**
- * 危险参数形态（强制 / 删远端 / 改写引用）。这是 **argv 边界的运行时守卫**，
+ * 危险参数形态（强制 / 删远端 / 改写引用 / 假快进）。这是 **argv 边界的运行时守卫**，
  * 不是源码文本启发式：任何调用方想拼这些参数都会被 `assertSafeGitArgs` 拒绝。
  */
 export const FORBIDDEN_GIT_ARG_PATTERNS = [
@@ -66,11 +66,21 @@ export const FORBIDDEN_GIT_ARG_PATTERNS = [
     /(?:^|[:\s"'`])\+(?:refs\/heads\/[A-Za-z0-9_.\/*-]+|[A-Za-z0-9_][A-Za-z0-9_.-]*)(?=[\s"'`\]},:/]|$)/,
     /\bpush\.force\s*[=:]/i,
     /--delet[e]\b/i,
+    // 快进形态的冒牌货（快进是本层唯一的历史推进方式，必须**只有**一种写法）：
+    // `--no-ff` 会造合并提交、`--ff-only=…` 会改掉默认行为、裸 `--ff` 不再是「只允许快进」，
+    // `--squash` / `--no-commit` 会把合并结果留在暂存区（等于半个改写）。
+    /--no-f[f]\b/i,
+    /--ff-only\s*=/i,
+    /(?:^|[\s"'`])--ff(?=[\s"'`\]},]|$)/i,
+    /(?:^|[\s"'`])--(?:squash|no-commit)(?=[\s"'`\]},]|$)/i,
+    // 硬丢弃形态：任何「把工作树/索引一把抹掉」的参数都不许出现（本地改动可能是唯一副本）。
+    /(?:^|[\s"'`])--hard(?=[\s"'`\]},]|$)/i,
 ];
 /** 断言一条 git argv 可以通过：子命令在 allowlist 内且不含任何危险参数。 */
 export function assertSafeGitArgs(args) {
     const sub = args[0] ?? '';
-    if (!GIT_SUBCOMMANDS.has(sub)) {
+    // 子命令白名单；快进是**唯一**的形态例外，且必须逐项等于固定 argv（不是把某个子命令放开）。
+    if (!GIT_SUBCOMMANDS.has(sub) && !isFastForwardArgs(args)) {
         throw new SyncError('E_VALIDATION', `v2 git 端口拒绝子命令：${sub}`);
     }
     for (const arg of args.slice(1)) {
@@ -91,6 +101,44 @@ export function buildSafePushArgs(args, extra = []) {
     assertSafeGitArgs(['push', ...extra]);
     return ['push', '--porcelain', 'origin', 'HEAD:main'];
 }
+/* -------------------------------------------------------------------------- */
+/* 快进（ff-only merge）：唯一构造器 + 唯一允许的 argv 形态                     */
+/* -------------------------------------------------------------------------- */
+/**
+ * 快进 argv 的**唯一构造器**：把本地快进到已经 fetch 过的 `refs/remotes/origin/main`。
+ *
+ * 形态刻意只有一个、逐项固定：`merge --ff-only <ref>`。它不做别的事情：
+ * - 没有任何强制参数、不改 refspec（不拼带「+」的 refspec），因此推不动远端历史；
+ * - 不能快进时**直接失败**（`--ff-only` 不造合并提交），所以本地历史永远线性；
+ * - 不碰工作树里未提交的内容：与本地改动重叠时 git 自己会拒绝，由 `fastForward()` 如实上报，
+ *   本层绝不做任何丢弃动作（本地改动可能是用户唯一的一份记录）。
+ */
+export const FAST_FORWARD_ARGS = Object.freeze([
+    'merge', '--ff-only', 'refs/remotes/origin/main',
+]);
+/** 返回快进 argv（每次都是新数组，调用方改不到常量本身）。 */
+export function buildFastForwardArgs() {
+    return FAST_FORWARD_ARGS.slice();
+}
+/**
+ * argv 是否**逐项等于**唯一允许的快进形态。
+ *
+ * 这条替代了「把 `merge` 加进子命令白名单」的粗放做法：多一个参数、少一个参数、
+ * 换个 ref 一律不算快进，于是 `merge` 依旧不是一个可以随便用的子命令。
+ */
+export function isFastForwardArgs(args) {
+    return args.length === FAST_FORWARD_ARGS.length &&
+        args.every((arg, index) => arg === FAST_FORWARD_ARGS[index]);
+}
+/**
+ * git 因「本地改动会被这次合并覆盖」而拒绝时的短语（英文 + 中文各一份）。
+ *
+ * 这里只是**加速与精确化**：认不出来时还有 `status --porcelain` 的本地事实兜底，
+ * 所以即便 git 输出被本地化成别的语言，结论也不会反过来。
+ */
+export const FF_LOCAL_CHANGES_TEXT_RE = /would be overwritten by merge|commit your changes or stash|move or remove them before you merge|local changes to the following files|被合并操作覆盖|请先提交或贮藏|未跟踪的工作区文件/i;
+/** git 明确说「不能快进」（= 真分叉，不是本地改动的锅）。 */
+export const FF_NOT_FAST_FORWARD_TEXT_RE = /not possible to fast-forward|cannot fast-forward|无法快进/i;
 const PUSH_REASONS = Object.freeze([
     'auth-prompt', 'auth-rejected', 'proxy-auth', 'rate-limited', 'remote-error', 'not-found',
     'non-fast-forward', 'timeout', 'unreachable', 'git-failed',
@@ -403,6 +451,40 @@ export class GitRepoV2Port {
             // 传错误对象而不是 message：结构信号（killed / details.reason）必须能到达分类器。
             throw this.pushFailure(error);
         }
+    }
+    /** 只读：工作树是否有未提交改动（含未跟踪文件）。`status` 本来就在子命令 allowlist 里。 */
+    async worktreeHasLocalChanges() {
+        const result = await this.git(['status', '--porcelain'], true);
+        return result.code === 0 && result.stdout.trim() !== '';
+    }
+    /**
+     * 快进到 `refs/remotes/origin/main`（`merge --ff-only`）：本层**唯一**的历史推进方式。
+     *
+     * 三态返回，「本地改动挡住」这种正常业务分支**不抛异常**：
+     * - `fast-forwarded`：HEAD 已经移到远端提交；与远端改动不重叠的本地改动原样留在工作树；
+     * - `blocked-by-local-changes`：git 因为本地改动/未跟踪文件会被覆盖而拒绝合并。
+     *   本地改动可能是用户唯一的一份记录，本层绝不丢弃、绝不硬丢弃工作树，交调用方处理；
+     * - `failed`：其它原因（不能快进 = 真分叉、有未完成合并、仓库状态不允许合并等），
+     *   由调用方升级成「快进失败」的 typed 文案（与「分叉」的措辞**不同**）。
+     *
+     * 「是不是本地改动挡住」先认 git 自己的短语，再用 `status --porcelain` 兜底：
+     * 即便 git 输出被本地化，结论也不会反过来（判错方向时仍然只会更保守，不会更激进）。
+     */
+    async fastForward() {
+        // 唯一构造口：调用方给不了任何参数，因此不可能拼进强制 / 非快进形态。
+        const result = await this.git(buildFastForwardArgs(), true);
+        if (result.code === 0)
+            return { status: 'fast-forwarded' };
+        const text = `${result.stderr}\n${result.stdout}`;
+        if (FF_LOCAL_CHANGES_TEXT_RE.test(text))
+            return { status: 'blocked-by-local-changes' };
+        if (FF_NOT_FAST_FORWARD_TEXT_RE.test(text)) {
+            return { status: 'failed', message: 'git 判定不能快进：本地与远端已各有对方没有的提交' };
+        }
+        // 语言不确定时用本地事实兜底：工作树确实有未提交改动 ⇒ 按「本地改动挡住」处理。
+        if (await this.worktreeHasLocalChanges())
+            return { status: 'blocked-by-local-changes' };
+        return { status: 'failed', message: 'git 拒绝了这次快进（不是本地改动造成的）' };
     }
     async dispose() {
         await this.repo.dispose();
