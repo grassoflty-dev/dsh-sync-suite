@@ -142,8 +142,11 @@ window.__ModuleLoader__.load({
       "lean.remote.rotated": "已重新生成：旧二维码与旧令牌立即失效，平板必须重新扫码配对。",
       "lean.remote.announce.pending": "待公告（未接公告钩子，每次打开都会请求重发）",
       "lean.remote.announce.none": "暂无待公告变更",
-      "lean.remote.audit.title": "谁连进来过",
-      "lean.remote.audit.empty": "暂无入站连接记录",
+      "lean.remote.audit.title": "当前连接",
+      "lean.remote.audit.empty": "当前没有设备连接",
+      "lean.remote.live.since": "已连接 {n} 分钟",
+      "lean.remote.live.watching": "正在查看",
+      "lean.remote.live.more": "还有 {n} 个",
       "lean.remote.stop": "停止接受连接",
       "lean.remote.start": "开始接受连接",
       "lean.remote.started": "已启动",
@@ -257,8 +260,11 @@ window.__ModuleLoader__.load({
       "lean.remote.rotated": "Regenerated: the old QR and token stop working now; the tablet must pair again.",
       "lean.remote.announce.pending": "Awaiting announce (no hook wired; a republish is requested on every open)",
       "lean.remote.announce.none": "No pending announce changes",
-      "lean.remote.audit.title": "Who connected",
-      "lean.remote.audit.empty": "No incoming connections recorded",
+      "lean.remote.audit.title": "Live connections",
+      "lean.remote.audit.empty": "No devices are connected right now",
+      "lean.remote.live.since": "Connected {n} min",
+      "lean.remote.live.watching": "Viewing",
+      "lean.remote.live.more": "{n} more",
       "lean.remote.stop": "Stop accepting connections",
       "lean.remote.start": "Start accepting connections",
       "lean.remote.started": "Started",
@@ -1140,13 +1146,42 @@ window.__ModuleLoader__.load({
     /**
      * 远程控制组（mod-plugin-pairing-client）：自动选路 + 可覆盖 + 原因行；
      * 二维码 / 复制串只由显式 `pairingShow` 取得（qr 只进 QrMatrix，text 只进剪贴板）；
-     * 重新生成 = 显式轮换 + 新二维码 + 重新配对提示；谁连进来过 = 脱敏审计；
+     * 重新生成 = 显式轮换 + 新二维码 + 重新配对提示；当前连接 = 引擎的活视图（不是历史审计）；
      * 停止接受连接 = 关闭监听并显示已停止。
      *
-     * 硬纪律：挂载只调 pairingProvision / pairingTransports / pairingConnections /
-     * remoteGetState，**绝不**调 pairingShow（bearer secret 出口）、**绝不**写剪贴板、
+     * 硬纪律：挂载只调 pairingProvision / pairingTransports / remoteGetState，
+     * **绝不**调 pairingShow（bearer secret 出口）、**绝不**写剪贴板、
      * **绝不**渲染端口 / 令牌输入框（端口只读展示，令牌只有 `present` 状态）。
      */
+    /** 面板自己的最后一道脱敏：只收白名单字段，任何 ? / token / URL 都进不了 DOM。 */
+    const LIVE_PEER_RE = /^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-fA-F:.]+|已脱敏)$/
+    const LIVE_TRANSPORTS = ['局域网', 'Tailscale', 'IPv6', '未知']
+    function readLiveConnections(raw) {
+      if (!raw || typeof raw !== 'object' || !Array.isArray(raw.connections)) return { connections: [], count: 0 }
+      const rows = []
+      for (const item of raw.connections.slice(0, 5)) {
+        if (!item || typeof item !== 'object') continue
+        const peer = typeof item.peer === 'string' && LIVE_PEER_RE.test(item.peer) ? item.peer : '已脱敏'
+        const transport = LIVE_TRANSPORTS.includes(item.transport) ? item.transport : '未知'
+        const since = typeof item.since === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(item.since) ? item.since : ''
+        if (since === '') continue
+        rows.push({
+          peer,
+          transport,
+          kind: item.kind === 'tunnel' ? 'tunnel' : 'http',
+          since,
+        })
+      }
+      const count = Number.isInteger(raw.count) && raw.count >= rows.length ? raw.count : rows.length
+      return { connections: rows, count }
+    }
+
+    /**
+     * P2-1：面板打开期间「当前连接」的轮询间隔。5 秒是有界折中——新对端最迟 5 秒上屏，
+     * 静默对端最迟 5 秒消失，而每次只是只读的 remoteGetState，不是忙循环；请求还有在飞去重。
+     */
+    const LIVE_POLL_MS = 5_000
+
     function LeanRemoteGroup(props) {
       const tr = makeT(props)
       const [view, setView] = React.useState(null)
@@ -1155,7 +1190,8 @@ window.__ModuleLoader__.load({
       const [fallback, setFallback] = React.useState(false)
       // shown 只留 qr 矩阵：pairingShow 的 payload / text 绝不进 state / DOM / 日志。
       const [shown, setShown] = React.useState(null)
-      const [audit, setAudit] = React.useState([])
+      // 「当前连接」活视图：只来自 remoteGetState 的 status.liveConnections；历史审计不再上屏。
+      const [liveConnections, setLiveConnections] = React.useState({ connections: [], count: 0 })
       const [running, setRunning] = React.useState(null)
       /**
        * mod-plugin-remote-autostart：这次监听是不是插件激活时**自己**恢复的
@@ -1188,6 +1224,9 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState('')
       const [failure, setFailure] = React.useState('')
       const booted = React.useRef(false)
+      // P2-1 轮询句柄：只由本组件的挂载 effect 建立与清理，和预约槽一样幂等。
+      const liveTimer = React.useRef(null)
+      const livePolling = React.useRef(false)
 
       function activeOverride() { return override === '' ? 'auto' : override }
 
@@ -1202,6 +1241,8 @@ window.__ModuleLoader__.load({
       function applyRemoteStatus(status, settings) {
         if (!status || typeof status !== 'object') return
         setRunning(status.running === true)
+        // 当前连接只认 status.liveConnections（引擎每次读都会剪枝）；不读历史审计。
+        setLiveConnections(readLiveConnections(status.liveConnections))
         // 自动恢复的标签必须跟"这次是谁拉起来的"同源；未启动时一律不显示。
         setAutoStarted(status.running === true && status.startedBy === 'auto')
         if (status.probe) setProbe(status.probe)
@@ -1220,6 +1261,23 @@ window.__ModuleLoader__.load({
             ? { code: failed.code, message: typeof failed.message === 'string' ? failed.message : '' }
             : null
         )
+      }
+
+      /**
+       * P2-1：面板开着时周期性重读引擎的活视图。只读引擎给的字段；引擎剪掉的对端下一次
+       * 轮询就会从列表消失，前端绝不自行补一个"还在"的假象。在飞请求去重，避免慢 RPC 堆积。
+       */
+      async function pollLiveConnections() {
+        if (livePolling.current) return
+        livePolling.current = true
+        try {
+          const result = await rpcCall('remoteGetState', {})
+          if (result.ok && result.data) applyRemoteStatus(result.data.status, result.data.settings)
+        } catch (e) {
+          /* rpcCall 不抛；这里只兜住意外，失败不改写上一次引擎快照 */
+        } finally {
+          livePolling.current = false
+        }
       }
 
       async function refreshProvision(which) {
@@ -1254,21 +1312,52 @@ window.__ModuleLoader__.load({
         booted.current = true
         let stopped = false
         Promise.resolve((async function () {
-          // 真实宿主 props（只有 t / close）：四个只读入口各取一次，没有任何种子接缝。
+          // 真实宿主 props（只有 t / close）：三个只读入口各取一次，没有任何种子接缝。
+          // 「当前连接」来自 remoteGetState 的 status.liveConnections，不再请求历史审计 pairingConnections。
           await Promise.all([
             refreshProvision(''),
             refreshTransports(''),
-            (async function () {
-              const result = await rpcCall('pairingConnections', {})
-              if (!stopped && result.ok && Array.isArray(result.data)) setAudit(result.data)
-            })(),
             (async function () {
               const result = await rpcCall('remoteGetState', {})
               if (!stopped && result.ok && result.data) applyRemoteStatus(result.data.status, result.data.settings)
             })(),
           ])
         })()).catch(function () { /* rpcCall 不抛；这里只兜住意外 */ })
-        return function () { stopped = true }
+
+        /**
+         * P2-1：面板开着才轮询「此刻谁在」。宿主没有单独的 aboutToDisappear 钩子，
+         * settings.section 关闭 = 组件卸载，下面的 cleanup 就是 dispose，必须清掉定时器。
+         * 页面隐藏（切走标签页）也立刻停表，不留任何在跑的定时器。
+         */
+        const doc = typeof document === 'undefined' ? null : document
+        const startLivePoll = function () {
+          if (stopped || liveTimer.current !== null) return
+          if (doc !== null && doc.visibilityState !== 'visible') return
+          liveTimer.current = setInterval(function () { void pollLiveConnections() }, LIVE_POLL_MS)
+          // 无界面宿主不被轮询钉住事件循环；真实页面仍由下面两处显式清理。
+          if (typeof liveTimer.current.unref === 'function') liveTimer.current.unref()
+        }
+        const stopLivePoll = function () {
+          if (liveTimer.current !== null) {
+            clearInterval(liveTimer.current)
+            liveTimer.current = null
+          }
+        }
+        const onVisibility = function () {
+          if (doc !== null && doc.visibilityState === 'visible') startLivePoll()
+          else stopLivePoll()
+        }
+        if (doc !== null) {
+          onVisibility()
+          if (typeof doc.addEventListener === 'function') doc.addEventListener('visibilitychange', onVisibility)
+        }
+        return function () {
+          stopped = true
+          stopLivePoll()
+          if (doc !== null && typeof doc.removeEventListener === 'function') {
+            doc.removeEventListener('visibilitychange', onVisibility)
+          }
+        }
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [])
 
@@ -1558,12 +1647,25 @@ window.__ModuleLoader__.load({
         h('div', { 'data-lean': 'remote-announce', style: S.hint }, announceLine),
         h('div', { 'data-lean': 'remote-audit', style: S.hint },
           h('div', { style: S.groupSummary }, tr('lean.remote.audit.title')),
-          audit.length === 0
-            ? h('div', { style: S.hint }, tr('lean.remote.audit.empty'))
-            : audit.map(function (entry, i) {
-                return h('div', { key: 'audit' + i, style: S.hint },
-                  fmtClock(entry.at) + ' · ' + asText(entry.peer))
-              })
+          liveConnections.connections.length === 0
+            ? h('div', { 'data-lean': 'remote-live-empty', style: S.hint }, tr('lean.remote.audit.empty'))
+            : liveConnections.connections.map(function (entry, i) {
+                // 一行一个对端：IP · 传输 · 已连接 N 分钟；隧道再标「正在查看」。
+                const sinceMs = Date.parse(entry.since)
+                const minutes = Number.isFinite(sinceMs)
+                  ? Math.max(0, Math.floor((Date.now() - sinceMs) / 60000))
+                  : 0
+                let line = entry.peer + ' · ' + entry.transport + ' · '
+                  + tr('lean.remote.live.since').replace('{n}', String(minutes))
+                if (entry.kind === 'tunnel') line += ' · ' + tr('lean.remote.live.watching')
+                return h('div', {
+                  key: 'live' + i, 'data-lean': 'remote-live-connection', style: S.hint,
+                }, line)
+              }),
+          liveConnections.count > liveConnections.connections.length
+            ? h('div', { 'data-lean': 'remote-live-more', style: S.hint },
+                tr('lean.remote.live.more').replace('{n}', String(liveConnections.count - liveConnections.connections.length)))
+            : null
         ),
         h(QrMatrix, { qr: qr, label: tr('lean.remote.qr') })
       )

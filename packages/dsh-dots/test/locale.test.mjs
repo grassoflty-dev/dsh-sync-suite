@@ -116,6 +116,9 @@ test('shipped 面板的文案 key 双份都在；dormant 旧面板文案已删�
     'lean.repo.url', 'lean.repo.token', 'lean.actions.save',
     'lean.remote.qr.show', 'lean.remote.copy', 'lean.remote.generate', 'lean.remote.selfcheck',
     'lean.remote.autostarted', 'lean.remote.accepting', 'lean.remote.listener-failed',
+    // retarget（mod-plugin-remote-live-connections）：面板从历史审计改为「当前连接」，
+    // 下面三行是新增的逐行文案 key，逐条点名而不是靠计数放行。
+    'lean.remote.live.since', 'lean.remote.live.watching', 'lean.remote.live.more',
     'lean.status.failed', 'lean.status.synced', 'lean.status.never'
   ]
   for (const [lang, dict] of [['en', en], ['zh', zh]]) {
@@ -133,9 +136,12 @@ test('shipped 面板的文案 key 双份都在；dormant 旧面板文案已删�
   // mod-plugin-remote-accepting-surface 新增 1 个 `lean.remote.accepting`
   // （活真相那一句「正在接受连接（{addr}）」，带一个 `{addr}` 占位符）→ 85。
   // mod-plugin-dispose-hygiene-residuals 新增 1 个 `lean.remote.listener-failed`
-  // （监听在启动后死掉那一句，带 `{code}` 与 `{message}` 两个占位符）→ **86**。
+  // （监听在启动后死掉那一句，带 `{code}` 与 `{message}` 两个占位符）→ 86；
+  // retarget（mod-plugin-remote-live-connections，locale.test.mjs:138）：新增
+  // `lean.remote.live.since`（已连接 {n} 分钟）、`lean.remote.live.watching`（正在查看）、
+  // `lean.remote.live.more`（还有 {n} 个）三个逐行文案 key → **89**。
   // 精确计数同时阻止整批复活与误删；新 key 还必须在上面逐条点名，改名会当场失败。
-  assert.equal(Object.keys(en).length, 86, `locale 应恰好 86 个 shipped key，实际 ${Object.keys(en).length}`)
+  assert.equal(Object.keys(en).length, 89, `locale 应恰好 89 个 shipped key，实际 ${Object.keys(en).length}`)
   // 点名（不靠计数代替）：这一句两边都必须真的有翻译，照抄英文也算没做。
   assert.equal(typeof en['lean.remote.autostarted'], 'string')
   assert.equal(typeof zh['lean.remote.autostarted'], 'string')
@@ -156,6 +162,19 @@ test('shipped 面板的文案 key 双份都在；dormant 旧面板文案已删�
     assert.match(dict['lean.remote.listener-failed'], /接受连接|accepting connections/i, `${lang} 必须把下一步（停止/重新开始）说清楚`)
   }
   assert.notEqual(en['lean.remote.listener-failed'], zh['lean.remote.listener-failed'], '中英文案必须各自翻译，不许照抄')
+  for (const key of ['lean.remote.live.since', 'lean.remote.live.watching', 'lean.remote.live.more']) {
+    for (const [lang, dict] of [['en', en], ['zh', zh]]) {
+      assert.equal(typeof dict[key], 'string', `${lang} 缺少当前连接文案 key ${key}`)
+      assert.ok(dict[key].trim().length > 0, `${lang}.${key} 不能为空`)
+    }
+    assert.notEqual(en[key], zh[key], `${key} 中英文案必须各自翻译`)
+  }
+  for (const [lang, dict] of [['en', en], ['zh', zh]]) {
+    assert.ok(dict['lean.remote.live.since'].includes('{n}'), `${lang}.lean.remote.live.since 必须含 {n} 占位符`)
+    assert.ok(dict['lean.remote.live.more'].includes('{n}'), `${lang}.lean.remote.live.more 必须含 {n} 占位符`)
+  }
+  assert.equal(zh['lean.remote.audit.title'], '当前连接', '标题必须是「当前连接」，旧历史文案不得复活')
+  assert.equal(zh['lean.remote.audit.empty'], '当前没有设备连接', '空态必须是「当前没有设备连接」')
 })
 
 test('src/client.js 内置字典与 locale JSON 完全一致（key 与文案）', () => {

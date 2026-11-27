@@ -681,7 +681,9 @@ test('merged panel：pairing-client 接线后远程组仍在同一页内可达�
     'Tailscale：平板需加入同一 tailnet', '局域网：同一 Wi-Fi',
     '局域网也需要端口和令牌：二维码里已经带好，不用手输；令牌阻止同一网络里的其他人控制这台 DSH。',
     '显示二维码', '复制配对串', '重新生成', '自检', '停止接受连接',
-    '谁连进来过' // 脱敏审计
+    // retarget（mod-plugin-remote-live-connections，client-remote-render.test.mjs:684）：
+    // 历史审计标题换成「当前连接」，空态同步换成「当前没有设备连接」。
+    '当前连接', '当前没有设备连接'
   ]) {
     assert.ok(text.includes(expected), `合并后远程组缺少「${expected}」`)
   }

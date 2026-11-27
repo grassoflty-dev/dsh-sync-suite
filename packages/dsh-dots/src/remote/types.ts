@@ -22,6 +22,7 @@
  * 一句话记法：`enabled` = 上次存了什么偏好，`autoStart` = 下次要不要自己起，
  * `accepting` = **此刻**在不在接。三者不准互相推断，也不准合并成一个字段。
  */
+import type { LiveConnectionView } from './connections.js'
 
 /**
  * 访问方式。`manual` = 用户自填完整地址（不代管监听）；
@@ -270,6 +271,15 @@ export interface RemoteStatus {
    */
   listenerFailure: { code: string; message: string } | null
   connections: { active: number; total: number }
+  /**
+   * **当前连接（additive）**：面板把「谁连进来过」换成「当前连接」用的活视图。
+   *
+   * 与上面的历史计数 `connections` 完全无关，那个字段口径不动。这里每条只有
+   * `{ id, peer, transport, kind, since, lastSeen }`：peer 是规范化 IP / `已脱敏`，
+   * 没有 token、URL、查询串或请求行；`count` 是剪枝后、cap 截断前的真实总数。
+   * 监听停止时句柄为空 ⇒ 这里是 `{ connections: [], count: 0 }`，绝不是旧数据。
+   */
+  liveConnections: LiveConnectionView
   /** 被限速/鉴权拒绝的累计次数。 */
   rejected: number
   /** 令牌存在性与打码展示（永不返回明文）。 */

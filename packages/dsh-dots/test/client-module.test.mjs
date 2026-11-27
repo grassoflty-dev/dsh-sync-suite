@@ -26,11 +26,15 @@ test('client talks to the documented RPC endpoint and actions', () => {
   // retarget（mod-plugin-dormant-panel-removal）：原清单含 dormant 旧面板独占的
   // testConnection / push / preview / apply / listSnapshots / rollback；旧面板删除后
   // shipped 客户端只调用下面这些 action，逐项钉住调用点而不是裸字符串。
+  // retarget（mod-plugin-remote-live-connections，client-module.test.mjs:29）：
+  // 面板不再请求历史审计 pairingConnections，改从 remoteGetState 的状态里读当前连接。
   for (const action of ['getState', 'saveSettings', 'remoteGetState', 'pairingProvision',
-    'pairingTransports', 'pairingConnections', 'pairingShow', 'pairingRotateToken',
+    'pairingTransports', 'pairingShow', 'pairingRotateToken',
     'remoteProbe', 'remoteStart', 'remoteStop']) {
     assert.ok(source.includes("rpcCall('" + action + "'"), `client.js 未调用 RPC action: ${action}`)
   }
+  assert.equal(source.includes("rpcCall('pairingConnections'"), false, '历史审计 RPC 不得再被面板调用')
+  assert.ok(source.includes('status.liveConnections'), '面板必须读 status.liveConnections（当前连接）')
   for (const dead of ['testConnection', 'push', 'preview', 'apply', 'listSnapshots', 'rollback']) {
     assert.equal(source.includes("rpcCall('" + dead + "'"), false, `dormant RPC 调用点不得复活: ${dead}`)
   }

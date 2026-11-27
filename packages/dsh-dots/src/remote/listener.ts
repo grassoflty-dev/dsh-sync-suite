@@ -50,6 +50,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo, Socket } from 'node:net'
 import { isIPv6 } from 'node:net'
 import type { Duplex } from 'node:stream'
+import { createLiveConnections, type LiveConnectionView } from './connections.js'
 
 /** 动态上游头：静态对象，或每次请求都调用的函数（DSH 会话 cookie 会过期，需要可刷新）。 */
 export type RemoteUpstreamHeaders =
@@ -213,6 +214,13 @@ export interface RemoteListenerOptions {
    * 这里只交原始 IP（调用方负责脱敏）；token / 请求行 / 端口一律不传。
    */
   onConnect?: (info: { at: string; remoteAddress: string }) => void
+  /**
+   * 测试注入：用假 `https.Server`（EventEmitter + `listen/address/close`）替代真实绑定，
+   * 便于用 loopback 假 socket 驱动 accept/upgrade 两条路径。生产永不传，绝不打开明文回落。
+   */
+  serverFactory?: () => https.Server
+  /** 测试注入：「当前连接」窗口的时钟（epoch 毫秒）；缺省 `Date.now`。 */
+  liveClock?: () => number
 }
 
 /** 监听句柄。`port`/`address` 是**实际**绑定值（`port: 0` 时尤其重要）。 */
@@ -237,6 +245,8 @@ export interface RemoteListenerHandle {
     tunnels: number
     /** 已拨上游但尚未转正的预约槽数（半开握手也算）；`close()` 之后恒为 0。 */
     reservedTunnels: number
+    /** 当前连接视图（面板用）：每次调用先按窗口剪枝；`close()` 之后恒为空。 */
+    liveConnections: LiveConnectionView
   }
   /** 最近一次运行期错误（上游不可达/握手失败等）；错误消息已脱敏，不含 token。 */
   readonly lastError: { code: string; message: string } | null
@@ -1128,6 +1138,17 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
    * 不登记的话，`close()` 之后最多还会留一条上游连接活到 15 s 握手兜底（b11b P2-5）。
    */
   const handshakes = new Set<http.ClientRequest>()
+  /**
+   * 「当前连接」的活视图（mod-plugin-remote-live-connections）。
+   * 与 `onConnect` 那条脱敏审计环**无关**：审计是历史，这里是此刻；面板只读这里。
+   */
+  const liveConnections = createLiveConnections({ clock: options.liveClock })
+  /**
+   * 每条已登记的隧道各有一个幂等收口函数（与 `reservation.release()` 同一纪律）。
+   * 早退路径可能重复调用；`shutdown()` 则遍历这里逐一收口，保证每条 socket 恰好 close 一次，
+   * 之后异步到来的 'error' / 'close' 再调用也只是 no-op。
+   */
+  const liveReleasers = new Set<() => void>()
 
   /**
    * 预约一个隧道槽位；到顶返回 `null`（调用方回 503）。
@@ -1172,7 +1193,8 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
   try {
     // 唯一的服务端构造器：没有 http.createServer()，也就没有明文回落路径。
     // rsa 自签证书由 pairingTls.ts 生成，指纹在配对时固定；这里只做 TLS 终结。
-    server = https.createServer({ cert: tlsInput.cert, key: tlsInput.key })
+    // 测试可用 serverFactory 注入假的 https.Server-shaped 对象（loopback 假 peer），生产不走这条。
+    server = typeof options.serverFactory === 'function' ? options.serverFactory() : https.createServer({ cert: tlsInput.cert, key: tlsInput.key })
   } catch (error) {
     // 坏密钥材料（PEM 损坏/不匹配/不支持的曲线等）：typed 失败，绝不退化成明文。
     throw new RemoteStartError(
@@ -1189,6 +1211,10 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
   const shutdown = async (): Promise<void> => {
     if (closed) return
     closed = true
+    // 停止监听 = 此刻没有任何连接：先对每条隧道逐一定点收口（幂等，恰好一次），
+    // 再同步清空，面板读到的是空而不是上一秒的残留。
+    for (const release of [...liveReleasers]) release()
+    liveConnections.clear()
     const drained = new Promise<void>((resolve) => {
       try {
         server.close(() => resolve())
@@ -1255,7 +1281,16 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
         respondPlain(res, 503, 'remote listener closed\n', true)
         return
       }
+      /**
+       * 每次**被放行的**请求才是"这个对端还在"的证据（一页突发多个资源只折叠成一条）。
+       * 门禁之前不 touch：401/403 拒绝的扫描/爬虫不能因此上屏（与 upgrade 路径同口径）。
+       * 只取 socket 的对端 IP：req.url 里的 token / 查询串绝不进入连接视图。
+       */
+      const touchHttp = (): void => {
+        liveConnections.touch(normalizeIp(req.socket?.remoteAddress), 'http')
+      }
       if (typeof options.authorize !== 'function') {
+        touchHttp()
         await forwardRequest(req, res, undefined)
         return
       }
@@ -1274,10 +1309,14 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
         if (gate.status >= 400) {
           rejected += 1
           log(`[remote] 拒绝请求：HTTP ${String(gate.status)}`)
+        } else {
+          // 自有接口（如状态读取）的 2xx 也是当前活跃证据；拒绝响应不算。
+          touchHttp()
         }
         respondPlain(res, gate.status, gate.body, true, gate.headers)
         return
       }
+      touchHttp()
       await forwardRequest(req, res, gate.upstreamHeaders)
     } catch (error) {
       noteFailure('代理请求', error)
@@ -1709,6 +1748,24 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
       })
       return
     }
+    /**
+     * 隧道登记一次（不是一条 HTTP 资源一条）：同一个对端的后续 HTTP 突发仍复用这条，
+     * `kind` 保持 `tunnel` 直到这条隧道关闭；id 是收口时精确定位这一条的唯一凭据。
+     */
+    const liveEntry = liveConnections.touch(normalizeIp(req.socket?.remoteAddress), 'tunnel')
+    /**
+     * 当前连接条目的幂等收口：和 `reservation.release()` 同一纪律，重复调用只真正摘一次。
+     * 所有可能留下预约/隧道的出口（同步抛错、握手段 error/拒绝、客户端早退、101 后写失败、
+     * 隧道 teardown、shutdown）都必须经过它。
+     */
+    let liveReleased = false
+    const releaseLive = (): void => {
+      if (liveReleased) return
+      liveReleased = true
+      liveReleasers.delete(releaseLive)
+      liveConnections.close(liveEntry.id)
+    }
+    liveReleasers.add(releaseLive)
     const extra: Record<string, string> = { ...staticHeaders, ...upstreamHeaders }
     const upgradeValue = req.headers.upgrade
     const headers = outboundHeaders(req, target, extra)
@@ -1727,8 +1784,10 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
         agent: false,
       })
     } catch (error) {
-      // 连"发起拨号"都失败：预约槽必须立刻归还（否则每次失败都白占一个槽直到 close）。
+      // 连"发起拨号"都失败：预约槽与活连接条目必须立刻一起归还（否则每次失败都白占一个槽，
+      // 还留下一条没有隧道却永久显示「正在查看」的幽灵行）。
       reservation.release()
+      releaseLive()
       noteFailure('升级握手', error)
       writeRawResponse(socket, 502, 'remote upstream unavailable\n')
       return
@@ -1742,7 +1801,11 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
     /** 握手段失败收口：先归还预约（幂等），未转正时再把上游请求掐掉。 */
     const abortHandshake = (): void => {
       reservation.release()
-      if (!established) destroyQuietly(upstreamReq)
+      if (!established) {
+        // 握手没成功就不是"正在查看"：立刻从当前连接里摘掉，不留僵尸行。
+        releaseLive()
+        destroyQuietly(upstreamReq)
+      }
     }
     // 登记"在飞的上游请求"，供 `shutdown()` 同步销毁（b11b P2-5）。
     // 退出登记的三条路：拿到 101、拿到普通响应、出错/关闭 —— 都在这条请求自己的事件里。
@@ -1762,12 +1825,17 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
       // 之前注册的客户端 close/error 收口（`abortHandshake`）变成 no-op，不会重复扣。
       established = true
       reservation.release()
+      // 101 到手 = socket 确实开着：撤销租约的自动收口，隧道可长期保活直到 teardown。
+      liveConnections.confirm(liveEntry.id)
       enableNoDelay(socket)
       enableNoDelay(upSocket)
       // 1) 先回 101（原样字节，保留 Sec-WebSocket-Accept 等）
       try {
         socket.write(serializeResponseHead(upRes))
       } catch {
+        // 101 已到但写头失败：established 守卫令 abortHandshake 变成 no-op，
+        // 必须显式走同一个幂等收口，否则条目永久留在面板上。
+        releaseLive()
         destroyQuietly(upSocket)
         destroyQuietly(socket)
         return
@@ -1777,6 +1845,8 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
         try {
           socket.write(upHead)
         } catch {
+          // 101 后残留字节写失败：同样显式收口（幂等）。
+          releaseLive()
           destroyQuietly(upSocket)
           destroyQuietly(socket)
           return
@@ -1786,6 +1856,8 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
         try {
           upSocket.write(head)
         } catch {
+          // 101 后残留字节写失败：同样显式收口（幂等）。
+          releaseLive()
           destroyQuietly(upSocket)
           destroyQuietly(socket)
           return
@@ -1804,6 +1876,8 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
       // 平板关页面后上游那条连接会一直半开着（S3 要求：不存在半开隧道）。
       const teardown = (): void => {
         tunnels.delete(tunnel)
+        // 隧道一关就不再是"正在查看"：走幂等收口，不等窗口自然到期。
+        releaseLive()
         destroyQuietly(upSocket)
         destroyQuietly(socket)
       }
@@ -1819,6 +1893,7 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
     upstreamReq.on('response', (upRes) => {
       handshakes.delete(upstreamReq)
       reservation.release()
+      if (!established) releaseLive()
       noteFailure('升级握手', { name: `HTTP_${String(upRes.statusCode)}` })
       try {
         upRes.resume()
@@ -1832,6 +1907,7 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
       // 上游 error（拒连 / 被重置 / 握手兜底超时 destroy）：归还预约槽。
       reservation.release()
       if (established) return // 已转正的隧道由 teardown 收口，绝不往隧道里塞错误页
+      releaseLive()
       noteFailure('升级握手', error)
       writeRawResponse(socket, 502, 'remote upstream unavailable\n')
     })
@@ -1942,6 +2018,8 @@ export async function startRemoteListener(options: RemoteListenerOptions): Promi
       tunnels: tunnels.size,
       // 已拨上游但还没拿到 101 的预约槽数（半开握手也算）；close() 之后恒为 0。
       reservedTunnels: reservations.size,
+      // 每次读都先剪枝：静默消失的对端不会在面板上僵住；close() 后这里恒为空。
+      liveConnections: liveConnections.view(),
     }),
     get lastError() {
       return lastError

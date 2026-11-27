@@ -22,6 +22,7 @@
 import dgram from 'node:dgram'
 import os from 'node:os'
 import { isBindableIpv6Address, isBindableLanAddress } from './listener.js'
+import type { LiveConnectionView } from './connections.js'
 import { RemoteStore } from './store.js'
 import { createRemoteAuthorizer } from './routes.js'
 import type { RemoteAuthorizeInput, RemoteAuthorizeResult, RemoteGate } from './routes.js'
@@ -44,7 +45,7 @@ import type {
 export interface RemoteListenerHandle {
   address: string
   port: number
-  stats(): { active: number; total: number; rejected: number }
+  stats(): { active: number; total: number; rejected: number; liveConnections: LiveConnectionView }
   lastError?: { code: string; message: string } | null
   close(): Promise<void>
 }
@@ -1018,7 +1019,11 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
     const live = listenerLive()
     // 监听被判死时，句柄本身不再参与任何"在接"的派生（统计/URL/TLS 一律按没有句柄处理）。
     const handle = live.accepting ? live.handle : null
-    const stats = handle === null ? { active: 0, total: 0, rejected: 0 } : handle.stats()
+    // 没句柄 ⇒ 当前连接必然为空（不是上次留下的快照）；句柄在则由 listener 每次读时现剪枝。
+    const stats =
+      handle === null
+        ? { active: 0, total: 0, rejected: 0, liveConnections: { connections: [], count: 0 } }
+        : handle.stats()
     const token = readTokenValue()
     const urls = []
     // 只有 lan 需要"挑地址"；其余方式的地址来自设置里的具体字段（隧道域名 / v6 字面量 …）。
@@ -1046,6 +1051,8 @@ export function createRemoteService(options: RemoteServiceOptions = {}): RemoteS
       lastError: runtime.lastError,
       listenerFailure: live.listenerFailure,
       connections: { active: stats.active, total: stats.total },
+      // additive：历史计数口径不变，面板改读这份"此刻"的视图。
+      liveConnections: stats.liveConnections,
       rejected: runtime.rejected + stats.rejected,
       token: { exists: token !== null, masked: token === null ? '' : maskToken(token), createdAt: tokenRecord?.createdAt ?? null },
       urls,

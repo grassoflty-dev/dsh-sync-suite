@@ -218,9 +218,33 @@ function makeFetch(overrides = {}) {
         republish: { key: 'pairing:gwl-pc', reason: 'token-rotated', previousPort: 44996, port: 44996 }
       }
     }),
+    // retarget（mod-plugin-remote-live-connections）：当前连接走 status.liveConnections，
+    // 不再是 pairingConnections 的历史审计；这里给两条活对端（HTTP + 隧道）。
     remoteGetState: () => ({
       ok: true,
-      data: { settings: { mode: 'lan', hasToken: true }, status: { running: stopCount === 0, probe: null }, modes: [] }
+      data: {
+        settings: { mode: 'lan', hasToken: true },
+        status: {
+          running: stopCount === 0,
+          probe: null,
+          liveConnections: {
+            connections: [
+              {
+                id: 'lc-1', peer: '192.168.1.11', transport: '局域网', kind: 'http',
+                since: new Date(Date.now() - 3 * 60_000).toISOString(),
+                lastSeen: new Date().toISOString(),
+              },
+              {
+                id: 'lc-2', peer: '100.64.0.2', transport: 'Tailscale', kind: 'tunnel',
+                since: new Date(Date.now() - 5 * 60_000).toISOString(),
+                lastSeen: new Date().toISOString(),
+              },
+            ],
+            count: 2,
+          },
+        },
+        modes: []
+      }
     }),
     remoteStop: () => { stopCount += 1; return { ok: true, data: { running: false } } },
     remoteProbe: () => ({ ok: true, data: { level: 'ok', verdict: '自检通过', checks: [] } })
@@ -257,13 +281,16 @@ async function renderReal(overrides = {}) {
 
 const click = async (tree, label) => { await button(tree, label).props.onClick(); await settle() }
 
-test('W1：真实宿主 props 挂载 → pairingProvision / pairingTransports / pairingConnections 被调用；零 pairingShow / 零剪贴板', async () => {
+// retarget（mod-plugin-remote-live-connections，pairing-client-wiring.test.mjs:260）：
+// 历史审计 RPC 从挂载路径移除；当前连接改由 remoteGetState 的状态给出，断言改为"绝不调用旧 RPC"。
+test('W1：真实宿主 props 挂载 → pairingProvision / pairingTransports / remoteGetState 被调用；零 pairingConnections / 零 pairingShow / 零剪贴板', async () => {
   copied.length = 0
   const { calls, tree } = await renderReal()
   const actions = calls.map((c) => c.action)
-  for (const action of ['pairingProvision', 'pairingTransports', 'pairingConnections', 'remoteGetState']) {
+  for (const action of ['pairingProvision', 'pairingTransports', 'remoteGetState']) {
     assert.ok(actions.includes(action), `挂载必须调用 ${action}`)
   }
+  assert.equal(actions.includes('pairingConnections'), false, '历史审计 RPC 不得再被调用')
   assert.equal(actions.includes('pairingShow'), false, 'pairingShow 只能由显式动作触发')
   assert.equal(copied.length, 0, '挂载必须零剪贴板写入')
   for (const line of reasonLines) {
@@ -311,14 +338,37 @@ test('W4：重新生成 → pairingRotateToken + 新二维码 + 重新配对后�
   assert.notEqual(before, after, '二维码必须是轮换后的新矩阵')
 })
 
-test('W5：审计渲染脱敏条目（时间 + 打码对端），不泄露完整地址', async () => {
+// retarget（mod-plugin-remote-live-connections，pairing-client-wiring.test.mjs:314）：
+// 旧的"历史审计 + 打码身份"断言换成"当前连接：IP · 传输 · 已连接 N 分钟 + 隧道标记"；
+// 脱敏纪律不放宽：token / 查询串 / URL 依旧逐项断言不存在。
+test('W5：当前连接渲染活条目（IP · 传输 · 已连接 N 分钟；隧道标「正在查看」），不泄露 token / ?', async () => {
   const { mount } = await renderReal()
   const audit = dataText(mount.tree, 'remote-audit')
   assert.ok(audit.includes(zh['lean.remote.audit.title']))
-  assert.ok(audit.includes('18:04'), '必须显示时间')
-  assert.ok(audit.includes('192.168.*.*'), '必须显示脱敏身份')
-  assert.equal(audit.includes('192.168.1.6'), false, '不得显示完整地址')
+  assert.equal(audit.includes('谁连进来过'), false, '历史文案不得复活')
+  assert.equal(dataNode(mount.tree, 'remote-live-connection').length, 2, '每个活对端恰好一行')
+  assert.ok(audit.includes('192.168.1.11 · 局域网 · 已连接 3 分钟'), 'HTTP 行格式必须是 IP · 传输 · 已连接 N 分钟')
+  assert.ok(audit.includes('100.64.0.2 · Tailscale · 已连接 5 分钟 · 正在查看'), '隧道行必须额外标「正在查看」')
+  assert.equal(audit.includes('192.168.*.*'), false, '脱敏历史身份不得再上屏')
+  assert.equal(audit.includes('18:04'), false, '历史审计时间不得再上屏')
   assert.equal(audit.includes(TOKEN), false, '不得显示 token')
+  assert.equal(audit.includes('?'), false, '不得显示查询串')
+  assert.equal(audit.includes('://'), false, '不得显示 URL')
+})
+
+test('W5b：当前连接为空 → 显示「当前没有设备连接」而不是空框或历史条目', async () => {
+  const { mount } = await renderReal({
+    routes: {
+      remoteGetState: () => ({
+        ok: true,
+        data: { settings: { mode: 'lan', hasToken: true }, status: { running: true, probe: null, liveConnections: { connections: [], count: 0 } }, modes: [] }
+      })
+    }
+  })
+  const audit = dataText(mount.tree, 'remote-audit')
+  assert.ok(audit.includes(zh['lean.remote.audit.empty']))
+  assert.equal(dataNode(mount.tree, 'remote-live-connection').length, 0)
+  assert.equal(dataNode(mount.tree, 'remote-live-empty').length, 1)
 })
 
 test('W6：停止接受连接 → remoteStop 被调用并显示已停止状态', async () => {
