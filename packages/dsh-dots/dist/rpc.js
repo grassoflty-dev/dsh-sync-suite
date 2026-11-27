@@ -34,6 +34,9 @@ import { mapRemoteCode, remoteToolError, REMOTE_TOOL_ERROR_CODES } from './remot
 // RPC 只依赖服务结构类型 + 拒绝文案表；缺省构造出的服务没有标记 ⇒ 一律 E_CHANNEL_UNVERIFIED。
 import { createSessionPromptService } from './remote/sessionPrompt.js';
 import { PROMPT_CODE_BY_KEY, PROMPT_WORDING } from './remote/promptWording.js';
+// mod-plugin-v2-marksynced：v1 / v2 共用同一成功判据与落戳动作。
+// 依赖方向只允许 rpc → sync：bootstrap 只收回调，绝不反向 import rpc（保持 sync 层可独立测试）。
+import { stampIfSynced } from './sync/bootstrap.js';
 /**
  * mod-plugin-askpass-error-surface：typed 码 → 横幅码（`state.json` 的 `status.repoBlockCode`）
  * 的**唯一判定点**。
@@ -281,7 +284,10 @@ export function createRpcService(options = {}) {
         }
         return { settings: { ...settings, hasToken: store.hasToken() }, status, snapshots: snapshotList };
     }
-    /** 记录最近一次成功同步的时间；状态文件写失败不应让已成功的同步变成失败。 */
+    /**
+     * v1 既有语义：push / apply 只要正常返回就记一次成功同步（push 返回 `pushed:false`
+     * = 远端已是最新，本来也算成功；本次不改动这条既有行为）。写 state.json 失败不外抛。
+     */
     function markSynced() {
         try {
             stateStore.writeLastSyncAt(now().toISOString());
@@ -290,6 +296,13 @@ export function createRpcService(options = {}) {
             /* state.json 只是 UI 展示用的运行事实，写失败不影响同步结果 */
         }
     }
+    /**
+     * 注入 V2SyncRuntime 的窄回调（选项 a）：只吃 CycleResult，不暴露服务内部。
+     * v2 侧必须经过共享判据：`pushed:false` / 仅 outbox 停放 / diverged-refused 一律零动作。
+     */
+    const markSyncedFromCycle = (result) => {
+        stampIfSynced(result, () => markSynced());
+    };
     async function saveSettings(payload) {
         const previous = store.readSettings();
         const next = normalizeSettings(payload.settings, previous, { allowLocalRepo: options.allowLocalRepo === true });
@@ -387,7 +400,7 @@ export function createRpcService(options = {}) {
                 const commit = await repo.commitAll(message, { onlyPath: `devices/${settings.deviceId}` });
                 const pushResult = await repo.pushWithRebase();
                 const head = await repo.head();
-                // push 成功（含"远端已是最新"）即视为一次成功同步；内部若发生 pull --rebase 也已覆盖。
+                // v1 既有语义：正常返回（含 pushed:false = 远端已是最新）即记一次成功同步。
                 markSynced();
                 return {
                     pushed: pushResult.pushed,
@@ -475,7 +488,7 @@ export function createRpcService(options = {}) {
             entries,
             preview: cached,
         });
-        // apply 是一次成功的"写回本地"同步动作，同样更新 lastSyncAt。
+        // apply 是一次成功的"写回本地"同步动作，同样更新 lastSyncAt（v1 既有语义不变）。
         markSynced();
         return applied;
     }
@@ -1129,7 +1142,7 @@ export function createRpcService(options = {}) {
         cache.clear();
         await queue.catch(() => undefined);
     }
-    return { paths, handleRpc, dispose };
+    return { paths, handleRpc, dispose, markSyncedFromCycle };
 }
 /* -------------------------------------------------------------------------- */
 /* HTTP 层                                                                     */

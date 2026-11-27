@@ -11,7 +11,7 @@
  * 迁移只在「旧 work 目录存在且新 repos 根不存在」时发生，先备份再移动且幂等。
  */
 import path from 'node:path'
-import { SettingsStore } from '../engine/settings.js'
+import { SettingsStore, LocalStateStore } from '../engine/settings.js'
 import { statePaths } from '../engine/paths.js'
 import { SyncError } from '../engine/errors.js'
 import { NodeTimelineFs } from '../timeline/write.js'
@@ -26,7 +26,50 @@ import type { RepoRootLogger } from './repoRoot.js'
 import { NodeOutboxPort } from './outbox.js'
 import { GitRepoV2Port } from './gitPort.js'
 import { runV2Cycle } from './cycle.js'
-import type { CycleResult } from './cycle.js'
+import type { CycleOptions, CycleResult } from './cycle.js'
+
+/**
+ * mod-plugin-v2-marksynced：唯一成功判据（**总函数**，任何输入都返回 boolean，绝不抛）。
+ *
+ * 只认「确实发生过同步」的三种结果形状，按优先级互斥判定：
+ *  1. v1 `push()` 结果 `{ pushed }`：只要 `pushed` 是 boolean 就以它为准，
+ *     `false` = 本次没有任何东西到达远端，拒绝；
+ *  2. v1 `apply()` 结果（带 `verified: true`）：写回本地成功，接受（既有语义不变）；
+ *  3. v2 `CycleResult`：只有 `ok === true && code === 'ok'`
+ *     且 `attempts` 有限并为正数，才证明至少一次真实 push 成功返回。`attempts === 0` 的纯快进 / 无写入周期、
+ *     outbox 只停放（nothing reached remote）以及 `ok === false` 的
+ *     diverged / refused / push-rejected 周期一律拒绝。
+ * 其余形状（null / 数组 / 缺字段 / 类型不符）fail-closed。
+ */
+export function shouldMarkSynced(result: unknown): boolean {
+  // P2-2：「永不抛」必须是代码事实——被撤销的 Proxy / 抛异常的 getter 也只返回 false。
+  try {
+    if (result === null || typeof result !== 'object' || Array.isArray(result)) return false
+    const record = result as Record<string, unknown>
+    if (typeof record.pushed === 'boolean') return record.pushed === true
+    if (record.verified === true) return true
+    // P2-1：只有有限且为正的 attempts 才算真实推送的正面证据；Infinity / NaN 不算。
+    const attempts = record.attempts
+    return record.ok === true && record.code === 'ok' &&
+      Number.isFinite(attempts) && (attempts as number) > 0
+  } catch {
+    return false
+  }
+}
+
+/** 落戳回调的最小形状：只吃周期结果，不暴露 state.json / 时钟 / RPC 服务。 */
+export type MarkSyncedFn = (result: CycleResult) => void
+
+/**
+ * v2 唯一落戳动作：判据为假时零动作；为真时**恰好调用一次** mark。
+ * 保证口径是「每个成功周期恰好盖一次」——不是「一个 save 总共只能盖一次」：
+ * 两个成功周期就是两戳，成功 + no-op 仍只有一戳。v1 push/apply 保持既有语义，不走这里。
+ */
+export function stampIfSynced(result: unknown, mark: MarkSyncedFn): boolean {
+  if (!shouldMarkSynced(result)) return false
+  mark(result as CycleResult)
+  return true
+}
 
 export interface V2RuntimeOptions {
   homeDir?: string
@@ -35,8 +78,16 @@ export interface V2RuntimeOptions {
   /** 宿主 logger（可选）；工作根选择那一行只经它输出。 */
   logger?: RepoRootLogger
   allowLocalRepo?: boolean
-  /** 注入时钟（仅周期 decidedAt/enqueuedAt 兜底）。 */
+  /** 注入时钟（仅周期 decidedAt/enqueuedAt 兜底，以及成功落戳的 ISO 形状）。 */
   now?: Date
+  /**
+   * mod-plugin-v2-marksynced：rpc.ts 的 `markSyncedFromCycle` 注入口（测试可塞 spy）。
+   * 不注入时运行时用同一个 `stampIfSynced` + `LocalStateStore` 自行落戳，
+   * 因此生产路径不依赖 index.ts 改线也能修好「上次同步」。
+   */
+  markSynced?: MarkSyncedFn
+  /** 测试注入：替换唯一周期执行器，用来钉住「两个调用点共用一次落戳」。 */
+  cycleRunner?: (options: CycleOptions) => Promise<CycleResult>
 }
 
 export interface V2RuntimeStatus {
@@ -69,8 +120,13 @@ export class V2SyncRuntime {
   private readonly homeDir: string | undefined
   private readonly appFilesDir: string
   private readonly settings: SettingsStore
+  private readonly stateStore: LocalStateStore
   private readonly allowLocalRepo: boolean
   private readonly now: Date
+  private readonly markSynced: MarkSyncedFn
+  private readonly cycleRunner: ((options: CycleOptions) => Promise<CycleResult>) | undefined
+  /** 本运行时实际落戳次数（供测试断言每个成功周期恰好 +1）。 */
+  private stampCount = 0
   private lastStatus: V2RuntimeStatus | null = null
 
   constructor(options: V2RuntimeOptions) {
@@ -80,6 +136,18 @@ export class V2SyncRuntime {
     this.now = options.now ?? new Date()
     const paths = statePaths(this.homeDir)
     this.settings = new SettingsStore(paths, { allowLocalRepo: this.allowLocalRepo })
+    this.stateStore = new LocalStateStore(paths)
+    // 保留字面的 `await runV2Cycle(...)`（WIR02 生产装配点守卫逐字钉住），注入只作测试覆盖。
+    this.cycleRunner = options.cycleRunner
+    // 缺省落戳器与 rpc.ts 的 markSynced() 共用同一 ISO 形状：Date.toISOString()。
+    // state.json 写失败只影响展示，绝不让已成功的同步变成失败（与 v1 markSynced 同口径）。
+    this.markSynced = options.markSynced ?? (() => {
+      try {
+        this.stateStore.writeLastSyncAt(this.now.toISOString())
+      } catch {
+        /* state.json 只是 UI 展示用的运行事实 */
+      }
+    })
     // 单一仓库目录决策点：env 优先级 + 默认 ~/.dsh/dots/repos/<repoHash>/git-repo。
     const resolved = resolveV2RepoDirDetailed({
       appFilesDir: this.appFilesDir,
@@ -96,6 +164,32 @@ export class V2SyncRuntime {
       stateRoot: paths.root,
       repoUrl: configuredRepoUrl === '' ? 'unconfigured' : configuredRepoUrl,
     })
+  }
+
+  /**
+   * 唯一周期 + 唯一落戳点：start() 与 syncNow() 两个调用点都经这里。
+   * 每个成功周期恰好盖一次；失败路径零写入、结果原样上报。
+   * 诚实边界：`syncNow()` 目前**没有生产调用者**，这条接缝在生产中只经 start() 跑；
+   * 测试用 cycleRunner 覆盖 syncNow，只为钉住「两个调用点共用同一落戳点」。
+   */
+  private async runCycle(days: string[], git: GitRepoV2Port): Promise<CycleResult> {
+    const options: CycleOptions = {
+      days, git, fs: new NodeTimelineFs(this.repoDir), outbox: this.outbox, now: this.now,
+    }
+    const cycle = this.cycleRunner !== undefined
+      ? await this.cycleRunner(options)
+      : await runV2Cycle(options)
+    try {
+      if (stampIfSynced(cycle, this.markSynced)) this.stampCount += 1
+    } catch {
+      /* P2-5：落戳失败只影响 UI 展示，绝不改变周期结果 / 让宿主保存失败 */
+    }
+    return cycle
+  }
+
+  /** 本运行时已落戳次数；两个调用点都只经 runCycle，每个成功周期 +1。 */
+  get syncedStampCount(): number {
+    return this.stampCount
   }
 
   /** 首跑迁移 + 有待同步意图时跑一次周期；任何 typed 中止都原样上报，绝不吞。 */
@@ -156,9 +250,7 @@ export class V2SyncRuntime {
       this.lastStatus = status
       return status
     }
-    const cycle = await runV2Cycle({
-      days, git, fs: new NodeTimelineFs(this.repoDir), outbox: this.outbox, now: this.now,
-    })
+    const cycle = await this.runCycle(days, git)
     const status: V2RuntimeStatus = {
       ...base, ok: cycle.ok, code: cycle.code, message: cycle.message,
       migrated: true, synced: cycle.ok, cycle,
@@ -176,7 +268,7 @@ export class V2SyncRuntime {
       token: this.settings.readToken(), platform: config.platform, username: config.username,
       allowLocalRepo: this.allowLocalRepo,
     })
-    return await runV2Cycle({ days, git, fs: new NodeTimelineFs(this.repoDir), outbox: this.outbox, now: this.now })
+    return await this.runCycle(days, git)
   }
 
   get status(): V2RuntimeStatus | null {
