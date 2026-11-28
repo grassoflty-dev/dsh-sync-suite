@@ -368,9 +368,15 @@ test('PO-07 no-loosening：负例仍全被拒 + 新导出形状与终态归属�
   const cycleSrc = readFileSync(path.resolve(here, '../src/sync/cycle.ts'), 'utf8')
   // 严格收容谓词原样在位（不是被替换成 startsWith 之类的宽松判断）。
   // mod-chat-hide：归属判定改用 isConfinedSyncPath（timeline/** 或恰为 chats/index.jsonl），
-  // 断言按 path:line 等量改指向新谓词；负例表与尾注/subject 条件一个都没删。
+  // PO-07 改后形状：基谓词仍以 || 为骨架，唯一放宽是导出尾注门控的 chat 载荷白名单，
+  // 且准入仍走 commit.paths.every(...)；下面四条文本断言 + 行为用例一起钉死组合形状。
   assert.equal(cycleSrc.includes("parts[0] === 'timeline'"), true)
-  assert.equal(cycleSrc.includes('commit.paths.every(isConfinedSyncPath)'), true)
+  assert.equal(cycleSrc.includes(
+    'return (p) => isConfinedSyncPath(p) || (exportTrailer && isConfinedChatExportPath(p))',
+  ), true)
+  assert.equal(cycleSrc.includes('const exportTrailer = hasChatExportTrailer(commit.body, instanceId)'), true)
+  assert.equal(cycleSrc.includes('const allowed = pathPredicateOf(commit, instanceId)'), true)
+  assert.equal(cycleSrc.includes('commit.paths.every(allowed)'), true)
   assert.equal(cycleSrc.includes("p === 'chats/index.jsonl'"), true)
   assert.equal(cycleSrc.includes('force: false'), true)
   assert.equal(/force\s*:\s*true/.test(cycleSrc), false)
@@ -389,6 +395,27 @@ test('PO-07 no-loosening：负例仍全被拒 + 新导出形状与终态归属�
   }
   assert.equal(isOursCommit(trailerOnly), true)
   assert.equal(describePendingOwnership([trailerOnly]).ours, true)
+
+  // PO-07 行为面：导出尾注是唯一放宽开关，且放宽范围恰好等于 chat 载荷类。
+  // 导出尾注由既有 v2 夹具换前缀得到，避免另写死默认实例 id。
+  const exportTrailer = TRAILER.replace('dsh-dots-v2:', 'dsh-dots-chat-sync:')
+  const chatSession = 'chats/s1/session.jsonl'
+  const chatMeta = 'chats/s1/meta.json'
+  const payloadOnly = { subject: '[v2] sync 1 days', body: TRAILER, paths: [REL_RECORDS, chatSession, chatMeta] }
+  const payloadWithExportTrailer = { ...payloadOnly, body: `${TRAILER}\n${exportTrailer}` }
+  const payloadPlusDevices = {
+    ...payloadWithExportTrailer,
+    paths: [...payloadWithExportTrailer.paths, 'devices/other-device/schedules/2026-11-19.jsonl'],
+  }
+  // (i) 无导出尾注：真实载荷路径一律拒绝。
+  assert.equal(isOursCommit(payloadOnly), false, '无导出尾注的 chat 载荷必须拒绝')
+  assert.equal(describePendingOwnership([payloadOnly]).ours, false, '无导出尾注的 chat 载荷必须拒绝')
+  // (ii) 有导出尾注：同一份载荷放行；但掺入 devices/** 立即拒绝，放宽不外溢。
+  assert.equal(isOursCommit(payloadWithExportTrailer), true, '带导出尾注的 chat 载荷必须放行')
+  assert.equal(describePendingOwnership([payloadWithExportTrailer]).ours, true, '带导出尾注的 chat 载荷必须放行')
+  assert.equal(isOursCommit(payloadPlusDevices), false, '导出尾注不得放宽到 devices/**')
+  assert.equal(describePendingOwnership([payloadPlusDevices]).ours, false, '导出尾注不得放宽到 devices/**')
+
   // 越界计数只是计数，永不变成路径列表。
   const d = describePendingOwnership([outside])
   assert.equal(d.verdicts[0].outsideScopePaths, 1)
