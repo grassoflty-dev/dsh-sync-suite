@@ -18,9 +18,9 @@
 10. **门闸输出必须当次留存（捕获纪律）**：每一次门禁运行都要保留完整输出（例如 `node --test ... 2>&1 | Tee-Object -FilePath .tmp/gates-<wave>.out`），使任何失败事后能点名到具体用例；没有留存日志的门闸结果不算证据，点不出名的失败不能分诊，也不许写成「已排除」。任何由设计师或评审执行的 gate 运行**必须** `Tee-Object` 到 `.tmp/gates-<lane>.out`；**没有留存日志的运行不构成证据**，不得作为 PASS 依据；评审若未留存，其结论按「未捕获」记录。**已记录的不明项（2026-11-21 Wave B）**：全量 app 套件 `node --test "apps/arkui-schedule/tools/test/*.test.mjs"` 共 2721 例，出现过**一次性 1 fail**，随后 14 次连续全绿（均 2721/2721/0/0）；因当次输出未留存，无法点名失败用例。套件内唯一显式超时是 `apps/arkui-schedule/tools/test/deviceAccept.test.mjs:465`（`timeout: 60000`），疑似负载敏感用例，**未证实**。处置：不据此盲改超时、不宣称已修复，只强制留存输出（本条规则）+ 本条记录；复现时按留存输出点名并单独修复。抖动台账见 `docs/FLAKES.md`。**陈旧性判定只看会进产物的输入**（`.ets` / `resources/**` / `AppScope/**` / 桥 JS / `main_pages.json` 等）；测试、文档、README 的 mtime 晚于构建**不影响**产物证据，评审不得据此判「产物过期」——本轮就出现过一次把 `docs/*.md` 的 mtime 当编译输入的误判。
 11. **凭据卫生：输出先打码，报告只报形态**：凡可能含凭据的命令输出（设备偏好快照 / 配置导出 / 请求响应体 / git 输出 / 构建日志等），在贴进 transcript、日志或报告之前必须经 `tools/redact.mjs`（`node tools/redact.mjs` 走 stdin→stdout，或 import 其 `redact(text)`）按模式遮罩；**只遮 URL 的写法不算打码**，因为 query、userinfo 与裸值仍会完整保留。报告只写「存在/不存在 + 长度类别」，**绝不写凭据值或任何可还原的片段**；打码工具自身对 hex 一律输出 `<redacted-hex>`、对其它密钥输出 `<redacted>`，不携带长度类别。伤疤：`1000007` 验证期间一次设备偏好快照检查只遮了 URL，把一个 32 位十六进制访问令牌原样打进了会话 transcript；该值仅存在于 6 个未跟踪的 `.tmp` 快照中，已就地清理且 XML 保持合法，仓库历史与源码未发现。此条为安全卫生规则而非功能特性。
 
-### 0.1 六种失败模式 → 六条方法（2026-11-27/28 夜间沉淀，写方法不写史；第 6 条 2026-11-28 上午补）
+### 0.1 八种失败模式 → 八条方法（2026-11-27/28 夜间沉淀，写方法不写史；第 6 条 2026-11-28 上午补，第 7–8 条 2026-11-28 午后补）
 
-以下五条**不是事故记录，是操作纪律**。每条给出「现象 → 必须做的动作」，下一次遇到同类情形直接照做。
+以下各条**不是事故记录，是操作纪律**。每条给出「现象 → 必须做的动作」，下一次遇到同类情形直接照做。
 
 1. **车道交付后静默**（现象：lane 写完了文件、captures 齐全，却不发汇报就转 inactive；一晚出现四次）。
    **动作**：不相信「没有汇报=没做完」，也不等待——**以树和 captures 为准**：`git status`、`.tmp/gates-*` 的字节数与 mtime、以及被测文件本身的 mtime，三样一起读，能直接判定「做完了/卡住了/在跑」。判定为完成后，由设计师代为汇总结论；判定为卡住后，用**有界指令**（具体命令 + 具体 capture 名 + 停止条件）续跑同一条 lane，不新开 lane。
@@ -37,7 +37,13 @@
    **动作**：**capture 先于产出**——动手改**第三个文件之前**，必须先落第一份 capture（哪怕只是一次 `git status --porcelain`，甚至一次故意失败的 `tsc`）。已经改了三个文件却零 capture 的车道，按**卡住**处理：停掉、重派，不等它汇报。**构建必须在开跑前说明**（「构建开始，capture 将叫 X」），汇报发生在**第一次写 capture 时**，不是等构建跑完。任何「做完了」如果没有**capture 名字与字节数**，不算结论——这是「absence 要路径与目录」那条纪律的另一半，它管的是 presence。
    **反方向同样成立**：不许用一份缺失的清单判定车道死了。本轮既有车道被误判为「零证据」而其实正在跑，也有工具把「正忙」报成 `unavailable` 被当成「已死」。判据只能是**树 + captures + 被改文件的 mtime 三样一起读**；读不全就先等或先问，不要先停、更不要先报「挂了」。工具自身的并发守卫（覆盖层 `applied=true`、构建脚本 exit 4）是最后一道兜底，不是第一道判据。
 
-引入这六条的代价是每批多花几分钟；不引入的代价是模块被提交后仍然半对、且没人知道。
+7. **只读评审「安静」被误判成卡住**（现象：三名评审派出后，仓库里十几分钟没有任何文件写入，`git status` 不变、`HEAD` 不动、没有 `REVIEW-*.md` 落地，看起来像全停了；实际两名已交结论、第三名正在读）。
+   **动作**：**只读车道的存活证据在它的 `%TEMP%` 暂存目录，不在仓库树里**。评审按纪律不许改仓库文件、不许构建、不许写 git，所以「仓库无写入」正是它**健康**的样子。判据三样一起读：`list_agents` 的行状态、`%TEMP%\<lane>-review-*` 目录的 mtime、以及它交回的结论。这是「把工具瞬态当成工作状态」的第 6 次变体——这一次错的不是进程表，而是**拿错了证物**：用「树有没有动」去判断一个被要求**不许动树**的车道。
+
+8. **冻结的 `dist` 会把正确的改动判成红**（现象：插件 `dist` 在重启前冻结，而插件测试 import 的是 `../dist/*`；于是把 `src` 里的工具名从 `schedule_*` 正确改成 `timeline_*` 之后，仓库自带的插件测试立刻出现 8 条红——红的是「`dist` 还是旧名」，不是改动本身）。
+   **动作**：先把**红归因**（用 `src` 与 `dist` 的差异说明红来自冻结，而不是来自改动），再用**临时编译 + 只重定向模块解析的 loader** 证明 `src` 侧正确。这套证据**可以**作为重启前证据，但**永远不是 Rule 9 证据**，且提交正文必须写明「本模块的插件套件只有在 `dist` 重新生成之后才会真正变绿」。凡在冻结期做的重命名或接线，都要预先准备好这句话。
+
+引入这几条的代价是每批多花几分钟；不引入的代价是模块被提交后仍然半对、且没人知道。
 
 > **版本号缺口（2026-11-22 登记一次）**：实际发布的序号是 `…1000007 → 1000008（构建了、bump 未提交）→ 1000009 → 1000011 → 1000012…`；**`1000008` 与 `1000010` 从未作为提交存在**。
 >
@@ -149,7 +155,7 @@
 | `mod-plugin-remote-hints-mode-keyed` | 插件精简远程组的提示改为**按选项查表**：`LEAN_MODE_HINTS`（`auto` / `tailscale` / `lan` / `ipv6` + `none` + `fallback`）一条一个模式，`none` 只点名推荐的下一步（Tailscale），未知模式走中性 fallback；渲染器只查一行，不再把多个模式的要求拼成一句 | 已写完（待 Lead 提交，状态 / 哈希（Lead 填））；**已编译（插件 `node scripts/build.mjs` exit 0 + `dist/` 与新鲜 `tsc` 逐字节一致）/ 未装机 / unverified** | （Lead 填） | 提交前回滚 = 撤销 `src/client.js` 的 `LEAN_MODE_HINTS` / `leanModeHint` / 查表渲染、`locale/{zh,en}.json` 五键与 `dist/client.js`，还原 `tools/test/{client-remote-render,pairing-client-wiring,client-lean-inventory,locale}.test.mjs` 的 retarget 并删除 `tools/test/remote-hints-mode-keyed.test.mjs`，撤销本文 §1/§2/§6 登记；提交后 `git revert <hash>`（独立叶子；`pairingShow`-only 取密、挂载零剪贴板、无端口 / 令牌输入框均不变） | 依赖 `mod-plugin-pairing-client`（`LeanRemoteGroup` 与 `lean.*` 字典）、`mod-plugin-lean-panel`；与所有插件包模块共用 `scripts/build.mjs` 与提交的 `dist/` 树（单构建窗口 ⇒ 构建串行）；无下游 | `packages/dsh-dots/test/remote-hints-mode-keyed.test.mjs`（一模式一句 / 异模式不出现 / 未知模式中性） |
 | `mod-plugin-askpass-node-resolution` | askpass 解释器解析：显式 `DSH_GIT_SYNC_NODE` → PATH `node(.exe)` → DSH 应用二进制**仅配** `ELECTRON_RUN_AS_NODE=1` → typed `E_ASKPASS_NODE_MISSING`；每个候选先过 `-e` 标记探针（2 s、进程内缓存）；`gitPort.pushFailure()` 不再把这类失败捏造成 `auth-prompt`，`cycle.ts` 保留 typed 码并给出对应下一步 | 已写完（待 Lead 提交，状态 / 哈希（Lead 填））；**已编译（插件 build exit 0 + `dist/` 逐字节一致）/ 未装机 / 真机推送 unverified** | （Lead 填） | 提交前回滚 = 删除 `src/engine/nodePath.ts`、`test/askpass-node-resolution.test.mjs` 与 `dist/engine/nodePath.js`，撤销 `src/engine/git.ts` / `src/sync/gitPort.ts` / `src/sync/cycle.ts` 三处增量与其 dist 产物，撤销本文 §1/§2/§6 登记；提交后 `git revert <hash>`（独立叶子；`gitAuthEnv()` 其余字节、真 `auth-prompt` 分类与 `E_PUSH_REJECTED` 原文案均不变） | 承接 `mod-plugin-git-auth-env`（`gitAuthEnv()` 单一构造点）与 `mod-plugin-pairing-client`；改共享 `src/sync/cycle.ts` / `src/sync/gitPort.ts`（见 §2）；无下游 | `packages/dsh-dots/test/askpass-node-resolution.test.mjs`（9 例）；诊断文案 `找不到可用的 node 解释器：…`；测试 17 例 |
 | `mod-tablet-git-bridge-diagnostics` | 修真机「Git 操作失败：Cannot read properties of undefined (reading 'length')」：`opV2Git('fastForward')` 误用 `git.merge({oid})`（isomorphic-git 1.25.3 期望 `theirs`，内部 `ref` 为 `undefined`，`GitRefManager.expand` 读 `ref.length`）→ 改为 `theirs` 后「落后远端 + 本地改动」能快进；每个桥命令收敛到 `E_BRIDGE` 边界（原始 JS 消息只进诊断行，主状态行换成固定中文），并给 7 个跨边界助手加数组 / 字符串守卫 | 已写完（待 Lead 提交，状态 / 哈希（Lead 填））；**已编译（`build-20261123-210334.log`）/ 未装机 / unverified** | （Lead 填） | 提交前回滚 = 撤销 `git-bridge.js` 的 `theirs` 修复 / `E_BRIDGE` 边界 / 七个守卫与测试导出，撤销 `services/GitSyncService.ets` 的 `E_BRIDGE` 映射与 `bridgeDiagnostic` 增量，删除 `tools/test/gitBridgeDiagnostics.test.mjs`，撤销本文 §1/§2/§6 与 `docs/ROADMAP.md` 登记；提交后 `git revert <hash>`（独立叶子；快进 / union / 门禁语义除该 bug 外不变） | 依赖 `mod-v2-sync-wiring`（`v2Git` 八 op）、`mod-sync-single-flight` / `mod-v2-sync-protocol`（周期调用点）；改共享 `git-bridge.js`（多模块共用，见 §2）；无下游 | `docs/REVIEW-app-qr-scan-and-bridge.md` §B；`tools/test/gitBridgeDiagnostics.test.mjs`（16 例，含真 repo 对复现旧 V8 报错） |
-| `mod-plugin-timeline-tool-rename` | 插件日历工具由 `schedule_*` 改名为 `timeline_*`，与 DSH 设备本地调度器的 `schedule_*` 区分 | 计划中（未实现；需插件构建，`dist` 冻结中） | （Lead 填） | 未提交前回滚 = 删除本行；提交后 `git revert <hash>` | 阻塞于 Lead 的 DSH 重启验证 | `docs/PLUGIN-GAPS.md` §1.1（`schedule_*` 命名守卫全文；交叉引用 `docs/DATA-CONTRACT-v2.md` §11 写路径表后一行） |
+| `mod-plugin-timeline-tool-rename` | 插件日历工具改名，与 DSH 设备本地调度器的 `schedule_*` 区分：实际只有三个工具——`schedule_list`/`schedule_add`/`schedule_summary` → `timeline_list`/`timeline_add`/`timeline_summary`；`create`/`view`/`edit` 三个动词插件尚未注册，已从本计划删除，等真有再加 | 计划中（**实现已完成、独立评审 PASS**；`src` 已改名，因 `dist` 冻结，插件套件按设计出现 8 条「改名断言」红——见 §0.1 第 8 条；等一次 `build.mjs`） | （待重启后填） | 未提交前回滚 = 删除本行；提交后 `git revert <hash>` | 阻塞于 Lead 的 DSH 重启验证 **+ 一次插件构建**（`dist` 必须重新生成，套件才会真绿） | `docs/PLUGIN-GAPS.md` §1.1（`schedule_*` 命名守卫全文；交叉引用 `docs/DATA-CONTRACT-v2.md` §11 写路径表后一行） |
 
 `mod-v2-dual-read` 已被 `mod-v2-dual-write-off` 取代，见契约 §13。
 
@@ -850,6 +856,16 @@ c41eb（v2 唯一路径；删除激活闸与双存储兼容；评审 P1-1/P1-2 �
 | 7 | `mod-plugin-chat-hide-infrastructure` | **插件侧基础设施；app 侧未交付（评审 Block，P1-1）**：隐藏折叠 + 导出器抑制 + 门禁白名单 | `b8af53c` | `module/mod-plugin-chat-hide-infrastructure` | 折叠全函数（普通行永不解除隐藏、只有 `op:"unarchive"` 能，且本模块不产生）；导出器两层抑制（选中前过滤 + `appendIndexLine` 前复读）；门禁精确到 `chats/index.jsonl`；merge 自证（purge 10 标记存活、0 删除行）；套件 1136/1134/0/2 ×2；distcheck 79/0 window 5；定向 29/29；emit 5/5 | **两条行为路径都未验证**（仓库无 `chats\`）；**用户入口不存在**：`chatHide.ts` 的文案与 typed 原因无导入方，平板逐条删除入口与窄写入通道属 `mod-app-chat-hide`，未交付 |
 
 > 哈希与标签以 `origin/main` 为准；`HEAD == origin/main` 于每次提交后核对过。
+
+## 7.8b 2026-11-28 午后提交批：三个模块（哈希已回填）
+
+| # | 模块 id | 一句话 | 提交 | 标签 | 测试能证明的 | 只有真机/真仓库能确认的（`unverified`） |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | `mod-app-git-commit-atomic` | 同步周期与隐藏删除共用**一把实例级闸**，add→commit→push 原子且串行，不再互相偷路径 | `6bf5ee8` | `module/mod-app-git-commit-atomic` | 定向 6/6/0；全量 3417/3417/0；validate 8/8；**ArkTS 首跑 FAIL**（`'"commit"' and '"push"' have no overlap`）→ 改法为「保留联合类型 + `isPushStage` 形参破收窄」后 `CompileArkTS` 真执行 1 min 19 s 成功。F3：空洞断言（`hideFailure('commit')` 在 `hideChat` 里出现两次）被**限定到闸内 catch 片段**，并用「把所有锁错误判成 push」的突变证明**旧断言仍绿、新断言变红** | 闸内 `pushMain` 把网络 I/O 放进临界区（队首阻塞，无超时）只由代码证明；真机并发下的表现未验 |
+| 2 | `mod-app-hide-commit-reconcile` | 消除**假失败**：周期已把隐藏行提交/推送后，`hideChat` 不再报「提交失败」 | `d64bc20` | `module/mod-app-hide-commit-reconcile` | 43/43/0（含 HCR-01..05）；先红后绿：实现前 4 条新测试全红（`decideHideReconcile is not a function`），37 条既有断言仍绿；`'done'` 要求**整行命中 HEAD 且关系 ∈ {equal, behind}**；`pushCount === 0` 对 equal/behind 都断言（「推了但成功」≠「没推」） | 真机上「周期与删除真并发」的交错未跑；只用纯函数 + 忠实假 runner 证明 |
+| 3 | `mod-app-empty-state-doctrine` | 空态契约改为「**空态有出路：真按钮，或没有可点的东西时给一句事实**」；两段云端空态**不再有按钮** | `37c81f9` | `module/mod-app-empty-state-doctrine` | 12 个 `EmptyState` 调用点逐一核对：10 个行为不变、2 个按设计去掉按钮；`showAction` 默认 `true`，空串仍回落「刷新」（`StateView.ets` 的变量传参不受影响）；占位符拒绝是**exact match**（`暂无数据`/`-`/`…` 等拒绝），含「没有」的诚实句子通过（有回归用例）；`导出全部`/`下拉刷新试试` 在 app 源码 0 命中 | 空态实际渲染、下拉刷新观感：无真机，全 `unverified` |
+| 4 | `mod-app-three-kind` | `dots` 成为**云端种类**（平板上可见）；`work` 永不可见；分段改用**会话文件投影**而非 `chats/index.jsonl` 的 `kind` | `98c4ec6` | `module/mod-app-three-kind` | `filterChatPreset` 只准入投影 `chat`/`dots` 并丢弃 `other`；`filterBySegment` 对未知 preset **fail-closed**；**任何视图不再读 `entry.kind`**；对抗用例：索引谎称 `kind:'dots'` 而投影为 `other` ⇒ 被丢弃。**同批补的口子**：可见的 dots 行本会撞上 `hideChat` 只准入 `chat` 而返回**假失败**，已改为精确两项白名单，并证明工作会话零写入/零 addPaths/零 commit/零 push | 分段切换、徽章、行内删除的屏幕观感：无真机，全 `unverified`；且今天还没有任何东西能创建 dots 会话（可见性基础设施先于入口） |
+
 
 ## 7.9 「尚未验证」清单（**读到这里不要以为是绿的**）
 
