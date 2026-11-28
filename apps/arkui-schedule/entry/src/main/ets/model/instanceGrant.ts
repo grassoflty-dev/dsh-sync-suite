@@ -663,6 +663,35 @@ export function revokeGrant(
   return mutationAccepted(next);
 }
 
+/**
+ * 按实例整组**移除**授权记录（mod-app-instance-delete-in-settings）：删实例时目标实例的
+ * 全部 grant 行从表里消失（不留 dangling instanceId、不留孤儿授权），其它实例逐字不动。
+ *
+ * 名字保留历史 `revokeAllForInstance` 以兼容既有接线；语义是删除，不是写 `revokedAt` 留历史。
+ * typed / total 纪律不变：非法 nowMs → `E_GRANT_NOW` + 原表副本；非法 instanceId →
+ * `E_GRANT_INSTANCE_ID` + 原表副本；没有匹配项 → 排序后的原表副本；入参不被就地修改。
+ */
+export function revokeAllForInstance(
+  grants: InstanceGrant[],
+  instanceId: string,
+  nowMs: number
+): GrantMutationResult {
+  if (!validTime(nowMs)) {
+    return mutationRefused('E_GRANT_NOW', grants);
+  }
+  const wanted: string = typeof instanceId === 'string' ? instanceId.trim() : '';
+  if (!INSTANCE_ID_PATTERN.test(wanted)) {
+    return mutationRefused('E_GRANT_INSTANCE_ID', grants);
+  }
+  const next: InstanceGrant[] = [];
+  for (const g of grants) {
+    if (g.instanceId !== wanted) {
+      next.push(copyGrant(g));
+    }
+  }
+  return mutationAccepted(next);
+}
+
 /** 渲染 / 导出视图：剥掉自由文本 note，只给派生 active / canPrompt（不落盘）。 */
 export function redactGrant(g: InstanceGrant, nowMs: number): RedactedGrant {
   const view: RedactedGrant = {

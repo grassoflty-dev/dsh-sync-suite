@@ -47,6 +47,8 @@ const PAGE = readFileSync(
 const ROUTE = readFileSync(new URL('../../entry/src/main/ets/pages/Instances.ets', import.meta.url), 'utf8');
 const HOME = readFileSync(new URL('../../entry/src/main/ets/pages/Home.ets', import.meta.url), 'utf8');
 const SETTINGS = readFileSync(new URL('../../entry/src/main/ets/pages/Settings.ets', import.meta.url), 'utf8');
+// mod-app-instance-delete-in-settings：删除入口迁到设置子页，面板侧断言改为「绝迹 + 子页存在」。
+const DELETE_PAGE = readFileSync(new URL('../../entry/src/main/ets/pages/SettingsInstances.ets', import.meta.url), 'utf8');
 const STORE = readFileSync(new URL('../../entry/src/main/ets/services/instanceStore.ets', import.meta.url), 'utf8');
 const MAIN_PAGES = JSON.parse(
   readFileSync(new URL('../../entry/src/main/resources/base/profile/main_pages.json', import.meta.url), 'utf8')
@@ -326,6 +328,8 @@ describe('静态断言：页面、入口与存储接线', () => {
   test('U-01 新页面存在且登记进两份 main_pages.json', () => {
     assert.ok(MAIN_PAGES.src.includes('pages/Instances'));
     assert.ok(HARMONY_PAGES.src.includes('pages/Instances'));
+    assert.ok(MAIN_PAGES.src.includes('pages/SettingsInstances'), '删除子页必须登记（main）');
+    assert.ok(HARMONY_PAGES.src.includes('pages/SettingsInstances'), '删除子页必须登记（harmony）');
   });
 
   // mod-instances-pane-readonly（old→new，不比原来弱）：原来只有一套空态「添加实例」；
@@ -358,7 +362,8 @@ describe('静态断言：页面、入口与存储接线', () => {
     const config = configBlocks(PAGE).join('\n');
     assert.ok(config.length > 0, '必须存在配置专属块');
     assert.equal(/LOCAL_INSTANCE_ID|localInstance\(/.test(PAGE), false, '面板不得残留本机分支');
-    assert.match(config, /label: '删除'/, '所有远程行都有删除动作');
+    assert.equal(/label: '删除'/.test(config), false, '配置模式也不得有删除动作（删除只在设置子页）');
+    assert.match(DELETE_PAGE, /label: '删除实例'/, '删除入口必须在 pages/SettingsInstances');
     assert.match(config, /label: '编辑'/, '所有远程行都有编辑动作');
     assert.match(config, /TextInput\(\{ text: this\.formUrl/, '地址输入框对所有实例可见');
     assert.match(config, /Select\(this\.modeSelectOptions\(\)\)/, '方式下拉对所有实例可见');
@@ -389,7 +394,7 @@ describe('静态断言：页面、入口与存储接线', () => {
 
   // mod-settings-root（old→new，不比原来弱）：旧入口是长滚动里的一行「远程实例与云端对话 ›」；
   // 现在是四行菜单中的「远程实例」行，摘要从实例数派生，仍指向同一个 pages/Instances 路由。
-  test('U-07 设置入口升级为四行菜单的「远程实例」行且指向 pages/Instances', () => {
+  test('U-07 设置入口升级为五行菜单的「远程实例」行且指向 pages/Instances', () => {
     assert.match(SETTINGS, /ROUTE_INSTANCES: string = 'pages\/Instances'/);
     assert.match(SETTINGS, rowBindingRe('远程实例', 'instanceSummary', 'ROUTE_INSTANCES'));
     assert.match(SETTINGS, /instanceStore\.list\(\)\.length/, '摘要必须是真实实例数');
@@ -397,8 +402,8 @@ describe('静态断言：页面、入口与存储接线', () => {
     assert.equal(SETTINGS.includes('远程实例与云端对话'), false, '旧入口文案已从根页移除');
   });
 
-  test('U-08 store 的 ensureSeeded 幂等接线（比较信封、无变化不写盘）', () => {
-    assert.match(STORE, /seedInstances\(before, legacy\)/);
+  test('U-08 store 的 ensureSeeded 幂等接线（墓碑抑制旧镜像 + 比较信封、无变化不写盘）', () => {
+    assert.match(STORE, /seedInstances\(before, suppressLegacyForTombstones\(legacy, this\.loadTombstones\(\)\)\)/);
     assert.match(STORE, /encodeInstances\(seeded\) === encodeInstances\(sortInstances\(before\)\)/);
     assert.match(STORE, /ensureSeeded\(legacy: LegacyInstanceSettings\)/);
   });
@@ -418,7 +423,8 @@ describe('静态断言：页面、入口与存储接线', () => {
     const config = configBlocks(PAGE).join('\n');
     assert.match(readonly, /label: '打开'/, '首页面板必须有打开动作');
     assert.match(config, /label: '编辑'/);
-    assert.match(config, /label: '删除'/);
+    assert.equal(/label: '删除'/.test(config), false, '设置配置页也不再有删除动作');
+    assert.match(DELETE_PAGE, /label: '删除实例'/);
     assert.equal(/label: '编辑'|label: '删除'/.test(readonly), false, '首页面板不得有编辑 / 删除');
     assert.match(PAGE, /EMPTY_TITLE: string = '还没有可管理的 DSH 实例'/);
   });
@@ -486,7 +492,8 @@ describe('静态断言：页面、入口与存储接线', () => {
     const config = configBlocks(PAGE).join('\n');
     assert.match(readonly, /label: '打开'/, '使用动作在首页面板常驻');
     assert.match(config, /label: '编辑'/);
-    assert.match(config, /label: '删除'/, '每一行（全为远程）都有删除动作');
+    assert.equal(/label: '删除'/.test(config), false, '每一行（全为远程）都不在面板里删除');
+    assert.match(DELETE_PAGE, /label: '删除实例'/, '删除入口在设置子页逐行存在');
     // 排序不再有本机锚点，由 L-02 的纯逻辑钉住；面板消费 store 的 sortInstances 后副本。
     assert.match(STORE, /redacted\(\): RedactedInstance\[\]/, '渲染视图来自 store 的排序副本');
   });
@@ -548,16 +555,22 @@ describe('静态断言：页面、入口与存储接线', () => {
     }
   });
 
-  test('U-19 设置路由模式保留全部配置能力（添加 / 编辑 / 删除 / 地址·令牌·方式表单）', () => {
+  test('U-19 设置路由模式保留添加 / 编辑 / 地址·令牌·方式表单；删除入口只在设置子页', () => {
     const config = configBlocks(PAGE).join('\n');
     for (const needle of [
-      'Text(\'添加实例\')', 'label: \'编辑\'', 'label: \'删除\'', 'label: \'重新添加\'',
+      'Text(\'添加实例\')', 'label: \'编辑\'', 'label: \'重新添加\'',
       'TextInput({ text: this.formUrl', 'Select(this.modeSelectOptions())',
-      'this.showAdd()', 'this.showEdit(view)', 'this.submitForm()', 'this.FormPanel()',
-      'this.deleteInstance(view)'
+      'this.showAdd()', 'this.showEdit(view)', 'this.submitForm()', 'this.FormPanel()'
     ]) {
       assert.ok(config.includes(needle), `配置模式必须保留「${needle}」`);
     }
+    // 编辑改地址的一步替换在 submitForm()（配置块之外），单独钉住：不是用户可见的删除。
+    assert.match(PAGE, /instanceStore\.rekey\(this\.formId, result\.instance\)/,
+      '编辑改地址必须走 rekey 而不是 instanceStore.remove(');
+    for (const gone of ['label: \'删除\'', 'this.deleteInstance(view)', 'instanceStore.remove(']) {
+      assert.equal(config.includes(gone), false, `配置模式不得保留「${gone}」`);
+    }
+    assert.match(DELETE_PAGE, /this\.askDelete\(/, '删除子页必须逐行提供两步确认入口');
     assert.match(config, /EMPTY_ACTION/, '配置模式空态主操作仍是「添加实例」');
   });
 

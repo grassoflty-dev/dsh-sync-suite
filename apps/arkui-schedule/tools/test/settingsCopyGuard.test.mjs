@@ -241,14 +241,15 @@ test('C4 AI 配置无「高级」按钮与手输模型名文案，预设服务/�
 // 设置入口唯一性继续由 uiTokens.test.mjs 的 U-S4 `settingsPushFiles() === ['Home.ets']` 钉住，
 // 本文件不重复、也不放宽那条断言。
 
-test('C5 根页恰好四行菜单：标题 / 摘要来源 / 页脚版本号', () => {
+test('C5 根页恰好五行菜单：第五行显式叫「删除实例」，标题 / 摘要来源 / 页脚版本号', () => {
   const root = readSettingsRoot();
-  assert.equal(countRows(root), 4, '根页只能有四行菜单');
+  assert.equal(countRows(root), 5, '根页只能有五行菜单（第五行是删除实例）');
   for (const [title, summary, route] of [
     ['同步仓库', 'repoSummary', 'ROUTE_SYNC'],
     ['远程实例', 'instanceSummary', 'ROUTE_INSTANCES'],
     ['数据导入导出', 'dataSummary', 'ROUTE_DATA'],
-    ['API 配置', 'apiSummary', 'ROUTE_API']
+    ['API 配置', 'apiSummary', 'ROUTE_API'],
+    ['删除实例', 'instanceSummary', 'ROUTE_INSTANCE_DELETE']
   ]) {
     assert.match(root, rowBindingRe(title, summary, route),
       `缺少「${title}」行或其摘要接线`);
@@ -280,19 +281,19 @@ test('C6 根页不渲染任何 section body（也不直接挂实现宿主）', (
   }
 });
 
-test('C7 四个子路由 + Instances 在两份页面清单都登记（main 12 / harmony 13）', () => {
+test('C7 五个子路由（含删除实例）+ Instances 在两份页面清单都登记（main 13 / harmony 14）', () => {
   const readPages = (relative) => JSON.parse(readFileSync(join(ETS_ROOT, '..', 'resources', relative), 'utf8')).src;
   const main = readPages('base/profile/main_pages.json');
   const harmony = readPages('../../harmony/resources/base/profile/main_pages.json');
   for (const route of [
     'pages/Settings', 'pages/SettingsSync', 'pages/SettingsExportImport',
-    'pages/SettingsApi', 'pages/Instances'
+    'pages/SettingsApi', 'pages/SettingsInstances', 'pages/Instances'
   ]) {
     assert.ok(main.includes(route), `main 清单缺少 ${route}`);
     assert.ok(harmony.includes(route), `harmony 清单缺少 ${route}`);
   }
-  assert.equal(main.length, 12, 'main 清单应为 12 页（原 9 + 三个设置子页）');
-  assert.equal(harmony.length, 13, 'harmony 清单应为 13 页（原 10 + 三个设置子页）');
+  assert.equal(main.length, 13, 'main 清单应为 13 页（原 9 + 四个设置子页，含删除实例）');
+  assert.equal(harmony.length, 14, 'harmony 清单应为 14 页（原 10 + 四个设置子页，含删除实例）');
   assert.equal(new Set(main).size, main.length, 'main 清单不得重复登记');
 });
 

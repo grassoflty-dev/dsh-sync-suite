@@ -25,6 +25,9 @@ const ENTRY_ABILITY = stripComments(
   readFileSync(new URL('../../entry/src/main/ets/entryability/EntryAbility.ets', import.meta.url), 'utf8')
 );
 const ETS_ROOT_URL = new URL('../../entry/src/main/ets/', import.meta.url);
+// mod-app-instance-delete-in-settings：删除入口只在设置子页，面板侧保留绝迹断言。
+const SETTINGS_DELETE_PAGE = stripComments(
+  readFileSync(new URL('pages/SettingsInstances.ets', ETS_ROOT_URL), 'utf8'));
 const PANE_DIR = new URL('pages/panes/', ETS_ROOT_URL);
 
 /** 取 marker 之后那对花括号的内部文本（marker 形如 `build() ` / `onBackPress() `）。 */
@@ -131,12 +134,13 @@ function contentStackBody() {
 }
 
 describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
-  test('L-01 外壳页存在且登记进两份页面清单（mod-settings-root 后 main 12 页，harmony 13 页为超集）', () => {
+  test('L-01 外壳页存在且登记进两份页面清单（含删除子页：main 13 页，harmony 14 页为超集）', () => {
     assert.ok(HOME.length > 0, 'pages/Home.ets 必须有内容');
     assert.ok(MAIN_PAGES.src.includes('pages/Home'), 'main main_pages.json 缺少 pages/Home');
     assert.ok(HARMONY_PAGES.src.includes('pages/Home'), 'harmony main_pages.json 缺少 pages/Home');
-    // 旧断言 9 → 新 12（+ 三个设置子页）；页数与 validate-app 的 pages 计数保持一致。
-    assert.equal(MAIN_PAGES.src.length, 12, 'main 页面清单应为 12 页（validate-app 的 pages 计数）');
+    assert.ok(MAIN_PAGES.src.includes('pages/SettingsInstances'), 'main 清单缺少删除子页');
+    // 旧断言 9 → 12（+ 三个设置子页）→ 13（+ 删除实例子页）；与 validate-app 的 pages 计数一致。
+    assert.equal(MAIN_PAGES.src.length, 13, 'main 页面清单应为 13 页（validate-app 的 pages 计数）');
     assert.equal(new Set(MAIN_PAGES.src).size, MAIN_PAGES.src.length, 'main 清单不得重复登记');
     for (const entry of MAIN_PAGES.src) {
       assert.ok(HARMONY_PAGES.src.includes(entry), `harmony 清单必须是 main 的超集，缺少 ${entry}`);
@@ -389,14 +393,19 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     ]) {
       assert.ok(readonly.includes(token), `首页面板必须拥有 ${token}`);
     }
-    for (const token of ["label: '编辑'", "label: '删除'"]) {
+    for (const token of ["label: '编辑'"]) {
       assert.ok(config.includes(token), `配置模式必须拥有 ${token}`);
       assert.equal(readonly.includes(token), false, `首页面板不得渲染配置动作 ${token}`);
     }
+    // mod-app-instance-delete-in-settings（old→new，收紧）：旧断言钉「配置模式每行可删」；
+    // 现在面板两种模式都没有删除 affordance，删除只在 pages/SettingsInstances。
+    for (const token of ["label: '删除'", 'instanceStore.remove(', 'this.deleteInstance(']) {
+      assert.equal(instances.includes(token), false, `面板不得保留删除 affordance ${token}`);
+    }
+    assert.ok(SETTINGS_DELETE_PAGE.includes("label: '删除实例'"), '删除入口在设置子页逐行存在');
     // mod-instances-drop-local（old→new，收紧）：旧断言钉「删除分支排除本机、打开时按本机
-    // 走参数缺省」；现在没有本机行——面板不得有 local 分支，所有远程行一律可删、可拼 token 打开。
+    // 走参数缺省」；现在没有本机行——面板不得有 local 分支，打开时可拼 token。
     assert.equal(/LOCAL_INSTANCE_ID|localInstance\(/.test(instances), false, '面板不得有本机行分支');
-    assert.ok(config.includes("label: '删除'"), '配置块的每行远程实例都有删除动作');
     for (const stale of ['远程面板即将迁入', '实例列表与连接操作即将迁入', '本页暂不展示任何记录。']) {
       assert.equal(instances.includes(stale), false, `远程面板不得残留占位串「${stale}」`);
     }
@@ -446,9 +455,9 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.equal(ENTRY_ABILITY.includes("loadContent('pages/Index'"), false, '入口不得再指向旧首页');
     assert.ok(MAIN_PAGES.src.includes('pages/Index'), 'main 清单必须保留 fallback 路由 pages/Index');
     assert.ok(HARMONY_PAGES.src.includes('pages/Index'), 'harmony 清单必须保留 fallback 路由 pages/Index');
-    // mod-settings-root（old→new）：仍钉「入口是 Home、Index 是 fallback」，页数按新增三个设置子页上调。
-    assert.equal(MAIN_PAGES.src.length, 12, 'main 页面数应为 12（原 9 + 三个设置子页）');
-    assert.equal(HARMONY_PAGES.src.length, 13, 'harmony 页面数应为 13（main 的超集）');
+    // mod-settings-root（old→new）：仍钉「入口是 Home、Index 是 fallback」，页数按四个设置子页上调。
+    assert.equal(MAIN_PAGES.src.length, 13, 'main 页面数应为 13（原 9 + 四个设置子页，含删除实例）');
+    assert.equal(HARMONY_PAGES.src.length, 14, 'harmony 页面数应为 14（main 的超集）');
   });
 
   test('L-18 日程真 body：SchedulePane 拥有两 tab / 搜索 / 汇总 / 撤销 / 加权列表', () => {

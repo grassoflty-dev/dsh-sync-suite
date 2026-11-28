@@ -27,6 +27,7 @@ import { describe, test } from 'node:test';
 import {
   ETS_ROOT,
   readApiPage,
+  readDeletePage,
   readExportPage,
   readSettingsFile,
   readSettingsRoot,
@@ -50,7 +51,13 @@ const DESTINATIONS = [
     struct: 'struct Instances'
   },
   { label: '数据导入导出', route: 'pages/SettingsExportImport', read: readExportPage, struct: 'struct SettingsExportImport' },
-  { label: 'API 配置', route: 'pages/SettingsApi', read: readApiPage, struct: 'struct SettingsApi' }
+  { label: 'API 配置', route: 'pages/SettingsApi', read: readApiPage, struct: 'struct SettingsApi' },
+  {
+    label: '删除实例',
+    route: 'pages/SettingsInstances',
+    read: readDeletePage,
+    struct: 'struct SettingsInstances'
+  }
 ];
 const ROUTE_LITERALS = DESTINATIONS.map(({ route }) => `'${route}'`);
 
@@ -87,7 +94,17 @@ const ACTIONS = [
     own: ['this.testAi()', 'AiSection({']
   },
   // Instances 是 @Entry 路由壳：没有 Button，配置动作在 InstancesPane 的页头（paneLayout P-19 已钉）。
-  { name: 'Instances', read: () => readSettingsFile('pages/Instances.ets'), primary: null, own: ['InstancesPane({'] }
+  { name: 'Instances', read: () => readSettingsFile('pages/Instances.ets'), primary: null, own: ['InstancesPane({'] },
+  {
+    name: 'SettingsInstances',
+    read: readDeletePage,
+    primary: null,
+    // 删除动作独占本页；IA-05 的主判据比 Button 计数更强，且 D-07 另钉唯一 instanceStore.remove 调用点。
+    own: [
+      'this.askDelete(', 'instanceGrantStore.revokeAllForInstance(',
+      'instanceStore.remove(', 'bindSheet(this.showDeleteSheet', 'deletePlanOf('
+    ]
+  }
 ];
 
 describe('mod-settings-ia-guards：设置信息架构整体契约', () => {
@@ -102,7 +119,7 @@ describe('mod-settings-ia-guards：设置信息架构整体契约', () => {
       assert.equal(root.includes(control), false, `根页只做导航，不得出现配置控件 ${control}`);
     }
     // 正证据：根页不是被删空，而是仍有导航骨架（四行的细节由 B2-19/B2-20、C5 钉住）。
-    assert.equal(countRows(root), 4, '根页仍是四行导航菜单');
+    assert.equal(countRows(root), 5, '根页仍是五行导航菜单（含「删除实例」）');
     assert.match(
       root,
       /private push\(route: string\): void \{[\s\S]{0,160}router\.pushUrl\(\{ url: route \}\)/,
@@ -147,7 +164,7 @@ describe('mod-settings-ia-guards：设置信息架构整体契约', () => {
     // 仓库里并没有「重试同步」这个字面量；这里钉的是源码中真实存在的那组动作词。
   });
 
-  test('IA-06 四目的地之间无横跳：没有 pushUrl 到另一设置页，三真页面只 router.back()', () => {
+  test('IA-06 五目的地之间无横跳：没有 pushUrl 到另一设置页，真页面只 router.back()', () => {
     for (const { label, read } of DESTINATIONS) {
       const code = stripComments(read());
       assert.equal(/router\.pushUrl\(/.test(code), false, `${label} 页不得有横向 pushUrl（返回只用 back）`);
@@ -174,7 +191,7 @@ describe('mod-settings-ia-guards：设置信息架构整体契约', () => {
       assert.equal(root.includes(token), false, `根页不得声明锚点机制 ${token}`);
     }
     // 正证据：被检查的确实是四行导航菜单，不是一个恰好为空的文件（非空 sanity 另见 IA-08）。
-    assert.equal(countRows(root), 4, '根页仍是四行导航菜单，不是空文件');
+    assert.equal(countRows(root), 5, '根页仍是五行导航菜单，不是空文件');
   });
 
   test('IA-08 读者读到真实字节：每个页面源码非空且 struct 名正确（改名 / 截断不能静默过关）', () => {

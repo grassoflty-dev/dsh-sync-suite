@@ -173,17 +173,26 @@ describe('D. InstancesPane：保活安全的消费者（不是 onPageShow）', (
     assert.match(body, /if \(raw\.length === 0\) \{[\s\S]{0,40}return;/, '空串早退，挡住清空回写的二次 watch');
   });
 
-  test('D3 onPageShow 不消费结果标记；Home 也不给面板传刷新 tick', () => {
+  test('D3 onPageShow / showTick 都不消费结果标记；Home 只传删除后的 showTick', () => {
     const pageShow = methodBody(PANE, 'onPageShow(): void');
     for (const needle of ['lastOutcome', 'decodeRemoteOutcome', 'shouldApplyOutcome',
       'markReachable', 'REMOTE_OUTCOME_KEY']) {
       assert.equal(pageShow.includes(needle), false, `消费路径不得挂在 onPageShow：${needle}`);
     }
+    // mod-app-instance-delete-in-settings（retarget，不放宽）：showTick 只负责删除后重读实例表，
+    // 结果标记仍只能由 onRemoteOutcome 的 @StorageLink + @Watch 消费。
+    const showTick = methodBody(PANE, 'onShowTick(): void');
+    for (const needle of ['lastOutcome', 'decodeRemoteOutcome', 'shouldApplyOutcome',
+      'markReachable', 'REMOTE_OUTCOME_KEY']) {
+      assert.equal(showTick.includes(needle), false, `showTick 不得消费结果标记：${needle}`);
+    }
     const homeCall = HOME.slice(HOME.indexOf('InstancesPane({'), HOME.indexOf('CloudChatPane({'));
     assert.ok(homeCall.length > 0, 'Home 的分段装配点必须存在');
     assert.match(homeCall, /InstancesPane\(\{[\s\S]*active: this\.section === SHELL_SECTION_INSTANCES/);
-    assert.equal(/Tick|tick|lastOutcome|REMOTE_OUTCOME/.test(homeCall), false,
-      'Home 没有给 InstancesPane 传任何刷新 tick，证明 @Watch 是唯一机制');
+    assert.match(homeCall, /showTick: this\.instancesShowTick/,
+      '删实例后返回首页必须传 showTick，让保活面板重读实例表');
+    assert.equal(/lastOutcome|REMOTE_OUTCOME/.test(homeCall), false,
+      'Home 不得传结果标记；结果标记只能走 @StorageLink + @Watch 唯一机制');
   });
 
   test('D4 导航成功不再标 ok；pushUrl 失败的 fail 分支仍在', () => {

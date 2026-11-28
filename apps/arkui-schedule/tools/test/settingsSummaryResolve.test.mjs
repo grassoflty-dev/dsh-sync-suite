@@ -39,14 +39,15 @@ const ROWS = [
   ['同步仓库', 'repoSummary', 'ROUTE_SYNC'],
   ['远程实例', 'instanceSummary', 'ROUTE_INSTANCES'],
   ['数据导入导出', 'dataSummary', 'ROUTE_DATA'],
-  ['API 配置', 'apiSummary', 'ROUTE_API']
+  ['API 配置', 'apiSummary', 'ROUTE_API'],
+  ['删除实例', 'instanceSummary', 'ROUTE_INSTANCE_DELETE']
 ];
 
 // ---------------------------------------------------------------------------
 // S-01 反应性守卫（修复前必须红）
 // ---------------------------------------------------------------------------
 
-test('S-01 反应性：四行经真组件 @Prop 绑定，不存在任何带参数的 @Builder 参数表', () => {
+test('S-01 反应性：五行经真组件 @Prop 绑定，不存在任何带参数的 @Builder 参数表', () => {
   // ① 页面里不许再出现**带参数**的 @Builder：那正是「@State 变了、Text 不重建」的形状。
   const builderWithParams = /@Builder\s*(?:\r?\n\s*)?[A-Za-z_$][\w$]*\s*\(\s*[A-Za-z_$]/;
   assert.equal(builderWithParams.test(PAGE), false,
@@ -57,7 +58,7 @@ test('S-01 反应性：四行经真组件 @Prop 绑定，不存在任何带参�
   assert.equal(/MenuRow\(title: string/.test(PAGE), false, '旧的 MenuRow(title: string, …) 声明必须绝迹');
 
   // ③ 恰好四行，且每行都接自己的摘要 @State + 可重试 @State + 自己的路由。
-  assert.equal(countRows(PAGE), 4, `根页必须恰好四行，实际 ${countRows(PAGE)}`);
+  assert.equal(countRows(PAGE), 5, `根页必须恰好五行（第五行「删除实例」），实际 ${countRows(PAGE)}`);
   for (const [title, summary, route] of ROWS) {
     assert.equal(rowBindingRe(title, summary, route).test(PAGE), true,
       `「${title}」行必须把 this.${summary} 作为 @Prop 交给行组件，并点到自己那条 ${route}`);

@@ -23,6 +23,9 @@ const MAIN_PAGES = JSON.parse(
   readFileSync(new URL('../../entry/src/main/resources/base/profile/main_pages.json', import.meta.url), 'utf8'));
 const HARMONY_PAGES = JSON.parse(
   readFileSync(new URL('../../entry/src/harmony/resources/base/profile/main_pages.json', import.meta.url), 'utf8'));
+// mod-app-instance-delete-in-settings：删除只在设置子页；面板侧保留「绝迹」断言。
+const SETTINGS_DELETE_PAGE = stripComments(
+  readFileSync(new URL('pages/SettingsInstances.ets', ETS), 'utf8'));
 
 const PANE_NAMES = ['DotsPane', 'SchedulePane', 'InstancesPane', 'CloudChatPane'];
 /** 原始源码：模式分叉守卫用；`stripComments()` 会把 URL 字面量 `http://` 后面的 `}` 截掉。 */
@@ -494,11 +497,14 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     const rows = blockAfter(raw, '\n  InstanceRow(');
     assert.match(readonlyRegions(rows), /label: '打开'/, '两种模式都能打开实例');
     assert.match(configRegions(rows).join('\n'), /label: '编辑'/, '配置模式有编辑');
-    assert.match(configRegions(rows).join('\n'), /label: '删除'/, '配置模式有删除');
+    // mod-app-instance-delete-in-settings（old→new，收紧）：旧断言钉「配置模式有删除」；
+    // 现在面板两种模式都不得删除，删除入口只在设置子页，避免日常打开时误删。
+    assert.equal(/label: '删除'/.test(configRegions(rows).join('\n')), false, '配置模式不再有删除');
+    assert.match(SETTINGS_DELETE_PAGE, /label: '删除实例'/, '删除入口在设置子页逐行存在');
     // mod-instances-drop-local（old→new，收紧）：旧断言钉「删除按钮排除本机」；
-    // 现在没有本机行，任何分支都不许再按 local id 分叉，所有远程行一律可删。
+    // 现在没有本机行，任何分支都不许再按 local id 分叉。
     assert.equal(/LOCAL_INSTANCE_ID|localInstance\(/.test(p.source), false, '面板不得有本机行分支');
-    assert.match(configRegions(rows).join('\n'), /label: '删除'/, '所有远程行都有删除动作（无本机豁免）');
+    assert.equal(/label: '删除'/.test(configRegions(rows).join('\n')), false, '所有远程行都不在面板里删除');
     assert.equal(/label: '编辑'|label: '删除'/.test(readonlyRegions(rows)), false, '首页行内无配置动作');
     // 只读模式没有地址 / 令牌 / 方式输入，也没有内联表单调用。
     for (const forbidden of ['TextInput(', 'Select(', 'this.showAdd()', 'this.FormPanel()']) {

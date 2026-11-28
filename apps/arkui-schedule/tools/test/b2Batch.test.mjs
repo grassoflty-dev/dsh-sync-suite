@@ -225,13 +225,14 @@ describe('B2 面板 ExportImportPanel.ets：快捷 chip 的源码级契约', () 
 // 旧：5 个 chip + scrollTo(offset) + 未测量 toast；
 // 新：恰好 4 行 + 每行一次 push(ROUTE_*) + 每行的摘要来自持久化状态 + 页脚版本。
 // 新契约更强：路由是真实可返回的导航（不是页内 offset），且摘要不能写死。
-describe('B2 设置根页 Settings.ets（四行菜单）：行级路由跳转的源码级契约', () => {
+describe('B2 设置根页 Settings.ets（五行菜单）：行级路由跳转的源码级契约', () => {
   test('B2-18 四个路由常量指向真实子页，没有指回根页', () => {
     for (const [name, route] of [
       ['ROUTE_SYNC', 'pages/SettingsSync'],
       ['ROUTE_INSTANCES', 'pages/Instances'],
       ['ROUTE_DATA', 'pages/SettingsExportImport'],
-      ['ROUTE_API', 'pages/SettingsApi']
+      ['ROUTE_API', 'pages/SettingsApi'],
+      ['ROUTE_INSTANCE_DELETE', 'pages/SettingsInstances']
     ]) {
       assert.match(PAGE, new RegExp(`const ${name}: string = '${route.replaceAll('/', '\\/')}';`),
         `契约丢了：${name} 必须指向 ${route}`);
@@ -239,7 +240,7 @@ describe('B2 设置根页 Settings.ets（四行菜单）：行级路由跳转的
     assert.equal(/ROUTE_[A-Z]+: string = 'pages\/Settings';/.test(PAGE), false, '子页路由不得指回根页造成循环');
   });
 
-  test('B2-19 四行按 同步仓库 / 远程实例 / 数据导入导出 / API 配置 顺序，且恰好 4 次 MenuSummaryRow', () => {
+  test('B2-19 五行按 同步仓库 / 远程实例 / 数据导入导出 / API 配置 / 删除实例 顺序，且恰好 5 次 MenuSummaryRow', () => {
     // mod-app-settings-summary-resolve（old→new，收紧）：行的形状从按值 @Builder `this.MenuRow('标题', …)`
     // 换成真组件 `MenuSummaryRow({ title: '标题', … })`（@Builder 按值参数不随 @State 重建，
     // 那正是真机「永远停在读取中…」的根因）。断言本身一条不删：仍是四条、顺序不变。
@@ -247,10 +248,11 @@ describe('B2 设置根页 Settings.ets（四行菜单）：行级路由跳转的
       "title: '同步仓库'",
       "title: '远程实例'",
       "title: '数据导入导出'",
-      "title: 'API 配置'"
+      "title: 'API 配置'",
+      "title: '删除实例'"
     ], 'Settings.build()');
     const rows = countRows(PAGE);
-    assert.equal(rows, 4, `契约丢了：根页恰好四行，实际 ${rows}`);
+    assert.equal(rows, 5, `契约丢了：根页恰好五行，实际 ${rows}（第五行必须叫「删除实例」）`);
   });
 
   test('B2-20 每行都接自己的摘要状态并真的 push 对应路由', () => {
@@ -258,7 +260,8 @@ describe('B2 设置根页 Settings.ets（四行菜单）：行级路由跳转的
       ['同步仓库', 'repoSummary', 'ROUTE_SYNC'],
       ['远程实例', 'instanceSummary', 'ROUTE_INSTANCES'],
       ['数据导入导出', 'dataSummary', 'ROUTE_DATA'],
-      ['API 配置', 'apiSummary', 'ROUTE_API']
+      ['API 配置', 'apiSummary', 'ROUTE_API'],
+      ['删除实例', 'instanceSummary', 'ROUTE_INSTANCE_DELETE']
     ]) {
       assert.match(PAGE, rowBindingRe(title, summary, route),
         `契约丢了：「${title}」行没有接摘要 / 路由`);

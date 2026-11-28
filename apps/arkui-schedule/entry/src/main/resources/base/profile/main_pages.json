@@ -7,6 +7,7 @@
     "pages/SettingsSync",
     "pages/SettingsExportImport",
     "pages/SettingsApi",
+    "pages/SettingsInstances",
     "pages/RemoteControl",
     "pages/Instances",
     "pages/Chats",

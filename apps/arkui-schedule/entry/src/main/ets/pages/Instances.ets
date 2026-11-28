@@ -8,8 +8,9 @@
  *
  * 外壳（pages/Home.ets）的「远程 DSH」分段装配的是同一个 InstancesPane，但**不传**
  * `configurable`，走默认 false：首页只「用」（列表 / 状态 / 打码 URL / 打开）；
- * 本路由是设置里的配置落点，显式传 `configurable: true`，保留添加 / 编辑 / 删除 /
- * 地址·令牌·方式表单与空态「添加实例」。配置与使用的分界只有一个 prop。
+ * 本路由是设置里的配置落点，显式传 `configurable: true`，保留添加 / 编辑 /
+ * 地址·令牌·方式表单与空态「添加实例」。删除入口已迁到 `pages/SettingsInstances`。
+ * 配置与使用的分界只有一个 prop。
  */
 import { InstancesPane } from './panes/InstancesPane';
 

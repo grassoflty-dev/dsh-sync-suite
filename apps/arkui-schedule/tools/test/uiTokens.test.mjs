@@ -575,8 +575,8 @@ test('U-S4 外壳只有一个设置出口：rail 齿轮 + 父页 openSettings，
 // mod-settings-root（新增，不替代 U-S4）：U-S4 的 `settingsPushFiles() === ['Home.ets']`
 // 一字未改，仍钉住「rail 齿轮是全外壳唯一设置入口」。这里只补新文件的反向断言：
 // 四行根页 push 的是四个子页、子页只 back，没有任何一处重新 push `pages/Settings`。
-test('U-S5 设置四行根页与三个子页都不新增设置入口（U-S4 仍是唯一性判据）', () => {
-  const roots = ['Settings.ets', 'SettingsSync.ets', 'SettingsExportImport.ets', 'SettingsApi.ets']
+test('U-S5 设置五行根页与四个子页都不新增设置入口（U-S4 仍是唯一性判据）', () => {
+  const roots = ['Settings.ets', 'SettingsSync.ets', 'SettingsExportImport.ets', 'SettingsApi.ets', 'SettingsInstances.ets']
     .map((name) => [name, stripComments(readFileSync(new URL(`../../entry/src/main/ets/pages/${name}`, import.meta.url), 'utf8'))])
   for (const [name, code] of roots) {
     assert.equal(/router\.pushUrl\(\{\s*url:\s*'pages\/Settings'\s*\}\)/.test(code), false,
@@ -609,6 +609,12 @@ test('U-S5 设置四行根页与三个子页都不新增设置入口（U-S4 仍�
   assert.match(api, /Scroll\(this\.pageScroller\)/, 'API 子页自带唯一 Scroll')
   assert.match(api, /Button\('保存'\)/, 'API 子页的唯一主操作是「保存」')
   assert.match(api, /router\.back\(\)/, 'API 子页只 back，不新增设置入口')
+  // mod-app-instance-delete-in-settings（新增，不放宽）：删除子页也不 push 设置根页，只 back。
+  const del = roots.find(([file]) => file === 'SettingsInstances.ets')[1]
+  assert.match(del, /PageLayout\(\{[\s\S]{0,80}title: '删除实例'/, '删除子页页头标题必须是「删除实例」')
+  assert.match(del, /Scroll\(\)/, '删除子页自带唯一 Scroll')
+  assert.match(del, /router\.back\(\)/, '删除子页只 back，不新增设置入口')
+  assert.equal(/router\.pushUrl\(/.test(del), false, '删除子页不得横向跳转到其它设置页')
   assert.equal(/高级/.test(api.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')), false,
     'API 真页面不得出现「高级」控件')
 })

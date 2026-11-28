@@ -29,7 +29,7 @@ const {
   apiRowSummary
 } = await import('../.build/model/settingsMenu.js');
 
-test('M-01 摘要键稳定且四行摘要函数齐备', () => {
+test('M-01 摘要键稳定且设置摘要函数齐备', () => {
   assert.equal(LAST_EXPORT_AT_KEY, 'settings.lastExportAt');
   assert.equal(LAST_IMPORT_AT_KEY, 'settings.lastImportAt');
   for (const fn of [repoHostOf, clockOf, syncRowSummary, dataRowSummary, apiRowSummary]) {

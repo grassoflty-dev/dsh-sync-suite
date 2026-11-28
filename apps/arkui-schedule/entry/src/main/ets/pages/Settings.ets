@@ -1,7 +1,8 @@
 /**
- * 设置根页（mod-settings-root）：**恰好四行菜单**，每行 push 一个真实路由子页。
+ * 设置根页（mod-settings-root）：**恰好五行菜单**，每行 push 一个真实路由子页。
  *
- * 四行（顺序固定）：同步仓库 / 远程实例 / 数据导入导出 / API 配置。
+ * 五行（顺序固定）：同步仓库 / 远程实例 / 数据导入导出 / API 配置 / 删除实例。
+ * 第五行是 mod-app-instance-delete-in-settings 的唯一删除落点；「远程实例」行仍只做打开 / 配对 / 编辑。
  * 本页**不渲染任何 section body**：原长滚动的实现搬到
  * `components/settings/SettingsHost.ets`，由四个子页各自复用同一个 section 组件。
  *
@@ -141,6 +142,8 @@ const ROUTE_SYNC: string = 'pages/SettingsSync';
 const ROUTE_INSTANCES: string = 'pages/Instances';
 const ROUTE_DATA: string = 'pages/SettingsExportImport';
 const ROUTE_API: string = 'pages/SettingsApi';
+// mod-app-instance-delete-in-settings：删除只在专门的设置子页；首页 / pages/Instances 只有打开 / 配对 / 编辑。
+const ROUTE_INSTANCE_DELETE: string = 'pages/SettingsInstances';
 
 @Entry
 @Component
@@ -160,6 +163,8 @@ struct Settings {
   private retryAttempt: number = 0;
   /** 页面已销毁：不再为一个已经不在的页面发起新的读取（已发出的结论照常落终态）。 */
   private disposed: boolean = false;
+  /** 首次 onPageShow 与 aboutToAppear 同帧发生，跳过以免重复读盘；后续返回才重读。 */
+  private firstShow: boolean = true;
 
   aboutToAppear(): void {
     // 显式挂 .catch：异步拒绝不许静默（旧写法 `this.bootstrap();` 既没有 void 也没有 catch，
@@ -171,6 +176,22 @@ struct Settings {
 
   aboutToDisappear(): void {
     this.disposed = true;
+  }
+
+  /**
+   * 从「删除实例」子页 router.back() 回来时重读摘要：实例数与「读不到」态都随删除即时更新，
+   * 不要求重启设置页。首次 show 由 aboutToAppear 已读，跳过一次避免重复读盘。
+   */
+  onPageShow(): void {
+    if (this.firstShow) {
+      this.firstShow = false;
+      return;
+    }
+    if (!this.disposed) {
+      this.bootstrap().catch((error: Object): void => {
+        this.settleFailed(error);
+      });
+    }
   }
 
   /**
@@ -412,7 +433,7 @@ struct Settings {
       }) {
         Scroll() {
           Column({ space: SPACING.md }) {
-            // 四行都是真子组件 + @Prop（不是 @Builder 按值传参）：摘要 @State 变化时，
+            // 五行都是真子组件 + @Prop（不是 @Builder 按值传参）：摘要 @State 变化时，
             // 父 → @Prop → 子 Text 这条链会被 ArkUI 跟踪，行才会真的刷新。
             MenuSummaryRow({
               title: '同步仓库',
@@ -453,6 +474,17 @@ struct Settings {
               retryable: false,
               onTap: () => {
                 this.push(ROUTE_API);
+              }
+            })
+            Divider()
+              .strokeWidth(DIVIDER)
+              .color($r('app.color.divider'))
+            MenuSummaryRow({
+              title: '删除实例',
+              summary: this.instanceSummary,
+              retryable: false,
+              onTap: () => {
+                this.push(ROUTE_INSTANCE_DELETE);
               }
             })
 

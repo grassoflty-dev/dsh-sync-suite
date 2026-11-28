@@ -496,14 +496,15 @@ function loopbackPageAt(bridge) {
   return bridge.internals.pageLoadedAtOf();
 }
 
-test('W-09 Settings.ets：四行仍是 4 次 MenuSummaryRow（真组件绑定），摘要仍来自权威来源（未被本次改动放宽）', () => {
+test('W-09 Settings.ets：五行是 5 次 MenuSummaryRow（真组件绑定），第五行显式叫「删除实例」', () => {
   const page = docker('pages/Settings.ets');
-  assert.equal(countRows(page), 4, '四行菜单不许变成别的形状');
+  assert.equal(countRows(page), 5, '五行菜单不许变成别的形状');
   for (const [title, summary, route] of [
     ['同步仓库', 'repoSummary', 'ROUTE_SYNC'],
     ['远程实例', 'instanceSummary', 'ROUTE_INSTANCES'],
     ['数据导入导出', 'dataSummary', 'ROUTE_DATA'],
-    ['API 配置', 'apiSummary', 'ROUTE_API']
+    ['API 配置', 'apiSummary', 'ROUTE_API'],
+    ['删除实例', 'instanceSummary', 'ROUTE_INSTANCE_DELETE']
   ]) {
     assert.match(page, rowBindingRe(title, summary, route));
   }

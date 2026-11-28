@@ -118,6 +118,13 @@ struct Home {
   @State scheduleShowTick: number = 0;
 
   /**
+   * 远程实例面板的「页面重新显示」信号（单调递增；每次 onPageShow +1）。
+   * InstancesPane 保活拿不到自己的 onPageShow；在设置子页删掉实例后返回首页，必须由这里
+   * 把 show 信号转给面板，面板在 @Watch 里重读 instanceStore——否则会留着旧行与旧令牌。
+   */
+  @State instancesShowTick: number = 0;
+
+  /**
    * 首页全局下拉刷新（mod-home-global-refresh / P1-D）：一次手势 = 一个周期 + 四个读回。
    *
    * `globalRefreshing` 只驱动外壳 Refresh 的转圈；真正的单飞闸 + 在飞 Promise 共享在
@@ -243,6 +250,8 @@ struct Home {
    */
   onPageShow(): void {
     this.scheduleShowTick = this.scheduleShowTick + 1;
+    // 删实例后返回首页：保活的实例面板靠这个 tick 重读，不显示已删行。
+    this.instancesShowTick = this.instancesShowTick + 1;
     // 冷启动请求只在进程第一次生效；这里再调也不会多跑一个周期（无定时器 / 无轮询）。
     homeStartupSync.request();
     // 前台恢复（mod-sync-silence-phase-b）：选 Home.onPageShow 而不是 EntryAbility.onForeground——
@@ -530,7 +539,8 @@ struct Home {
           })
           InstancesPane({
             deepLinkId: this.deepLinkId,
-            active: this.section === SHELL_SECTION_INSTANCES
+            active: this.section === SHELL_SECTION_INSTANCES,
+            showTick: this.instancesShowTick
           })
           CloudChatPane({
             deepLinkId: this.deepLinkId,

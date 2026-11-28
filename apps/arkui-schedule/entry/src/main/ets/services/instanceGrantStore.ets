@@ -20,6 +20,7 @@ import {
   decodeGrants,
   encodeGrants,
   redactGrant,
+  revokeAllForInstance as revokeAllGrantsForInstance,
   revokeGrant,
   sortGrants,
   upsertGrant
@@ -130,6 +131,20 @@ export class InstanceGrantStore {
    */
   revoke(grantId: string, nowMs: number): InstanceGrant[] {
     const result: GrantMutationResult = revokeGrant(this.load(), grantId, nowMs);
+    if (!result.ok) {
+      this.problem = result.problem;
+      return this.list();
+    }
+    return this.commit(result.items);
+  }
+
+  /**
+   * 删实例专用：按 instanceId 从表里移除该实例的全部授权记录（其它实例逐字不动，
+   * 不留 dangling instanceId）。走纯 `revokeAllForInstance` 的 typed 结果：
+   * 失败时只标 problem、绝不写回半截表。
+   */
+  revokeAllForInstance(instanceId: string, nowMs: number): InstanceGrant[] {
+    const result: GrantMutationResult = revokeAllGrantsForInstance(this.load(), instanceId, nowMs);
     if (!result.ok) {
       this.problem = result.problem;
       return this.list();

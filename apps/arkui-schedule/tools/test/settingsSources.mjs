@@ -64,6 +64,14 @@ export function readApiPage() {
   return readSettingsFile('pages/SettingsApi.ets');
 }
 
+/**
+ * mod-app-instance-delete-in-settings：删除实例子页。设置 IA 守卫把它当作第五个目的地；
+ * 删除入口只在这里，首页 / pages/Instances 的面板没有删除 affordance。
+ */
+export function readDeletePage() {
+  return readSettingsFile('pages/SettingsInstances.ets');
+}
+
 /** 同步组 section（含组头「更多」、主表单、`高级` 折叠区）。 */
 export function readSyncSection() {
   return readSettingsFile('components/settings/SyncSection.ets');
@@ -96,6 +104,7 @@ export function readSettingsSources() {
     'pages/SettingsSync.ets',
     'pages/SettingsExportImport.ets',
     'pages/SettingsApi.ets',
+    'pages/SettingsInstances.ets',
     'components/settings/SettingsHost.ets',
     'components/settings/SettingsBits.ets',
     'components/settings/SyncSection.ets',

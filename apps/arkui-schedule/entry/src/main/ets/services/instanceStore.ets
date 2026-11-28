@@ -34,12 +34,27 @@ import type { LegacyInstanceSettings } from '../model/instanceSeed';
 import { addPairedInstanceWithProbe } from '../model/pairingPayload';
 import type { PairingAddResult } from '../model/pairingPayload';
 import type { PairingProbeTransport } from '../model/pairingProbe';
+import {
+  decodeTombstones,
+  encodeTombstones,
+  forgetTombstones,
+  mergeTombstones,
+  suppressLegacyForTombstones,
+  tombstoneIdsOf
+} from '../model/instanceDelete';
 
 /** 唯一持久键：JSON 字符串信封。 */
 const INSTANCE_STORAGE_KEY: string = 'instances.json';
 
+/**
+ * 删除墓碑键（mod-app-instance-delete-in-settings）：单独一个字符串键，不污染实例表信封。
+ * 旧配置镜像 `remoteUrl` / `remoteLastOk` 仍在盘上，没有墓碑就会在下次启动被 ensureSeeded 播种回来。
+ */
+const TOMBSTONE_STORAGE_KEY: string = 'deleted-instances.json';
+
 /** `PersistentStorage` 只需绑定一次；重复绑定由布尔位挡住。 */
 let storageBound: boolean = false;
+let tombstoneBound: boolean = false;
 
 /** 绑定单个持久键；绑定失败时仍可用 AppStorage 内存镜像，不抛到 UI。 */
 function ensureBound(): void {
@@ -67,9 +82,35 @@ function writeRaw(json: string): void {
   AppStorage.setOrCreate<string>(INSTANCE_STORAGE_KEY, json);
 }
 
+/** 墓碑键只需绑定一次；绑定失败时仍可用 AppStorage 内存镜像，不抛到 UI。 */
+function ensureTombstoneBound(): void {
+  if (tombstoneBound) {
+    return;
+  }
+  tombstoneBound = true;
+  try {
+    PersistentStorage.persistProp<string>(TOMBSTONE_STORAGE_KEY, '');
+  } catch {
+    // 绑定不可用：读侧拿到空串、写侧只保留内存镜像；问题码由写失败标记
+  }
+}
+
+function readTombstonesRaw(): string {
+  ensureTombstoneBound();
+  const raw: string | undefined = AppStorage.get<string>(TOMBSTONE_STORAGE_KEY);
+  return raw === undefined ? '' : raw;
+}
+
+function writeTombstonesRaw(json: string): void {
+  ensureTombstoneBound();
+  AppStorage.setOrCreate<string>(TOMBSTONE_STORAGE_KEY, json);
+}
+
 export class InstanceStore {
   /** 内存镜像；null = 还没从持久层解码过。 */
   private items: DsInstance[] | null = null;
+  /** 墓碑镜像；null = 还没从持久层解码过。 */
+  private tombstones: string[] | null = null;
   /** 最近一次读 / 写的问题码；'ok' = 健康。 */
   private problem: InstanceProblem = 'ok';
 
@@ -106,9 +147,41 @@ export class InstanceStore {
     return sorted.slice();
   }
 
+  /** 墓碑表懒加载：坏信封回落空表，整条路径不抛异常。 */
+  private loadTombstones(): string[] {
+    if (this.tombstones !== null) {
+      return this.tombstones;
+    }
+    let raw: string = '';
+    try {
+      raw = readTombstonesRaw();
+    } catch {
+      this.tombstones = [];
+      return this.tombstones;
+    }
+    this.tombstones = decodeTombstones(raw);
+    return this.tombstones;
+  }
+
+  /** 墓碑整串替换：写失败只保留内存镜像，不把异常抛给页面。 */
+  private commitTombstones(ids: string[]): void {
+    const next: string[] = ids.slice();
+    try {
+      writeTombstonesRaw(encodeTombstones(next));
+    } catch {
+      // 与实例表同样的失败纪律：problem 由调用方按写失败标记，内存镜像照常更新
+    }
+    this.tombstones = next;
+  }
+
   /** 当前实例表（返回副本；只含远程行，旧 `local` 行已在 `decodeInstances` 读取时过滤）。 */
   list(): DsInstance[] {
     return this.load().slice();
+  }
+
+  /** 当前墓碑表（返回副本）。 */
+  deletedIds(): string[] {
+    return this.loadTombstones().slice();
   }
 
   /**
@@ -119,7 +192,8 @@ export class InstanceStore {
    */
   ensureSeeded(legacy: LegacyInstanceSettings): DsInstance[] {
     const before: DsInstance[] = this.load();
-    const seeded: DsInstance[] = seedInstances(before, legacy);
+    // 墓碑优先：即使调用方还持有旧 remoteUrl / remoteLastOk，也不许把已删实例播种回来。
+    const seeded: DsInstance[] = seedInstances(before, suppressLegacyForTombstones(legacy, this.loadTombstones()));
     if (encodeInstances(seeded) === encodeInstances(sortInstances(before))) {
       return before.slice();
     }
@@ -135,7 +209,33 @@ export class InstanceStore {
 
   /** 插入或按 id 替换（同 id 更新，不产生第二条），写回后返回排序后的新表。 */
   upsert(inst: DsInstance): DsInstance[] {
-    return this.commit(upsertInstance(this.load(), inst));
+    const next: DsInstance[] = this.commit(upsertInstance(this.load(), inst));
+    // 用户重新添加 / 配对同一地址：墓碑必须清掉，否则旧镜像会被永久抑制（新行本身不受影响）。
+    this.commitTombstones(forgetTombstones(this.loadTombstones(), tombstoneIdsOf(inst.id, inst.url)));
+    return next;
+  }
+
+  /**
+   * 编辑改地址专用一步替换：旧 id → 新 id，不留两行。
+   * 这不是用户可见的删除入口（删除只在 `pages/SettingsInstances`）：旧 id/旧地址写墓碑，
+   * 防止旧配置镜像在下次启动把「改地址前的那一行」播种回来；新地址清墓碑。
+   */
+  rekey(oldId: string, inst: DsInstance): DsInstance[] {
+    const before: DsInstance[] = this.load();
+    let old: DsInstance | null = null;
+    for (const item of before) {
+      if (item.id === oldId) {
+        old = item;
+        break;
+      }
+    }
+    const next: DsInstance[] = this.commit(upsertInstance(removeInstance(before, oldId), inst));
+    let tombstones: string[] = this.loadTombstones();
+    if (old !== null) {
+      tombstones = mergeTombstones(tombstones, tombstoneIdsOf(old.id, old.url));
+    }
+    this.commitTombstones(forgetTombstones(tombstones, tombstoneIdsOf(inst.id, inst.url)));
+    return next;
   }
 
   /**
@@ -148,13 +248,34 @@ export class InstanceStore {
     const result: PairingAddResult = await addPairedInstanceWithProbe(this.load(), text, probe);
     if (result.ok) {
       this.commit(result.items);
+      for (const item of result.items) {
+        this.commitTombstones(forgetTombstones(this.loadTombstones(), tombstoneIdsOf(item.id, item.url)));
+      }
     }
     return result;
   }
 
-  /** 按 id 删除任意远程行（没有受保护的本机行）；删空后保持空表，不重新播种。 */
+  /**
+   * 按 id 删除远程行（没有受保护的本机行）；连同 token / tlsFingerprint / pairingInstanceId
+   * 整条记录一起消失（整表替换，不留半行）。同时写墓碑：旧配置镜像里的地址派生同一个 id，
+   * 下次启动 `ensureSeeded()` 会因此被抑制，已删实例不会回来。
+   *
+   * 唯一调用点是 `pages/SettingsInstances.ets` 的确认 sheet；首页 / 配置页面板没有删除入口。
+   */
   remove(id: string): DsInstance[] {
-    return this.commit(removeInstance(this.load(), id));
+    const before: DsInstance[] = this.load();
+    let removed: DsInstance | null = null;
+    for (const item of before) {
+      if (item.id === id) {
+        removed = item;
+        break;
+      }
+    }
+    const next: DsInstance[] = this.commit(removeInstance(before, id));
+    if (removed !== null) {
+      this.commitTombstones(mergeTombstones(this.loadTombstones(), tombstoneIdsOf(removed.id, removed.url)));
+    }
+    return next;
   }
 
   /**

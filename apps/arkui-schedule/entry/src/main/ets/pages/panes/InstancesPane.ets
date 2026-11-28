@@ -8,8 +8,12 @@
  *   方式表单；所有配置动作都回到「设置 → 远程实例」。
  *   产品决定（`mod-instances-drop-local`）：平板不跑原生 DSH，没有本机实例行；空表是正常首用状态。
  * - `configurable = true`（设置 → 远程实例路由 `pages/Instances`）：**配置落点**——
- *   在上面「用」的能力之外，保留页头「添加实例」、行内「编辑 / 删除」、添加 / 编辑表单
+ *   在上面「用」的能力之外，保留页头「添加实例」、行内「编辑」、添加 / 编辑表单
  *   与空态「添加实例」。
+ *
+ * mod-app-instance-delete-in-settings：**本面板两种模式都没有删除 affordance**——没有行尾删除
+ * 按钮、没有滑动删除、没有长按菜单。删除只在 `pages/SettingsInstances`（设置根页「删除实例」行），
+ * 防止日常从首页「打开」时误删。编辑改地址走 `instanceStore.rekey()`（一步替换，不是删除入口）。
  *
  * `Home.ets` 的分段装配不传 `configurable`，走默认 false，因此首页面板天然只读、不必改 Home；
  * `pages/Instances.ets` 显式传 `true`，设置入口看到的仍是原来的完整配置页。
@@ -99,8 +103,13 @@ export struct InstancesPane {
   /** 保活可见性：Home 当前分段为 instances 时传 true。 */
   @Prop active: boolean = true;
   /**
+   * 页面重新显示信号（Home.onPageShow 每次 +1）。本面板保活，框架不会调用自己的 onPageShow；
+   * 设置子页删完实例返回首页时靠 @Watch 重读 instanceStore，不显示已删行 / 旧令牌。
+   */
+  @Prop @Watch('onShowTick') showTick: number = 0;
+  /**
    * 配置模式：默认 false = 首页「远程 DSH」面板（只用不配置）；
-   * 设置路由 pages/Instances 传 true = 保留添加 / 编辑 / 删除 / 地址·令牌·方式表单。
+   * 设置路由 pages/Instances 传 true = 保留添加 / 编辑 / 地址·令牌·方式表单（删除只在设置子页）。
    */
   @Prop configurable: boolean = false;
 
@@ -167,11 +176,19 @@ export struct InstancesPane {
     }
   }
 
+  /** Home 转发的 show 信号：保活面板自己的 onPageShow 不触发，这里重读真实实例表。 */
+  onShowTick(): void {
+    if (!this.disposed) {
+      this.reload();
+    }
+  }
+
   /**
    * 远程结果标记的一次性消费者（mod-pairing-badge-truth）。
    *
    * 与 `onPageShow()` 无关：本面板保活，框架不会调用它自己的 `onPageShow`，
-   * Home 也没有传 tick；结果一到 AppStorage，@StorageLink + @Watch 就会在这里触发。
+   * showTick 只用于删除后的整表重读，不携带结果标记；结果一到 AppStorage，
+   * @StorageLink + @Watch 就会在这里触发。
    * 空串直接返回——这同时挡住「清空标记」回写引起的二次 watch。
    * 坏 / 异 id / 陈旧标记 fail-closed：清掉标记、不动任何行。
    */
@@ -473,11 +490,13 @@ export struct InstancesPane {
       this.formError = result.reason;
       return;
     }
-    // 改地址 = 换 id：先删旧行再落新行，避免列表里同时留两条
+    // 改地址 = 换 id：一步 rekey（旧 id 写墓碑、新 id 落表），避免列表里同时留两条。
+    // 这是编辑动作，不是用户可见的删除；删除入口只在 pages/SettingsInstances。
     if (this.panelMode === PANEL_EDIT && id !== this.formId) {
-      instanceStore.remove(this.formId);
+      instanceStore.rekey(this.formId, result.instance);
+    } else {
+      instanceStore.upsert(result.instance);
     }
-    instanceStore.upsert(result.instance);
     this.panelMode = '';
     this.reload();
   }
@@ -560,12 +579,6 @@ export struct InstancesPane {
         this.pairingBusy = false;
       }
     }
-  }
-
-  /** 删除任意远程行（没有受保护的本机行）；删完立刻重读内存镜像，空表不回补实例。 */
-  private deleteInstance(view: RedactedInstance): void {
-    instanceStore.remove(view.id);
-    this.reload();
   }
 
   /**
@@ -777,7 +790,7 @@ export struct InstancesPane {
     }
   }
 
-  /** 单行：名称 / 方式 / 三态 + 相对时间 / 打码 URL /「打开」；编辑·删除只在可配置模式。 */
+  /** 单行：名称 / 方式 / 三态 + 相对时间 / 打码 URL /「打开」；编辑只在可配置模式，删除不在此处。 */
   @Builder
   InstanceRow(view: RedactedInstance) {
     Column({ space: SPACING.xs }) {
@@ -900,18 +913,6 @@ export struct InstancesPane {
             block: false,
             onTap: (): void => {
               this.showEdit(view);
-            },
-            onBlockedTap: null
-          })
-          ActionButton({
-            label: '删除',
-            actionEnabled: true,
-            disabledReason: '',
-            busy: false,
-            variant: 'danger',
-            block: false,
-            onTap: (): void => {
-              this.deleteInstance(view);
             },
             onBlockedTap: null
           })

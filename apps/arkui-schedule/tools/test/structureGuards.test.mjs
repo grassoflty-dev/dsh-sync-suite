@@ -278,6 +278,8 @@ describe('结构断言：@State 至少被读一次 / issue 必须有渲染落点
     // mod-settings-export-page：真页面也必须进死状态扫描，否则它的 @State 等于没检查。
     assert.ok(files.has('main/ets/pages/SettingsExportImport.ets'), '必须扫到数据真页面 SettingsExportImport.ets');
     assert.ok(files.has('main/ets/pages/SettingsApi.ets'), '必须扫到 API 真页面 SettingsApi.ets（AI @State 的死状态检查不能漏）');
+    // mod-app-instance-delete-in-settings：删除子页的 @State 也必须进死状态扫描范围。
+    assert.ok(files.has('main/ets/pages/SettingsInstances.ets'), '必须扫到删除子页 SettingsInstances.ets');
     assert.ok(fields.length > 100, `@State 总数 ${fields.length} 明显偏少`);
     // S3：四个面板下沉到 pages/panes/，必须全部进扫描文件集（旧三占位只有 @Prop；
     // mod-shell-cloud-chat-pane / mod-shell-dots-pane 落真后 CloudChatPane 与 DotsPane 也产生 @State，
@@ -311,15 +313,18 @@ describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
     }
   });
 
-  test('SG-S2 外壳登记进两份页面清单（mod-settings-root 后 main 12 页，harmony 13 页为超集）', () => {
+  test('SG-S2 外壳登记进两份页面清单（含删除子页：main 13 页，harmony 14 页为超集）', () => {
     assert.ok(MAIN_PAGES.src.includes('pages/Home'), 'main main_pages.json 缺少 pages/Home');
     assert.ok(HARMONY_PAGES.src.includes('pages/Home'), 'harmony main_pages.json 缺少 pages/Home');
-    // 旧断言 main 9 → 新 main 12（+ 三个设置子页）；不是放宽：页数与 validate-app 的 pages 计数
-    // 必须一致，且四个设置路由逐个钉住，harmony 13 必须是真超集。
-    assert.equal(MAIN_PAGES.src.length, 12, 'main 清单应为 12 页（与 validate-app 的 pages 12 一致）');
-    assert.equal(HARMONY_PAGES.src.length, 13, 'harmony 清单应为 13 页（原 10 + 三个设置子页）');
+    // 旧断言 main 9 → 新 main 13（+ 四个设置子页，含删除实例）；页数与 validate-app 的 pages 计数
+    // 必须一致，且五个设置路由逐个钉住，harmony 14 必须是真超集。
+    assert.equal(MAIN_PAGES.src.length, 13, 'main 清单应为 13 页（与 validate-app 的 pages 13 一致）');
+    assert.equal(HARMONY_PAGES.src.length, 14, 'harmony 清单应为 14 页（原 10 + 四个设置子页，含删除实例）');
     assert.equal(new Set(MAIN_PAGES.src).size, MAIN_PAGES.src.length, 'main 清单不得重复');
-    for (const route of ['pages/Settings', 'pages/SettingsSync', 'pages/SettingsExportImport', 'pages/SettingsApi']) {
+    for (const route of [
+      'pages/Settings', 'pages/SettingsSync', 'pages/SettingsExportImport',
+      'pages/SettingsApi', 'pages/SettingsInstances'
+    ]) {
       assert.ok(MAIN_PAGES.src.includes(route), `main 清单缺少 ${route}`);
       assert.ok(HARMONY_PAGES.src.includes(route), `harmony 清单缺少 ${route}`);
     }
@@ -360,14 +365,14 @@ describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
       const keys = passedKeys(HOME_CODE.slice(at), name);
       assert.ok(keys !== null, `${name} 装配点必须有属性区`);
       // mod-home-list-instant-refresh：日程面板多一个 showTick（Home.onPageShow 的 show 信号）。
+      // mod-app-instance-delete-in-settings：InstancesPane 多一个 showTick（删实例返回首页后重读）。
       // mod-home-global-refresh：三个 git 依赖面板（日程 / dots / 云端）再多一个 globalRefreshTick，
-      // 日程因状态行最后重读再多一个 statusRefreshTick；InstancesPane 不依赖仓库，仍只有两 prop。
-      // 旧断言的全部 key 仍在期望集合里，只是补上新增项（更严，不放宽）。
+      // 日程因状态行最后重读再多一个 statusRefreshTick。旧 key 全部保留，只补新增项（更严）。
       const expected = name === 'SchedulePane'
         ? ['active', 'deepLinkId', 'globalRefreshTick', 'showTick', 'statusRefreshTick']
         : (name === 'DotsPane' || name === 'CloudChatPane')
           ? ['active', 'deepLinkId', 'globalRefreshTick']
-          : ['active', 'deepLinkId'];
+          : ['active', 'deepLinkId', 'showTick'];
       assert.deepEqual([...keys].sort(), expected, '少传 = 保活/深链/即时刷新断线；多传 = 名字拼错被静默忽略');
       if (name === 'SchedulePane') {
         assert.match(code, /@Prop @Watch\('onShowTick'\) showTick: number = 0;/,
@@ -375,6 +380,13 @@ describe('结构断言：外壳装配（Home ↔ ShellRail）', () => {
         assert.match(HOME_CODE, /@State scheduleShowTick: number = 0;/, 'Home 必须持有 show tick');
         assert.match(HOME_CODE, /onPageShow\(\): void \{[\s\S]{0,200}scheduleShowTick = this\.scheduleShowTick \+ 1;/,
           'Home.onPageShow 必须推进 show tick');
+      }
+      if (name === 'InstancesPane') {
+        assert.match(code, /@Prop @Watch\('onShowTick'\) showTick: number = 0;/,
+          '实例面板必须用 @Watch 接住删除后的 show 信号');
+        assert.match(HOME_CODE, /@State instancesShowTick: number = 0;/, 'Home 必须持有实例面板 show tick');
+        assert.match(HOME_CODE, /onPageShow\(\): void \{[\s\S]{0,240}instancesShowTick = this\.instancesShowTick \+ 1;/,
+          'Home.onPageShow 必须推进实例面板 show tick');
       }
     }
   });
