@@ -9,7 +9,12 @@
  * 只做一件事：把 `services/chatStore` + `model/chatList` 的投影渲染成可点的只读列表，
  * 点行进既有 `pages/ChatDetail`（只传 id，路由写法与 `pages/Chats.ets` 完全一致）。
  * 没有搜索框、没有下拉刷新、没有新建 / 发送 / 设置控件，也没有配置行或机制说明段落；
- * 空态给一句事实「先在设置里配置仓库」；出路由真「刷新」按钮承担，不把事实句当下一步按钮。
+ * 空态经 `components/state/EmptyState` 显式 `showAction: false`：只讲一句事实（配置仓库后后台自动同步，
+ * 本页显示上次读取到的同步结果），不渲染同步 / 导出形状的按钮（旧「刷新」按钮出路已作废）。
+ * 不承诺结果时效性，也不承诺回到本页就读到新数据：本面板是保活组件，重读只发生在 aboutToAppear
+ * 与 @Watch('onGlobalRefreshTick') 的外壳全局刷新 tick；一次同步若没被本面板读到（Chats 页 pull
+ * 不推进云端 tick、Home 前台 5 分钟冷却挡住补偿周期），结果要等到下一次读取才反映；
+ * `pages/Chats.ets` 是页面，onPageShow 真会重读，所以它保留自己的那句，本面板不照抄。
  *
  * 历史锚点（mod-cloud-chat-no-config-note 的守卫按源码文本钉住，勿删）：
  * 旧占位原因 REASON_CLOUD 与「会话列表与只读详情即将迁入」只保留在本注释里作迁移记录，
@@ -19,7 +24,7 @@ import { common } from '@kit.AbilityKit';
 import { promptAction, router } from '@kit.ArkUI';
 import { loadingText } from '../../common/copy';
 import { DIVIDER, FONT, LINE_HEIGHT, SPACING, TOUCH_MIN } from '../../common/uiTokens';
-import { ActionButton } from '../../components/ActionButton';
+import { EmptyState } from '../../components/state/EmptyState';
 import { ErrorState } from '../../components/state/ErrorState';
 import { LoadingState } from '../../components/state/LoadingState';
 import { chatSummaryLine, filterBySegment, sortChats } from '../../model/chatList';
@@ -31,8 +36,10 @@ import { describeError } from '../../services/scheduleStore';
 /** 本分段只看纯云端会话；dots 会话不在这里展示（分段切换只由 ShellRail 负责）。 */
 const PANE_KIND: ChatKind = 'cloud';
 
-/** 空态事实句：复用「设置 → 同步仓库」的 Git 配置，没有独立设置面；出路由真「刷新」按钮承担。 */
-const CLOUD_REPO_SETUP: string = '先在设置里配置仓库';
+/** 空态文案（old→new）：前两条沿用批准措辞、与 `pages/Chats.ets` 同前缀；第三句改为「本页显示上次读取到的同步结果」——保活面板只在 aboutToAppear / @Watch('onGlobalRefreshTick') 重读，没被它读到的同步要到下一次读取才反映，不能像页面那样承诺回到本页就读到新数据，也不承诺结果一定是最新的。 */
+const EMPTY_CLOUD_TITLE: string = '还没有云端对话';
+const EMPTY_CLOUD_DETAIL: string =
+  '先在设置里配置仓库；之后云端会话会在后台自动同步过来；本页显示上次读取到的同步结果。';
 
 /** 错误态：为什么由 `errorText` 给，这里只给一句可执行的排查方向。 */
 const ERROR_WHAT: string = '读取会话列表失败';
@@ -152,39 +159,14 @@ export struct CloudChatPane {
     .width('100%')
   }
 
-  /** 空态（index.jsonl 不存在）：标题 + 一句配置仓库的事实 + 真刷新按钮，不写机制段落。 */
+  /** 空态（index.jsonl 不存在）：只讲事实，显式不渲染按钮（没有可点的东西时出路靠 detail）。 */
   @Builder
   EmptyChats() {
-    Column({ space: SPACING.sm }) {
-      Text('还没有云端对话')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-      Text(CLOUD_REPO_SETUP)
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.text_secondary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-      ActionButton({
-        label: '刷新',
-        actionEnabled: true,
-        disabledReason: '',
-        busy: false,
-        variant: 'secondary',
-        block: false,
-        onTap: (): void => {
-          this.reload();
-        },
-        onBlockedTap: null
-      })
-    }
-    .width('100%')
-    .padding({ top: SPACING.xl, bottom: SPACING.xl })
-    .alignItems(HorizontalAlign.Start)
+    EmptyState({
+      title: EMPTY_CLOUD_TITLE,
+      detail: EMPTY_CLOUD_DETAIL,
+      showAction: false
+    })
   }
 
   /** 加载中：行内紧凑档，只显示等待，不阻塞后续重试。 */

@@ -18,6 +18,13 @@
  * 不是日志），且逐字来自冻结闸门 `COMMAND_WORDING`（经纯函数 `placeholderRefusalReason`），
  * 没有手写拒绝文案。没有 grant UI / 没有 RPC / 没有配置面。
  * 加载 / 空 / 错误+重试 / 列表四态齐全，不渲染任何假行。
+ * 空态经 `components/state/EmptyState` 显式 `showAction: false`：没有可点的东西时只给一句事实，
+ * 不渲染同步 / 导出形状的按钮（旧「下一步 + 刷新按钮」口径已作废）。
+ * 事实句只陈述「本页显示上次读取到的同步结果」，不承诺结果时效性，也不承诺回到本页就读到新数据：
+ * 本面板是保活组件，重读只发生在 aboutToAppear 与 @Watch('onGlobalRefreshTick') 的外壳全局刷新 tick，
+ * 切段回到本页不触发读取；一次同步若没被本面板读到（Chats 页 pull 不推进 dots tick、
+ * Home 前台 5 分钟冷却挡住补偿周期），结果要等到下一次读取才反映，所以这句只按读到的那一刻说，
+ * 不能承诺结果一定是最新的；`pages/Chats.ets` 是页面，onPageShow 真会重读，所以那句真话只留在页面里，本面板不照抄。
  *
  * 历史锚点（守卫按源码文本钉住，勿当作现行语义）：
  * scaffold 原因旧值「dots 尚未接线」与禁用输入框 `输入给 dots 的指令…` 已随真列表移除，
@@ -28,7 +35,7 @@ import { common } from '@kit.AbilityKit';
 import { promptAction, router } from '@kit.ArkUI';
 import { loadingText } from '../../common/copy';
 import { DIVIDER, FONT, LINE_HEIGHT, SPACING, TOUCH_MIN } from '../../common/uiTokens';
-import { ActionButton } from '../../components/ActionButton';
+import { EmptyState } from '../../components/state/EmptyState';
 import { ErrorState } from '../../components/state/ErrorState';
 import { LoadingState } from '../../components/state/LoadingState';
 import { chatSummaryLine, filterBySegment, sortChats } from '../../model/chatList';
@@ -51,8 +58,10 @@ const DOTS_SUBTITLE: string = 'dots 只读查看会话，暂不能发指令。';
 const GRANT_LINE_PREFIX: string = 'dots 权限（只读）：';
 const GRANT_LINE_NO_COMMAND: string = `；命令工具 ${TOOL_SESSION_PROMPT} 未授予。`;
 
-/** 空态短下一步：dots 会话随同步仓库的 chats/index.jsonl 到来，本面板没有独立设置面。 */
-const DOTS_NEXT_STEP: string = '先在设置里同步一次仓库';
+/** 空态文案（old→new）：前两条沿用批准措辞；第三句只说「本页显示上次读取到的同步结果」——保活面板只在 aboutToAppear / @Watch('onGlobalRefreshTick') 重读，没被它读到的同步要到下一次读取才反映，既不承诺回到本页就读到新数据，也不承诺结果一定是最新的。 */
+const EMPTY_DOTS_TITLE: string = '还没有 dots 对话';
+const EMPTY_DOTS_DETAIL: string =
+  '先在设置里配置仓库；之后 dots 会话会在后台自动同步过来；本页显示上次读取到的同步结果。';
 
 /** 错误态：为什么由 `errorText` 给，这里只给一句可执行的排查方向。 */
 const ERROR_WHAT: string = '读取 dots 会话失败';
@@ -245,39 +254,14 @@ export struct DotsPane {
     .width('100%')
   }
 
-  /** 空态（没有投影为 dots 的会话）：标题 + 一句同步下一步 + 真刷新按钮，不写机制段落。 */
+  /** 空态（没有投影为 dots 的会话）：只讲事实，显式不渲染按钮（没有可点的东西时出路靠 detail）。 */
   @Builder
   EmptyChats() {
-    Column({ space: SPACING.sm }) {
-      Text('还没有 dots 对话')
-        .fontSize(FONT.body)
-        .lineHeight(LINE_HEIGHT.body)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-      Text(DOTS_NEXT_STEP)
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.text_secondary'))
-        .width('100%')
-        .textAlign(TextAlign.Start)
-      ActionButton({
-        label: '刷新',
-        actionEnabled: true,
-        disabledReason: '',
-        busy: false,
-        variant: 'secondary',
-        block: false,
-        onTap: (): void => {
-          this.reload();
-        },
-        onBlockedTap: null
-      })
-    }
-    .width('100%')
-    .padding({ top: SPACING.xl, bottom: SPACING.xl })
-    .alignItems(HorizontalAlign.Start)
+    EmptyState({
+      title: EMPTY_DOTS_TITLE,
+      detail: EMPTY_DOTS_DETAIL,
+      showAction: false
+    })
   }
 
   /** 加载中：行内紧凑档，只显示等待，不阻塞后续重试。 */

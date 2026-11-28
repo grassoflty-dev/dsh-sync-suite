@@ -80,8 +80,22 @@ describe('mod-cloud-chat-no-config-note：零设置面（说明绝迹）+ 空态
     assert.equal(PANE.includes(RETIRED_EXPLANATION), false, 'CloudChatPane 必须删掉同一条只读说明');
     assert.equal(/CHAT_GIT_EXPLANATION/.test(PANE), false, '面板里的说明常量必须删除');
     assert.equal(/TextInput\(/.test(PANE), false, '云端面板不该有输入框');
-    assert.match(PANE, /const CLOUD_REPO_SETUP: string = '先在设置里配置仓库';/, '面板空态给短下一步');
-    assert.match(PANE, /Text\(CLOUD_REPO_SETUP\)/, '短下一步渲染在面板里');
+    // old→new：旧锚点钉「CLOUD_REPO_SETUP + Text(CLOUD_REPO_SETUP) 真刷新按钮」；
+    // 空态改走 EmptyState + 显式 showAction:false 后，新断言逐条钉 import / 新常量 / 调用块 / 零按钮。
+    assert.ok(PANE.includes("import { EmptyState } from '../../components/state/EmptyState';"),
+      '云端面板必须 import EmptyState，不得自己拼空态渲染树');
+    assert.match(PANE, /const EMPTY_CLOUD_TITLE: string = '还没有云端对话';/,
+      '面板空态标题是与 Chats.ets 同源的新常量');
+    assert.match(PANE, /const EMPTY_CLOUD_DETAIL: string =/, '面板空态事实句走新常量');
+    const empty = PANE.slice(PANE.indexOf('EmptyChats() {'), PANE.indexOf('LoadingHint() {'));
+    assert.match(empty, /EmptyState\(\{/, '空态必须调用 EmptyState({…})');
+    assert.match(empty, /showAction: false/, '空态显式不渲染按钮');
+    assert.match(empty, /title: EMPTY_CLOUD_TITLE/, '空态标题走新常量');
+    assert.match(empty, /detail: EMPTY_CLOUD_DETAIL/, '空态事实句走新常量');
+    for (const token of ['ActionButton(', 'Button(', 'actionLabel:', 'onAction:', "'刷新'"]) {
+      assert.equal(empty.includes(token), false, `空态块不得残留按钮 token「${token}」`);
+    }
+    assert.equal(PANE.includes('CLOUD_REPO_SETUP'), false, '旧常量 CLOUD_REPO_SETUP 必须彻底绝迹');
     assert.match(PANE, /REASON_CLOUD/, '禁用主操作的逐字原因仍在（无假入口）');
     assert.match(PANE, /会话列表与只读详情即将迁入/, 'truthful 空态说明仍在');
   });

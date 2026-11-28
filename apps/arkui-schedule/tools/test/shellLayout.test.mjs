@@ -40,6 +40,28 @@ function blockAfter(source, marker) {
   return source.slice(start + 1, end - 1);
 }
 
+/**
+ * 空态契约（old→new）：旧守卫钉「短下一步字面量 + Text(...) 真刷新按钮」，
+ * 37c81f9 之后统一走 `EmptyState` + 显式 `showAction: false`。
+ * 这里钉 import / 新常量 / 调用块 / 零按钮 token，旧覆盖面不删，只增加更严的形状断言。
+ */
+function assertPaneEmptyStateContract(source, upper) {
+  assert.ok(source.includes("import { EmptyState } from '../../components/state/EmptyState';"),
+    `${upper} 面板必须 import EmptyState，不得自己拼空态渲染树`);
+  assert.match(source, new RegExp(`const EMPTY_${upper}_TITLE: string = '[^']+';`),
+    `${upper} 面板必须有新标题常量 EMPTY_${upper}_TITLE`);
+  assert.match(source, new RegExp(`const EMPTY_${upper}_DETAIL: string =`),
+    `${upper} 面板必须有新事实句常量 EMPTY_${upper}_DETAIL`);
+  const empty = blockAfter(source, '\n  EmptyChats() {');
+  assert.match(empty, /EmptyState\(\{/, `${upper} 空态必须调用 EmptyState({…})`);
+  assert.match(empty, /showAction: false/, `${upper} 空态必须显式 showAction: false`);
+  assert.match(empty, new RegExp(`title: EMPTY_${upper}_TITLE`), `${upper} 空态标题必须走新常量`);
+  assert.match(empty, new RegExp(`detail: EMPTY_${upper}_DETAIL`), `${upper} 空态事实句必须走新常量`);
+  for (const token of ['ActionButton(', 'Button(', "'刷新'"]) {
+    assert.equal(empty.includes(token), false, `${upper} 空态块不得残留按钮 token「${token}」`);
+  }
+}
+
 /** 取 `Stack({...}) { ... }` 这类「配置对象 + builder 体」构造器的 builder 体（跳过第一对花括号）。 */
 function configuredBlockAfter(source, marker) {
   const at = source.indexOf(marker);
@@ -303,8 +325,11 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.match(cloudBody, /Text\('云端对话'\)/, '云端面板页头保留分段标题');
     assert.equal(/新建对话|REASON_CLOUD|\.enabled\(false\)|即将迁入|本页暂不展示任何记录。/.test(cloud), false,
       '云端面板不得残留占位说明 / 禁用假入口');
-    assert.match(cloud, /const CLOUD_REPO_SETUP: string = '先在设置里配置仓库';/, '空态短下一步仍在');
-    assert.match(cloud, /Text\(CLOUD_REPO_SETUP\)/, '短下一步仍渲染在面板里');
+    // old→new：旧锚点钉「CLOUD_REPO_SETUP + Text(CLOUD_REPO_SETUP) 真刷新按钮」；
+    // 空态改走 EmptyState 显式 opt-out 后，新断言逐条钉调用块与新常量，并禁掉空态里的按钮。
+    assertPaneEmptyStateContract(cloud, 'CLOUD');
+    assert.match(cloud, /const EMPTY_CLOUD_TITLE: string = '还没有云端对话';/, '云端空态标题逐字保留');
+    assert.equal(cloud.includes('CLOUD_REPO_SETUP'), false, '旧常量 CLOUD_REPO_SETUP 必须彻底绝迹');
     // 日程不再是占位：真页头只留标题/副标题 + pane 专属「新建」；设置出口唯一在 rail 齿轮。
     const schedule = PANE_SOURCE.get('SchedulePane');
     assert.equal(/headerActionTwo|onHeaderActionTwo|⚙ 设置|private openSettings/.test(schedule), false,
@@ -343,9 +368,12 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     assert.match(body, /\.enabled\(false\)/, '「发指令」动作必须禁用');
     assert.equal(/TextInput\(|placeholder: '输入给 dots 的指令…'/.test(body), false,
       '发指令尚未接线，不得有输入框假入口');
-    assert.match(source, /还没有 dots 对话/, 'dots 空态标题保留');
-    assert.match(source, /const DOTS_NEXT_STEP: string = '先在设置里同步一次仓库';/, '空态下一步逐字保留');
-    assert.match(source, /Text\(DOTS_NEXT_STEP\)/, '空态下一步必须渲染');
+    // old→new：旧三连钉「短下一步字面量 + Text(DOTS_NEXT_STEP) + 标题」，正是设备抓到的刷新按钮旁路；
+    // 新断言钉 EmptyState 调用 / showAction:false / 新常量 / 零按钮，旧形状一律绝迹。
+    assertPaneEmptyStateContract(source, 'DOTS');
+    assert.match(source, /const EMPTY_DOTS_TITLE: string = '还没有 dots 对话';/, 'dots 空态标题逐字保留');
+    assert.equal(source.includes('DOTS_NEXT_STEP'), false, '旧常量 DOTS_NEXT_STEP 必须彻底绝迹');
+    assert.equal(source.includes('先在设置里同步一次仓库'), false, '旧的「同步一次仓库」文案必须绝迹');
     assert.match(source, /ForEach\(\s*this\.chats/, '真实会话列表通过 ForEach 渲染');
     assert.match(source, /chatSummaryLine\(item\)/, '行摘要走纯模型');
     assert.equal((source.match(/\.enabled\(false\)/g) ?? []).length, 1, '只有一处禁用动作');
@@ -534,7 +562,8 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     const body = paneBody('CloudChatPane');
     for (const token of [
       'chatStore.prepare(', 'chatStore.listChats()', 'ChatListResult', 'filterBySegment(', 'sortChats(',
-      'chatSummaryLine(item)', 'ForEach(', 'LoadingState(', 'ErrorState(', 'Text(CLOUD_REPO_SETUP)'
+      'chatSummaryLine(item)', 'ForEach(', 'LoadingState(', 'ErrorState(',
+      'EmptyState(', 'showAction: false', 'const EMPTY_CLOUD_TITLE', 'const EMPTY_CLOUD_DETAIL'
     ]) {
       assert.ok(raw.includes(token), `云端面板必须拥有 ${token}`);
     }
@@ -555,7 +584,8 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     const body = paneBody('DotsPane');
     for (const token of [
       'chatStore.prepare(', 'chatStore.listChats()', 'ChatListResult', 'filterBySegment(', 'sortChats(',
-      'chatSummaryLine(item)', 'ForEach(', 'LoadingState(', 'ErrorState(', 'Text(DOTS_NEXT_STEP)'
+      'chatSummaryLine(item)', 'ForEach(', 'LoadingState(', 'ErrorState(',
+      'EmptyState(', 'showAction: false', 'const EMPTY_DOTS_TITLE', 'const EMPTY_DOTS_DETAIL'
     ]) {
       assert.ok(raw.includes(token), `dots 面板必须拥有 ${token}`);
     }

@@ -129,6 +129,12 @@ props：`title`、`detail`、`actionLabel`、`onAction`、`showAction`（默认 
 出路由 `detail` 的一句事实承担（`emptyStateIssue` 会拒绝空白与已知占位符）。
 **契约是「空态有出路：真按钮，或没有可点的东西时给一句事实」**，不再是「永远有按钮」；
 产品规则是**不要有同步或导出按钮**，所以「没有可点的东西」是合法空态。
+**面板同样适用**：`pages/panes/**` 的空态也必须经本组件 —— `DotsPane.ets` / `CloudChatPane.ets` 用
+`showAction: false` + 一句事实；云端面板的前两句与 `pages/Chats.ets` 的云端批准文案逐字相同，dots 面板沿用同一批准前缀、
+只把名词换成 `dots`（ED-05 另有 dots 专属前缀断言钉住，防止「只差名词」的等号空转）。**第三句必须是面板能兑现的事实**
+（保活面板不在 `onPageShow` 重读，就不许写「回到本页即可看到」或任何「最近一次」的承诺，只陈述「本页显示上次读取到的同步结果」）。
+空态里不得出现「刷新 / 同步 / 导出」这类让数据出现的控件，由 `tools/test/emptyStateDoctrine.test.mjs` 守卫
+（同一个探测器既扫真实树，也跑红探针）。
 
 ### 4.3 `ErrorState`
 

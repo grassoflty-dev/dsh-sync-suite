@@ -39,7 +39,10 @@ const PANE_RAW = new Map(
  */
 // mod-dots-readonly：动作槽从「新建对话」改成禁用的「发指令」，原因改为今天成立的 grant 口径。
 const SCAFFOLDS = [
-  { name: 'DotsPane', action: '发指令', reason: 'this.refusalReason', empty: '还没有 dots 对话' }
+  {
+    name: 'DotsPane', action: '发指令', reason: 'this.refusalReason',
+    empty: '还没有 dots 对话', emptyTitleConst: 'EMPTY_DOTS_TITLE'
+  }
 ];
 /** mod-dots-readonly：只读授权行 / 新副标题的逐字真值；禁用原因已改为 COMMAND_WORDING 派生。 */
 const DOTS_SUBTITLE = 'dots 只读查看会话，暂不能发指令。';
@@ -49,8 +52,17 @@ const GRANT_READ_APIS = ['instanceGrantStore.lastProblem()', 'instanceGrantStore
 /** 只读纪律：面板里绝不允许出现任何变更 / 命令 / 写盘 API（名字级 pin）。 */
 const GRANT_MUTATION_APIS = ['instanceGrantStore.upsert(', 'instanceGrantStore.revoke(', 'upsertGrant(',
   'revokeGrant(', 'session.prompt(', 'sessionPrompt(', 'AppStorage.setOrCreate', 'persistProp('];
-/** mod-shell-cloud-chat-pane：云端对话 scaffold 已换成真实只读会话列表。 */
-const CLOUD_CHAT = { name: 'CloudChatPane', title: '云端对话', nextStep: '先在设置里配置仓库' };
+/**
+ * mod-shell-cloud-chat-pane：云端对话 scaffold 已换成真实只读会话列表。
+ * old→new：`nextStep: '先在设置里配置仓库'` 退成两个新常量名——空态不再有「下一步按钮」，
+ * 只有交给 `EmptyState` 的标题 / 事实句，下面 P-15 / P-23 逐条钉住调用形状。
+ */
+const CLOUD_CHAT = {
+  name: 'CloudChatPane',
+  title: '云端对话',
+  emptyTitleConst: 'EMPTY_CLOUD_TITLE',
+  emptyDetailConst: 'EMPTY_CLOUD_DETAIL'
+};
 
 /** 取 marker 之后那对花括号的内部文本。 */
 function blockAfter(source, marker) {
@@ -60,6 +72,29 @@ function blockAfter(source, marker) {
   assert.notEqual(brace, -1, `${marker} 后面没有花括号`);
   const [start, end] = matchBrace(source, brace);
   return source.slice(start + 1, end - 1);
+}
+
+/**
+ * 空态契约（old→new）：旧守卫钉「短下一步字面量 + Text(...) 渲染」，
+ * 37c81f9 之后统一走 `EmptyState` + 显式 `showAction: false`。
+ * 这里逐条钉住 import / 新常量 / 调用块 / 零按钮 token，只比旧断言强，不删旧覆盖面。
+ */
+function assertPaneEmptyStateContract(p, upper) {
+  assert.ok(p.source.includes("import { EmptyState } from '../../components/state/EmptyState';"),
+    `${p.name} 必须 import EmptyState，不得自己拼空态渲染树`);
+  assert.match(p.source, new RegExp(`const EMPTY_${upper}_TITLE: string = '[^']+';`),
+    `${p.name} 必须有新标题常量 EMPTY_${upper}_TITLE`);
+  assert.match(p.source, new RegExp(`const EMPTY_${upper}_DETAIL: string =`),
+    `${p.name} 必须有新事实句常量 EMPTY_${upper}_DETAIL`);
+  const empty = blockAfter(p.source, '\n  EmptyChats() {');
+  assert.match(empty, /EmptyState\(\{/, `${p.name} 空态必须调用 EmptyState({…})`);
+  assert.match(empty, /showAction: false/, `${p.name} 空态必须显式 showAction: false`);
+  assert.match(empty, new RegExp(`title: EMPTY_${upper}_TITLE`), `${p.name} 空态标题必须走新常量`);
+  assert.match(empty, new RegExp(`detail: EMPTY_${upper}_DETAIL`), `${p.name} 空态事实句必须走新常量`);
+  for (const token of ['ActionButton(', 'Button(', "'刷新'"]) {
+    assert.equal(empty.includes(token), false, `${p.name} 空态块不得残留按钮 token「${token}」`);
+  }
+  return empty;
 }
 
 // mod-instances-pane-readonly：同一个 InstancesPane 两种模式，按门控块切只读 / 配置可见源码。
@@ -372,7 +407,9 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
       }
       assert.match(p.source, /ForEach\(\s*this\.chats/, `${scaffold.name} 必须 ForEach 真实会话数组`);
       assert.match(p.source, /chatSummaryLine\(item\)/, `${scaffold.name} 行摘要必须走纯模型`);
-      assert.ok(p.source.includes(scaffold.empty), `${scaffold.name} 必须有空态说明「${scaffold.empty}」`);
+      // old→new：旧断言只查字符串出现；标题仍是同一句，但现在以 EMPTY_*_TITLE 常量定义存在，逐字钉常量更强。
+      assert.ok(p.source.includes(`const ${scaffold.emptyTitleConst}: string = '${scaffold.empty}';`),
+        `${scaffold.name} 必须有空态标题常量「${scaffold.empty}」`);
       // 旧「本页暂不展示任何记录。」由占位持有，现在落真 → 四面板中都绝迹。
       assert.equal(/本页暂不展示任何记录。/.test(p.source), false,
         `${scaffold.name} 不得残留被真列表取代的占位说明`);
@@ -381,6 +418,10 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     const list = blockAfter(cloud.source, '\n  ChatList() ');
     assert.match(list, /ForEach\(\s*this\.chats/, '云端面板必须渲染真实会话行');
     assert.match(cloud.source, /chatSummaryLine\(item\)/, '每行摘要走纯模型，不是手写假文案');
+    assert.ok(cloud.source.includes(`const ${CLOUD_CHAT.emptyTitleConst}: string = '还没有云端对话';`),
+      '云端空态标题必须是与 Chats.ets 同源的新常量');
+    assert.ok(cloud.source.includes(`const ${CLOUD_CHAT.emptyDetailConst}: string =`),
+      '云端空态事实句必须走新常量，不得是旧短下一步');
     assert.equal(/本页暂不展示任何记录。|即将迁入/.test(cloud.source), false, '云端占位说明必须绝迹');
     assert.equal(/ForEach\(/.test(HOME), false, '外壳页本体不渲染任何列表行');
   });
@@ -424,10 +465,11 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     assert.equal(/TextInput\(|placeholder: '输入给 dots 的指令…'/.test(dots.body), false,
       '发指令尚未接线，不得渲染输入框假入口');
     assert.match(dots.source, /ForEach\(\s*this\.chats/, '真实会话列表必须通过 ForEach 渲染');
-    assert.match(dots.source, /const DOTS_NEXT_STEP: string = '先在设置里同步一次仓库';/,
-      '空态下一步必须逐字保留');
-    assert.match(dots.source, /Text\(DOTS_NEXT_STEP\)/, '空态下一步必须渲染');
-    assert.match(dots.source, /Text\('还没有 dots 对话'\)/, '空态标题必须诚实保留');
+    // old→new：旧三连钉「DOTS_NEXT_STEP 字面量 + Text(DOTS_NEXT_STEP) + Text('还没有 dots 对话')」，
+    // 那正是设备验证抓到的「刷新」按钮旁路。改成 EmptyState 正向契约 + 旧形状绝迹，覆盖面只增不减。
+    assertPaneEmptyStateContract(dots, 'DOTS');
+    assert.equal(dots.source.includes('DOTS_NEXT_STEP'), false, '旧短下一步常量必须彻底绝迹');
+    assert.equal(dots.source.includes('先在设置里同步一次仓库'), false, '旧的「同步一次仓库」文案必须绝迹');
     // mod-dots-readonly（old→new，收紧）：旧过度承诺副标题绝迹，新只读副标题必须渲染在 Text 上且无点击动作。
     assert.equal(dots.source.includes(OLD_DOTS_SUBTITLE), false, '过度承诺的旧副标题必须绝迹');
     assert.ok(dots.source.includes(`const DOTS_SUBTITLE: string = '${DOTS_SUBTITLE}';`), '新副标题逐字保留');
@@ -600,9 +642,10 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
       'Hidden 保活接线保留');
     assert.equal((p.source.match(/aboutToAppear\(/g) ?? []).length, 1, '只读一次：只有一个 aboutToAppear');
     assert.equal(/onPageShow\(/.test(p.source), false, '不得每次显示都重读（无 onPageShow）');
-    // 空态给出事实句 + 真刷新按钮（与 mod-cloud-chat-no-config-note 同款锚点）；字面量沿用，断言强度不变。
-    assert.match(p.source, /const CLOUD_REPO_SETUP: string = '先在设置里配置仓库';/);
-    assert.match(p.source, /Text\(CLOUD_REPO_SETUP\)/, '空态仍渲染这句事实');
+    // old→new：旧锚点钉「CLOUD_REPO_SETUP 字面量 + Text(CLOUD_REPO_SETUP) 真刷新按钮」；
+    // 产品规则禁止同步 / 导出按钮后，改成 EmptyState + showAction:false + 新常量 + 零按钮 token。
+    assertPaneEmptyStateContract(p, 'CLOUD');
+    assert.equal(p.source.includes('CLOUD_REPO_SETUP'), false, '旧常量 CLOUD_REPO_SETUP 必须彻底绝迹');
     // 四态：加载 / 空 / 错误 / 列表；无搜索框，故无 no-match 态。
     for (const token of ['this.LoadingHint()', 'this.EmptyChats()', 'this.ErrorBlock()', 'this.ChatList()']) {
       assert.ok(p.body.includes(token), `必须渲染 ${token}`);
@@ -630,7 +673,8 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     for (const token of [
       'chatStore.prepare(', 'chatStore.listChats()', 'ChatListResult', 'filterBySegment(',
       "PANE_KIND: ChatKind = 'dots'", 'sortChats(', "'updated'", 'chatSummaryLine(item)',
-      'ForEach(\n        this.chats', 'LoadingState(', 'ErrorState(', 'Text(DOTS_NEXT_STEP)'
+      'ForEach(\n        this.chats', 'LoadingState(', 'ErrorState(',
+      'EmptyState(', 'showAction: false', 'const EMPTY_DOTS_TITLE', 'const EMPTY_DOTS_DETAIL'
     ]) {
       assert.ok(raw.includes(token), `dots 面板必须复用 ${token}`);
     }
