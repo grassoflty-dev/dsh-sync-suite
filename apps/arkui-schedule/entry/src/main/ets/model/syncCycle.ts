@@ -26,6 +26,7 @@ import { parseSchemaMarker, parseTimelineDay } from './timeline';
 import { decideFreshStart } from './freshStart';
 import type { FreshStartDecision } from './freshStart';
 import { stagePathsForCycle, daysInStageSet } from './syncUploadScope';
+import { isPushStage } from './gitCommitLock';
 
 /**
  * mod-sync-empty-repo-bootstrap：首次同步的远端状态探测（只读，不依赖 fetch 是否成功）。
@@ -152,6 +153,20 @@ export interface GitPort {
   localTimelinePaths?(): Promise<string[]>;
   /** 可选（首跑引导 §11）：本地工作副本 timeline/schema.json 原文（缺文件 = 空串）。 */
   localSchemaText?(): Promise<string>;
+  /**
+   * mod-app-git-commit-atomic（可选）：把整段 add → commit → push 放进 runner 自己的
+   * 写闸。生产绑定的 BridgeGitRunner 实现它，与 hideChat 共用同一把实例级锁；
+   * 旧端口 / 内存 fake 未实现时退回原来的直接调用，语义不变。
+   */
+  withWriteLock?<T>(task: () => Promise<T>): Promise<T>;
+}
+
+/** 有写闸就进闸，没有就保持原来的直调（旧端口与纯预览零行为变化）。 */
+async function runGitWrite<T>(port: GitPort, task: () => Promise<T>): Promise<T> {
+  if (port.withWriteLock !== undefined) {
+    return await port.withWriteLock(task);
+  }
+  return await task();
 }
 
 /** 周期结果：前 8 个字段是任务指定的 tri-state 契约，其余为出队/审计所需的扩展。 */
@@ -597,9 +612,13 @@ async function bootstrapEmptyRemote(
   // 阶段 3：commit + push（无 force / 无 reset / 不改写历史）。失败即 typed 错误 + outbox 停放，
   // 绝不把「本地已提交但没推成功」的中间态报成成功。
   try {
-    await port.addPaths(paths);
-    await port.commit(BOOTSTRAP_COMMIT_MESSAGE);
-    await port.pushMain();
+    // mod-app-git-commit-atomic：与 chatStore.hideChat 共用同一把写闸，
+    // 整段 add → commit → push 不可分割；异常由下方既有 typed 路径收口。
+    await runGitWrite(port, async (): Promise<void> => {
+      await port.addPaths(paths);
+      await port.commit(BOOTSTRAP_COMMIT_MESSAGE);
+      await port.pushMain();
+    });
   } catch (error) {
     const text: string = error instanceof Error ? error.message : String(error);
     const typed: TypedPushError = typedPushError(text);
@@ -799,16 +818,23 @@ export async function runCyclePure(
       }
     }
     const stagePaths: string[] = stagePathsForCycle(changedPaths, dirtyPaths, days);
-    if (stagePaths.length > 0) {
-      // 提交信息形状不变（跨包契约 isV2CommitSubject）：n 取「union 动过的日」与「本次提交覆盖的日」的较大者。
-      touchedDays = Math.max(touchedDays, daysInStageSet(stagePaths));
-      await port.addPaths(stagePaths);
-      await port.commit(`${COMMIT_PREFIX}${touchedDays} days`);
-    }
 
-    // 步骤 6：push origin main；被拒 → 唯一 reset 路径 → 重放 → 重来（≤ MAX_ATTEMPTS）。
+    // 步骤 5+6：add → commit → push 在**与 chatStore.hideChat 共用的同一把闸**内完成。
+    // 两个写口共用 runner 单例的 pendingPaths 缓冲；不串行就会互相覆盖（隐藏行被误提交 /
+    // 提交错文件却返回 ok:true）。stage 只为保留原错误语义：commit 抛错仍原样上抛，
+    // 不被当作 push 失败去 reset / bump。
+    let stage: 'commit' | 'push' = 'commit';
     try {
-      await port.pushMain();
+      await runGitWrite(port, async (): Promise<void> => {
+        if (stagePaths.length > 0) {
+          // 提交信息形状不变（跨包契约 isV2CommitSubject）：n 取「union 动过的日」与「本次提交覆盖的日」的较大者。
+          touchedDays = Math.max(touchedDays, daysInStageSet(stagePaths));
+          await port.addPaths(stagePaths);
+          await port.commit(`${COMMIT_PREFIX}${touchedDays} days`);
+        }
+        stage = 'push';
+        await port.pushMain();
+      });
       pushUnique(allApplied, attemptApplied);
       daysCommitted = days.slice();
       conflicts = attemptConflicts;
@@ -823,6 +849,10 @@ export async function runCyclePure(
         attempts: attempts, resultOutbox: current, droppedIds: allDropped.slice()
       };
     } catch (error) {
+      if (!isPushStage(stage)) {
+        // 原语义：commit 失败不进 push 失败的 reset / 重放分支，原样上抛。
+        throw error;
+      }
       // 保真原始 push 错误（E_AUTH / E_IO / 拒推文案），不再一律塌缩成 E_PUSH_REJECTED。
       lastPushError = error instanceof Error ? error.message : String(error);
       // 本地真值在仓库外 outbox，reset 不丢数据；绝不 force-push / 改写远端历史。

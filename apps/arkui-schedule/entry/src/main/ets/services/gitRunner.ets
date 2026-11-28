@@ -7,6 +7,9 @@
  *
  * 分支恒为 main、force 恒为 false、唯一的 reset 是 resetHard（本地分支指回 origin/main）。
  * addPaths 只缓冲路径，commit 时一次性经白名单提交（桥侧拒绝任何非 timeline/** 路径）。
+ * mod-app-git-commit-atomic：缓冲是单例可变状态，两个写口（hideChat / syncCycle）必须把
+ * add → commit → push 整段包进本实例的 withWriteLock（model/gitCommitLock 提供的闸）；
+ * 本类不自行在 addPaths/commit 里加锁，避免把「闸」和「缓冲排空」拆成两份互不知情的状态。
  *
  * 未绑定 / 桥未就绪时先**等页面回传的就绪信号**（首轮周期早于 WebView onPageEnd 是常态）；
  * 超时才抛带中文下一步的 `E_SYNC_UNAVAILABLE`，由 syncStatusStore 显示为可点「重试同步」的
@@ -16,6 +19,7 @@
 import { GitSyncService } from './GitSyncService';
 import { syncController } from './syncController';
 import { syncProtocolStore } from './syncProtocolStore';
+import { GitCommitLock } from '../model/gitCommitLock';
 import { runnerReadyDecision, E_SYNC_UNAVAILABLE_MESSAGE } from '../model/syncCycle';
 import type { GitPort, RemoteLayout, RunnerReadyDecision } from '../model/syncCycle';
 import type { common } from '@kit.AbilityKit';
@@ -30,6 +34,8 @@ const READY_POLL_MS: number = 50;
 
 export class BridgeGitRunner implements GitPort {
   private pendingPaths: string[] = [];
+  /** mod-app-git-commit-atomic：本 runner 唯一的 git 写闸；hideChat 与 syncCycle 共用它。 */
+  private readonly writeLock: GitCommitLock = new GitCommitLock();
 
   /**
    * 确定性取桥：优先 App 级 `syncController` 绑定的那个服务（启动链唯一真值），
@@ -193,7 +199,20 @@ export class BridgeGitRunner implements GitPort {
     return typeof raw === 'string' ? raw : '';
   }
 
-  /** 只缓冲：真正的 git add + commit 在 commit() 里一次完成（syncCycle 的调用顺序固定）。 */
+  /**
+   * 写口互斥：把整段 add → commit → push 放进**本实例**的闸，两个写口因此拿到同一把锁。
+   * 不自行在 addPaths/commit 里加锁：闸的边界由调用方的一次业务操作决定，
+   * 缓冲排空仍只在 commit() 里发生一次。
+   */
+  withWriteLock<T>(task: () => Promise<T>): Promise<T> {
+    return this.writeLock.run(task);
+  }
+
+  /**
+   * 只缓冲：真正的 git add + commit 在 commit() 里一次完成（syncCycle 的调用顺序固定）。
+   * 调用方必须已持有本实例的 withWriteLock（hideChat / syncCycle 两个写口都遵守），
+   * 否则两个 await 之间另一个写口的 addPaths 会覆盖本缓冲，导致提交错文件却返回成功。
+   */
   async addPaths(paths: string[]): Promise<void> {
     this.pendingPaths = paths.slice();
   }

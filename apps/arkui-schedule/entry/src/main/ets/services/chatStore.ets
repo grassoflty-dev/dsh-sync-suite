@@ -39,6 +39,7 @@ import {
   appendHideLine, hideCommitMessageOf, hideLineOf, hideReasonOf, isHideId, HIDE_INDEX_PATH
 } from '../model/chatHide';
 import type { HideStage } from '../model/chatHide';
+import { isPushStage } from '../model/gitCommitLock';
 import { bridgeGitRunner } from './gitRunner';
 
 const REPO_DIR_NAME: string = 'git-repo';
@@ -364,16 +365,25 @@ export class ChatStore {
       if (message.length === 0) {
         return this.hideFailure('commit');
       }
+      // mod-app-git-commit-atomic：隐藏行的 add → commit → push 与同步周期共用同一把闸。
+      // 否则同步周期的 addPaths 会覆盖 runner 单例里刚缓冲的隐藏路径，把隐藏行落进
+      // `[v2] sync N days` 提交，而本方法仍返回 ok:true。stage 只在闸内推进，保留
+      // 原来的「提交失败 / 推送失败」两阶段原因，不新增会话发布尾注。
+      let stage: 'commit' | 'push' = 'commit';
       try {
-        await bridgeGitRunner.addPaths([HIDE_INDEX_PATH]);
-        await bridgeGitRunner.commit(message);
+        await bridgeGitRunner.withWriteLock(async (): Promise<void> => {
+          await bridgeGitRunner.addPaths([HIDE_INDEX_PATH]);
+          await bridgeGitRunner.commit(message);
+          stage = 'push';
+          await bridgeGitRunner.pushMain();
+        });
       } catch (error) {
+        // 经 helper 读取 stage：参数位置保留联合类型，既不触发 ArkTS 窄化误报，
+        // 也不把 stage 放宽成 string；两个阶段的字面量原因各自保留。
+        if (isPushStage(stage)) {
+          return this.hideFailure('push');
+        }
         return this.hideFailure('commit');
-      }
-      try {
-        await bridgeGitRunner.pushMain();
-      } catch (error) {
-        return this.hideFailure('push');
       }
       const done: HideOutcome = { ok: true, stage: 'done', reason: '' };
       return done;
