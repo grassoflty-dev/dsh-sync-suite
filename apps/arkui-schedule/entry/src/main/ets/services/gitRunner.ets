@@ -117,6 +117,20 @@ export class BridgeGitRunner implements GitPort {
     return (await (await this.requireService()).v2Git('readBlob', args)).value;
   }
 
+  /**
+   * mod-app-hide-commit-reconcile：读**本地 HEAD** 的某个路径原文（只读，零 git 写）。
+   *
+   * 与 showMain 共用桥侧同一个 `readBlob` op，只是 ref 传 'HEAD'：桥的 v2OidOf 会把 HEAD
+   * 解析成提交 sha，再 git.readBlob({ oid, filepath })。不新增桥 op、不改协议、不碰插件。
+   * 隐藏行在写盘之后拿闸之前可能已被同步周期提交；本方法让 hideChat 在闸内分辨
+   * 「已提交」与「没提交」。HEAD 没有该文件 / 没有提交时桥返回空串或抛错，调用方按
+   * 「未提交」处理（窄捕获），绝不让假失败冒到页面。
+   */
+  async showHead(path: string): Promise<string> {
+    const args: Record<string, string> = { 'ref': 'HEAD', 'path': path };
+    return (await (await this.requireService()).v2Git('readBlob', args)).value;
+  }
+
   async branchName(): Promise<string> {
     const args: Record<string, string> = {};
     return (await (await this.requireService()).v2Git('currentBranch', args)).value;

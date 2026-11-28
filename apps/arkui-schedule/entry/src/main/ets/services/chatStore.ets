@@ -36,9 +36,10 @@ import type {
 // mod-app-chat-hide：写侧只复用 chatHide 的纯逻辑（确认文案 / 行形状 / 只追加 / 四阶段原因），
 // 不在此处重写折叠，也不产生任何 unarchive 行。
 import {
-  appendHideLine, hideCommitMessageOf, hideLineOf, hideReasonOf, isHideId, HIDE_INDEX_PATH
+  appendHideLine, decideHideReconcile, hasHideLine, hideCommitMessageOf, hideLineOf, hideReasonOf, isHideId,
+  HIDE_INDEX_PATH
 } from '../model/chatHide';
-import type { HideStage } from '../model/chatHide';
+import type { HideReconcileDecision, HideStage } from '../model/chatHide';
 import { isPushStage } from '../model/gitCommitLock';
 import { bridgeGitRunner } from './gitRunner';
 
@@ -365,13 +366,49 @@ export class ChatStore {
       if (message.length === 0) {
         return this.hideFailure('commit');
       }
-      // mod-app-git-commit-atomic：隐藏行的 add → commit → push 与同步周期共用同一把闸。
-      // 否则同步周期的 addPaths 会覆盖 runner 单例里刚缓冲的隐藏路径，把隐藏行落进
-      // `[v2] sync N days` 提交，而本方法仍返回 ok:true。stage 只在闸内推进，保留
-      // 原来的「提交失败 / 推送失败」两阶段原因，不新增会话发布尾注。
+      // mod-app-git-commit-atomic：隐藏行的 add → commit → push 与同步周期共用同一把闸，
+      // 否则两个写口的 addPaths 会互相覆盖 runner 单例的 pendingPaths。
+      // mod-app-hide-commit-reconcile（本模块）：闸只解决了「缓冲竞态」，没解决「发现竞态」——
+      // 隐藏行在拿闸之前已经落盘，同步周期的 stagePaths 又总是含 chats/index.jsonl，
+      // 所以周期完全可能在它自己的 `[v2] sync N days` 提交里把这一行带走，甚至已经推送。
+      // 因此闸内先用只读的 HEAD/关系事实做三态对账（model/chatHide.decideHideReconcile），
+      // 再决定「不再写 / 只推送 / 照旧 add→commit→push」；stage 只在真正发起写口后推进，
+      // 原来的「提交失败 / 推送失败」两阶段原因与成功文案都不变，不新增会话发布尾注。
       let stage: 'commit' | 'push' = 'commit';
       try {
         await bridgeGitRunner.withWriteLock(async (): Promise<void> => {
+          // HEAD 首次隐藏时可能根本没有该文件 / 没有提交；窄捕获按「未提交」处理，
+          // 绝不让异常冒到外层 catch 被误判成 prepare（那也会是一次假失败）。
+          let headText: string = '';
+          try {
+            headText = await bridgeGitRunner.showHead(HIDE_INDEX_PATH);
+          } catch (error) {
+            headText = '';
+          }
+          let relation: string = 'diverged';
+          if (hasHideLine(headText, line)) {
+            // 只有隐藏行**整行**确实在 HEAD 时才需要问远端关系；gate 与 decideHideReconcile
+            // 共用 model/chatHide.hasHideLine 这一个判据，子串包含不算命中，避免无关的更长行
+            // 白白发一次只读的关系请求。关系读失败按「未推送」处理（fail-safe：真去 push，
+            // 让 push 的真实成败说话，而不是凭空报成功）。
+            try {
+              relation = await bridgeGitRunner.headRelation();
+            } catch (error) {
+              relation = 'diverged';
+            }
+          }
+          const decision: HideReconcileDecision = decideHideReconcile(headText, line, relation);
+          if (decision === 'done') {
+            // (a) 周期已提交并推送：隐藏已落地，直接成功，不碰任何写口、不造新失败文案。
+            return;
+          }
+          if (decision === 'push') {
+            // (b) 本地已提交但未到 origin/main：只补一次推送；stage 推进保证失败归 push 原因。
+            stage = 'push';
+            await bridgeGitRunner.pushMain();
+            return;
+          }
+          // (c) / 常规路径：隐藏行还没进任何提交，按原顺序 add → commit → push。
           await bridgeGitRunner.addPaths([HIDE_INDEX_PATH]);
           await bridgeGitRunner.commit(message);
           stage = 'push';

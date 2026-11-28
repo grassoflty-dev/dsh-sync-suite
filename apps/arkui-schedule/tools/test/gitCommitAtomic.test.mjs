@@ -130,7 +130,8 @@ test('GCA-01 locked writers: sync cannot enter addPaths inside hide add→commit
   assert.deepEqual(bridge.commits, [
     { message: HIDE_MESSAGE, paths: [HIDE_PATH] },
     { message: SYNC_MESSAGE, paths: [TIMELINE_PATH] }
-  ], '两次提交各带各的路径：隐藏行不会被时间线提交吞掉');
+  ], '两次提交各带各的缓冲路径：共享 pendingPaths 不被另一写口覆盖；闸只消除缓冲竞态，'
+    + '落盘后被周期扫到的发现竞态由 mod-app-hide-commit-reconcile 在闸内对账处理');
   assert.equal(lock.active(), 0, '闸必须在成功路径释放');
 });
 

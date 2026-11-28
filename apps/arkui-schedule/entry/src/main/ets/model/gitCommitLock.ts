@@ -3,12 +3,17 @@
  *
  * 为什么需要这一层：BridgeGitRunner.addPaths() 只把路径缓冲到单例的 pendingPaths，
  * commit() 才真正排空缓冲并提交。隐藏会话（services/chatStore.hideChat）与同步周期
- * （本文件 runCyclePure）共用同一个 runner 实例：若两边各自 addPaths → commit → push
- * 互不排队，A 缓冲的路径会被 B 的 addPaths 覆盖，于是 B 的 `[v2] sync N days` 提交里
- * 混进 A 的文件，A 却照样拿到 ok:true（隐藏行留在工作区未提交）。本模块提供**唯一**的
- * async 互斥原语：两个写口把整段 add → commit → push 放进同一个 runner Owned 的
- * `withWriteLock` 闭包，临界区内不允许出现第二个写者；缓冲仍由 runner 在 commit 里
- * 恰好排空一次。
+ * （model/syncCycle.runCyclePure）共用同一个 runner 实例：若两边各自 addPaths → commit → push
+ * 互不排队，A 缓冲的路径会被 B 的 addPaths 覆盖 —— 本闸**只**消除这个共享 pendingPaths
+ * 竞态：两个写口把整段 add → commit → push 放进同一个 runner 持有的 `withWriteLock`
+ * 闭包，临界区内不允许第二个写者；缓冲仍由 runner 在 commit 里恰好排空一次。
+ *
+ * 它**不**保证「隐藏行绝不会进周期提交」。隐藏行是在拿闸之前就写到
+ * `chats/index.jsonl` 磁盘上的，而同步周期的 stagePaths 总是包含这个路径：周期完全可能
+ * 在它自己的 `[v2] sync N days` 提交里把该行一并提交、甚至推送。这个「落盘 → 拿闸」之间的
+ * **发现竞态**不在本锁的能力范围内，由 mod-app-hide-commit-reconcile 处理：hideChat 在闸内
+ * 读 HEAD（showHead）与 HEAD/origin 关系，用 chatHide.decideHideReconcile 区分
+ * 已推送 / 本地已提交未推 / 真没提交，避免把「没东西可提交」误报成假失败。
  *
  * 闸是**实例级**的，不是进程级全局：它属于被保护的那个 GitPort/runner。这样多设备
  * 仿真（两个独立 port）互不牵连，而应用内两个写口共享单例 runner 时必然取到同一把闸。

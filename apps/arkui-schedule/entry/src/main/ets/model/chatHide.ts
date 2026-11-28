@@ -118,3 +118,64 @@ export function hideReasonOf(stage: HideStage): string {
   if (stage === 'push') return HIDE_FAIL_PUSH;
   return HIDE_FAIL_PREPARE;
 }
+
+/**
+ * mod-app-hide-commit-reconcile：闸内三态对账（纯函数，零 IO / 零写 / 零 SDK）。
+ *
+ * 背景：hideChat 先把隐藏行落盘，之后才拿写闸。同步周期的 stagePaths 恰好也接受
+ * `chats/index.jsonl`，所以周期可能在自己那次 `[v2] sync N days` 提交里把这一行带走，
+ * 甚至已经推送。此时 hideChat 再 add→commit 已经「没有可提交内容」，旧实现一律报
+ * commit 失败 —— 对用户是一次**假失败**（删除其实已经生效）。本函数只用三个只读事实：
+ * HEAD 里 `chats/index.jsonl` 的原文、本次要写的具体隐藏行、HEAD 与 origin/main 的关系。
+ *
+ * 返回：
+ * - `commit`：HEAD 里没有这一行 —— 真没被任何提交带上（含首次隐藏 HEAD 根本没有该文件），
+ *   走原来的 add → commit → push；提交真失败时仍是既有 commit 原因。
+ * - `done`：这一行在 HEAD，且 HEAD 与 origin/main 同 sha（equal），或 HEAD 是 origin/main 的祖先
+ *   （behind）—— 这一行已经在远端历史里，周期已提交并推送，直接成功，不重复 commit / push，
+ *   也不新增任何用户可见失败文案。behind 时若 origin/main 后来又前进、在新提交里移除了这一行，
+ *   远端当前其实不再隐藏；这是有意的取舍：行既然发布过，本地索引仍是唯一真相，不因为 behind 就
+ *   倒推远端状态，更不重试一次注定 non-fast-forward 的 push（详见函数内注释）。
+ * - `push`：这一行在 HEAD，但 HEAD 比 origin/main 新（ahead）或与它分叉（diverged），或关系
+ *   无法识别（保守路径）—— 远端可能还没有这一行，补一次推送；推送成功即成功，失败仍是既有
+ *   push 原因。
+ *
+ * 匹配按**整行.trim()**，由 `hasHideLine` 单独提供：闸内 gate（要不要读关系）与本函数的三态决策
+ * 共用同一判据，只认本次 hideLineOf 生成的那一行，不把别的 id / 子串误认成自己，也不把 CRLF
+ * 差异当成没写进去。
+ */
+export type HideReconcileDecision = 'commit' | 'done' | 'push';
+
+/**
+ * HEAD 文本里是否**整行**等于本次隐藏行（trim 后比较，兼容 CRLF）。
+ * 闸内廉价 gate 与三态决策共用这一个判据：光是子串包含不足以证明这一行已进 HEAD。
+ */
+export function hasHideLine(headText: string, hideLine: string): boolean {
+  if (typeof headText !== 'string' || typeof hideLine !== 'string' || hideLine.length === 0) {
+    return false;
+  }
+  const lines: string[] = headText.split('\n');
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() === hideLine) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function decideHideReconcile(headText: string, hideLine: string, relation: string): HideReconcileDecision {
+  if (!hasHideLine(headText, hideLine)) {
+    return 'commit';
+  }
+  // equal / behind 都算已发布：这一行已经在 origin/main 的历史里，从 behind 再 push 只会换来
+  // non-fast-forward 拒绝 —— 那又是一次「删除其实成功、界面却报失败」的假失败。
+  // 唯一的取舍：behind 时 origin/main 可能又前进并在新提交里移除了这一行，远端当前不再隐藏；
+  // 仍然判 done，是因为行已发布过、本地索引才是唯一真相，不能靠 behind 反推远端状态，
+  // 更不能重试一次注定失败的 push。恢复显示只走显式 unarchive，本模块不产生该行。
+  // ahead / diverged 才是「本地已提交、远端还没有」，补一次 push；未知关系保守按 push 处理，
+  // 让 push 的真实成败说话（fail-safe，绝不凭空报成功）。
+  if (relation === 'equal' || relation === 'behind') {
+    return 'done';
+  }
+  return 'push';
+}
