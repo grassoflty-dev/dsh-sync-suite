@@ -22,6 +22,17 @@
 | 适合谁 | 所有人，默认 | 想在外网用、且愿意装一个客户端的人 | 有公网 v6、会配路由器的高级用户 |
 | 主要坑 | 换 Wi-Fi 就换地址 | 平板上要装**侧载 HAP**；卓易通里的安卓 Tailscale **不管用**（`:24-25`、`:142`） | 临时 IPv6 地址约每小时轮换，外网会周期性连不上（`probe.ts:943`） |
 
+### 2.1 tailcat 与上表「Tailscale / Tailcat 组网」那一列的关系
+
+这一列里的 **tailcat 不是另一条独立通道**，容易误读，单独说明：
+
+- **tailcat 是 Tailscale 的 user-space WireGuard 库**（`docs/TAILCAT-HARMONYOS-SPIKE.md:34`）：不需要内核 TUN、不改路由表；magicsock 做「直连 UDP + DERP」打洞。
+- **数据面可以直连，但不是「完全不经过服务器」**：打洞成功时数据端到端直连（协调服务器看不到内容）；**打洞失败会退回 DERP 中继**（中继看到的仍是密文）。而**协调面**（登录、密钥、NAT 发现）始终要经过 Tailscale 的控制面，除非自建 Headscale。
+- **本项目已决定平板侧不用 tailcat**：`docs/TAILCAT-HARMONYOS-SPIKE.md:52` 明确「tailcat 仅 host↔host（电脑控电脑）；平板侧 adapter 保持 typed `E_TRANSPORT_UNSUPPORTED`，不静默降级」。原因是工程代价：平板要 NAPI 编 `aarch64-linux-ohos` 的 `.so`、需要 OHOS 的 Go fork、前台 PoC 约 5–10 人日，且**端到端仍未验证**。
+- 因此对用户而言，「tailscale」这一档实际走的是**平板上的系统级客户端（目前只有侧载的 HarmoTail）**，不是 tailcat。
+
+一句话对照：**真正「不经任何第三方服务器」的只有 `lan` 与 `ipv6`**（代价分别是「只能在家」与「要动路由器」）；`tailscale` 是零入站配置的那条，但数据面是否直连取决于打洞是否成功。
+
 ## 3 为什么 IPv6 必须是「高级选项」
 
 1. **它要求改路由器。** `accessMode.ts:171-175` 已经把这三条写进 `requires`：公网 v6、**光猫或路由器放行该端口入站**、平板网络也有 v6。第一条和第三条取决于运营商，第二条是路由器管理界面的操作——普通用户到不了这一步。
