@@ -176,17 +176,27 @@ describe('mod-app-chat-hide：**逐条**入口与写者形状（源码守卫）'
     }
   });
 
-  test('WS-06 读侧只渲染 chat preset，写侧复核同一判据（工作会话不可隐藏）', () => {
-    assert.match(chatListModel, /export type ChatSessionPreset = 'chat' \| 'other'/);
+  test('WS-06 读侧渲染 chat / dots 两种云端 preset，写侧白名单复核两种云端 preset（工作会话不可隐藏）', () => {
+    assert.match(chatListModel, /export type ChatSessionPreset = 'chat' \| 'dots' \| 'other'/);
     assert.match(chatListModel, /raw\.type === 'session'/);
     assert.match(chatListModel, /raw\.type === 'agent-preset\/selected'/);
     assert.match(chatListModel, /export function filterChatPreset\(/);
-    assert.match(chatStore, /filterChatPreset\(parsed\.entries, presets\)/, '列表只返回 chat preset 条目');
+    assert.match(chatListModel, /preset === 'chat' \|\| preset === 'dots'/, '两种云端种类都准入');
+    assert.match(chatListModel, /preset: preset/, '准入时把投影派生到条目字段，供分段使用');
+    assert.match(chatStore, /filterChatPreset\(parsed\.entries, presets\)/, '列表只返回云端 preset 条目');
     assert.match(chatStore, /this\.readSessionPreset\(entry\.id\)/, '每条索引行都要查 preset');
     const writer = chatStore.slice(chatStore.indexOf('async hideChat('));
-    assert.match(writer, /this\.readSessionPreset\(safeId\) !== 'chat'/, '写口必须复核 preset');
+    // 这条守卫管的是「只有云端种类可写」，不是「写口必须长得像 chat」：
+    // dots 现在也是云端、也渲染出可点行，必须与 chat 一样可隐藏；工作种类（other）仍一律 prepare 早退。
+    // 所以按产品规则把字面量从单一 chat 放宽到恰好 chat / dots 两个白名单成员，并且更严：
+    // 任何第三种 preset（standard / null / 缺字段 / 未知值）都不允许通过。
+    assert.match(writer, /const preset: ChatSessionPreset = this\.readSessionPreset\(safeId\)/,
+      '写口必须先取真实投影 preset');
+    assert.match(writer, /if \(preset !== 'chat' && preset !== 'dots'\)/,
+      '写口白名单必须恰好接受 chat / dots 两种云端种类');
+    assert.doesNotMatch(writer, /preset !== 'other'/, '不得放宽成「不是 other」的黑名单');
     const writeIndex = writer.indexOf('this.writeHideText(');
-    const presetCheck = writer.indexOf("this.readSessionPreset(safeId) !== 'chat'");
+    const presetCheck = writer.indexOf("preset !== 'chat' && preset !== 'dots'");
     assert.ok(presetCheck >= 0 && presetCheck < writeIndex, 'preset 检查必须在任何写动作之前');
     // 没有从标题 / 工作区 / index.kind 猜测 preset 的第二来源
     assert.equal(/presetOf\(\s*entry\.title|presetOf\(\s*entry\.kind/.test(chatListModel), false);
@@ -196,5 +206,19 @@ describe('mod-app-chat-hide：**逐条**入口与写者形状（源码守卫）'
     assert.match(chatsPage, /ForEach\(\s*this\.visibleChats,[\s\S]{0,500}this\.ChatRow\(item\.id/);
     assert.equal(/ForEach\(\s*this\.chats,[\s\S]{0,300}this\.ChatRow/.test(chatsPage), false);
     assert.match(chatsPage, /this\.askHide\(id\)/, '按钮只把可见行的 id 交给确认');
+  });
+
+  test('WS-08 三处视图分段都只认投影派生 preset，不认 index.kind', () => {
+    assert.match(chatListModel, /export function filterBySegment\(/);
+    assert.match(chatListModel, /`kind` 只是第二来源/, '中文注释钉住「投影胜出」');
+    assert.match(chatsPage, /filterBySegment\(this\.chats, this\.kind\)/, 'Chats 页按投影分段');
+    assert.equal(/filterByKind\(this\.chats/.test(chatsPage), false, 'Chats 页不得按索引 kind 分段');
+    assert.match(chatsPage, /item\.preset === 'dots' \? 'dots' : 'chat'/, '行徽章只认投影派生字段');
+    assert.equal(/item\.kind === 'dots'/.test(chatsPage), false, '行徽章不得读索引 kind');
+    for (const pane of ['DotsPane.ets', 'CloudChatPane.ets']) {
+      const text = readFileSync(join(ETS_ROOT, 'pages', 'panes', pane), 'utf8');
+      assert.match(text, /filterBySegment\(result\.entries, PANE_KIND\)/, `${pane} 按投影分段`);
+      assert.equal(/filterByKind\(result\.entries/.test(text), false, `${pane} 不得按索引 kind 分段`);
+    }
   });
 });

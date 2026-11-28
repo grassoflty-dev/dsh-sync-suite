@@ -585,7 +585,7 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     const raw = PANE_RAW.get(CLOUD_CHAT.name);
     for (const token of [
       'chatStore.prepare(', 'chatStore.listChats()', 'ChatListResult',
-      'filterByKind(', "PANE_KIND: ChatKind = 'cloud'", 'sortChats(', "'updated'",
+      'filterBySegment(', "PANE_KIND: ChatKind = 'cloud'", 'sortChats(', "'updated'",
       'chatSummaryLine(item)', 'ForEach(\n        this.chats'
     ]) {
       assert.ok(raw.includes(token), `云端面板必须复用 ${token}`);
@@ -628,7 +628,7 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
     const dots = pane('DotsPane');
     const raw = PANE_RAW.get('DotsPane');
     for (const token of [
-      'chatStore.prepare(', 'chatStore.listChats()', 'ChatListResult', 'filterByKind(',
+      'chatStore.prepare(', 'chatStore.listChats()', 'ChatListResult', 'filterBySegment(',
       "PANE_KIND: ChatKind = 'dots'", 'sortChats(', "'updated'", 'chatSummaryLine(item)',
       'ForEach(\n        this.chats', 'LoadingState(', 'ErrorState(', 'Text(DOTS_NEXT_STEP)'
     ]) {

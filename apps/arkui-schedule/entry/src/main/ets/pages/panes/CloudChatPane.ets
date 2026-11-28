@@ -22,7 +22,7 @@ import { DIVIDER, FONT, LINE_HEIGHT, SPACING, TOUCH_MIN } from '../../common/uiT
 import { ActionButton } from '../../components/ActionButton';
 import { ErrorState } from '../../components/state/ErrorState';
 import { LoadingState } from '../../components/state/LoadingState';
-import { chatSummaryLine, filterByKind, sortChats } from '../../model/chatList';
+import { chatSummaryLine, filterBySegment, sortChats } from '../../model/chatList';
 import type { ChatIndexEntry, ChatKind } from '../../model/chatList';
 import { chatStore } from '../../services/chatStore';
 import type { ChatListResult } from '../../services/chatStore';
@@ -51,7 +51,7 @@ export struct CloudChatPane {
    */
   @Prop @Watch('onGlobalRefreshTick') globalRefreshTick: number = 0;
 
-  /** 全部会话（已排序、已按 kind 过滤）；只在 aboutToAppear / 重试 / 全局刷新时重读。 */
+  /** 全部云端会话（已排序、已按投影 preset 过滤）；只在 aboutToAppear / 重试 / 全局刷新时重读。 */
   @State chats: ChatIndexEntry[] = [];
   /** 读取失败原因；空串 = 无错误。 */
   @State errorText: string = '';
@@ -70,7 +70,7 @@ export struct CloudChatPane {
 
   // ------------------------------------------------------------------ 数据
 
-  /** 读 `chats/index.jsonl` → 只取 cloud 段 → 按更新时间倒序。失败只落 `errorText`，不抛。 */
+  /** 读准入后的会话 → 只取投影 preset 为 chat 的 cloud 段 → 按更新时间倒序；不读 index 的 `kind`。 */
   private async reload(): Promise<void> {
     this.errorText = '';
     this.loading = true;
@@ -82,7 +82,7 @@ export struct CloudChatPane {
         this.loading = false;
         return;
       }
-      this.chats = sortChats(filterByKind(result.entries, PANE_KIND), 'updated');
+      this.chats = sortChats(filterBySegment(result.entries, PANE_KIND), 'updated');
     } catch (error) {
       this.chats = [];
       this.errorText = `${ERROR_WHAT}：${describeError(error)}`;

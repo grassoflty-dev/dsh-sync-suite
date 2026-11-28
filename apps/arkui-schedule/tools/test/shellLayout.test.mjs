@@ -533,7 +533,7 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     const raw = PANE_RAW.get('CloudChatPane');
     const body = paneBody('CloudChatPane');
     for (const token of [
-      'chatStore.prepare(', 'chatStore.listChats()', 'ChatListResult', 'filterByKind(', 'sortChats(',
+      'chatStore.prepare(', 'chatStore.listChats()', 'ChatListResult', 'filterBySegment(', 'sortChats(',
       'chatSummaryLine(item)', 'ForEach(', 'LoadingState(', 'ErrorState(', 'Text(CLOUD_REPO_SETUP)'
     ]) {
       assert.ok(raw.includes(token), `云端面板必须拥有 ${token}`);
@@ -554,7 +554,7 @@ describe('外壳布局：单 flex 层 + 四面板保活 + 抽屉', () => {
     const raw = PANE_RAW.get('DotsPane');
     const body = paneBody('DotsPane');
     for (const token of [
-      'chatStore.prepare(', 'chatStore.listChats()', 'ChatListResult', 'filterByKind(', 'sortChats(',
+      'chatStore.prepare(', 'chatStore.listChats()', 'ChatListResult', 'filterBySegment(', 'sortChats(',
       'chatSummaryLine(item)', 'ForEach(', 'LoadingState(', 'ErrorState(', 'Text(DOTS_NEXT_STEP)'
     ]) {
       assert.ok(raw.includes(token), `dots 面板必须拥有 ${token}`);

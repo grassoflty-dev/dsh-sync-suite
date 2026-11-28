@@ -2,7 +2,7 @@
  * 云端对话 · 会话列表（内容只读；每条会话可单条删除）。
  *
  * 数据源：同步仓库工作副本里的 `chats/index.jsonl`（见 `services/chatStore.ets` 与
- * `docs/CHAT-SYNC.md` §2.4）。页面做五件事：按 `kind` 分段（`filterByKind`）、
+ * `docs/CHAT-SYNC.md` §2.4）。页面做五件事：按投影 preset 分段（`filterBySegment`，不读 index 的 `kind`）、
  * 搜索（`filterChats`）、按更新时间排序（`sortChats`）、点行跳只读详情、
  * **逐行**「删除」打开确认 sheet（mod-app-chat-hide）。
  *
@@ -36,7 +36,7 @@ import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { loadingText } from '../common/copy';
 import { APP_VERSION } from '../common/version';
-import { chatSummaryLine, filterByKind, filterChats, sortChats } from '../model/chatList';
+import { chatSummaryLine, filterBySegment, filterChats, sortChats } from '../model/chatList';
 import type { ChatIndexEntry, ChatKind } from '../model/chatList';
 import { chatHidePlanOf, hideReasonOf } from '../model/chatHide';
 import type { ChatHidePlan } from '../model/chatHide';
@@ -167,9 +167,13 @@ struct Chats {
     this.loading = false;
   }
 
-  /** 重新按分段 + 搜索词过滤（只算内存，不重读磁盘；切段不丢数据）。 */
+  /**
+   * 重新按分段 + 搜索词过滤（只算内存，不重读磁盘；切段不丢数据）。
+   * 分段只认准入时由 session.jsonl 投影派生的 `preset`，**不认 index.jsonl 的 `kind`**：
+   * 两者冲突时投影胜出，工作种类无论索引怎么写都进不了任何一段。
+   */
   private applyQuery(): void {
-    this.visibleChats = filterChats(filterByKind(this.chats, this.kind), this.queryText);
+    this.visibleChats = filterChats(filterBySegment(this.chats, this.kind), this.queryText);
   }
 
   /**
@@ -286,7 +290,7 @@ struct Chats {
       return '正在读取…';
     }
     // 计数按当前分段：切到 dots 段时不该显示云端段的会话总数。
-    const segmentCount: number = filterByKind(this.chats, this.kind).length;
+    const segmentCount: number = filterBySegment(this.chats, this.kind).length;
     if (segmentCount === 0) {
       return '可逐条删除';
     }
@@ -467,8 +471,9 @@ struct Chats {
         (item: ChatIndexEntry) => {
           ListItem() {
             Column() {
+              // 徽章同样只认投影派生的 preset，不读 index 的 kind：投影与索引冲突时投影胜出。
               this.ChatRow(item.id, item.title, chatSummaryLine(item),
-                item.kind === 'dots' ? 'dots' : 'chat')
+                item.preset === 'dots' ? 'dots' : 'chat')
               Divider()
                 .strokeWidth(DIVIDER)
                 .color($r('app.color.divider'))

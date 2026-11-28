@@ -39,12 +39,13 @@ export type ChatKind = 'cloud' | 'dots';
 /**
  * 会话 preset（**不是**上面的 `ChatKind` 分段）：事实来自 workspace 根
  * `docs/RESEARCH-chat-preset.md` §5.1 的 `agentPreset` 投影。
- * - `chat` = 云端对话模式，**唯一**允许进平板列表 / 被隐藏的会话；
+ * - `chat` = 云端对话模式，允许进平板列表 / 被隐藏；
+ * - `dots` = dots 对话模式，同为云端种类，允许进平板列表（落到 dots 段）；
  * - `other` = standard（工作会话）/ 缺字段 / 未知 id / 读不到 —— 一律不可见、不可隐藏（fail-closed）。
  *
- * 不从标题、工作区、index 的 `kind` 猜测；没有可证明的 `agentPreset === 'chat'` 就当不是。
+ * 不从标题、工作区、index 的 `kind` 猜测；没有可证明的 `agentPreset === 'chat' | 'dots'` 就当不是。
  */
-export type ChatSessionPreset = 'chat' | 'other';
+export type ChatSessionPreset = 'chat' | 'dots' | 'other';
 
 /** `chats/index.jsonl` 的一行（读侧已归一：缺字段用安全默认值补上）。 */
 export interface ChatIndexEntry {
@@ -60,6 +61,12 @@ export interface ChatIndexEntry {
   sha256: string;
   /** 会话种类；缺字段 / 未知值一律回落 `'cloud'`（只读默认，不改文件）。 */
   kind: ChatKind;
+  /**
+   * mod-app-three-kind：准入时由 `session.jsonl` 的 preset 投影派生的字段（只读）。
+   * 只有经过 `filterChatPreset` 的条目才会带上它；分段判定只认这个派生值，
+   * **绝不认上面来自 `chats/index.jsonl` 的 `kind`**（投影与索引冲突时投影胜出）。
+   */
+  preset?: ChatSessionPreset;
 }
 
 /** `parseChatIndex` 的结果：坏行只计数，不抛。 */
@@ -522,9 +529,12 @@ interface SessionPresetLine {
   data?: { agentPreset?: string } | null;
 }
 
-/** 只有字面量 `'chat'` 算 chat：大小写 / 空白 / 别名都不放宽。 */
+/** 只有字面量 `'chat'` / `'dots'` 算云端 preset：大小写 / 空白 / 别名都不放宽。 */
 function presetOf(value: unknown): ChatSessionPreset {
-  return value === 'chat' ? 'chat' : 'other';
+  if (value === 'chat') {
+    return 'chat';
+  }
+  return value === 'dots' ? 'dots' : 'other';
 }
 
 /**
@@ -532,7 +542,8 @@ function presetOf(value: unknown): ChatSessionPreset {
  *
  * 与 DSH 的 `agentPreset` 投影同口径：header 首行的 `agentPreset` 给初值，
  * 后续 `agent-preset/selected` 事件按顺序覆盖；缺 header / 值非法 / 空输入 → `other`。
- * 这是判定「是不是云端对话」的**唯一**来源；`chats/index.jsonl` 与 `meta.json` 都没有这个字段。
+ * 这是判定「是不是云端会话、属于哪种云端会话」的**唯一**来源；`chats/index.jsonl` 的 `kind`
+ * 与 `meta.json` 都没有这个事实，不能拿来分段（mod-app-three-kind）。
  */
 export function sessionPresetOf(sessionJsonl: string): ChatSessionPreset {
   const text: string = typeof sessionJsonl === 'string' ? sessionJsonl : '';
@@ -568,8 +579,14 @@ export function sessionPresetOf(sessionJsonl: string): ChatSessionPreset {
 }
 
 /**
- * allow-list：只保留 preset 恰好为 `chat` 的条目；缺映射 / `other` / 未知 id 一律丢弃。
- * 工作会话即使被误写进索引也不会渲染，因此没有可点的行、也就没有可隐藏的目标。
+ * allow-list：只保留 preset 恰好为 `chat` / `dots` 的条目（两种云端种类都要可见）；
+ * 缺映射 / `other` / 未知 id 一律丢弃。工作会话即使被误写进索引也不会渲染，
+ * 因此没有可点的行、也就没有可隐藏的目标。
+ *
+ * mod-app-three-kind：准入时把投影 preset 派生到条目的 `preset` 字段，并把 `kind` 同步成投影
+ * 对应的分段（`chat` → `cloud`、`dots` → `dots`）。`chats/index.jsonl` 的 `kind` 只是第二来源，
+ * 与投影冲突时**投影胜出**；这里从不按 `kind` 放行，所以索引谎称 `kind:'dots'` 的工作会话
+ * 仍会被丢掉（工作种类永不可见）。
  */
 export function filterChatPreset(
   entries: ChatIndexEntry[],
@@ -584,11 +601,50 @@ export function filterChatPreset(
     if (entry === null || entry === undefined) {
       continue;
     }
-    if (presets[entry.id] === 'chat') {
-      kept.push(entry);
+    const preset: ChatSessionPreset | undefined = presets[entry.id];
+    if (preset === 'chat' || preset === 'dots') {
+      // 返回新对象，不改调用方入参；分段事实只来自 preset 投影，不来自索引行的 kind。
+      const admitted: ChatIndexEntry = {
+        id: entry.id,
+        title: entry.title,
+        updatedAt: entry.updatedAt,
+        messageCount: entry.messageCount,
+        sha256: entry.sha256,
+        kind: preset === 'dots' ? 'dots' : 'cloud',
+        preset: preset
+      };
+      kept.push(admitted);
     }
   }
   return kept;
+}
+
+/**
+ * 分段过滤（页面与面板的唯一分组入口）：段归属只认 `filterChatPreset` 派生的 `preset`，
+ * `chat` → `cloud`、`dots` → `dots`；`other` / 缺字段 → 两段都不收（工作会话永不出现）。
+ *
+ * **不读 `chats/index.jsonl` 的 `kind`**：索引行即使写成 `kind:'cloud'`，投影为 dots 仍进 dots 段；
+ * 索引行即使写成 `kind:'dots'`，投影为 other 仍被丢弃。投影是唯一真相（mod-app-three-kind）。
+ */
+export function filterBySegment(
+  entries: ChatIndexEntry[],
+  segment: ChatKind
+): ChatIndexEntry[] {
+  const list: ChatIndexEntry[] = Array.isArray(entries) ? entries : [];
+  const matched: ChatIndexEntry[] = [];
+  for (let index = 0; index < list.length; index++) {
+    const entry: ChatIndexEntry | null = list[index];
+    if (entry === null || entry === undefined) {
+      continue;
+    }
+    const preset: ChatSessionPreset | undefined = entry.preset;
+    const inSegment: boolean = (segment === 'cloud' && preset === 'chat') ||
+      (segment === 'dots' && preset === 'dots');
+    if (inSegment) {
+      matched.push(entry);
+    }
+  }
+  return matched;
 }
 
 // ---------------------------------------------------------------- 详情：事件流 → 消息

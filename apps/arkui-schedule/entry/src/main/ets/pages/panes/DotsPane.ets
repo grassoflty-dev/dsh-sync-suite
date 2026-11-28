@@ -7,7 +7,8 @@
  *     Hidden 仍留在组件树上，切段不丢 @State（不卸载、不每次显示都重读）。
  *
  * 数据链与 CloudChatPane 同源：`services/chatStore` 的 prepare / listChats + `model/chatList`
- * 的 filterByKind / sortChats / chatSummaryLine，只取 kind='dots'；不另建 store、不自行解析 JSON。
+ * 的 filterBySegment / sortChats / chatSummaryLine，只取投影 preset 为 dots 的会话；
+ * 不读 `chats/index.jsonl` 的 `kind`（投影胜出），不另建 store、不自行解析 JSON。
  * 点行进既有 `pages/ChatDetail`（只传 id，路由写法与 `pages/Chats.ets` 完全一致）。
  *
  * mod-dots-readonly：只读消费 `services/instanceGrantStore`（仅 lastProblem / redacted 两个 read API，
@@ -30,7 +31,7 @@ import { DIVIDER, FONT, LINE_HEIGHT, SPACING, TOUCH_MIN } from '../../common/uiT
 import { ActionButton } from '../../components/ActionButton';
 import { ErrorState } from '../../components/state/ErrorState';
 import { LoadingState } from '../../components/state/LoadingState';
-import { chatSummaryLine, filterByKind, sortChats } from '../../model/chatList';
+import { chatSummaryLine, filterBySegment, sortChats } from '../../model/chatList';
 import type { ChatIndexEntry, ChatKind } from '../../model/chatList';
 import { isViewTool, problemText, TOOL_SESSION_PROMPT, VIEW_TOOLS } from '../../model/instanceGrant';
 import type { GrantProblem, RedactedGrant } from '../../model/instanceGrant';
@@ -70,7 +71,7 @@ export struct DotsPane {
    */
   @Prop @Watch('onGlobalRefreshTick') globalRefreshTick: number = 0;
 
-  /** 全部 dots 会话（已排序、已按 kind 过滤）；只在 aboutToAppear / 重试 / 全局刷新时重读。 */
+  /** 全部 dots 会话（已排序、已按投影 preset 过滤）；只在 aboutToAppear / 重试 / 全局刷新时重读。 */
   @State chats: ChatIndexEntry[] = [];
   /** 读取失败原因；空串 = 无错误。 */
   @State errorText: string = '';
@@ -174,7 +175,7 @@ export struct DotsPane {
         this.loading = false;
         return;
       }
-      this.chats = sortChats(filterByKind(result.entries, PANE_KIND), 'updated');
+      this.chats = sortChats(filterBySegment(result.entries, PANE_KIND), 'updated');
     } catch (error) {
       this.chats = [];
       this.errorText = `${ERROR_WHAT}：${describeError(error)}`;
@@ -244,7 +245,7 @@ export struct DotsPane {
     .width('100%')
   }
 
-  /** 空态（没有 kind=dots 的索引行）：标题 + 一句同步下一步 + 真刷新按钮，不写机制段落。 */
+  /** 空态（没有投影为 dots 的会话）：标题 + 一句同步下一步 + 真刷新按钮，不写机制段落。 */
   @Builder
   EmptyChats() {
     Column({ space: SPACING.sm }) {

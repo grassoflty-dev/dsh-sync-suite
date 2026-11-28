@@ -165,8 +165,9 @@ describe('mod-home-entries · kind 投影与分段过滤', () => {
     assert.match(CHATS, /@State kind: ChatKind = 'cloud';/, '默认左侧 cloud 段');
     assert.ok(READ_KIND.includes("return params['kind'] === 'dots' ? 'dots' : 'cloud';"), '只有 dots 切段');
     assert.ok(CHATS.includes('this.kind = this.readKindParam();'), 'aboutToAppear 预选分段');
-    assert.ok(APPLY_QUERY.includes('filterChats(filterByKind(this.chats, this.kind), this.queryText)'),
-      '分段过滤后再搜索，共用 chats 不丢数据');
+    assert.ok(APPLY_QUERY.includes('filterChats(filterBySegment(this.chats, this.kind), this.queryText)'),
+      '按投影 preset 分段后再搜索，共用 chats 不丢数据');
+    assert.equal(APPLY_QUERY.includes('filterByKind('), false, '不得退回按 index.kind 分段');
   });
 
   test('分段常驻顶部：在错误分支与搜索框之前，两个格子文案与选中态绑定正确', () => {
@@ -181,9 +182,10 @@ describe('mod-home-entries · kind 投影与分段过滤', () => {
     assert.equal((KIND_SEGMENT.match(/this\.applyQuery\(\)/g) ?? []).length, 2, '切段只重算内存过滤');
   });
 
-  test('行徽章随 kind 变化，替代固定「只读」', () => {
+  test('行徽章随投影 preset 变化，替代固定「只读」', () => {
     assert.match(CHATS, /ChatRow\(id: string, title: string, summary: string, badge: string\)/, '行 builder 带徽章参数');
-    assert.ok(CHAT_LIST.includes("item.kind === 'dots' ? 'dots' : 'chat'"), '按 kind 渲染 chat/dots 徽章');
+    assert.ok(CHAT_LIST.includes("item.preset === 'dots' ? 'dots' : 'chat'"), '按投影派生 preset 渲染 chat/dots 徽章');
+    assert.equal(CHAT_LIST.includes('item.kind ==='), false, '徽章不得读 index.kind');
     assert.equal(CHATS.includes("Text('只读')"), false, '固定「只读」徽章已移除');
   });
 });

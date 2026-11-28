@@ -20,9 +20,11 @@
  * 经窄写通道 commit/push；`chats/<id>/**` 全层只读，无恢复 / 无批量 / 无载荷删除。
  * 隐藏状态不缓存在本层，列表永远以索引折叠结果为真相（失败不留乐观隐藏）。
  *
- * 云端对话准入：`listChats` 只返回 `agentPreset === 'chat'` 的会话（读 `chats/<id>/session.jsonl`
- * 的 preset 投影，缺字段 / 读不到 / standard 一律 fail-closed 不渲染）；`hideChat` 在写前复核
- * 同一判据，工作会话既没有可点的行也无法被隐藏。平板只读取与隐藏，没有创建会话的入口。
+ * 云端准入（mod-app-three-kind）：`listChats` 只返回 `agentPreset` 投影为 `chat` / `dots` 的
+ * 两种云端会话（读 `chats/<id>/session.jsonl`，缺字段 / 读不到 / standard 一律 fail-closed
+ * 不渲染）；分段只认准入时派生的 preset，不认 `chats/index.jsonl` 的 `kind` —— 索引与投影
+ * 冲突时投影胜出。`hideChat` 在写前复核 preset 判据，工作会话既没有可点的行也无法被隐藏。
+ * 平板只读取与隐藏，没有创建会话的入口。
  *
  * 为什么不用 `router` 参数直接传会话内容：参数是字符串表，长会话会被截断/超限；
  * 详情页只接 `id`，每次重新读文件（旋转、返回都靠 `@State` 保内容，见页面注释）。
@@ -167,9 +169,10 @@ export class ChatStore {
   }
 
   /**
-   * 会话是不是「云端对话模式」：只读 `chats/<id>/session.jsonl` 的 `agentPreset` 投影
-   * （纯逻辑在 `model/chatList.sessionPresetOf`）。读不到 / 缺 header / standard / 未知 → `other`，
-   * fail-closed：绝不按标题 / 工作区 / index 的 kind 猜。
+   * 会话是哪种云端会话：只读 `chats/<id>/session.jsonl` 的 `agentPreset` 投影
+   * （纯逻辑在 `model/chatList.sessionPresetOf`，`chat` / `dots` 为云端，其余 → `other`）。
+   * 读不到 / 缺 header / standard / 未知 → `other`，fail-closed：
+   * 绝不按标题 / 工作区 / index 的 kind 猜。
    */
   private readSessionPreset(id: string): ChatSessionPreset {
     if (!isSafeChatId(id)) {
@@ -218,7 +221,7 @@ export class ChatStore {
         return failed;
       }
       const parsed: ChatIndexParse = parseChatIndex(text);
-      // 云端对话准入：只渲染 agentPreset === 'chat' 的会话；工作会话即使在索引里也不可见。
+      // 云端准入：只渲染投影为 chat / dots 的会话；工作会话即使在索引里（哪怕 kind 写成 dots）也不可见。
       const presets: Record<string, ChatSessionPreset> = {};
       for (let index = 0; index < parsed.entries.length; index++) {
         const entry: ChatIndexEntry = parsed.entries[index];
@@ -331,8 +334,9 @@ export class ChatStore {
       if (!isHideId(safeId)) {
         return this.hideFailure('prepare');
       }
-      // 工作会话（agentPreset !== 'chat'）没有行可点；写口再守一次，程序化调用也隐藏不了它。
-      if (this.readSessionPreset(safeId) !== 'chat') {
+      // 工作种类（other）没有行可点；两种云端种类（chat / dots）都可隐藏。
+      const preset: ChatSessionPreset = this.readSessionPreset(safeId);
+      if (preset !== 'chat' && preset !== 'dots') {
         return this.hideFailure('prepare');
       }
       const dir: string = this.chatsDir();

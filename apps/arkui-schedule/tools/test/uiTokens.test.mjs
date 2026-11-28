@@ -652,7 +652,7 @@ test('U-S6 四面板页头无跨节导航：云端对话等分段只从 ShellRai
 // mod-shell-dots-pane（新增正向守卫）：dots 分段落真后仍走同一套令牌 / 保活 / 唯一设置出口。
 test('U-S7 dots 面板是真列表：同款 chatStore/chatList 数据链 + ForEach 真行 + 令牌化 + 保活', () => {
   const dots = PANE_CODES[0]
-  for (const token of ['chatStore.prepare(', 'chatStore.listChats()', 'filterByKind(',
+  for (const token of ['chatStore.prepare(', 'chatStore.listChats()', 'filterBySegment(',
     "PANE_KIND: ChatKind = 'dots'", 'sortChats(', 'chatSummaryLine(item)', 'ForEach(\n        this.chats']) {
     assert.ok(dots.includes(token), `dots 面板必须复用 ${token}`)
   }

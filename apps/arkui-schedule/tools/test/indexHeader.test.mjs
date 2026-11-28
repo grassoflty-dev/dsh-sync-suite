@@ -309,7 +309,7 @@ describe('外壳页头（Home + ShellRail）：唯一设置出口 + 无假动作
     const dots = PANE_CODES[0];
     assert.match(dots, /ForEach\(\s*this\.chats/, 'dots 面板必须 ForEach 真实会话数组');
     assert.match(dots, /chatSummaryLine\(item\)/, '行摘要必须走纯模型，不是手写假文案');
-    for (const token of ['chatStore.prepare(', 'chatStore.listChats()', 'filterByKind(', 'sortChats(',
+    for (const token of ['chatStore.prepare(', 'chatStore.listChats()', 'filterBySegment(', 'sortChats(',
       "PANE_KIND: ChatKind = 'dots'", 'ChatListResult']) {
       assert.ok(dots.includes(token), `dots 面板必须复用 ${token}`);
     }

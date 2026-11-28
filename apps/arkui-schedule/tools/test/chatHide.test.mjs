@@ -6,7 +6,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
 
-import { filterChatPreset, foldChatIndex, parseChatIndex, sessionPresetOf } from '../.build/model/chatList.js';
+import {
+  filterByKind, filterBySegment, filterChatPreset, foldChatIndex, parseChatIndex, sessionPresetOf
+} from '../.build/model/chatList.js';
 // mod-app-hide-commit-reconcile：三态决策从纯模型导入（用命名空间，pre-fix 时只让 HCR 用例红，
 // 不把本文件其它既有断言一起拖下水）。
 import * as chatHideModel from '../.build/model/chatHide.js';
@@ -16,6 +18,11 @@ import {
   HIDE_FAIL_WRITE, HIDE_INDEX_PATH, HIDE_TITLE, appendHideLine, chatHidePlanOf,
   hideCommitMessageOf, hideLineOf, hideReasonOf, isHideId
 } from '../.build/model/chatHide.js';
+import { matchBrace, stripComments } from './helpers/etsSource.mjs';
+
+// mod-app-three-kind：ArkTS 服务不能直接 import，下面的用例从真实 .ets 截方法本体转译执行。
+const ts = (await import('typescript')).default;
+const { isPushStage } = await import('../.build/model/gitCommitLock.js');
 
 const normal = (id, extra = {}) => JSON.stringify({
   id, title: `标题-${id}`, updatedAt: '2026-11-27T10:00:00.000Z', messageCount: 2, sha256: 'a'.repeat(64), ...extra
@@ -201,23 +208,29 @@ describe('mod-app-chat-hide：窄写通道（字节级 / 四阶段 / 入口形�
   });
 });
 
-describe('mod-app-chat-hide：会话 preset 准入（只有 agentPreset === chat）', () => {
+describe('mod-app-three-kind：会话 preset 准入（chat / dots 两种云端，工作会话拒之门外）', () => {
   const header = (preset) => JSON.stringify({ type: 'session', id: 'x', agentPreset: preset });
   const selected = (preset) => JSON.stringify({ type: 'agent-preset/selected', data: { agentPreset: preset } });
 
-  test('CW-01 preset 只读 session.jsonl 的 agentPreset：allow-list、fail-closed', () => {
+  test('CW-01 preset 只读 session.jsonl 的 agentPreset：两种云端 allow-list、其余 fail-closed', () => {
     assert.equal(sessionPresetOf(`${header('chat')}\n${normal('x')}`), 'chat');
+    assert.equal(sessionPresetOf(`${header('dots')}\n${normal('x')}`), 'dots');
+    assert.equal(sessionPresetOf([header('chat'), selected('dots')].join('\n')), 'dots');
     for (const bad of [header('standard'), header('ptc'), header('CHAT'), header(' chat'),
+      header('DOTS'), header(' dots'), header(null),
       JSON.stringify({ type: 'session', id: 'x' }),
       JSON.stringify({ type: 'session', id: 'x', agentPreset: null }),
       normal('x'), '', '{坏行']) {
-      assert.equal(sessionPresetOf(bad), 'other', `不得把非 chat 当 chat：${bad}`);
+      assert.equal(sessionPresetOf(bad), 'other', `不得把非 chat / dots 当云端：${bad}`);
     }
     assert.equal(sessionPresetOf(undefined), 'other');
   });
 
   test('CW-02 preset 投影按事件顺序覆盖 header，非法事件不放松', () => {
     assert.equal(sessionPresetOf([header('standard'), selected('chat')].join('\n')), 'chat');
+    assert.equal(sessionPresetOf([header('standard'), selected('dots')].join('\n')), 'dots');
+    assert.equal(sessionPresetOf([header('dots'), selected('chat')].join('\n')), 'chat');
+    assert.equal(sessionPresetOf([header('dots'), selected('DOTS')].join('\n')), 'other');
     assert.equal(sessionPresetOf([header('chat'), selected('standard')].join('\n')), 'other');
     assert.equal(sessionPresetOf([header('chat'), selected('unknown')].join('\n')), 'other');
     assert.equal(sessionPresetOf([header('chat'), JSON.stringify({ type: 'agent-preset/selected' })].join('\n')), 'other');
@@ -253,6 +266,62 @@ describe('mod-app-chat-hide：会话 preset 准入（只有 agentPreset === chat
     assert.equal(isHideId('work-1'), true);
     assert.equal(presets['work-1'] === 'chat', false);
     assert.match(hideReasonOf('prepare'), /没有写入任何内容/);
+  });
+
+  test('CW-05 准入保留 chat 与 dots 两种云端，丢掉 other（回归到只留 chat 会立刻变红）', () => {
+    const entries = parseChatIndex([normal('chat-1'), normal('dots-1'), normal('work-1')].join('\n')).entries;
+    // preset 全部来自真实 session.jsonl 投影，不手写映射
+    const presets = {
+      'chat-1': sessionPresetOf(header('chat')),
+      'dots-1': sessionPresetOf(header('dots')),
+      'work-1': sessionPresetOf(header('standard'))
+    };
+    assert.deepEqual(presets, { 'chat-1': 'chat', 'dots-1': 'dots', 'work-1': 'other' });
+    assert.deepEqual(filterChatPreset(entries, presets).map((entry) => entry.id), ['chat-1', 'dots-1']);
+    assert.deepEqual(filterChatPreset(entries, {}), [], '读不到 preset 时一条都不渲染');
+    // 准入派生字段跟随投影，且不改调用方入参
+    const admitted = filterChatPreset(entries, presets);
+    assert.deepEqual(admitted.map((entry) => entry.preset), ['chat', 'dots']);
+    assert.equal(entries[0].preset, undefined, '不得就地改写索引解析结果');
+  });
+
+  test('CW-06 第二来源攻击：索引 kind 谎称 dots、投影为 other 的工作会话必须被丢弃', () => {
+    const index = [normal('work-a', { kind: 'dots' }), normal('dots-a', { kind: 'cloud' })].join('\n');
+    const entries = parseChatIndex(index).entries;
+    assert.deepEqual(entries.map((entry) => entry.kind), ['dots', 'cloud'], '先证明索引里的伪装值确实存在');
+    // 旧做法（按索引 kind 分段）会把工作会话放进 dots 段——这正是本例要防的回归
+    assert.deepEqual(filterByKind(entries, 'dots').map((entry) => entry.id), ['work-a']);
+    const presets = {
+      'work-a': sessionPresetOf(header('standard')),
+      'dots-a': sessionPresetOf(header('dots'))
+    };
+    const visible = filterChatPreset(entries, presets);
+    assert.deepEqual(visible.map((entry) => entry.id), ['dots-a'], '工作会话绝不因 kind=dots 混入');
+    assert.equal(visible.some((entry) => entry.id === 'work-a'), false);
+  });
+
+  test('CW-07 分段归属由投影决定：索引 kind=cloud / dots 都不能左右段落', () => {
+    const index = [normal('d-but-cloud', { kind: 'cloud' }), normal('c-but-dots', { kind: 'dots' })].join('\n');
+    const admitted = filterChatPreset(parseChatIndex(index).entries, {
+      'd-but-cloud': sessionPresetOf(header('dots')),
+      'c-but-dots': sessionPresetOf(header('chat'))
+    });
+    assert.deepEqual(filterBySegment(admitted, 'dots').map((entry) => entry.id), ['d-but-cloud']);
+    assert.deepEqual(filterBySegment(admitted, 'cloud').map((entry) => entry.id), ['c-but-dots']);
+    assert.equal(admitted[0].kind, 'dots', '派生的 kind 也跟投影走，不跟索引行走');
+    assert.equal(admitted[1].kind, 'cloud');
+    assert.equal(admitted[0].preset, 'dots');
+  });
+
+  test('CW-08 工作种类在两段都不可见；未经准入的条目也不进任何段', () => {
+    const entries = parseChatIndex([normal('w'), normal('c'), normal('d')].join('\n')).entries;
+    const admitted = filterChatPreset(entries, { 'w': 'other', 'c': 'chat', 'd': 'dots' });
+    assert.deepEqual(filterBySegment(admitted, 'cloud').map((entry) => entry.id), ['c']);
+    assert.deepEqual(filterBySegment(admitted, 'dots').map((entry) => entry.id), ['d']);
+    assert.equal(filterBySegment(admitted, 'cloud').some((entry) => entry.id === 'w'), false);
+    assert.equal(filterBySegment(admitted, 'dots').some((entry) => entry.id === 'w'), false);
+    assert.deepEqual(filterBySegment(entries, 'cloud'), [], '没有派生 preset 就 fail-closed');
+    assert.deepEqual(filterBySegment(entries, 'dots'), []);
   });
 });
 
@@ -422,5 +491,152 @@ describe('mod-app-hide-commit-reconcile：闸内对账三态（用户可见结�
     assert.equal(decision, 'commit', '只有超串含本行 ⇒ 没被提交，走 commit');
     assert.deepEqual(port.calls, ['showHead'], 'gate 未命中 ⇒ 不读 headRelation（与决策同一判据）');
     assert.equal(port.calls.includes('headRelation'), false);
+  });
+});
+
+// mod-app-three-kind：写口准入的**真实源码执行**。ArkTS 服务不能直接 import，
+// 这里从 chatStore.ets 截出 isSafeChatId / readSessionPreset / hideChat 三段生产方法，
+// tsc 转译后接上真纯模型与假 IO，跑的是方法本体，不是复刻品；
+// 复刻体一旦漂移，TK-01 / TK-03 就不会跟着真实源码的红绿变化。
+describe('mod-app-three-kind：hideChat 写口准入（真实源码执行）', () => {
+  const STORE_SRC = readFileSync(
+    new URL('../../entry/src/main/ets/services/chatStore.ets', import.meta.url), 'utf8');
+  const STRIPPED = stripComments(STORE_SRC);
+
+  /** 截出方法整体（含 private / async 前缀），花括号配对定位末尾。 */
+  function storeMember(src, pattern, label) {
+    const found = pattern.exec(src);
+    assert.ok(found !== null, `必须读到真实源码：${label}`);
+    const [open, close] = matchBrace(src, src.indexOf('{', found.index));
+    return src.slice(found.index, close);
+  }
+
+  const SAFE_ID_FN = storeMember(STRIPPED, /export function isSafeChatId\(/, 'isSafeChatId')
+    .replace(/^export\s+/, '');
+  const READ_PRESET_FN = storeMember(STRIPPED, /private readSessionPreset\(/, 'readSessionPreset');
+  const HIDE_CHAT_FN = storeMember(STRIPPED, /async hideChat\(/, 'hideChat');
+  const CONST_LINES = [
+    /const ID_PATTERN: RegExp = [^;]+;/,
+    /const ID_MAX_LENGTH: number = [^;]+;/,
+    /const INDEX_FILE_NAME: string = [^;]+;/,
+    /const SESSION_FILE_NAME: string = [^;]+;/
+  ].map((re) => {
+    const matched = re.exec(STRIPPED);
+    assert.ok(matched !== null, `必须读到真实常量：${re.source}`);
+    return matched[0];
+  });
+  const HARNESS_JS = ts.transpileModule(
+    `${CONST_LINES.join('\n')}\n${SAFE_ID_FN}\nclass HideChatHarness {\n${READ_PRESET_FN}\n${HIDE_CHAT_FN}\n}`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.None } }
+  ).outputText;
+
+  /**
+   * 假 IO + 真 runner 形状：只记录写口调用，不碰磁盘；HEAD 默认无隐藏行 ⇒ 走 add→commit→push。
+   * preset 来自真实 session.jsonl 原文，经生产 readSessionPreset → sessionPresetOf 投影。
+   */
+  function makeHideStore(sessionText, indexText, headText = '') {
+    const trace = { writes: [], added: [], commits: [], pushes: [] };
+    const fsStub = {
+      readTextSync(path) {
+        if (typeof path === 'string' && path.endsWith('/session.jsonl')) return sessionText;
+        return indexText;
+      }
+    };
+    const runner = {
+      async withWriteLock(task) { return await task(); },
+      async showHead() { return headText; },
+      async headRelation() { return 'diverged'; },
+      async addPaths(paths) { trace.added.push(paths.slice()); },
+      async commit(message) { trace.commits.push(message); },
+      async pushMain() { trace.pushes.push(true); }
+    };
+    const Factory = new Function(
+      'fs', 'sessionPresetOf', 'isHideId', 'hideLineOf', 'appendHideLine',
+      'hideCommitMessageOf', 'hasHideLine', 'decideHideReconcile', 'hideReasonOf',
+      'isPushStage', 'HIDE_INDEX_PATH', 'bridgeGitRunner',
+      `${HARNESS_JS}\nreturn HideChatHarness;`
+    );
+    const Store = Factory(
+      fsStub, sessionPresetOf, isHideId, hideLineOf, appendHideLine,
+      hideCommitMessageOf, chatHideModel.hasHideLine, chatHideModel.decideHideReconcile,
+      hideReasonOf, isPushStage, HIDE_INDEX_PATH, runner
+    );
+    const store = new Store();
+    store.chatsDir = () => '/fake/git-repo';
+    store.fileExists = () => true;
+    store.hideFailure = (stage) => ({ ok: false, stage: stage, reason: hideReasonOf(stage) });
+    store.writeHideText = (path, text) => { trace.writes.push({ path: path, text: text }); };
+    return { store, trace };
+  }
+
+  const header = (preset) => JSON.stringify({ type: 'session', id: 'sess-1', agentPreset: preset });
+  const indexText = `${normal('sess-1')}\n`;
+
+  test('TK-01 dots 会话可隐藏：ok:true、无失败原因、索引真追加一行且真的发起 commit', async () => {
+    const session = header('dots');
+    assert.equal(sessionPresetOf(session), 'dots', '前置：投影必须是 dots');
+    const { store, trace } = makeHideStore(session, indexText);
+    const outcome = await store.hideChat('sess-1');
+    assert.deepEqual(outcome, { ok: true, stage: 'done', reason: '' });
+    assert.equal(outcome.reason.length, 0, '成功路径不得带任何用户可见失败原因');
+    assert.equal(/删除失败/.test(outcome.reason), false);
+    assert.equal(trace.writes.length, 1, '必须真的追加索引行，不是只返回结果');
+    assert.equal(trace.writes[0].path, '/fake/git-repo/index.jsonl');
+    assert.equal(trace.writes[0].text.startsWith(indexText), true, '旧字节必须是新字节的严格前缀');
+    const tombstone = JSON.parse(trace.writes[0].text.slice(indexText.length).trim());
+    assert.deepEqual(tombstone, { op: 'archive', id: 'sess-1', deletedAt: tombstone.deletedAt });
+    assert.equal(typeof tombstone.deletedAt, 'number');
+    assert.deepEqual(foldChatIndex(trace.writes[0].text).hiddenIds, ['sess-1'],
+      '写进去的行必须真被读侧折叠隐藏');
+    assert.deepEqual(trace.added, [[HIDE_INDEX_PATH]], '只 add 精确白名单路径');
+    assert.equal(trace.commits.length, 1, '必须真的发起一次 commit');
+    assert.equal(trace.commits[0], hideCommitMessageOf('sess-1'));
+    assert.equal(trace.pushes.length, 1, 'commit 后必须 attempt push');
+  });
+
+  test('TK-02 chat 会话成功形状与 dots 一致（原行为不得回归）', async () => {
+    const session = header('chat');
+    assert.equal(sessionPresetOf(session), 'chat', '前置：投影必须是 chat');
+    const { store, trace } = makeHideStore(session, indexText);
+    const outcome = await store.hideChat('sess-1');
+    assert.deepEqual(outcome, { ok: true, stage: 'done', reason: '' });
+    assert.equal(trace.writes.length, 1);
+    assert.equal(trace.commits.length, 1);
+    assert.equal(trace.pushes.length, 1);
+  });
+
+  test('TK-03 工作会话仍不可隐藏：other / standard / null / 缺字段全部 prepare 早退且零写入', async () => {
+    const cases = [
+      ['other', header('other')],
+      ['standard', header('standard')],
+      ['null', header(null)],
+      ['缺字段', JSON.stringify({ type: 'session', id: 'sess-1' })]
+    ];
+    for (const [label, session] of cases) {
+      assert.equal(sessionPresetOf(session), 'other', `前置：${label} 必须投影为 other`);
+      const { store, trace } = makeHideStore(session, indexText);
+      const outcome = await store.hideChat('sess-1');
+      assert.deepEqual(outcome, { ok: false, stage: 'prepare', reason: HIDE_FAIL_PREPARE },
+        `${label} 必须仍是 prepare 的 typed 中文失败`);
+      assert.equal(trace.writes.length, 0, `${label} 不得追加索引行`);
+      assert.deepEqual(trace.added, [], `${label} 不得 add 任何路径`);
+      assert.equal(trace.commits.length, 0, `${label} 不得发起 commit`);
+      assert.equal(trace.pushes.length, 0, `${label} 不得发起 push`);
+    }
+  });
+
+  test('TK-04 源码守卫：写口白名单恰好接受 chat / dots，绝不放宽成「不是 other」', () => {
+    const writer = STRIPPED.slice(STRIPPED.indexOf('async hideChat('));
+    assert.match(writer, /const preset: ChatSessionPreset = this\.readSessionPreset\(safeId\);/,
+      '写口必须先取真实投影 preset');
+    assert.match(writer, /if \(preset !== 'chat' && preset !== 'dots'\)/,
+      '白名单必须恰好是 chat / dots 两个字面量');
+    assert.doesNotMatch(writer, /preset !== 'other'/,
+      '不得改成黑名单：unknown / 空值也会混进来');
+    assert.match(STORE_SRC, /工作种类（other）没有行可点；两种云端种类（chat \/ dots）都可隐藏/,
+      '中文规则注释必须跟随产品规则更新');
+    const writeIndex = writer.indexOf('this.writeHideText(');
+    const presetCheck = writer.indexOf("preset !== 'chat' && preset !== 'dots'");
+    assert.ok(presetCheck >= 0 && presetCheck < writeIndex, 'preset 检查必须在任何写动作之前');
   });
 });
