@@ -22,7 +22,8 @@
  *   | 其它（负数 / NaN / Infinity / 小数 / 非数）| refuse | invalid-facts |
  *
  * 「其它」一行是**硬护栏**：事实读不出来或形状不对时绝不静默 proceed，一律 typed 拒绝。
- * `ours` = 领先提交是否**全部**由本模块产生（带 `dsh-dots-v2:` 尾注 + 只改 `timeline/**`），
+ * `ours` = 领先提交是否**全部**由本模块产生（带 `dsh-dots-v2:` 尾注 + 只改白名单路径
+ * `timeline/**` 或恰为 `chats/index.jsonl`），
  * 由调用方用 `sync/cycle.ts` 的既有严格谓词算好后传入；本文件不重复实现归属判定，
  * 也不放宽任何一条（尾注缺失 / 实例不符 / diff 越界仍然一律不算本模块）。
  */

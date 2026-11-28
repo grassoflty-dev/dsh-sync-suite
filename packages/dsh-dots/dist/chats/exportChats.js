@@ -22,6 +22,7 @@ import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { countMessages, firstUserTextOf, latestTitleOf, modelOf } from './readSessions.js';
+import { foldChatIndex } from './foldChatIndex.js';
 /** 共享命名空间（不是 `devices/<id>/`，见 `docs/CHAT-SYNC.md` §2）。 */
 export const CHATS_DIR = 'chats';
 /** 只追加的列表页索引。 */
@@ -288,55 +289,36 @@ export function buildChatExport(info, session, options) {
         meta.model = model;
     return { dir: `${CHATS_DIR}/${sessionId}`, id: sessionId, meta, jsonl };
 }
-/** 读 `chats/index.jsonl`；文件不存在按空索引处理，坏行只计数。 */
-export async function readChatIndex(workDir) {
-    const file = path.join(workDir, CHATS_DIR, INDEX_FILE_NAME);
-    let text = '';
+/** 读 `chats/index.jsonl` 的原文；文件不存在 / 读不到按空索引处理（fail-open 到空，不抛）。 */
+async function readChatIndexText(indexFile) {
     try {
-        text = await readFile(file, 'utf8');
+        return await readFile(indexFile, 'utf8');
     }
     catch {
-        return { entries: [], exported: 0, lastExportAt: '', badLines: 0 };
+        return '';
     }
-    const byId = new Map();
-    let badLines = 0;
-    let lastExportAt = '';
-    for (const line of text.split('\n')) {
-        const trimmed = line.trim();
-        if (trimmed === '')
-            continue;
-        let parsed;
-        try {
-            parsed = JSON.parse(trimmed);
-        }
-        catch {
-            badLines += 1;
-            continue;
-        }
-        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            badLines += 1;
-            continue;
-        }
-        const record = parsed;
-        const id = typeof record.id === 'string' ? record.id : '';
-        if (id === '') {
-            badLines += 1;
-            continue;
-        }
-        const entry = {
-            id,
-            title: typeof record.title === 'string' ? record.title : '',
-            updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : '',
-            messageCount: typeof record.messageCount === 'number' ? record.messageCount : 0,
-            sha256: typeof record.sha256 === 'string' ? record.sha256 : '',
-        };
-        byId.delete(id);
-        byId.set(id, entry);
-        if (entry.updatedAt > lastExportAt)
-            lastExportAt = entry.updatedAt;
-    }
-    const entries = Array.from(byId.values());
-    return { entries, exported: entries.length, lastExportAt, badLines };
+}
+/**
+ * 当前隐藏 id 集合（mod-chat-hide 的导出抑制层）。
+ *
+ * 每次都**重新读盘**：选中前过滤与 `appendIndexLine` 前复核都调它，才能关住 TOCTOU 窗口。
+ * 文件不存在 = 没有隐藏项；坏行只计数、不抛。
+ */
+export async function readHiddenChatIds(workDir) {
+    const file = path.join(workDir, CHATS_DIR, INDEX_FILE_NAME);
+    const folded = foldChatIndex(await readChatIndexText(file));
+    return new Set(folded.hiddenIds);
+}
+/** 读 `chats/index.jsonl`；文件不存在按空索引处理，隐藏 id 不进正常投影，坏行只计数。 */
+export async function readChatIndex(workDir) {
+    const file = path.join(workDir, CHATS_DIR, INDEX_FILE_NAME);
+    const folded = foldChatIndex(await readChatIndexText(file));
+    return {
+        entries: folded.entries,
+        exported: folded.entries.length,
+        lastExportAt: folded.lastExportAt,
+        badLines: folded.badLines,
+    };
 }
 /**
  * 只追加一行到 `chats/index.jsonl`。
@@ -413,6 +395,10 @@ export async function uploadChats(repo, exports, options = {}) {
     for (const item of list) {
         try {
             assertSafeSessionId(item.id);
+            // 纵深第 2 层（写盘前）：隐藏集合每次重新读盘，命中即整会话跳过，不碰载荷。
+            if ((await readHiddenChatIds(repo.dir)).has(item.id)) {
+                throw new ChatExportError('deleted', '会话已隐藏，拒绝重新发布');
+            }
             const sessionDir = path.join(chatsRoot, item.id);
             await mkdir(sessionDir, { recursive: true });
             const metaFile = path.join(sessionDir, META_JSON_NAME);
@@ -420,6 +406,11 @@ export async function uploadChats(repo, exports, options = {}) {
             const meta = previousCreatedAt === '' ? item.meta : { ...item.meta, createdAt: previousCreatedAt };
             await writeFile(path.join(sessionDir, SESSION_JSONL_NAME), item.jsonl, 'utf8');
             await writeFile(metaFile, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
+            // 纵深第 2 层（TOCTOU）：**紧挨着 appendIndexLine 之前**再读一次。
+            // 隐藏行可能在本次导出期间被平板追加进来；此时绝不能再写一条普通行去"刷新"它。
+            if ((await readHiddenChatIds(repo.dir)).has(meta.sessionId)) {
+                throw new ChatExportError('deleted', '会话在导出期间被隐藏，拒绝追加普通行');
+            }
             await appendIndexLine(indexFile, {
                 id: meta.sessionId,
                 title: meta.title,

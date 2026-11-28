@@ -64,7 +64,7 @@ export const LOCAL_PENDING_MESSAGE = 'E_LOCAL_PENDING: 本地存在尚未推送�
  * 真分叉 / 领先提交不是本模块产生时的文案：**逐字保持原样**（老 `gateOfFacts` 的那一句）。
  * 快进通道上线后它依然准确：只有双方各有对方没有的提交时才会走到这里。
  */
-export const NOT_SYNCED_MESSAGE = '本地 HEAD 与 origin/main 不一致，本层不改写历史；下一步：确认本地领先提交是否带 dsh-dots-v2 尾注且只改 timeline/**，否则请人工协调后重试';
+export const NOT_SYNCED_MESSAGE = '本地 HEAD 与 origin/main 不一致，本层不改写历史；下一步：确认本地领先提交是否带 dsh-dots-v2 尾注且只改白名单路径（timeline/** 或恰为 chats/index.jsonl），否则请人工协调后重试';
 /** 快进成功之后本地仍未对齐（含事实自相矛盾）：点名「是快进没到位」，且说明不会循环重试。 */
 export const FF_INCOMPLETE_MESSAGE = 'E_NOT_SYNCED: 快进 origin/main 后本地与远端仍未对齐（本周期只允许一次快进，绝不循环重试）；下一步：稍后重试同步；若重复出现，请在本机仓库执行 git log / git status 人工核对';
 /** 快进失败且**不是**本地改动造成的（远端又动了、仓库有未完成合并等）：不借用「分叉」的措辞。 */
@@ -82,7 +82,8 @@ export function syncCommitMessage(days) {
 /**
  * 提交尾注（authority marker）：写在 commit **body**，不写 subject。
  * App 的 `syncProtocolStore.ets:552` 会发出一模一样的 `[v2] sync <n> days` subject，
- * 因此 subject 不能证明归属；只有带本尾注 + diff 全在 timeline/** 才算本模块提交。
+ * 因此 subject 不能证明归属；只有带本尾注 + diff 全在白名单路径
+ * （timeline/** 或**恰为** chats/index.jsonl）才算本模块提交。
  */
 export const V2_TRAILER_PREFIX = 'dsh-dots-v2:';
 export const DEFAULT_V2_INSTANCE_ID = 'plugin-git-store';
@@ -95,9 +96,20 @@ export function hasV2Trailer(body, instanceId = DEFAULT_V2_INSTANCE_ID) {
     const line = v2TrailerLine(instanceId);
     return body.split(/\r?\n/).some((row) => row.trim() === line);
 }
+/**
+ * 隐藏行的 subject（`mod-chat-hide`，设计 §5）：`chats: delete <id>`。
+ * 只允许与会话 id 白名单同款的字符；这是**精确多一种形状**，不是放宽成任意文本。
+ */
+export function isChatDeleteSubject(subject) {
+    const match = /^chats: delete ([A-Za-z0-9._-]{1,200})$/.exec(subject.trim());
+    if (match === null)
+        return false;
+    const id = match[1];
+    return id !== '.' && id !== '..';
+}
 /** 只检查 subject 形状；**单独不足以**证明归属（见 hasV2Trailer / isOursCommit）。 */
 export function isV2CommitSubject(subject) {
-    return /^\[v2\] (sync \d+ days|bootstrap main)$/.test(subject.trim());
+    return /^\[v2\] (sync \d+ days|bootstrap main)$/.test(subject.trim()) || isChatDeleteSubject(subject);
 }
 /**
  * 严格路径收容：只接受 `timeline/<…>` 的正斜杠相对路径。
@@ -113,12 +125,20 @@ export function isConfinedTimelinePath(p) {
         return false;
     return parts[0] === 'timeline' && parts.length > 1;
 }
-/** 三条件同时成立才算「本模块产生」：subject 形状 + 尾注 + diff 严格收容在 timeline/**。 */
+/**
+ * 严格路径收容（设计 §5）：`timeline/**` 或**字面量恰好** `chats/index.jsonl`。
+ * `chats/<id>/meta.json`、`chats/<id>/session.jsonl`、devices/**、配置载荷与
+ * 绝对 / 归一化 / 反斜杠 / 空段 / `.` / `..` 形态一律拒绝。
+ */
+export function isConfinedSyncPath(p) {
+    return p === 'chats/index.jsonl' || isConfinedTimelinePath(p);
+}
+/** 三条件同时成立才算「本模块产生」：subject 形状 + 尾注 + diff 严格收容在白名单路径。 */
 export function isOursCommit(commit, instanceId = DEFAULT_V2_INSTANCE_ID) {
     return isV2CommitSubject(commit.subject) &&
         hasV2Trailer(commit.body, instanceId) &&
         commit.paths.length > 0 &&
-        commit.paths.every(isConfinedTimelinePath);
+        commit.paths.every(isConfinedSyncPath);
 }
 /** 尾注存在但实例标识不是本模块（与「整条尾注缺失」区分）。 */
 function hasOtherV2Trailer(body, instanceId) {
@@ -130,14 +150,14 @@ function hasOtherV2Trailer(body, instanceId) {
 }
 /**
  * 纯函数：逐条解释领先提交的归属。复用 isOursCommit / isV2CommitSubject /
- * hasV2Trailer / isConfinedTimelinePath 同一批严格谓词——本函数只**增解释**，
+ * hasV2Trailer / isConfinedSyncPath 同一批严格谓词——本函数只**增解释**，
  * 不放宽任何一条：尾注缺失、实例不符、subject 非 v2 形状、diff 越界仍一律不算本模块。
  */
 export function describePendingOwnership(commits, instanceId = DEFAULT_V2_INSTANCE_ID) {
     const verdicts = commits.map((commit, i) => {
         const subjectShape = isV2CommitSubject(commit.subject) ? 'v2' : 'other';
         const trailer = hasV2Trailer(commit.body, instanceId);
-        const outsideScopePaths = commit.paths.filter((p) => !isConfinedTimelinePath(p)).length;
+        const outsideScopePaths = commit.paths.filter((p) => !isConfinedSyncPath(p)).length;
         const reasons = [];
         if (subjectShape !== 'v2')
             reasons.push('subject 不是 [v2] 形状');

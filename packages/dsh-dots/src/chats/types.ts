@@ -236,3 +236,5 @@ export type ChatExportErrorCode =
   | 'missing-header'
   | 'bad-session-id'
   | 'path-leak'
+  // mod-chat-hide：会话已隐藏，导出器按隐藏集合跳过（不是失败，但结果里必须如实记原因）。
+  | 'deleted'

@@ -8,11 +8,12 @@
  *     并保证**任何失败都不抛到 RPC 之外**（逐会话记原因，push 失败只降级整体 ok）。
  */
 import path from 'node:path';
-import { ChatExportError, readChatIndex, sanitizeChatReason, uploadChats } from './exportChats.js';
+import { ChatExportError, readChatIndex, readHiddenChatIds, sanitizeChatReason, uploadChats } from './exportChats.js';
 import { buildChatExport } from './exportChats.js';
 import { listLocalSessions, readSessionEvents } from './readSessions.js';
 export * from './types.js';
-export { CHATS_DIR, CHAT_SCHEMA_VERSION, ChatExportError, INDEX_FILE_NAME, META_JSON_NAME, REDACTED_PATH, SESSION_JSONL_NAME, buildChatExport, readChatIndex, redactSecrets, sanitizeChatReason, scanForLeaks, scrubAbsolutePaths, scrubAbsolutePathsDeep, uploadChats, workspaceNameOf, } from './exportChats.js';
+export { CHATS_DIR, CHAT_SCHEMA_VERSION, ChatExportError, INDEX_FILE_NAME, META_JSON_NAME, REDACTED_PATH, SESSION_JSONL_NAME, buildChatExport, readChatIndex, readHiddenChatIds, redactSecrets, sanitizeChatReason, scanForLeaks, scrubAbsolutePaths, scrubAbsolutePathsDeep, uploadChats, workspaceNameOf, } from './exportChats.js';
+export { foldChatIndex } from './foldChatIndex.js';
 export { SESSION_FILE_NAME, classifyEvents, countMessages, eventText, firstUserTextOf, frameByteLength, latestTitleOf, listLocalSessions, modelOf, readSessionEvents, resolveSessionsRoot, splitZstdFrames, } from './readSessions.js';
 /** `chatExportAll` 的默认上限：一次推爆远端仓库没有意义（每会话最多几 MB 明文）。 */
 export const DEFAULT_EXPORT_LIMIT = 50;
@@ -31,9 +32,11 @@ export async function readChatExportStatus(options = {}) {
     const workDir = typeof options.workDir === 'string' ? options.workDir : '';
     const snapshot = workDir === '' ? null : await readChatIndex(workDir);
     const exportedIds = new Set((snapshot?.entries ?? []).map((entry) => entry.id));
+    // 隐藏会话不再提示"待导出"：源 zstd 还在，但导出器会按隐藏集合跳过它。
+    const hiddenIds = workDir === '' ? new Set() : await readHiddenChatIds(workDir);
     let pending = 0;
     for (const session of local) {
-        if (!exportedIds.has(session.sessionId))
+        if (!exportedIds.has(session.sessionId) && !hiddenIds.has(session.sessionId))
             pending += 1;
     }
     return {
@@ -75,12 +78,18 @@ export async function exportChatsToRepo(options) {
     const byId = new Map();
     for (const session of local)
         byId.set(session.sessionId, session);
+    // 纵深第 1 层（选中前过滤）：隐藏会话既不构建也不上传，源 zstd 留着但绝不重新发布。
+    const hiddenIds = await readHiddenChatIds(options.repo.dir);
     let selected = [];
     if (Array.isArray(options.sessionIds) && options.sessionIds.length > 0) {
         for (const requested of options.sessionIds) {
             const id = typeof requested === 'string' ? requested.trim() : '';
             if (id === '') {
                 results.push({ id: '', ok: false, reason: 'bad-session-id' });
+                continue;
+            }
+            if (hiddenIds.has(id)) {
+                results.push({ id, ok: false, reason: 'deleted' });
                 continue;
             }
             const found = byId.get(id);
@@ -92,7 +101,12 @@ export async function exportChatsToRepo(options) {
         }
     }
     else {
-        selected = local.slice(0, limit);
+        selected = local.filter((session) => !hiddenIds.has(session.sessionId)).slice(0, limit);
+        for (const session of local) {
+            if (hiddenIds.has(session.sessionId)) {
+                results.push({ id: session.sessionId, ok: false, reason: 'deleted' });
+            }
+        }
     }
     const buildOptions = {
         deviceId: options.deviceId,

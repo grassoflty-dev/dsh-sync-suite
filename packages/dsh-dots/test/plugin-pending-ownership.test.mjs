@@ -367,8 +367,11 @@ test('PO-07 no-loosening：负例仍全被拒 + 新导出形状与终态归属�
   const here = path.dirname(fileURLToPath(import.meta.url))
   const cycleSrc = readFileSync(path.resolve(here, '../src/sync/cycle.ts'), 'utf8')
   // 严格收容谓词原样在位（不是被替换成 startsWith 之类的宽松判断）。
+  // mod-chat-hide：归属判定改用 isConfinedSyncPath（timeline/** 或恰为 chats/index.jsonl），
+  // 断言按 path:line 等量改指向新谓词；负例表与尾注/subject 条件一个都没删。
   assert.equal(cycleSrc.includes("parts[0] === 'timeline'"), true)
-  assert.equal(cycleSrc.includes('commit.paths.every(isConfinedTimelinePath)'), true)
+  assert.equal(cycleSrc.includes('commit.paths.every(isConfinedSyncPath)'), true)
+  assert.equal(cycleSrc.includes("p === 'chats/index.jsonl'"), true)
   assert.equal(cycleSrc.includes('force: false'), true)
   assert.equal(/force\s*:\s*true/.test(cycleSrc), false)
 
