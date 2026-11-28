@@ -76,7 +76,7 @@ const INDEX_REFRESH = bodyOf(INDEX, 'private refreshQuery(): void');
 const { applyQuery, makeFilter } = await import('../.build/model/query.js');
 
 describe('新建后即时可见：shell 的 show → reload → re-derive 链路（源码形状）', () => {
-  test('HLR-01 Home 是 show 信号唯一生产者：onPageShow 只推进一个 @State tick，无定时器', () => {
+  test('HLR-01 Home 是 show 信号唯一生产者：onPageShow 推进 show tick 并转发两个 chat 读回 tick，无定时器', () => {
     assert.match(HOME, /@State scheduleShowTick: number = 0;/, 'Home 必须持有单调递增的 show tick');
     assert.match(HOME_ON_SHOW, /this\.scheduleShowTick = this\.scheduleShowTick \+ 1;/,
       'onPageShow 必须推进 tick（唯一语句级要求，不替面板读盘）');

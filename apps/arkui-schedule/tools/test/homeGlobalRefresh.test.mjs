@@ -519,3 +519,110 @@ test('HGR-14 存储层守卫：早退失败不覆盖阻塞与戳，隐私码刷�
   assert.match(memberBody(HOME_SRC, 'aboutToAppear'), /syncStatusStore\.setFailed\(reason\)/,
     '确有绕过 fromCycle 的直接调用点 ⇒ 守卫必须在 setFailed')
 })
+
+// ---------------------------------------------------------------- mod-app-chat-pane-readback：
+// 冷却窗口内返回首页，两个 chat 面板必须无条件重读本地索引（HGR-15）。
+// 同一个探测器既打真实 Home.ets，也打红探针——避免写出「真实树绿、红探针也绿」的空跑守卫（§13.8）。
+
+/**
+ * 判定「回到 Home 后是否无条件重读两个 chat 面板」的唯一探测器。
+ * 吃一份源码（真实文件或 fixture），先剥注释、切出 onPageShow 方法体，
+ * 再按 bump 是否位于方法体顶层（花括号深度 0）且排在首个 await 之前判定。
+ */
+function detectShowChatReadback(source) {
+  const code = stripComments(source)
+  const body = memberBody(code, 'onPageShow')
+  const bumps = [
+    { key: 'dotsRefreshTick', statement: 'this.dotsRefreshTick = this.dotsRefreshTick + 1;' },
+    { key: 'cloudChatRefreshTick', statement: 'this.cloudChatRefreshTick = this.cloudChatRefreshTick + 1;' }
+  ]
+  const findings = bumps.map(({ key, statement }) => {
+    const at = body.indexOf(statement)
+    if (at < 0) {
+      return { key, present: false, topLevel: false }
+    }
+    // 深度 > 0 ⇒ bump 被塞进 if / 分支；首个 await 之后 ⇒ 不是无条件顶层语句。
+    let depth = 0
+    for (let i = 0; i < at; i++) {
+      if (body[i] === '{') depth++
+      else if (body[i] === '}') depth--
+    }
+    const afterAwait = /\bawait\b/.test(body.slice(0, at))
+    return { key, present: true, topLevel: depth === 0 && !afterAwait }
+  })
+  const hasForegroundCall = body.includes('void this.maybeForegroundSync();')
+  const hasTimer = /setInterval|setTimeout|requestAnimationFrame/.test(body)
+  return {
+    findings,
+    hasForegroundCall,
+    hasTimer,
+    ok: findings.every((finding) => finding.present && finding.topLevel) &&
+      hasForegroundCall && !hasTimer
+  }
+}
+
+test('HGR-15 冷却窗口内返回首页仍重读两个 chat 面板（规则守卫：真实树 + 红探针同探测器）', async () => {
+  // 三条件在同一处构造：周期已完成 + 冷却中 + 返回；断言表达的是规则，不是字面量化石。
+  // (a) 周期已完成：数据已在磁盘 / Chats 页拉取已落地。
+  //     homeGlobalRefresh.ts:296-301 的 reloadDots / reloadCloudChat 只在协调器周期内推进 tick；
+  //     pages/Chats.ets:185-199 的 pullAndReload() → syncController.pullNow() 绕过协调器，
+  //     那条路径落地的新数据不会推进 dotsRefreshTick / cloudChatRefreshTick ⇒ 面板可能陈旧。
+  const CHATS = stripComments(readEts('main/ets/pages/Chats.ets'))
+  assert.match(CHATS, /pullAndReload\(\): Promise<void>/)
+  assert.match(CHATS, /syncController\.pullNow\(\)/, 'Chats 页拉取走 pullNow（不经协调器）')
+  const appear = memberBody(HOME, 'aboutToAppear')
+  assert.match(appear,
+    /reloadDots: \(\)(:\s*void)? => \{[\s\S]{0,160}dotsRefreshTick = this\.dotsRefreshTick \+ 1;/,
+    '协调器的 dots 读回钩子才推进 dots tick')
+  assert.match(appear,
+    /reloadCloudChat: \(\)(:\s*void)? => \{[\s\S]{0,180}cloudChatRefreshTick = this\.cloudChatRefreshTick \+ 1;/,
+    '协调器的云端读回钩子才推进 cloud tick')
+
+  // (b) 冷却中：用真实常量 / 真函数证明 shouldRunForegroundTrigger 在 5 分钟内返回 false。
+  //     syncTriggerPolicy.ts:14 定义 FOREGROUND_MIN_AGE_MS，:35-50 用 age >= 它作判据。
+  const { FOREGROUND_MIN_AGE_MS, shouldRunForegroundTrigger } =
+    await import('../.build/model/syncTriggerPolicy.js')
+  const POLICY = stripComments(readEts('main/ets/model/syncTriggerPolicy.ts'))
+  assert.match(POLICY, /FOREGROUND_MIN_AGE_MS: number = 5 \* 60 \* 1000/)
+  assert.match(POLICY, /export function shouldRunForegroundTrigger\(/)
+  assert.match(POLICY, /const age: number = input\.nowMs - input\.lastAttemptMs;/)
+  assert.match(POLICY, /return age >= FOREGROUND_MIN_AGE_MS;/)
+  const nowMs = 1_800_000_000
+  const lastAttemptMs = nowMs - (FOREGROUND_MIN_AGE_MS - 1000)
+  assert.equal(shouldRunForegroundTrigger({
+    configured: true, inFlight: false, nowMs, lastAttemptMs
+  }), false, '冷却中：Date.now() - lastAttemptAt() < FOREGROUND_MIN_AGE_MS ⇒ 前台周期为零')
+  assert.match(memberBody(HOME, 'maybeForegroundSync'),
+    /shouldRunForegroundTrigger\(\{[\s\S]{0,240}lastAttemptMs: globalRefreshCoordinator\.lastAttemptAt\(\)/)
+
+  // (c) 返回：Home.onPageShow() 执行——即使 (a) 已落地、(b) 挡住了前台周期，面板也必须重读。
+  const real = detectShowChatReadback(HOME)
+  assert.equal(real.findings.find((item) => item.key === 'dotsRefreshTick')?.topLevel, true,
+    '返回首页必须无条件顶层推进 dotsRefreshTick（重读 dots 本地索引）')
+  assert.equal(real.findings.find((item) => item.key === 'cloudChatRefreshTick')?.topLevel, true,
+    '返回首页必须无条件顶层推进 cloudChatRefreshTick（重读云端本地索引）')
+  assert.equal(real.hasForegroundCall, true, 'void this.maybeForegroundSync(); 必须保留')
+  assert.equal(real.hasTimer, false, 'onPageShow 不得引入定时器 / 轮询')
+
+  // 红探针：把 dots bump 塞进冷却 if 分支——同一个探测器必须拒绝它（否则守卫是空跑）。
+  const RED_PROBE = `
+struct RedProbe {
+  onPageShow(): void {
+    this.scheduleShowTick = this.scheduleShowTick + 1;
+    this.instancesShowTick = this.instancesShowTick + 1;
+    if (this.inForegroundCooldown()) {
+      this.dotsRefreshTick = this.dotsRefreshTick + 1;
+    }
+    this.cloudChatRefreshTick = this.cloudChatRefreshTick + 1;
+    void this.maybeForegroundSync();
+  }
+}`
+  const red = detectShowChatReadback(RED_PROBE)
+  assert.equal(red.findings[0].topLevel, false, '红探针：冷却 if 分支里的 dots bump 不是顶层')
+  assert.equal(red.ok, false, '红探针必须被拒绝：分支内重读在冷却期内不会发生')
+
+  // 保活面板仍不得自己拿 onPageShow（paneLayout / shellLayout / uiTokens 三条守卫的事实）。
+  for (const [name, source] of [['DotsPane', DOTS], ['CloudChatPane', CLOUD]]) {
+    assert.equal(/onPageShow\s*\(/.test(source), false, `${name} 不得新增 onPageShow`)
+  }
+})

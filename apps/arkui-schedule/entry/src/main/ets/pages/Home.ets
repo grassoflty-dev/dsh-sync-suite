@@ -243,15 +243,24 @@ struct Home {
   }
 
   /**
-   * 页面重新显示：把一次性 show 信号转给日程面板（由它的 @Watch 消费保存标记 → 重读列表）。
+   * 页面重新显示：把一次性 show 信号转给日程面板（由它的 @Watch 消费保存标记 → 重读列表），
+   * 并让两个保活 chat 面板无条件重读本地会话索引。
    *
-   * 只推进 tick、不在外壳里替面板读盘 / 改筛选：单一事实来源仍是面板自己的 reload()。
-   * 不跑定时器、不轮询；show 是页面生命周期的自然一次事件。
+   * 为什么 chat tick 必须在这里推进：同步可以从 Chats 页的下拉直接发起
+   * （pullAndReload → syncController.pullNow），那条路不走 globalRefreshCoordinator，
+   * 因此不会触发它的 reloadDots / reloadCloudChat 钩子；而回到首页时前台周期还可能被
+   * 5 分钟冷却挡住。所以无论冷却与否，这里都无条件推进两个 chat tick——面板只在自己的
+   * @Watch 里做本地索引重读：不跑网络、不跑第二个周期、不建定时器、不弹 toast。
+   * 日程 / 实例 tick 沿用原语义；单一事实来源仍是各面板自己的 reload()。
    */
   onPageShow(): void {
     this.scheduleShowTick = this.scheduleShowTick + 1;
     // 删实例后返回首页：保活的实例面板靠这个 tick 重读，不显示已删行。
     this.instancesShowTick = this.instancesShowTick + 1;
+    // mod-app-chat-pane-readback：Chats 页下拉绕过协调器，回到首页必须无条件重读两个本地 chat 索引。
+    // 只推进 tick（面板 @Watch 里纯本地重读），不跑网络 / 不跑第二个周期 / 不建定时器 / 不弹 toast。
+    this.dotsRefreshTick = this.dotsRefreshTick + 1;
+    this.cloudChatRefreshTick = this.cloudChatRefreshTick + 1;
     // 冷启动请求只在进程第一次生效；这里再调也不会多跑一个周期（无定时器 / 无轮询）。
     homeStartupSync.request();
     // 前台恢复（mod-sync-silence-phase-b）：选 Home.onPageShow 而不是 EntryAbility.onForeground——
