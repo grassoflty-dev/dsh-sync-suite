@@ -1,6 +1,9 @@
 /**
  * 会话导出：本机 zstd 会话 → 共享仓库里的明文 `chats/<id>/{session.jsonl,meta.json}` + `chats/index.jsonl`。
  *
+ * 诚实告知（常驻声明，不是对话框）：会话正文会像日程一样自动同步到云端仓库，以明文 JSONL 保存并进入 Git 历史，无法抹除。
+ * 隐私过滤只打码凭据与绝对路径，并不改变「正文入仓」这一事实；告知文案不得软化成「备份 / 加密保存 / 仅本地可见」。
+ *
  * 三个职责严格分开，别混：
  *   1. `buildChatExport`：**纯函数**（除读时间外无 IO）。隐私过滤 + 逐行校验 + 生成 meta；
  *   2. `uploadChats`：只做「落盘 + 每个会话一个 commit + 一次 push」。push 失败**不抛**、
@@ -31,6 +34,7 @@ import type {
   ChatSessionSource,
   ChatUploadResult,
   LocalSessionInfo,
+  SessionHeader,
 } from './types.js'
 import { countMessages, firstUserTextOf, latestTitleOf, modelOf } from './readSessions.js'
 import { foldChatIndex } from './foldChatIndex.js'
@@ -51,6 +55,57 @@ const TITLE_FALLBACK_CHARS = 40
 const MAX_TITLE_CHARS = 200
 /** 索引行投影的字段（`docs/CHAT-SYNC.md` §2.4，多一个都不写）。 */
 const INDEX_FIELDS = ['id', 'title', 'updatedAt', 'messageCount', 'sha256'] as const
+
+/**
+ * mod-plugin-chat-export-auto：**每轮最多发布 50 个 chat 会话的安全上限**。
+ * 它是上限，不是选择窗口——绝不能按「最近 50 个」挑会话，否则会把 work 会话发出去。
+ * 选择只认唯一白名单谓词 `isPublishablePresetHeader()`：preset 字面量恰在
+ * `PUBLISHABLE_PRESET_IDS` 里的会话才是可发布的（chat / dots），
+ * 零轮（刚创建）的会话也要发布（Lead 2026-11-28 裁决）。
+ * 本机 readSessions 可见的 888 个规范会话全部是 `agentPreset:'standard'`（work），
+ * 因此今天实际会发布 0 个；50 只是防御性天花板，保证将来真有可发布会话时
+ * 单轮字节/时间仍有界，且远低于 `PUSH_TIMEOUT_MS = 120_000` 的推送纪律。
+ *
+ * 残余风险（照实记录，不在本 lane 关闭）：零轮的已发布会话尚未被 `agentPresets.select`
+ * 锁定，只有产生过一轮的会话才锁定，因此它理论上仍可被重新选成别的 preset。
+ * 本模块只读会话首行 header，**从不写、也不提供任何修改 preset 的 API**。
+ */
+export const CHAT_EXPORT_PER_RUN_CAP = 50
+
+/**
+ * 每轮导出阶段的硬时间上限（毫秒），只覆盖解码 + 哈希 + 写盘，不含网络。
+ * 20 s 远小于 `PUSH_TIMEOUT_MS = 120_000`；触顶时只在会话边界停下，
+ * 已写文件与已追加的索引行保留，随后仍由周期统一提交一次、推送一次。
+ */
+export const AUTO_EXPORT_PHASE_TIMEOUT_MS = 20_000
+
+/**
+ * 产品裁决（2026-11-28，三种会话形态）：可静默发布的 preset 白名单只有两项。
+ *   - `'chat'`：我们的 chat 入口创建（preset `chat`），只做对话；
+ *   - `'dots'`：我们的 dots 入口创建（preset `dots`），对话之外还有调整日程 / 定时任务 /
+ *     远程控制访问远程 DSH 的能力。
+ * DSH 自己 UI（preset `standard`）创建的 work 会话**只留本地、永不发布**。
+ *
+ * 这是 allow-list 精确全等，不是包含 / 前缀 / 大小写匹配；来源只有会话首行 header。
+ * `standard` / `null` / `undefined` / 空串 / 非字符串 / 未知 id 一律 fail-closed 为 work。
+ * 两份字面量只在这里出现一次；选择处与变更门控共用下面的同一个谓词，绝不各写一份成员判断。
+ * 零轮会话也要发布：刚建好时本就没有轮次，用户期望它出现在平板上。
+ *
+ * P2-4：`Object.freeze(new Set(...))` 只是容器本身冻结，`set.add()` 仍能改内容，不是真不可变。
+ * 这里换成冻结数组 + `includes`：数组冻结后没有可调用的增删成员方法，成员关系逐字节固定。
+ */
+export const PUBLISHABLE_PRESET_IDS: readonly string[] = Object.freeze(['chat', 'dots'] as string[])
+
+/**
+ * 唯一的发布白名单谓词：两个调用点（选择 + 变更门控）都调它。
+ * 先挡非对象 header，再挡非字符串 preset，最后才做一次 allow-list 成员判断。
+ */
+export function isPublishablePresetHeader(header: SessionHeader | null | undefined): boolean {
+  if (header === null || header === undefined || typeof header !== 'object') return false
+  const preset: unknown = header.agentPreset
+  if (typeof preset !== 'string') return false
+  return PUBLISHABLE_PRESET_IDS.includes(preset)
+}
 
 /** 会话导出失败（fail-closed）：`code` 机器可读，`message` 只含原因，**不含正文/路径**。 */
 export class ChatExportError extends Error {
@@ -377,6 +432,87 @@ export async function readChatIndex(workDir: string): Promise<ChatIndexSnapshot>
   }
 }
 
+/** 该 id 在隐藏感知折叠后的索引里最后一条普通行（没有则 undefined）。 */
+export function indexEntryOf(index: ChatIndexSnapshot, id: string): ChatIndexEntry | undefined {
+  for (const entry of index.entries) {
+    if (entry.id === id) return entry
+  }
+  return undefined
+}
+
+/**
+ * 索引里记录的 sha256（设计 §2 的变更锚点）。
+ * 走 `foldChatIndex` 后的投影：op 行只折叠隐藏状态，绝不会折成 `sha256:''` 打动门控；
+ * 坏行折出的空串按「内容变了」处理，绝不静默跳过。
+ */
+export function recordedSha256Of(index: ChatIndexSnapshot, id: string): string | undefined {
+  return indexEntryOf(index, id)?.sha256
+}
+
+/** 变更门控的结局：`export` 含「修复」（索引有行但载荷缺失），`skip` 含未变与 work 会话。 */
+export type ChatExportGateDecision =
+  | { action: 'export'; reason: 'new' | 'sha256-changed' | 'payload-missing' }
+  | { action: 'skip'; reason: 'unchanged' | 'work-session' }
+
+/**
+ * 纯函数：只有「本次 hash ≠ 索引记录的 sha256」或「索引有行但载荷文件缺失」才导出。
+ * 不读盘、不写盘：`indexEntry` 与 `payloadExists` 由调用方从同一份工作副本取来。
+ *
+ * **第二道 allow-list**（第一道在 index.ts 的选择处）：`header.agentPreset` 必须命中同一个
+ * `isPublishablePresetHeader()` 谓词，否则连 sha256 都不算就跳过。
+ * work 会话因此在任何调用路径上都进不了发布账本。
+ * 顺序要紧：preset 门 → sha 不同（全量重写 + 新 sha 行）→ 载荷缺失（修复 + 原 sha 行）。
+ */
+export function shouldExportChat(
+  built: ChatExport,
+  indexEntry: ChatIndexEntry | undefined,
+  payloadExists: boolean,
+  header: SessionHeader | null | undefined,
+): ChatExportGateDecision {
+  if (!isPublishablePresetHeader(header)) return { action: 'skip', reason: 'work-session' }
+  if (indexEntry === undefined) return { action: 'export', reason: 'new' }
+  const recorded = typeof indexEntry.sha256 === 'string' ? indexEntry.sha256 : ''
+  if (recorded === '' || recorded !== built.meta.sha256) return { action: 'export', reason: 'sha256-changed' }
+  if (!payloadExists) return { action: 'export', reason: 'payload-missing' }
+  return { action: 'skip', reason: 'unchanged' }
+}
+
+/**
+ * 载荷两件套是否都在工作副本里（「索引有行但载荷缺失」的判定源）。
+ * id 先过与写盘同款的白名单，坏 id 一律返回 false，绝不拼进文件系统路径。
+ */
+export async function chatPayloadExists(workDir: string, id: string): Promise<boolean> {
+  if (typeof id !== 'string' || id === '' || id.length > 200) return false
+  if (!/^[A-Za-z0-9._-]+$/.test(id) || id === '.' || id === '..') return false
+  try {
+    await Promise.all([
+      readFile(path.join(workDir, CHATS_DIR, id, SESSION_JSONL_NAME)),
+      readFile(path.join(workDir, CHATS_DIR, id, META_JSON_NAME)),
+    ])
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 索引普通行的 5 字段门禁（设计 §8）：缺字段 / 多字段 / 坏 JSON 一律拒绝。
+ * `op` 行（隐藏 / 恢复）由 `foldChatIndex` 单独折叠，不在这里按 5 字段判定。
+ */
+export function isValidChatIndexLine(line: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(line)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return false
+    const record = parsed as Record<string, unknown>
+    if (record.op !== undefined) return true
+    const keys = Object.keys(record)
+    return keys.length === INDEX_FIELDS.length &&
+      INDEX_FIELDS.every((field) => Object.prototype.hasOwnProperty.call(record, field))
+  } catch {
+    return false
+  }
+}
+
 /**
  * 只追加一行到 `chats/index.jsonl`。
  *
@@ -505,4 +641,91 @@ export async function uploadChats(
     // push 失败：本地文件/提交都保留，下次重试即可。
     return { ...result, ok: false, pushed: false, reason: reasonOf(error, 'push-failed') }
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* mod-plugin-chat-export-auto：只写盘，不提交、不推送                          */
+/* -------------------------------------------------------------------------- */
+
+export interface ChatExportWriteResult {
+  ok: boolean
+  reason?: string
+  /** 仓库相对 POSIX 路径，交给 v2 周期唯一的 commitAll 一起提交。 */
+  paths: string[]
+  /** 实际写了载荷的 id。 */
+  writtenIds: string[]
+  /** 修复行的 id：索引有行但载荷缺失，sha256 不变、updatedAt 更新。 */
+  repairedIds: string[]
+}
+
+/**
+ * 把门控放行的会话写进工作副本，**绝不 commit / push**（设计 §10 的 A + mutex）。
+ *
+ * 落盘顺序与 `uploadChats` 一致：`session.jsonl` → `meta.json` → `index.jsonl` 追加一行。
+ * 唯一的提交与推送由 `sync/cycle.ts` 在 pull/快进之后统一做一笔；push 失败时不会留下
+ * 本地 ahead 提交，下一周期也就不会变成事实上的 rebase（`exportChats.ts` 旧路径的陷阱）。
+ *
+ * 索引始终是「已成功发布」的唯一账本：修复场景追加一行**原 sha256**、新 `updatedAt`，
+ * 旧行留在 Git 历史里；既有字节从不重写。
+ */
+export async function writeChatExportPayloads(
+  workDir: string,
+  exports: ChatExport[],
+  decisions: Map<string, ChatExportGateDecision>,
+): Promise<ChatExportWriteResult> {
+  const result: ChatExportWriteResult = { ok: true, paths: [], writtenIds: [], repairedIds: [] }
+  const list = Array.isArray(exports) ? exports.filter((item) => item !== null && typeof item === 'object') : []
+  if (list.length === 0) return result
+
+  const indexFile = path.join(workDir, CHATS_DIR, INDEX_FILE_NAME)
+  // schema 门：任何一条坏普通行都让整轮导出在设计 §8 的失败语义下停住，
+  // 零载荷写入、零索引半行；本轮没有进程内重试，也不起定时器。
+  const existingIndex = await readChatIndexText(indexFile)
+  if (existingIndex.split('\n').some((line) => line.trim() !== '' && !isValidChatIndexLine(line))) {
+    return { ...result, ok: false, reason: 'index-schema-rejected' }
+  }
+  for (const item of list) {
+    try {
+      assertSafeSessionId(item.id)
+      // 纵深第三道：门控给出 work-session 的会话绝不落盘（调用方绕开选择处也挡住）。
+      if (decisions.get(item.id)?.reason === 'work-session') continue
+      // 隐藏集合每次重新读盘：写盘前与追加索引前各一次，关住 TOCTOU。
+      if ((await readHiddenChatIds(workDir)).has(item.id)) continue
+      const sessionDir = path.join(workDir, CHATS_DIR, item.id)
+      await mkdir(sessionDir, { recursive: true })
+
+      const metaFile = path.join(sessionDir, META_JSON_NAME)
+      const previousCreatedAt = await readPreviousCreatedAt(metaFile)
+      const meta: ChatExportMeta =
+        previousCreatedAt === '' ? item.meta : { ...item.meta, createdAt: previousCreatedAt }
+
+      await writeFile(path.join(sessionDir, SESSION_JSONL_NAME), item.jsonl, 'utf8')
+      await writeFile(metaFile, `${JSON.stringify(meta, null, 2)}\n`, 'utf8')
+      if ((await readHiddenChatIds(workDir)).has(meta.sessionId)) continue
+
+      await appendIndexLine(indexFile, {
+        id: meta.sessionId,
+        title: meta.title,
+        updatedAt: meta.updatedAt,
+        messageCount: meta.messageCount,
+        sha256: meta.sha256,
+      })
+
+      // 路径用 POSIX 字面量拼，绝不把 Windows 反斜杠带进 git 路径或门禁白名单。
+      for (const rel of [
+        `${CHATS_DIR}/${item.id}/${SESSION_JSONL_NAME}`,
+        `${CHATS_DIR}/${item.id}/${META_JSON_NAME}`,
+        `${CHATS_DIR}/${INDEX_FILE_NAME}`,
+      ]) {
+        if (!result.paths.includes(rel)) result.paths.push(rel)
+      }
+      result.writtenIds.push(meta.sessionId)
+      if (decisions.get(item.id)?.reason === 'payload-missing') result.repairedIds.push(meta.sessionId)
+    } catch (error) {
+      result.ok = false
+      result.reason = reasonOf(error, 'write-failed')
+      break
+    }
+  }
+  return result
 }

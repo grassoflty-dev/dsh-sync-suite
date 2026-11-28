@@ -104,6 +104,11 @@ export interface SyncStatus {
    * 「已配置仓库」不等于「可用仓库」：这个字段专门戳破那种假健康状态。
    */
   repoBlockCode?: string | null
+  /**
+   * 最近一次 v2 周期的 chat/dots 静默发布结果（P1-1）。只由 V2SyncRuntime → rpc.ts 注入，
+   * 空串 = 本轮没有发布结果，面板不渲染那一行；非空一定是 typed 安全文案，绝不代表按钮。
+   */
+  chatExportLine?: string
 }
 
 /** getState 的 settings 额外带 hasToken（BRIEF §2.4）。 */

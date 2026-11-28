@@ -178,6 +178,10 @@ export const REPO_BANNER_RULES: Record<string, RepoBannerRule> = {
     banner: null,
     reason: 'chat 域内部防御性码，不在仓库 / 推送路径上',
   },
+  E_CHAT_EXPORT: {
+    banner: null,
+    reason: '会话自动导出失败属 chat 域导出结果码，原因与下一步由周期层的 E_CHAT_EXPORT 中文文案逐字给出；它不表示仓库或凭据不可用，套进仓库横幅会把导出问题谎报成仓库阻断',
+  },
   E_INTERNAL: {
     banner: null,
     reason: '未预期异常的兜底码，没有任何可执行的下一步可写进横幅',

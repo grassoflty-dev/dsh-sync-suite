@@ -205,6 +205,11 @@ export interface RpcServiceOptions {
    * 返回 `E_INTERNAL 配对服务未挂载`，绝不返回空 payload 让 UI 画出假二维码。
    */
   pairing?: PairingServiceLike
+  /**
+   * P1-1：`status.chatExportLine` 的**唯一**生产者——由 index.ts 从 V2SyncRuntime 惰性取值。
+   * 不注入时返回空串（面板就不渲染那一行），绝不在这里臆造「已同步」。
+   */
+  chatExportStatusLine?: () => string
 }
 
 export interface RpcService {
@@ -426,6 +431,7 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
    * - `reachable`：状态文件里最近一次 testConnection/push/preview 的探测结果（三态）；
    * - `lastSyncAt`：状态文件里的最近一次成功同步时间；
    * - `error`：只填本地读取错误（工作副本损坏等）。网络不可达**不是**错误。
+   * - `chatExportLine`：只从注入的 V2SyncRuntime 投影取得，空串 = 本轮无 chat 发布结果。
    */
   async function getState(): Promise<GetStateData> {
     const settings = store.readSettings()
@@ -440,6 +446,8 @@ export function createRpcService(options: RpcServiceOptions = {}): RpcService {
       conflict: false,
       lastSyncAt: stateStore.readLastSyncAt(),
       repoBlockCode: stateStore.readRepoError(),
+      // P1-1：面板那一行在这里拿到唯一生产者的文本；没有注入 = 空串 = 不渲染。
+      chatExportLine: asString(options.chatExportStatusLine?.()),
     }
     const snapshotList: SnapshotMeta[] = snapshots.list()
     if (settings.repoUrl === '') {

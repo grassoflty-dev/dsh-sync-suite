@@ -119,7 +119,11 @@ test('shipped 面板的文案 key 双份都在；dormant 旧面板文案已删�
     // retarget（mod-plugin-remote-live-connections）：面板从历史审计改为「当前连接」，
     // 下面三行是新增的逐行文案 key，逐条点名而不是靠计数放行。
     'lean.remote.live.since', 'lean.remote.live.watching', 'lean.remote.live.more',
-    'lean.status.failed', 'lean.status.synced', 'lean.status.never'
+    'lean.status.failed', 'lean.status.synced', 'lean.status.never',
+    // retarget（mod-plugin-chat-export-auto）：常驻诚实声明与三条失败/部分发布文案，
+    // 逐条点名（不靠计数代替），改名会当场失败。
+    'lean.chatExport.honesty', 'lean.chatExport.scope', 'lean.chatExport.paused',
+    'lean.chatExport.partial', 'lean.chatExport.skipped'
   ]
   for (const [lang, dict] of [['en', en], ['zh', zh]]) {
     for (const key of shippedKeys) {
@@ -139,9 +143,12 @@ test('shipped 面板的文案 key 双份都在；dormant 旧面板文案已删�
   // （监听在启动后死掉那一句，带 `{code}` 与 `{message}` 两个占位符）→ 86；
   // retarget（mod-plugin-remote-live-connections，locale.test.mjs:138）：新增
   // `lean.remote.live.since`（已连接 {n} 分钟）、`lean.remote.live.watching`（正在查看）、
-  // `lean.remote.live.more`（还有 {n} 个）三个逐行文案 key → **89**。
+  // `lean.remote.live.more`（还有 {n} 个）三个逐行文案 key → **89**；
+  // retarget（mod-plugin-chat-export-auto，locale.test.mjs:144）：新增诚实声明
+  // `lean.chatExport.honesty`、范围声明 `lean.chatExport.scope`
+  // 与暂停 / 部分发布 / 跳过不完整会话三条文案 → **94**。
   // 精确计数同时阻止整批复活与误删；新 key 还必须在上面逐条点名，改名会当场失败。
-  assert.equal(Object.keys(en).length, 89, `locale 应恰好 89 个 shipped key，实际 ${Object.keys(en).length}`)
+  assert.equal(Object.keys(en).length, 94, `locale 应恰好 94 个 shipped key，实际 ${Object.keys(en).length}`)
   // 点名（不靠计数代替）：这一句两边都必须真的有翻译，照抄英文也算没做。
   assert.equal(typeof en['lean.remote.autostarted'], 'string')
   assert.equal(typeof zh['lean.remote.autostarted'], 'string')
