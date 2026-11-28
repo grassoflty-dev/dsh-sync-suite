@@ -19,8 +19,9 @@
 //
 // 【刻意不在这里管】（不是放宽，是不同契约 / 不同状态）：
 //   - `components/**` 是契约本身的实现（`EmptyState` 内部就有 `ActionButton`），不在扫描范围；
-//   - no-match / 筛选族「没有匹配…」「没有符合筛选条件…」是 `docs/STATE-UI.md` §5 里的另一种状态，
-//     不是空态；本探针只做 marker **前缀**匹配，这些句子不会被误判为空态标题；
+//   - no-match / 筛选族「没有匹配…」「没有符合筛选条件…」是另一种状态，不是空态：见 `docs/UI-DESIGN.md:428`
+//     （「没有匹配… / 没有符合筛选条件…」）、`docs/CHAT-APP.md:79`（§3.3 无匹配，title 行）与
+//     `pages/Chats.ets` 的 `NoMatch`（pages/Chats.ets:531）；本探针只做 marker **前缀**匹配，这些句子不会被误判为空态标题；
 //   - 弱提示（例如「今天还没有日程」）不以 marker 开头，属于提示而非空态标题，不命中；
 //   - 任何经 helper 函数间接渲染的标题（`Text(titleOf(...))` / `Text(this.title())`）追不到，
 //     本探针故意不管，不要靠加正则去「覆盖」它。

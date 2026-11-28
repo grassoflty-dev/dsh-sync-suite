@@ -125,10 +125,14 @@ describe('空态 doctrine：面板不再旁路 EmptyState（old→new，只收�
   });
 
   // ED-05 old→new：旧守卫只钉「面板 cloud 句 === Chats.ets cloud 句」这一条字节等号，
-  // 于是页面那句真话（onPageShow 真会重读）被原样抄进保活面板，变成做不到的空头支票：
-  // 面板只在 aboutToAppear / 全局刷新 tick 重读，回到本页并不会自动读到新数据。
-  // R2-01：第三句「本页显示最近一次同步的结果」在一条可达路径上仍会为假——Chats 页 pull 走
-  // syncController.pullNow() 不推进面板 tick，Home 前台 5 分钟冷却又挡住补偿周期，面板可能停在上次读取到的结果；
+  // 于是页面那句真话（onPageShow 真会重读）被原样抄进保活面板，变成当时做不到的空头支票：
+  // 当时面板只在 aboutToAppear / 全局刷新 tick 重读，回到本页并不会自动读到新数据；
+  // d90c75e 起 Home.onPageShow() 在每次从其他页面返回首页（页级返回）时无条件推进 dots / cloudChat 两个 tick，
+  // 面板的 @Watch 因此每次返回都做一次本地会话索引重读（无网络 / 无第二个周期 / 无定时器 / 无 toast）；
+  // 页内切段由 Home.selectSection 只赋 section / drawerOpen、不推进 tick，保活面板不重读，旧前提只指页级返回。
+  // R2-01：第三句「本页显示最近一次同步的结果」仍在一条可达路径上为假——Chats 页 pull 走
+  // syncController.pullNow() 绕过 globalRefreshCoordinator；若用户在该 pull 仍在飞行时回到首页，
+  // 本次本地重读可能早于 pull 落地，面板停在上次读取到的结果；无后续订阅，下一次触发才反映。
   // Lead 判据是「逐字可证为真」，所以第三句改成「本页显示上次读取到的同步结果」，并把「最近一次」列为拒绝形状。
   // 新守卫换成四段更紧的钉子：(a) 批准前缀两边逐字相同；(a2) R2-02 dots 专属前缀存在，让 (c) 的名词归一不空转；
   // (b) 第三句必须是诚实句且不含假承诺形状；
@@ -172,7 +176,7 @@ describe('空态 doctrine：面板不再旁路 EmptyState（old→new，只收�
     const falsePromises = ['回到本页', '即可看到', '立即', '马上', '自动刷新', '最近一次'];
     for (const [label, detail] of [['DotsPane', dotsDetail], ['CloudChatPane', cloudDetail]]) {
       assert.ok(detail.endsWith(honestTail),
-        `${label} 的 detail 必须以诚实句结尾「${honestTail}」（保活面板只在 aboutToAppear / @Watch('onGlobalRefreshTick') 重读，没被读到的同步要到下一次读取才反映，不能声称「最近一次」），实测「${detail}」`);
+        `${label} 的 detail 必须以诚实句结尾「${honestTail}」（回到首页现在会通过推进的 tick 触发本地重读，但 Chats 页发起的 pull 若仍在飞行，读取可能早于其落地，故仍不能声称「最近一次」），实测「${detail}」`);
       for (const shape of falsePromises) {
         assert.equal(detail.includes(shape), false,
           `${label} 的 detail 不得含做不到的承诺形状「${shape}」，实测「${detail}」`);

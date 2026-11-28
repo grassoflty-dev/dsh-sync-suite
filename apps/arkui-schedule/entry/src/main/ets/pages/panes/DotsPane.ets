@@ -4,7 +4,7 @@
  * 对外契约（Home 装配，一字未改）：
  *   - `@Prop deepLinkId`：深链携带的会话 id，预留给「按 id 打开指定 dots 会话」，当前不消费；
  *   - `@Prop active`：由 Home 按当前分段传入，根 Scroll 据此在 Visible / Hidden 间切换；
- *     Hidden 仍留在组件树上，切段不丢 @State（不卸载、不每次显示都重读）。
+ *     Hidden 仍留在组件树上，切段不丢 @State（不卸载、@State 保留）；页级返回首页 Home.onPageShow() 会推进 dots tick 并触发本地索引重读（另一处推进是周期 settle 后的 globalRefreshCoordinator.reloadDots），页内切段不推进 tick、不重读——但 Chats 页在途 pull 可能尚未落地，读到的仍是上次结果（见文件头）。
  *
  * 数据链与 CloudChatPane 同源：`services/chatStore` 的 prepare / listChats + `model/chatList`
  * 的 filterBySegment / sortChats / chatSummaryLine，只取投影 preset 为 dots 的会话；
@@ -20,11 +20,11 @@
  * 加载 / 空 / 错误+重试 / 列表四态齐全，不渲染任何假行。
  * 空态经 `components/state/EmptyState` 显式 `showAction: false`：没有可点的东西时只给一句事实，
  * 不渲染同步 / 导出形状的按钮（旧「下一步 + 刷新按钮」口径已作废）。
- * 事实句只陈述「本页显示上次读取到的同步结果」，不承诺结果时效性，也不承诺回到本页就读到新数据：
- * 本面板是保活组件，重读只发生在 aboutToAppear 与 @Watch('onGlobalRefreshTick') 的外壳全局刷新 tick，
- * 切段回到本页不触发读取；一次同步若没被本面板读到（Chats 页 pull 不推进 dots tick、
- * Home 前台 5 分钟冷却挡住补偿周期），结果要等到下一次读取才反映，所以这句只按读到的那一刻说，
- * 不能承诺结果一定是最新的；`pages/Chats.ets` 是页面，onPageShow 真会重读，所以那句真话只留在页面里，本面板不照抄。
+ * 事实句只陈述「本页显示上次读取到的同步结果」，按触发那一刻的本地索引说真话，不承诺结果时效性；
+ * 重读只有三处：首次挂载 aboutToAppear()（兼 chatStore.prepare）、@Watch('onGlobalRefreshTick') 收到 tick 变化（Home 把 dotsRefreshTick 传入，Home.ets:540）、错误态用户按「重试」；
+ * tick 两处推进：周期 settle 后的 globalRefreshCoordinator.reloadDots +1（Home.ets:172-177）、d90c75e 起 Home.onPageShow() 每次从其他页面返回首页（页级返回，Home.ets:256-263）无条件把 dots / cloudChat 两个 chat tick +1 → @Watch → 本地索引重读；页内切段（rail 分段来回切，Home.selectSection / Home.ets:499-502 只赋 section / drawerOpen）不推进 tick，保活面板不重读；旧注释把页级返回与页内切段混作一句话，对页内切段仍成立、对页级返回自 d90c75e 起不再成立，错在所指事件本身而非文案陈旧；
+ * 重读只是 chatStore.listChats() 读本地会话索引，不跑网络 / 第二个周期 / 定时器 / toast；第三句保留是因为 Chats 页下拉 pullAndReload() → syncController.pullNow() 绕过协调器，
+ * 回首页时该 pull 可能仍在飞行、落地晚于本次读取，面板仍是上次结果；没有谁订阅稍后的落地，下一次触发才反映；`pages/Chats.ets` 页面 onPageShow 真会重读、保留自己的句子，本面板不照抄。
  *
  * 历史锚点（守卫按源码文本钉住，勿当作现行语义）：
  * scaffold 原因旧值「dots 尚未接线」与禁用输入框 `输入给 dots 的指令…` 已随真列表移除，
@@ -58,7 +58,7 @@ const DOTS_SUBTITLE: string = 'dots 只读查看会话，暂不能发指令。';
 const GRANT_LINE_PREFIX: string = 'dots 权限（只读）：';
 const GRANT_LINE_NO_COMMAND: string = `；命令工具 ${TOOL_SESSION_PROMPT} 未授予。`;
 
-/** 空态文案（old→new）：前两条沿用批准措辞；第三句只说「本页显示上次读取到的同步结果」——保活面板只在 aboutToAppear / @Watch('onGlobalRefreshTick') 重读，没被它读到的同步要到下一次读取才反映，既不承诺回到本页就读到新数据，也不承诺结果一定是最新的。 */
+/** 空态文案（old→new）：前两条沿用批准措辞；第三句只说「本页显示上次读取到的同步结果」——重读来自 aboutToAppear、@Watch 的 tick 变化（周期 settle 与每次回到首页 Home.onPageShow() 两处推进）与错误态重试，只读本地会话索引；回首页虽会重读，但 Chats 页在途 pull 未落地时仍可能是上次结果（详见文件头），故不承诺时效性。 */
 const EMPTY_DOTS_TITLE: string = '还没有 dots 对话';
 const EMPTY_DOTS_DETAIL: string =
   '先在设置里配置仓库；之后 dots 会话会在后台自动同步过来；本页显示上次读取到的同步结果。';
@@ -74,13 +74,17 @@ export struct DotsPane {
   /** 保活可见性：Home 当前分段为 dots 时传 true。 */
   @Prop active: boolean = true;
   /**
-   * 首页全局下拉刷新的读回信号（mod-home-global-refresh）：Home 在一次周期 settle 后 +1。
-   * 本面板是保活 @Component，框架不会调用自己的 onPageShow，只能靠 @Watch 接外壳信号；
-   * 这里**只重读 chatStore**（无网络、无第二个周期），与 aboutToAppear 共用同一条 reload()。
+   * 首页全局下拉刷新的读回信号（mod-home-global-refresh）：tick 有两处推进——周期 settle 后的
+   * globalRefreshCoordinator.reloadDots +1（Home.ets:172-177）、d90c75e 起 Home.onPageShow() 每次从其他页面返回首页（页级返回，Home.ets:256-263）无条件 +1（两个 chat tick）；页内切段（Home.selectSection / Home.ets:499-502）不推进 tick、不重读；
+   * Home 把 dotsRefreshTick 传入（Home.ets:540）。
+   * 本面板是保活 @Component，框架不会调用自己的 onPageShow，只能通过 @Watch 接收外壳传来的 prop；
+   * 这里**只重读 chatStore 的本地会话索引**（无网络、无第二个周期、无定时器、无 toast），
+   * 与 aboutToAppear 共用同一条 reload()。注意：Chats 页在途 pull 可能晚于本次读取落地，
+   * 此刻读到的仍是上次结果（详见文件头），故此信号不保证已经呈现「最近一次」同步。
    */
   @Prop @Watch('onGlobalRefreshTick') globalRefreshTick: number = 0;
 
-  /** 全部 dots 会话（已排序、已按投影 preset 过滤）；只在 aboutToAppear / 重试 / 全局刷新时重读。 */
+  /** 全部 dots 会话（已排序、已按投影 preset 过滤）；重读于 aboutToAppear / 错误态重试 / tick 变化（周期 settle 与回到首页两处推进），读触发时的本地索引，Chats 在途 pull 未落地时仍是上次结果。 */
   @State chats: ChatIndexEntry[] = [];
   /** 读取失败原因；空串 = 无错误。 */
   @State errorText: string = '';
@@ -98,7 +102,7 @@ export struct DotsPane {
     this.refusalReason = this.buildRefusalReason();
   }
 
-  /** 外壳全局刷新信号：一次周期的结果已落盘，这里只从 chatStore 重读，不重跑任何同步。 */
+  /** 外壳全局刷新信号有两源：一次周期 settle，以及从其他页面返回首页这一页级事件 Home.onPageShow()（页内切段不推进 tick）；这里只从 chatStore 重读本地会话索引，不跑同步 / 网络 / 定时器；Chats 页在途 pull 未落地时仍是上次结果（见文件头）。 */
   onGlobalRefreshTick(): void {
     this.reload();
   }
