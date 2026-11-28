@@ -898,6 +898,7 @@ c41eb（v2 唯一路径；删除激活闸与双存储兼容；评审 P1-1/P1-2 �
 | # | 模块 id | 一句话 | 提交 | 标签 | 测试能证明的 | 只有真机能确认的（`unverified`） |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | `mod-app-empty-state-panes` | Home 的 dots / 云端两个面板的空态改走 `EmptyState({showAction:false})`，并加守卫防复发 | `a9ecc93` | `module/mod-app-empty-state-panes` | 干净 HEAD 基线 3438/3438/0 → 修后 **3447/3447/0**；守卫 9/9；**先红后绿 ×3**（`gates-esd-r1-red-before.out` 25,507 B 点名两个 pane 的硬编码行；`-r4-` 2,832 B 逐字打出旧「回到本页即可看到」；`-r5-` 2,873 B 逐字打出旧「最近一次同步的结果」）；产物 `modules.abc` 3,446,040 B：新第三句 ×2、「先在设置里同步一次仓库」0 次 | 居中空态的实际观感/换行/留白未验；第三句「本页显示上次读取到的同步结果」是**结构为真**的描述，未人眼复核 |
+| 2 | `mod-app-chat-pane-readback` | 回到首页时无条件推进两个 chat tick，让保活面板重读**本地索引**（不发网络、不跑第二个周期） | `d90c75e` | `module/mod-app-chat-pane-readback` | 先红后绿：`gates-cpr-r1-red-before.out` 3,614 B（HGR-15 在 Home.ets 改动之前就红）；修后 187/187/0、全量 **3,448/3,448/0**（+1 = HGR-15）、tsc 0、validate 8/8；评审自跑 **4/4 变异全被杀死**（塞进冷却 if、删 cloud bump、bump 前加 await、bump 改空操作）；Rule 9 `build-20261128-160524.log`：`CompileArkTS` 2 s 639 ms ×1 / UP-TO-DATE ×0 / ERROR ×0 / BUILD SUCCESSFUL 6 s 687 ms | 无真机（本轮未做设备 pass）；「返回即刻可见」的真实时序未验（重读是异步的）；**面板文案不恢复**与 Chats 页逐字一致——仍存在「拉取在途时返回首页」的残留路径 |
 
 **两处只有设备才看得见的结论**：
 1. **教条的「已采纳」是按文件算的** —— 一个页面采纳不等于一条界面路径采纳；这次的守卫改成扫描 `pages/**` 与 `pages/panes/**`，且同一探测器既扫真实树也跑红探针。
