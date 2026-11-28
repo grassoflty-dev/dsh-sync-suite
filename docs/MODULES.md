@@ -18,7 +18,7 @@
 10. **门闸输出必须当次留存（捕获纪律）**：每一次门禁运行都要保留完整输出（例如 `node --test ... 2>&1 | Tee-Object -FilePath .tmp/gates-<wave>.out`），使任何失败事后能点名到具体用例；没有留存日志的门闸结果不算证据，点不出名的失败不能分诊，也不许写成「已排除」。任何由设计师或评审执行的 gate 运行**必须** `Tee-Object` 到 `.tmp/gates-<lane>.out`；**没有留存日志的运行不构成证据**，不得作为 PASS 依据；评审若未留存，其结论按「未捕获」记录。**已记录的不明项（2026-11-21 Wave B）**：全量 app 套件 `node --test "apps/arkui-schedule/tools/test/*.test.mjs"` 共 2721 例，出现过**一次性 1 fail**，随后 14 次连续全绿（均 2721/2721/0/0）；因当次输出未留存，无法点名失败用例。套件内唯一显式超时是 `apps/arkui-schedule/tools/test/deviceAccept.test.mjs:465`（`timeout: 60000`），疑似负载敏感用例，**未证实**。处置：不据此盲改超时、不宣称已修复，只强制留存输出（本条规则）+ 本条记录；复现时按留存输出点名并单独修复。抖动台账见 `docs/FLAKES.md`。**陈旧性判定只看会进产物的输入**（`.ets` / `resources/**` / `AppScope/**` / 桥 JS / `main_pages.json` 等）；测试、文档、README 的 mtime 晚于构建**不影响**产物证据，评审不得据此判「产物过期」——本轮就出现过一次把 `docs/*.md` 的 mtime 当编译输入的误判。
 11. **凭据卫生：输出先打码，报告只报形态**：凡可能含凭据的命令输出（设备偏好快照 / 配置导出 / 请求响应体 / git 输出 / 构建日志等），在贴进 transcript、日志或报告之前必须经 `tools/redact.mjs`（`node tools/redact.mjs` 走 stdin→stdout，或 import 其 `redact(text)`）按模式遮罩；**只遮 URL 的写法不算打码**，因为 query、userinfo 与裸值仍会完整保留。报告只写「存在/不存在 + 长度类别」，**绝不写凭据值或任何可还原的片段**；打码工具自身对 hex 一律输出 `<redacted-hex>`、对其它密钥输出 `<redacted>`，不携带长度类别。伤疤：`1000007` 验证期间一次设备偏好快照检查只遮了 URL，把一个 32 位十六进制访问令牌原样打进了会话 transcript；该值仅存在于 6 个未跟踪的 `.tmp` 快照中，已就地清理且 XML 保持合法，仓库历史与源码未发现。此条为安全卫生规则而非功能特性。
 
-### 0.1 五种失败模式 → 五条方法（2026-11-27/28 夜间沉淀，写方法不写史）
+### 0.1 六种失败模式 → 六条方法（2026-11-27/28 夜间沉淀，写方法不写史；第 6 条 2026-11-28 上午补）
 
 以下五条**不是事故记录，是操作纪律**。每条给出「现象 → 必须做的动作」，下一次遇到同类情形直接照做。
 
@@ -33,7 +33,11 @@
 5. **测试绿、生活里半对**（现象：一个模块的测试全绿、评审也放行，真机/真仓库一跑就露——本轮出现两次：`lastSyncAt` 只接了启动周期没接工具保存路径；实例删除只把授权标成吊销而留了悬空 `instanceId`）。
    **动作**：收尾前必须回答一句**「这条路径在生产里由谁调用？」**，答不出来或答出「没有生产调用者」的，必须在登记里写清（例：`syncNow()` 至今无生产调用者）；凡「只在测试夹具里成立」的结论，一律标 `unverified` 并写出**要怎样才能验证**（具体命令 + 观察点），不得用测试绿代替。
 
-引入这五条的代价是每批多花几分钟；不引入的代价是模块被提交后仍然半对、且没人知道。
+6. **车道静默：写完了文件、零 capture 就转 inactive**（现象：一晚多次需要整条重派，其中一次其实仍在构建，却被误判成卡住）。
+   **动作**：**capture 先于产出**——动手改**第三个文件之前**，必须先落第一份 capture（哪怕只是一次 `git status --porcelain`，甚至一次故意失败的 `tsc`）。已经改了三个文件却零 capture 的车道，按**卡住**处理：停掉、重派，不等它汇报。**构建必须在开跑前说明**（「构建开始，capture 将叫 X」），汇报发生在**第一次写 capture 时**，不是等构建跑完。任何「做完了」如果没有**capture 名字与字节数**，不算结论——这是「absence 要路径与目录」那条纪律的另一半，它管的是 presence。
+   **反方向同样成立**：不许用一份缺失的清单判定车道死了。本轮既有车道被误判为「零证据」而其实正在跑，也有工具把「正忙」报成 `unavailable` 被当成「已死」。判据只能是**树 + captures + 被改文件的 mtime 三样一起读**；读不全就先等或先问，不要先停、更不要先报「挂了」。工具自身的并发守卫（覆盖层 `applied=true`、构建脚本 exit 4）是最后一道兜底，不是第一道判据。
+
+引入这六条的代价是每批多花几分钟；不引入的代价是模块被提交后仍然半对、且没人知道。
 
 > **版本号缺口（2026-11-22 登记一次）**：实际发布的序号是 `…1000007 → 1000008（构建了、bump 未提交）→ 1000009 → 1000011 → 1000012…`；**`1000008` 与 `1000010` 从未作为提交存在**。
 >
@@ -145,6 +149,7 @@
 | `mod-plugin-remote-hints-mode-keyed` | 插件精简远程组的提示改为**按选项查表**：`LEAN_MODE_HINTS`（`auto` / `tailscale` / `lan` / `ipv6` + `none` + `fallback`）一条一个模式，`none` 只点名推荐的下一步（Tailscale），未知模式走中性 fallback；渲染器只查一行，不再把多个模式的要求拼成一句 | 已写完（待 Lead 提交，状态 / 哈希（Lead 填））；**已编译（插件 `node scripts/build.mjs` exit 0 + `dist/` 与新鲜 `tsc` 逐字节一致）/ 未装机 / unverified** | （Lead 填） | 提交前回滚 = 撤销 `src/client.js` 的 `LEAN_MODE_HINTS` / `leanModeHint` / 查表渲染、`locale/{zh,en}.json` 五键与 `dist/client.js`，还原 `tools/test/{client-remote-render,pairing-client-wiring,client-lean-inventory,locale}.test.mjs` 的 retarget 并删除 `tools/test/remote-hints-mode-keyed.test.mjs`，撤销本文 §1/§2/§6 登记；提交后 `git revert <hash>`（独立叶子；`pairingShow`-only 取密、挂载零剪贴板、无端口 / 令牌输入框均不变） | 依赖 `mod-plugin-pairing-client`（`LeanRemoteGroup` 与 `lean.*` 字典）、`mod-plugin-lean-panel`；与所有插件包模块共用 `scripts/build.mjs` 与提交的 `dist/` 树（单构建窗口 ⇒ 构建串行）；无下游 | `packages/dsh-dots/test/remote-hints-mode-keyed.test.mjs`（一模式一句 / 异模式不出现 / 未知模式中性） |
 | `mod-plugin-askpass-node-resolution` | askpass 解释器解析：显式 `DSH_GIT_SYNC_NODE` → PATH `node(.exe)` → DSH 应用二进制**仅配** `ELECTRON_RUN_AS_NODE=1` → typed `E_ASKPASS_NODE_MISSING`；每个候选先过 `-e` 标记探针（2 s、进程内缓存）；`gitPort.pushFailure()` 不再把这类失败捏造成 `auth-prompt`，`cycle.ts` 保留 typed 码并给出对应下一步 | 已写完（待 Lead 提交，状态 / 哈希（Lead 填））；**已编译（插件 build exit 0 + `dist/` 逐字节一致）/ 未装机 / 真机推送 unverified** | （Lead 填） | 提交前回滚 = 删除 `src/engine/nodePath.ts`、`test/askpass-node-resolution.test.mjs` 与 `dist/engine/nodePath.js`，撤销 `src/engine/git.ts` / `src/sync/gitPort.ts` / `src/sync/cycle.ts` 三处增量与其 dist 产物，撤销本文 §1/§2/§6 登记；提交后 `git revert <hash>`（独立叶子；`gitAuthEnv()` 其余字节、真 `auth-prompt` 分类与 `E_PUSH_REJECTED` 原文案均不变） | 承接 `mod-plugin-git-auth-env`（`gitAuthEnv()` 单一构造点）与 `mod-plugin-pairing-client`；改共享 `src/sync/cycle.ts` / `src/sync/gitPort.ts`（见 §2）；无下游 | `packages/dsh-dots/test/askpass-node-resolution.test.mjs`（9 例）；诊断文案 `找不到可用的 node 解释器：…`；测试 17 例 |
 | `mod-tablet-git-bridge-diagnostics` | 修真机「Git 操作失败：Cannot read properties of undefined (reading 'length')」：`opV2Git('fastForward')` 误用 `git.merge({oid})`（isomorphic-git 1.25.3 期望 `theirs`，内部 `ref` 为 `undefined`，`GitRefManager.expand` 读 `ref.length`）→ 改为 `theirs` 后「落后远端 + 本地改动」能快进；每个桥命令收敛到 `E_BRIDGE` 边界（原始 JS 消息只进诊断行，主状态行换成固定中文），并给 7 个跨边界助手加数组 / 字符串守卫 | 已写完（待 Lead 提交，状态 / 哈希（Lead 填））；**已编译（`build-20261123-210334.log`）/ 未装机 / unverified** | （Lead 填） | 提交前回滚 = 撤销 `git-bridge.js` 的 `theirs` 修复 / `E_BRIDGE` 边界 / 七个守卫与测试导出，撤销 `services/GitSyncService.ets` 的 `E_BRIDGE` 映射与 `bridgeDiagnostic` 增量，删除 `tools/test/gitBridgeDiagnostics.test.mjs`，撤销本文 §1/§2/§6 与 `docs/ROADMAP.md` 登记；提交后 `git revert <hash>`（独立叶子；快进 / union / 门禁语义除该 bug 外不变） | 依赖 `mod-v2-sync-wiring`（`v2Git` 八 op）、`mod-sync-single-flight` / `mod-v2-sync-protocol`（周期调用点）；改共享 `git-bridge.js`（多模块共用，见 §2）；无下游 | `docs/REVIEW-app-qr-scan-and-bridge.md` §B；`tools/test/gitBridgeDiagnostics.test.mjs`（16 例，含真 repo 对复现旧 V8 报错） |
+| `mod-plugin-timeline-tool-rename` | 插件日历工具由 `schedule_*` 改名为 `timeline_*`，与 DSH 设备本地调度器的 `schedule_*` 区分 | 计划中（未实现；需插件构建，`dist` 冻结中） | （Lead 填） | 未提交前回滚 = 删除本行；提交后 `git revert <hash>` | 阻塞于 Lead 的 DSH 重启验证 | `docs/PLUGIN-GAPS.md` §1.1（`schedule_*` 命名守卫全文；交叉引用 `docs/DATA-CONTRACT-v2.md` §11 写路径表后一行） |
 
 `mod-v2-dual-read` 已被 `mod-v2-dual-write-off` 取代，见契约 §13。
 

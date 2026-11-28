@@ -300,6 +300,8 @@ v2 替换的是 v1 的**日程时间线域**：`devices/<deviceId>/schedules/*.j
 | 7 | 导出 / 导入恢复 | `docs/EXPORT-IMPORT.md:172–175`、`exportService.appendImportPlan` | 导入落点改 `timeline/`、搬运媒体；经周期与门禁，不直接 append |
 | 8 | outbox 重放 | §9 阶段二 | **每条意图重放前重查门禁**（P1-3(a)） |
 
+> `schedule_*` 命名提醒：本表第 5/6 行的插件 `schedule_*` 是**日历 / 时间线（经 git）**；DSH 宿主同名的 `schedule_*` 是**设备本地定时任务**，永不进仓库、不在此表内。命名守卫全文见 `docs/PLUGIN-GAPS.md` §1.1，改名计划见 `docs/MODULES.md` 的 `mod-plugin-timeline-tool-rename` 行。
+
 **例外清单**：`chats/` 与配置同步载荷文件（`cordis.patch.yml` 等）**不受 `timeline/**` 只读约束**——未知 schema 时只停 `timeline/**`，这些路径可继续按 v1 语义读写（§1 范围不变）。可测：schemaVersion=99 时写 chats 成功、写 timeline 失败。
 
 **分支断言（P2-12）**：阶段 0 同时断言当前分支与 upstream 均为 `main`；插件 `bridge.ts:423` 仍从 settings 读 `settings.branch`，v2 一律忽略该值，不匹配报 `E_BRANCH_MISMATCH`，零写入。可测：settings.branch='dev' 且当前分支为 main → 仍按 main 执行、不报分支错；实际 checkout 到 dev → 报 `E_BRANCH_MISMATCH`。

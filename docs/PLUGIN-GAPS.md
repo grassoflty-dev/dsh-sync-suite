@@ -10,6 +10,11 @@
 - 远程面：`src/rpc.ts:677-730` 共 22 action（读 getState/preview*/remoteGetState/chatExportStatus…；写 push/apply/rollback/remote*/chatExport*）；访问状态机 `src/remote/service.ts:170-531`，反代 `src/remote/listener.ts:698`、`src/remote/routes.ts:145`，令牌门 `src/remote/auth.ts:203`；无 `src/remote/rpc.ts`。
 - 确认闸：`test/confirm-gate.test.mjs:33-56` 只守 `apply`/`rollback` 的 `confirm:true`（profile patch），不守会话/命令。
 - 云端面：`src/chats/readSessions.ts:34,165-209` 读本机 `<.dsh>/sessions/**/session.v4.jsonl.zstd`；`src/chats/exportChats.ts:465-487,399-411` 写仓库 `chats/<id>/{session.jsonl,meta.json}` + `chats/index.jsonl`（仅 5 字段，:52）。
+
+### 1.1 `schedule_*` 命名守卫（2026-11-28；查工具名先查含义）
+
+**`schedule_*` 在本项目首先指 DSH 宿主自带的设备本地定时任务/提醒调度器**（`schedule_list` / `schedule_create` / `schedule_view` / `schedule_edit`，注册在 `app.asar`，见 §2 第 1 条）：定时任务每个设备独立，**永不写进仓库、永不跨设备同步，也永远不会出现在 `chats/**` 或 `timeline/**`**（用户规则见 `docs/CHAT-DEMO-INTEGRATION.md` §3.4）。插件当前把日历工具注册成同名前缀（`schedule_list` / `schedule_add` / `schedule_summary`，见 §1），它们读写的却是**仓库携带的共享时间线** `timeline/<date>/records.json`，经 git 提交 / 推送来流转——名字相近，含义与存储完全不同。已决定把这些插件日历工具**改名为 `timeline_list` / `timeline_create` / `timeline_view` / `timeline_edit`**，让分域一眼可辨；**该改名尚未实施**：需要一次插件构建，而 `dist` 冻结中，直到 Lead 的 DSH 重启验证完成——所以这是**计划，不是现行行为**（登记见 `docs/MODULES.md` 的 `mod-plugin-timeline-tool-rename` 行）。改名落地前，凡见 `schedule_*` 一律**按含义读、不按名字读**：宿主调度器工具 = 设备本地、不进仓库；插件 `schedule_*` = 日历 / 时间线经 git。
+
 ## 2 缺口（按模块）
 - `schedule_view` 在 DSH 本体注册（`app.asar:dsh/node_modules/@deepseek-ai/dsh-tool-schedule/lib/index.js:594-595`，`ctx.tools.register(defineTool({name:"schedule_view"...}))`），但属不同域（Host 定时任务/reminder，参数 `id`，基于 `ctx.schedule`，:595-600；同包还注册 `schedule_list`/`create`/`edit`，:518,561,613，与插件同名工具有碰撞风险）；全仓（`packages/**`、`cordis.patch.yml`、`docs/*.md`、README）无注册亦无承诺（仅本文件提及），非"缺失工具"，无需删文案。
 - `mod-plugin-git-store` / `mod-plugin-tools-v2`：**工具面已闭合（待 Lead 提交；未装机 / 待 reload 验证）**。读侧已重连共享 v2（`src/schedule/v2Bridge.ts:200,226`、`src/schedule/dots.ts:544,615`），写侧走 `src/schedule/v2Bridge.ts:282` → `runV2Cycle`（schema 门槛 / 固定 main / 无 rebase·force / push 失败 outbox 停放），字节只经 `src/timeline/records.ts` 的 `canonicalRecordLine` / `buildRecordsText` / `conflictsLine`；v1 `src/schedule/bridge.ts` 原样保留，只供自由函数与历史测试使用。余项：`chats/` 导出仍是下一模块，真实主机 reload/GUI `unverified`。
