@@ -9,7 +9,7 @@
  * 只做一件事：把 `services/chatStore` + `model/chatList` 的投影渲染成可点的只读列表，
  * 点行进既有 `pages/ChatDetail`（只传 id，路由写法与 `pages/Chats.ets` 完全一致）。
  * 没有搜索框、没有下拉刷新、没有新建 / 发送 / 设置控件，也没有配置行或机制说明段落；
- * 空态唯一下一步是「先在设置里配置仓库」。
+ * 空态给一句事实「先在设置里配置仓库」；出路由真「刷新」按钮承担，不把事实句当下一步按钮。
  *
  * 历史锚点（mod-cloud-chat-no-config-note 的守卫按源码文本钉住，勿删）：
  * 旧占位原因 REASON_CLOUD 与「会话列表与只读详情即将迁入」只保留在本注释里作迁移记录，
@@ -31,7 +31,7 @@ import { describeError } from '../../services/scheduleStore';
 /** 本分段只看纯云端会话；dots 会话不在这里展示（分段切换只由 ShellRail 负责）。 */
 const PANE_KIND: ChatKind = 'cloud';
 
-/** 空态短下一步：复用「设置 → 同步仓库」的 Git 配置，没有独立设置面。 */
+/** 空态事实句：复用「设置 → 同步仓库」的 Git 配置，没有独立设置面；出路由真「刷新」按钮承担。 */
 const CLOUD_REPO_SETUP: string = '先在设置里配置仓库';
 
 /** 错误态：为什么由 `errorText` 给，这里只给一句可执行的排查方向。 */
@@ -152,7 +152,7 @@ export struct CloudChatPane {
     .width('100%')
   }
 
-  /** 空态（index.jsonl 不存在）：标题 + 一句配置仓库的下一步 + 真刷新按钮，不写机制段落。 */
+  /** 空态（index.jsonl 不存在）：标题 + 一句配置仓库的事实 + 真刷新按钮，不写机制段落。 */
   @Builder
   EmptyChats() {
     Column({ space: SPACING.sm }) {

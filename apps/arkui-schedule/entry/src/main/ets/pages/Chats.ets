@@ -20,12 +20,12 @@
  * **首页页头不动**（仍只有「今天 / ⚙ 设置」）：本页入口在「设置 → 云端对话」。
  *
  * **no config surface**（mod-cloud-chat-no-config-note）：云端会话直接复用「设置 → 同步仓库」的 Git
- * 配置；本页没有独立设置面，不渲染配置行或机制说明段落，空态唯一下一步是「先在设置里配置仓库」。
+ * 配置；本页没有独立设置面，不渲染配置行或机制说明段落；空态只陈述事实，配置仓库仍是前提但不是下一步按钮。
  *
  * 三种非常规状态（`docs/CHAT-APP.md` 逐字记录，`docs/STATE-UI.md` §4 组件化）：
  * - **加载中**：`LoadingState`（行内紧凑档），3 秒后可取消——取消只停止「等待」，后台读文件可能仍会完成；
- * - **空态**（`chats/index.jsonl` 不存在，`ok:true`）：`EmptyState` 给出「怎么把会话弄过来」的操作指引
- *   与「下拉刷新试试」，不是一句「暂无数据」——用户第一次进来几乎必然是这个状态；
+ * - **空态**（`chats/index.jsonl` 不存在，`ok:true`）：只讲事实——会话在后台自动同步，回到本页（或下拉刷新）
+ *   即可看到更新；按产品规则不渲染同步 / 导出按钮，也不是一句「暂无数据」；
  * - **错误态**（读文件失败，`ok:false`）：`ErrorState` 三段式 + 诊断行 + 「重试」/「去设置」；
  * - **无匹配**（有会话但搜索词没命中）：提示清空搜索词，与「空态」区分开。
  *
@@ -60,15 +60,14 @@ const CONTENT_MAX_WIDTH: number = 720;
 /** 诊断行里的错误码（列表读取失败）：固定值，便于用户反馈时检索。 */
 const CHAT_LIST_ERROR_CODE: string = 'CHAT_LIST';
 
-/** 云端段空态：唯一下一步 = 配置同步仓库；其余只是导出/同步的操作指引，不是配置或机制说明。 */
+/** 云端段空态：只讲事实——配置同步仓库后会话自动同步；没有同步 / 导出按钮。 */
 const EMPTY_CLOUD_TITLE: string = '还没有云端对话';
 const EMPTY_CLOUD_DETAIL: string =
-  '先在设置里配置仓库；之后在电脑点插件「云端对话 → 导出全部」并同步，下拉刷新即可看到；从首页「纯云端对话」可随时回来查看';
-/** dots 段空态：说清 dots 能做什么、一切操作都要用户确认（没有假的输入框）。 */
+  '先在设置里配置仓库；之后云端会话会在后台自动同步过来；列表在下次同步后更新，回到本页即可看到。';
+/** dots 段空态：说清 dots 能做什么、一切操作都要用户确认（没有假的输入框、没有按钮）。 */
 const EMPTY_DOTS_TITLE: string = '还没有 dots 对话';
 const EMPTY_DOTS_DETAIL: string =
-  '从首页「与 dots 对话」进入本页；dots 可查看实例并对会话发指令，所有操作需你确认，当前为只读预览';
-const EMPTY_ACTION: string = '下拉刷新试试';
+  '从首页「与 dots 对话」进入本页；dots 可查看实例并对会话发指令，所有操作需你确认，当前为只读预览；列表在下次同步后更新，回到本页即可看到。';
 
 /** 错误态文案：为什么失败由 `errorText` 运行时给。 */
 const ERROR_WHAT: string = '读取会话列表失败';
@@ -487,38 +486,32 @@ struct Chats {
   }
 
   /**
-   * 空态：**必须带操作指引**（用户第一次进来几乎必然是这个状态）。
+   * 空态：**只讲事实，不给按钮**（产品规则：不要有同步 / 导出按钮）。
    *
-   * 两段各自的空文案不同：云端说清「去哪儿导出 / 怎么同步过来」（`docs/CHAT-APP.md` §3），
-   * dots 说清「它能做什么 / 操作要你确认」。两态都给真按钮（`EmptyState` 兜底），
-   * 不渲染假行、不写「暂无数据」。
+   * 两段各自的空文案不同：云端说清「先在设置里配置，之后后台自动同步」（`docs/CHAT-APP.md` §3），
+   * dots 说清「它能做什么 / 操作要你确认」。两态都显式 `showAction: false`，出路由 `detail` 的
+   * 事实句承担，不渲染假行、不写「暂无数据」。
    */
   @Builder
   EmptyCloudChats() {
     EmptyState({
       title: EMPTY_CLOUD_TITLE,
       detail: EMPTY_CLOUD_DETAIL,
-      actionLabel: EMPTY_ACTION,
-      onAction: (): void => {
-        this.pullAndReload();
-      }
+      showAction: false
     })
   }
 
-  /** dots 段空态：只读预览 + 需确认的说明，下一步仍是刷新（没有假的输入框）。 */
+  /** dots 段空态：只读预览 + 需确认的说明 + 自动同步的事实；没有假的输入框，也没有按钮。 */
   @Builder
   EmptyDotsChats() {
     EmptyState({
       title: EMPTY_DOTS_TITLE,
       detail: EMPTY_DOTS_DETAIL,
-      actionLabel: EMPTY_ACTION,
-      onAction: (): void => {
-        this.pullAndReload();
-      }
+      showAction: false
     })
   }
 
-  /** 按当前分段落空态；两段共用同一个刷新出口。 */
+  /** 按当前分段落空态；两段都不渲染按钮，只读事实句。 */
   @Builder
   EmptyChats() {
     if (this.kind === 'dots') {

@@ -56,7 +56,7 @@ describe('mod-cloud-chat-no-config-note：零设置面（说明绝迹）+ 空态
   // old → new：旧「列表常驻 CHAT_GIT_EXPLANATION 说明行」改为「该说明及机制提示绝迹、
   // 空态给一句配置仓库」。不是删断言/放弱——旧断言只证明「有一段只读文字」，
   // 新断言证明「整页没有任何设置/机制说明 UI」且功能路径完好，覆盖面严格更大。
-  test('会话列表没有配置/机制说明段落；空态唯一下一步是「先在设置里配置仓库」', () => {
+  test('会话列表没有配置/机制说明段落；空态事实句以「先在设置里配置仓库」开头', () => {
     assert.equal(CHATS.includes(RETIRED_EXPLANATION), false, '旧的只读来源说明必须彻底删除');
     assert.equal(/CHAT_GIT_EXPLANATION/.test(CHATS), false, '说明常量必须删除，不是改名复活');
     assert.equal(/从同步仓库读取/.test(CHATS), false, '副标题不再解释存储机制');
@@ -69,8 +69,11 @@ describe('mod-cloud-chat-no-config-note：零设置面（说明绝迹）+ 空态
     const empty = CHATS.slice(CHATS.indexOf('EmptyCloudChats() {'), CHATS.indexOf('EmptyDotsChats() {'));
     assert.match(empty, /title: EMPTY_CLOUD_TITLE/, '空态仍渲染标题');
     assert.match(empty, /detail: EMPTY_CLOUD_DETAIL/, '空态仍渲染下一步文案');
-    assert.match(empty, /actionLabel: EMPTY_ACTION/, '空态仍带真按钮');
-    assert.match(empty, /this\.pullAndReload\(\)/, '空态动作仍走真刷新');
+    // Lead 已否决同步 / 导出按钮：正向钉住显式 opt-out，反向钉住按钮文案 / 回调 / 刷新动作绝迹。
+    assert.match(empty, /showAction: false/, '空态显式不渲染按钮');
+    assert.equal(/actionLabel:/.test(empty), false, '空态不再传按钮文案');
+    assert.equal(/onAction:/.test(empty), false, '空态不再挂按钮回调');
+    assert.equal(/this\.pullAndReload\(\)/.test(empty), false, '空态不再触发刷新');
   });
 
   test('外壳云端面板没有配置/说明段落；保留禁用原因与短下一步（不造假行）', () => {

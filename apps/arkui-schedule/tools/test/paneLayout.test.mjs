@@ -600,9 +600,9 @@ describe('面板诚实性：占位无假行 + 无全局导航', () => {
       'Hidden 保活接线保留');
     assert.equal((p.source.match(/aboutToAppear\(/g) ?? []).length, 1, '只读一次：只有一个 aboutToAppear');
     assert.equal(/onPageShow\(/.test(p.source), false, '不得每次显示都重读（无 onPageShow）');
-    // 空态唯一下一步（与 mod-cloud-chat-no-config-note 同款锚点）。
+    // 空态给出事实句 + 真刷新按钮（与 mod-cloud-chat-no-config-note 同款锚点）；字面量沿用，断言强度不变。
     assert.match(p.source, /const CLOUD_REPO_SETUP: string = '先在设置里配置仓库';/);
-    assert.match(p.source, /Text\(CLOUD_REPO_SETUP\)/, '空态仍渲染短下一步');
+    assert.match(p.source, /Text\(CLOUD_REPO_SETUP\)/, '空态仍渲染这句事实');
     // 四态：加载 / 空 / 错误 / 列表；无搜索框，故无 no-match 态。
     for (const token of ['this.LoadingHint()', 'this.EmptyChats()', 'this.ErrorBlock()', 'this.ChatList()']) {
       assert.ok(p.body.includes(token), `必须渲染 ${token}`);

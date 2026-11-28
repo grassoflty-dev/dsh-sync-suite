@@ -60,8 +60,13 @@ export function formatDiagnostics(input: DiagnosticsInput, now?: number): string
 /** 失败三段式：`<what>失败：<why>。下一步：<next>`（幂等；缺项不编造）。 */
 export function describeFailure(what: string, why: string, next: string): string;
 
-/** 空态必须有动作：返回问题说明（空串 = 合规）。 */
-export function emptyStateIssue(title: string, actionLabel: string): string;
+/** 空态有出路：真按钮，或没有可点的东西时给一句事实；返回问题说明（空串 = 合规）。 */
+export function emptyStateIssue(
+  title: string,
+  actionLabel: string,
+  showAction?: boolean,   // 默认 true：仍然渲染按钮；false = 显式不渲染按钮
+  detail?: string         // showAction === false 时必须给一句事实（非空白、非已知占位符）
+): string;
 ```
 
 **硬约束（单测钉住）**
@@ -69,8 +74,11 @@ export function emptyStateIssue(title: string, actionLabel: string): string;
 - `formatDiagnostics` 四个字段**永远四个都在**（缺失用兜底词，不允许省略段）；
 - 时间格式固定 `YYYY-MM-DD HH:mm:ss`（本地时区由调用方决定，函数只吃时间戳）；
 - `describeFailure` 幂等：`f(f(x)) === f(x)`；`why` 为空时写「原因未知」，`next` 为空时写「重试，或到设置页检查配置」；
-- `emptyStateIssue` 只在**标题像空态**（含「暂无 / 没有 / 空」）且 `actionLabel` 为空时返回问题，
-  避免把「还没有云端会话」这种必须带动作的空态漏掉。
+- `emptyStateIssue` 分两支判定：`showAction !== false` 时，**标题像空态**（含「暂无 / 没有 / 空」）且
+  `actionLabel` 为空 → 返回问题；`showAction === false` 时，`detail` 必须是一句事实，**空白**或命中
+  `PLACEHOLDER_DETAILS`（`暂无数据` / `暂无内容` / `-` / `—` / `…` / `...` / `暂无` / `无` / `空` 等，
+  **exact match**，绝不做子串扫描——否则「还没有配置仓库」这种诚实句子会被误杀）→ 返回问题。
+  这一步是**词法检查**：它能拒绝空白与已知占位符，但**不能**判断一句话是不是真的。
 
 ## 3. `model/actionButton.ts` 契约
 
@@ -115,8 +123,12 @@ props：`title`（默认 `loadingText('')`）、`detail`、`progress`（-1 = 不
 
 ### 4.2 `EmptyState`
 
-props：`title`、`detail`、`actionLabel`、`onAction`。
-`actionLabel` 为空时回落到 `'刷新'` 并照常给按钮（**空态永远有出路**，这条有单测 + 静态断言）。
+props：`title`、`detail`、`actionLabel`、`onAction`、`showAction`（默认 `true`）。
+`showAction !== false` 时行为不变：`actionLabel` 为空回落到 `'刷新'`，照常给按钮。
+`showAction: false` 是**显式**退出按钮的唯一方式（绝不从空串推断）：此时不渲染按钮、也不渲染禁用态，
+出路由 `detail` 的一句事实承担（`emptyStateIssue` 会拒绝空白与已知占位符）。
+**契约是「空态有出路：真按钮，或没有可点的东西时给一句事实」**，不再是「永远有按钮」；
+产品规则是**不要有同步或导出按钮**，所以「没有可点的东西」是合法空态。
 
 ### 4.3 `ErrorState`
 

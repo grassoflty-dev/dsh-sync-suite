@@ -7,12 +7,29 @@
 // - 四要素齐全：诊断行永远是「版本 / 设备 / 错误码 / 时间」四段，缺字段用兜底词，绝不省略；
 // - 时间格式：固定 `YYYY-MM-DD HH:mm:ss`（用本地时间构造期望值，不依赖跑测机器的时区）；
 // - 幂等：`describeFailure(f(x), '', '') === f(x)`，页面重复包一层不会出现「失败：失败：」；
-// - 空态必须有动作：`emptyStateIssue` 只抓「标题像空态且没有动作」，不误伤普通标题；
+// - 空态有出路（真按钮，或没有可点的东西时给一句事实）：`emptyStateIssue` 默认抓「标题像空态且没有动作」，
+//   显式 `showAction: false` 时改抓「没有事实句」，都不误伤普通标题；事实句检查是词法检查：
+//   空白与已知占位符（`PLACEHOLDER_DETAILS`，含 `emptyText('')`）必须报问题，但不判断句子真伪；
 // - 非法输入不抛、不产出 `undefined` 字样（运行时脏数据是常态，纯逻辑层是最后一道防线）。
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { registerHooks } from 'node:module';
 
-import {
+// 纯逻辑层源码的相对 import 不带 .js 后缀（ArkTS 侧沿用），Node ESM 解析时补上后缀。
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    try {
+      return nextResolve(specifier, context);
+    } catch (error) {
+      if (error && error.code === 'ERR_MODULE_NOT_FOUND' && specifier.startsWith('.') && !specifier.endsWith('.js')) {
+        return nextResolve(`${specifier}.js`, context);
+      }
+      throw error;
+    }
+  }
+});
+
+const {
   CANCEL_AFTER_MS,
   STATE_EMPTY,
   STATE_ERROR,
@@ -22,7 +39,8 @@ import {
   emptyStateIssue,
   formatDiagnostics,
   progressText
-} from '../.build/model/stateView.js';
+} = await import('../.build/model/stateView.js');
+const { emptyText } = await import('../.build/common/copy.js');
 
 /** 用本地时间构造毫秒时间戳（期望值也用本地时间写，跑测机器时区无关）。 */
 function localStamp(year, month, day, hours, minutes, seconds) {
@@ -231,4 +249,46 @@ test('emptyStateIssue：脏入参不抛异常', () => {
   assert.equal(emptyStateIssue(undefined, undefined), '');
   assert.equal(emptyStateIssue(null, null), '');
   assert.notEqual(emptyStateIssue('暂无日程', undefined), '');
+});
+
+test('emptyStateIssue：显式无按钮但没有事实句 → 报问题（必须点明缺少事实）', () => {
+  const issue = emptyStateIssue('暂无日程', '', false);
+  assert.notEqual(issue, '', '无按钮且没有事实句必须报问题');
+  assert.ok(issue.includes('事实'), `问题说明应点明缺少事实句：${issue}`);
+  assertClean(issue, 'emptyStateIssue(showAction=false, 无 detail)');
+});
+
+test('emptyStateIssue：显式无按钮且有事实句 → 合规', () => {
+  assert.equal(emptyStateIssue('还没有云端会话', '', false, '列表会在下次同步后自动更新。'), '',
+    '事实句给出出路即合规');
+});
+
+test('emptyStateIssue：显式无按钮但 detail 是已知占位符 → 报问题（词法拒绝，不做真伪判断）', () => {
+  for (const placeholder of ['暂无数据', '-']) {
+    const issue = emptyStateIssue('暂无日程', '', false, placeholder);
+    assert.notEqual(issue, '', `占位符「${placeholder}」不能充当事实句`);
+    assert.ok(issue.includes('事实'), `问题说明应点明缺少事实句：${issue}`);
+    assertClean(issue, `emptyStateIssue(showAction=false, detail=${placeholder})`);
+  }
+  const fallback = emptyStateIssue('暂无日程', '', false, emptyText(''));
+  assert.notEqual(fallback, '', `应用兜底标题「${emptyText('')}」不能充当事实句`);
+  assert.ok(fallback.includes('事实'), `问题说明应点明缺少事实句：${fallback}`);
+});
+
+test('emptyStateIssue：事实句含「没有」不被误伤（占位符按 exact match 比对，不做子串扫描）', () => {
+  const detail = '还没有配置仓库，回到本页即可看到同步结果。';
+  assert.equal(emptyStateIssue('还没有云端会话', '', false, detail), '',
+    `含「没有」的事实句必须合规：${detail}`);
+});
+
+test('emptyStateIssue：「没有按钮」只在事实句承担出路时合法（按钮文案不能替代事实句）', () => {
+  for (const detail of ['', '   ', undefined, null]) {
+    const issue = emptyStateIssue('暂无日程', '换个区间', false, detail);
+    assert.notEqual(issue, '', `无按钮时空白事实句（${String(detail)}）必须报问题`);
+    assert.ok(issue.includes('事实'), `问题说明应点明缺少事实句：${issue}`);
+  }
+  assert.equal(emptyStateIssue('暂无日程', '换个区间', false, '列表会在下次同步后自动更新。'), '',
+    '有事实句才合规');
+  assert.notEqual(emptyStateIssue('暂无日程', '', true, '列表会在下次同步后自动更新。'), '',
+    '默认仍要求真按钮，事实句不能替代按钮；opt-out 必须显式');
 });

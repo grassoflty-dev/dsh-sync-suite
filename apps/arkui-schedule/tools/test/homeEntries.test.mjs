@@ -267,21 +267,32 @@ describe('mod-home-entries · 布局回归：列表必须拿到余量（§15.12 
 });
 
 describe('mod-home-entries · 两段空态文案', () => {
-  test('两段各有独立标题 + 下一步指引，且都带真按钮', () => {
+  test('两段各有独立标题，且都显式不渲染按钮', () => {
     assert.match(CHATS, /const EMPTY_CLOUD_TITLE: string = '还没有云端对话';/);
     assert.match(CHATS, /const EMPTY_DOTS_TITLE: string = '还没有 dots 对话';/);
     assert.ok(EMPTY_CLOUD.includes('EMPTY_CLOUD_TITLE') && EMPTY_CLOUD.includes('EMPTY_CLOUD_DETAIL'));
     assert.ok(EMPTY_DOTS.includes('EMPTY_DOTS_TITLE') && EMPTY_DOTS.includes('EMPTY_DOTS_DETAIL'));
-    assert.ok(EMPTY_CLOUD.includes('actionLabel: EMPTY_ACTION'), '云端空态有下一步按钮');
-    assert.ok(EMPTY_DOTS.includes('actionLabel: EMPTY_ACTION'), 'dots 空态有下一步按钮');
-    assert.ok(EMPTY_CLOUD.includes('this.pullAndReload()') && EMPTY_DOTS.includes('this.pullAndReload()'));
+    // Lead 已否决同步 / 导出按钮：两态都显式 opt-out，且不再有按钮文案 / 回调 / 刷新动作。
+    assert.ok(EMPTY_CLOUD.includes('showAction: false'), '云端空态显式不渲染按钮');
+    assert.equal(EMPTY_CLOUD.includes('actionLabel:'), false, '云端空态不再传按钮文案');
+    assert.equal(EMPTY_CLOUD.includes('onAction:'), false, '云端空态不再挂按钮回调');
+    assert.equal(EMPTY_CLOUD.includes('pullAndReload()'), false, '云端空态不再触发刷新');
+    assert.ok(EMPTY_DOTS.includes('showAction: false'), 'dots 空态显式不渲染按钮');
+    assert.equal(EMPTY_DOTS.includes('actionLabel:'), false, 'dots 空态不再传按钮文案');
+    assert.equal(EMPTY_DOTS.includes('onAction:'), false, 'dots 空态不再挂按钮回调');
+    assert.equal(EMPTY_DOTS.includes('pullAndReload()'), false, 'dots 空态不再触发刷新');
   });
 
   test('文案给出首页入口与可操作指引，不渲染假行', () => {
-    assert.match(CHATS, /从首页「纯云端对话」/, '云端空态指向首页入口');
+    // Lead 批准的新事实句逐字钉住：不再指向首页入口，改为「回到本页即可看到」；不引入 watcher 承诺。
+    assert.match(CHATS, /const EMPTY_CLOUD_DETAIL: string =\s*'先在设置里配置仓库；之后云端会话会在后台自动同步过来；列表在下次同步后更新，回到本页即可看到。';/,
+      '云端空态逐字给出 Lead 批准的事实句');
     assert.match(CHATS, /从首页「与 dots 对话」/, 'dots 空态指向首页入口');
     assert.match(CHATS, /所有操作需你确认/, 'dots 空态说明确认纪律');
-    assert.match(CHATS, /插件「云端对话 → 导出全部」/, '云端空态保留导出/同步指引');
+    // 事实句取代了旧的「电脑导出 + 下拉刷新」指引（产品规则：不要有同步 / 导出按钮）。
+    assert.match(CHATS, /const EMPTY_CLOUD_DETAIL: string =\s*'[^']*列表在下次同步后更新，回到本页即可看到。'/, '云端空态给出后台同步 + 回到本页可见的事实句');
+    assert.equal(/插件「云端对话 → 导出全部」/.test(CHATS), false, '云端空态不再要求手动导出');
+    assert.equal((CHATS.match(/showAction: false/g) ?? []).length, 2, '云端与 dots 两态都显式 showAction: false');
     for (const builder of [EMPTY_CLOUD, EMPTY_DOTS, EMPTY_CHATS]) {
       assert.equal(builder.includes('ForEach('), false, '空态不得渲染假行');
     }

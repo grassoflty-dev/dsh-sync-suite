@@ -7,8 +7,10 @@
  * 2. **加载有进度**：`progressText(progress)` —— `-1` = 不确定进度，`0..100` 夹取取整；
  * 3. **错误有诊断**：`formatDiagnostics(input, now?)` —— 版本 / 设备 / 错误码 / 时间**四段永远都在**
  *    （缺一段用户就少一条反馈线索），配合 `describeFailure()` 生成「发生了什么 / 为什么 / 下一步」；
- * 4. **空态有出路**：`emptyStateIssue(title, actionLabel)` —— 标题像空态却没有动作时返回问题说明，
- *    由静态测试钉住「空态必须给按钮」。
+ * 4. **空态有出路：真按钮，或没有可点的东西时给一句事实**：
+ *    `emptyStateIssue(title, actionLabel, showAction?, detail?)` —— 默认仍要求按钮；
+ *    显式 `showAction: false` 时要求非空且非已知占位的 `detail`，由静态测试钉住。
+ *    这一步是**词法检查**（空白 + 已知占位符），不判断句子说的是不是真的。
  *
  * 约定（与 `common/copy.ts` 一致）：
  * - **容错**：空串 / `undefined` / `null` / `NaN` 不抛异常，且**绝不产出「undefined」字样**；
@@ -16,11 +18,12 @@
  *   「同步失败：同步失败：…」；
  * - **不编造**：`formatDiagnostics` 缺字段用兜底词（`未登记` / `无`），不猜内容。
  */
+import { emptyText } from '../common/copy';
 
 /** 三态：加载中。 */
 export const STATE_LOADING: string = 'loading';
 
-/** 三态：空（没有数据，但必须给出下一步动作）。 */
+/** 三态：空（没有数据；出路是真按钮，或没有可点的东西时给一句事实）。 */
 export const STATE_EMPTY: string = 'empty';
 
 /** 三态：错误（发生了什么 / 为什么 / 下一步 + 诊断）。 */
@@ -231,20 +234,55 @@ function looksLikeEmptyState(title: string): boolean {
 }
 
 /**
- * 空态必须有动作：返回问题说明（**空串 = 合规**）。
+ * 空态 detail 的已知占位符（**只做 exact match，不做子串匹配**）：这些都不是事实句。
  *
- * 只在「标题像空态」且 `actionLabel` 为空时返回问题——这样既能抓住
- * 「暂无日程」这种死界面，也不会把「还没有云端会话」（含「没有」）漏掉；
+ * `emptyText('')` 是应用自己的兜底标题（「暂无内容」），必须一并拒绝；
+ * 「没有」这类识别词只用于标题，不在这里做子串扫描——事实句里完全可以出现「没有」。
+ * 词法检查**按设计如此**：只能挡住空白和名单里的占位，判断不了一句话是不是真的。
+ */
+const PLACEHOLDER_DETAILS: readonly string[] = Object.freeze([
+  emptyText(''),
+  '暂无数据',
+  '暂无内容',
+  '-',
+  '—',
+  '…',
+  '...',
+  '暂无',
+  '无',
+  '空'
+]);
+
+/**
+ * 空态有出路：真按钮，或没有可点的东西时给一句事实：返回问题说明（**空串 = 合规**）。
+ *
+ * - `showAction !== false`（默认）：标题像空态且 `actionLabel` 为空时返回问题——既能抓住
+ *   「暂无日程」这种死界面，也不会把「还没有云端会话」（含「没有」）漏掉；空按钮文案永远有
+ *   `EmptyState` 的「刷新」兜底，不会被当作「不要按钮」。
+ * - `showAction === false`：必须给出非空且不在 `PLACEHOLDER_DETAILS` 里的 `detail` 才合规；
+ *   此时没有任何可点的东西，出路只能靠那句事实。
+ *   **这里是词法检查（按设计如此）**：能拒绝空白和已知占位符（`emptyText('')` 等逐字比对），
+ *   但不能判断一句话是不是真的；占位符按 exact match 比对，绝不做子串扫描。
  * 标题不像空态时不属于本函数的判定范围（返回空串）。
  */
-export function emptyStateIssue(title: string, actionLabel: string): string {
-  const action: string = normalizeText(actionLabel);
-  if (action.length > 0) {
-    return '';
-  }
+export function emptyStateIssue(title: string, actionLabel: string, showAction: boolean = true, detail: string = ''): string {
   const name: string = normalizeText(title);
   if (!looksLikeEmptyState(name)) {
     return '';
   }
-  return `空态缺少下一步动作：标题「${name}」必须配一个按钮（actionLabel 为空）`;
+  if (showAction === false) {
+    const fact: string = normalizeText(detail);
+    if (fact.length === 0) {
+      return `空态没有可点的东西时必须给一句事实：标题「${name}」缺少事实说明（detail 为空）`;
+    }
+    if (PLACEHOLDER_DETAILS.indexOf(fact) >= 0) {
+      return `空态没有可点的东西时必须给一句事实：标题「${name}」的 detail 是占位符「${fact}」，不是事实句`;
+    }
+    return '';
+  }
+  const action: string = normalizeText(actionLabel);
+  if (action.length > 0) {
+    return '';
+  }
+  return `空态有出路：真按钮，或没有可点的东西时给一句事实；标题「${name}」缺少下一步动作（actionLabel 为空）`;
 }
