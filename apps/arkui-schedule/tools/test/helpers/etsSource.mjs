@@ -25,11 +25,62 @@ export function readApp(relative) {
   return readFileSync(join(APP_ROOT, relative), 'utf8');
 }
 
-/** 剥注释（块注释 + 行注释）；保留换行数，行号与源文件一致。 */
+/**
+ * 剥注释（块注释 + 行注释）；保留换行数，行号与源文件一致。
+ *
+ * 旧实现是两条全局正则，`//` 只要出现在字符串里就会被当成行注释开头，
+ * 把同一行后面的代码一起吃掉（`const u = 'https://x'; if (entry.kind …)`）。
+ * 这里改成单遍状态机：先认字符串字面量（含转义），字符串里的 `//` / `/*` 原样保留；
+ * 只有代码态下的 `//` / `/*` 才算注释。块注释仍用等长空格占位（仅保留 `\n`），
+ * 行注释仍只删到行尾，所以所有依赖「行号不变」的守卫行为都不变。
+ */
 export function stripComments(source) {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
-    .replace(/\/\/[^\n]*/g, '');
+  let out = '';
+  let i = 0;
+  const size = source.length;
+  while (i < size) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (ch === '/' && next === '*') {
+      out += '  ';
+      i += 2;
+      while (i < size && !(source[i] === '*' && source[i + 1] === '/')) {
+        out += source[i] === '\n' ? '\n' : ' ';
+        i += 1;
+      }
+      if (i < size) {
+        out += '  ';
+        i += 2;
+      }
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      while (i < size && source[i] !== '\n') {
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const quote = ch;
+      out += ch;
+      i += 1;
+      while (i < size) {
+        const inner = source[i];
+        out += inner;
+        i += 1;
+        if (inner === '\\' && i < size) {
+          out += source[i];
+          i += 1;
+        } else if (inner === quote) {
+          break;
+        }
+      }
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
 }
 
 /** 递归收集目录下指定后缀的文件（返回正斜杠绝对路径，顺序稳定）。 */

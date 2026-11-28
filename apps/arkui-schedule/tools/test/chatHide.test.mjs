@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
 
 import {
-  filterByKind, filterBySegment, filterChatPreset, foldChatIndex, parseChatIndex, sessionPresetOf
+  filterBySegment, filterChatPreset, foldChatIndex, parseChatIndex, sessionPresetOf
 } from '../.build/model/chatList.js';
 // mod-app-hide-commit-reconcile：三态决策从纯模型导入（用命名空间，pre-fix 时只让 HCR 用例红，
 // 不把本文件其它既有断言一起拖下水）。
@@ -30,6 +30,23 @@ const normal = (id, extra = {}) => JSON.stringify({
 const archive = (id, deletedAt) => JSON.stringify({ op: 'archive', id, deletedAt });
 const unarchive = (id, ts) => JSON.stringify({ op: 'unarchive', id, ts });
 const fold = (...lines) => foldChatIndex(lines.join('\n'));
+
+/**
+ * 已删除的 `filterByKind(entries, kind)` 的旧语义，只在本测试文件里复刻：
+ * 按 chats/index.jsonl 复制来的 `entry.kind` 分组。保留它只为证明「第二来源」会把工作会话漏进
+ * 云端段；绝不从模型导出，也不许任何生产视图使用（WS-09 会扫描视图层钉住这一点）。
+ */
+function legacyFilterByKindByIndexKind(entries, kind) {
+  const list = Array.isArray(entries) ? entries : [];
+  const matched = [];
+  for (let index = 0; index < list.length; index++) {
+    const entry = list[index];
+    if (entry !== null && entry.kind === kind) {
+      matched.push(entry);
+    }
+  }
+  return matched;
+}
 
 describe('chatList.foldChatIndex（折叠全函数）', () => {
   test('AH-01 普通行 last-wins；同 id 多行只出一条', () => {
@@ -289,8 +306,8 @@ describe('mod-app-three-kind：会话 preset 准入（chat / dots 两种云端�
     const index = [normal('work-a', { kind: 'dots' }), normal('dots-a', { kind: 'cloud' })].join('\n');
     const entries = parseChatIndex(index).entries;
     assert.deepEqual(entries.map((entry) => entry.kind), ['dots', 'cloud'], '先证明索引里的伪装值确实存在');
-    // 旧做法（按索引 kind 分段）会把工作会话放进 dots 段——这正是本例要防的回归
-    assert.deepEqual(filterByKind(entries, 'dots').map((entry) => entry.id), ['work-a']);
+    // 旧 API 已从模型删除，语义在这里复刻：按索引 kind 分段会把工作会话放进 dots 段（证明它确实漏）。
+    assert.deepEqual(legacyFilterByKindByIndexKind(entries, 'dots').map((entry) => entry.id), ['work-a']);
     const presets = {
       'work-a': sessionPresetOf(header('standard')),
       'dots-a': sessionPresetOf(header('dots'))
@@ -298,6 +315,10 @@ describe('mod-app-three-kind：会话 preset 准入（chat / dots 两种云端�
     const visible = filterChatPreset(entries, presets);
     assert.deepEqual(visible.map((entry) => entry.id), ['dots-a'], '工作会话绝不因 kind=dots 混入');
     assert.equal(visible.some((entry) => entry.id === 'work-a'), false);
+    // 对照：真正的 filterBySegment 只认投影 preset，同一份 entries 绝不返回 work-a。
+    assert.deepEqual(filterBySegment(visible, 'dots').map((entry) => entry.id), ['dots-a']);
+    assert.equal(filterBySegment(visible, 'dots').some((entry) => entry.id === 'work-a'), false,
+      '投影分段不返回工作会话');
   });
 
   test('CW-07 分段归属由投影决定：索引 kind=cloud / dots 都不能左右段落', () => {

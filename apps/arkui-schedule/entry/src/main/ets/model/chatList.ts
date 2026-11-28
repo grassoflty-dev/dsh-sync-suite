@@ -502,24 +502,6 @@ export function filterChats(entries: ChatIndexEntry[], query: string): ChatIndex
   return matched;
 }
 
-/**
- * 分段过滤：只保留 `kind` 等于给定值的会话（返回副本，不改入参）。
- *
- * 与 `filterChats` 正交：页面先按 `kind` 切段，再按搜索词过滤，两段共用同一份 `chats`
- * （切换不丢数据）。脏输入返回空数组，不抛。
- */
-export function filterByKind(entries: ChatIndexEntry[], kind: ChatKind): ChatIndexEntry[] {
-  const list: ChatIndexEntry[] = Array.isArray(entries) ? entries : [];
-  const matched: ChatIndexEntry[] = [];
-  for (let index = 0; index < list.length; index++) {
-    const entry: ChatIndexEntry | null = list[index];
-    if (entry !== null && entry.kind === kind) {
-      matched.push(entry);
-    }
-  }
-  return matched;
-}
-
 // ---------------------------------------------------------------- 会话 preset（云端对话准入）
 
 /** session.jsonl 里只声明 preset 投影要用的键；其它行内容一概不读。 */

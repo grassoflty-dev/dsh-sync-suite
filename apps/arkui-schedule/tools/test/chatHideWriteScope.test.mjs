@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { describe, test } from 'node:test';
 
 import { ETS_ROOT } from './settingsSources.mjs';
+import { stripComments } from './helpers/etsSource.mjs';
 
 // tsc 产出的 .build 是「无扩展名相对 import」的 ESM（与 pendingUploadDiagnosis.test.mjs 同一套解析钩子）。
 registerHooks({
@@ -219,6 +220,89 @@ describe('mod-app-chat-hide：**逐条**入口与写者形状（源码守卫）'
       const text = readFileSync(join(ETS_ROOT, 'pages', 'panes', pane), 'utf8');
       assert.match(text, /filterBySegment\(result\.entries, PANE_KIND\)/, `${pane} 按投影分段`);
       assert.equal(/filterByKind\(result\.entries/.test(text), false, `${pane} 不得按索引 kind 分段`);
+    }
+  });
+
+  test('WS-09 任何视图不得用 entry.kind 决定分段/可见性', () => {
+    // 【规则：以后要放宽先读完这段，别再加临时正则】
+    // 唯一真相是 session.jsonl 投影出的 preset（filterChatPreset 派生、filterBySegment 消费）；
+    // chats/index.jsonl 复制来的 entry.kind 是第二来源，视图（以及视图 outsourcing 出去的
+    // 助手）不得拿它决定分段或可见性。
+    //
+    // 【禁止】严格口径 = pages/** + 所有 import model/chatList 的源文件：
+    //   A. 除白名单外任何 `.kind` / `['kind']` 属性读——不挑变量名，所以别名
+    //      `const e = entry; e.kind` 一样拦；switch / GROUP[entry.kind] / 无比较读
+    //      都由这一条统一覆盖，不再依赖「有没有 ===」；
+    //   B. 行名 entry/item/row/chat/chatEntry 上的 `[K]` 计算键读（K 为任意标识符），
+    //      专门钉住 `entry[K] === 'dots'` 这种没有 kind 字面量的绕法；
+    //   C. 任何解构出 kind 的写法 `{ kind } = x` / `{ kind: k } = x`；
+    //   D. `filterBySegment(..., <第二参数含 kind>)`——把索引 kind 直接喂进分段函数
+    //      根本不需要比较运算符，所以单独钉死（即便 A 被白名单遮掉也仍然红）。
+    //
+    // 【允许】this.kind 是页面 UI 段状态（路由只读它）；params['kind'] === 'dots'
+    //   是 readKindParam 的路由入参判别（预选 UI 段，也不是索引行）；
+    //   kind: 是对象键 / 形参名，压根不是属性读；
+    //   result.kind === 'ok' 与 modelsKindLabel(result.kind) 是 SettingsApi 的模型
+    //   拉取判别联合，与会话行毫无关系。这些形状先被遮成等长空格，剩下的代码才受审。
+    //   白名单刻意逐字精确：不能泛化成「任意 result.kind」，否则别名可以借这个名字溜走。
+    //
+    // 【范围】严格口径放 pages/** 与 chatList 的全部导入者（助手想拿到行对象就得
+    //   import 它的类型/函数，逃不出这张网）；另外 model/services/common 再用窄口径
+    //   （行名 entry/chatEntry/row/chat 的 kind 读 + C + D）扫一遍，堵住「不 import
+    //   却收了个结构相同的行对象」的助手。这三个目录没有用严格口径，是因为
+    //   result / decision / spec / object.kind 是大量合法的判别字段，全禁会淹没真信号。
+    // ────────────────────────────────────────────────────────────────────────
+
+    const files = listFiles(ETS_ROOT).filter((file) => /\.(?:ets|ts)$/.test(file));
+    assert.ok(files.length > 1, '源码扫描必须是非空集合，不能 vacuous pass');
+    const relOf = (file) => file.replace(/\\/g, '/');
+    const isPage = (file) => relOf(file).includes('/pages/');
+    const fromChatList = /from\s*['"][^'"]*model\/chatList['"]/;
+    const sources = files.map((file) => ({ file, raw: readFileSync(file, 'utf8') }));
+    const strictSources = sources.filter(({ file, raw }) => isPage(file) || fromChatList.test(raw));
+    assert.ok(strictSources.some(({ file }) => relOf(file).endsWith('/pages/Chats.ets')),
+      '扫描集合必须包含 pages/Chats.ets');
+    assert.ok(strictSources.some(({ file }) => !isPage(file)),
+      '扫描集合必须包含 pages 外的 chatList 导入者（services/chatStore.ets），否则助手仍能逃逸');
+    const wideSources = sources.filter(({ file }) => /\/(?:model|services|common)\//.test(relOf(file)));
+    assert.ok(wideSources.length > 1, 'model/services/common 的助手扫描不能是空集');
+
+    // 先剥注释、再把白名单遮成等长空格（换行不动，报错仍可定位行号）。
+    const allowed = [
+      /this\.kind/g,
+      /params\s*\[\s*['"]kind['"]\s*\]\s*===\s*['"]dots['"]/g,
+      /result\.kind\s*===\s*['"]ok['"]/g,
+      /modelsKindLabel\(\s*result\.kind\s*\)/g
+    ];
+    const masked = (raw) => allowed.reduce(
+      (text, re) => text.replace(re, (hit) => hit.replace(/[^\n]/g, ' ')),
+      stripComments(raw));
+
+    // A/B：严格口径认任何 .kind 读；助手窄口径只认行名，避开合法判别字段。
+    const strictKindRead = /\.\s*kind\b|\[\s*['"]kind['"]\s*\]|\b(?:entry|item|row|chat|chatEntry)\s*\[\s*[A-Za-z_$]\w*\s*\]/;
+    const helperKindRead = /\b(?:entry|chatEntry|row|chat)\s*(?:\?\.\s*)?\.\s*kind\b|\b(?:entry|chatEntry|row|chat)\s*\[\s*(?:['"]kind['"]|[A-Za-z_$]\w*)\s*\]/;
+    // C/D：两种口径共用。
+    const kindDestructure = /\{[^{}]*\bkind\b[^{}]*\}\s*=/;
+    const kindIntoSegment = /\bfilterBySegment\s*\([^)]*,[^)]*(?:\.\s*kind\b|\[\s*['"]kind['"]\s*\])/;
+
+    for (const { file, raw } of strictSources) {
+      const code = masked(raw);
+      // D 先判：让「直接把 kind 喂进分段函数」有自己的报错，便于定位这类无比较读。
+      assert.equal(kindIntoSegment.test(code), false,
+        `${file} 不得把 kind 当第二参数喂给 filterBySegment`);
+      assert.equal(strictKindRead.test(code), false,
+        `${file} 不得读索引行 kind（别名 / 计算键 / 无比较读都算）`);
+      assert.equal(kindDestructure.test(code), false,
+        `${file} 不得解构 kind 再拿它分段`);
+    }
+    for (const { file, raw } of wideSources) {
+      const code = masked(raw);
+      assert.equal(kindIntoSegment.test(code), false,
+        `${file} 助手不得把 kind 喂给 filterBySegment`);
+      assert.equal(helperKindRead.test(code), false,
+        `${file} 助手不得读行名 kind 再交给视图`);
+      assert.equal(kindDestructure.test(code), false,
+        `${file} 助手不得解构 kind`);
     }
   });
 });

@@ -145,12 +145,15 @@ describe('mod-home-entries · 首页对话双格条', () => {
 });
 
 describe('mod-home-entries · kind 投影与分段过滤', () => {
-  test('模型只加 additive 字段：type ChatKind + entry.kind + 读侧默认 + filterByKind 导出', () => {
+  test('模型只加 additive 字段：type ChatKind + entry.kind + 读侧默认 + filterBySegment 导出（filterByKind 已删除）', () => {
     assert.match(MODEL, /export type ChatKind = 'cloud' \| 'dots';/);
     assert.match(MODEL, /  kind: ChatKind;/, 'ChatIndexEntry 带 kind 字段');
     assert.match(MODEL, /  kind\?: string;/, 'RawIndexLine 只声明读的键');
     assert.match(MODEL, /kind: normalizeChatKind\(raw\.kind\)/, '解析时走读侧归一');
-    assert.match(MODEL, /export function filterByKind\(entries: ChatIndexEntry\[\], kind: ChatKind\): ChatIndexEntry\[\]/);
+    // 真实签名是折行的：entries: ChatIndexEntry[] + segment: ChatKind → ChatIndexEntry[]。
+    assert.match(MODEL, /export function filterBySegment\(\s*entries: ChatIndexEntry\[\],\s*segment: ChatKind\s*\): ChatIndexEntry\[\]/);
+    // 旧的第二来源 API 已删除；这条负断言把删除本身钉住。
+    assert.equal(MODEL.includes('export function filterByKind'), false);
     // 读侧默认只归一返回值；没有任何把 kind 写回文件的调用（写盘属 services，本片不碰）。
     assert.equal(/write|append|save/i.test(MODEL), false, '纯模型不得出现写盘动作');
   });

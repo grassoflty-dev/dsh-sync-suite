@@ -12,7 +12,7 @@ import { describe, test } from 'node:test';
 
 import {
   chatSummaryLine,
-  filterByKind,
+  filterBySegment,
   filterChats,
   formatChatTime,
   parseChatIndex,
@@ -419,33 +419,42 @@ describe('filterChats', () => {
   });
 });
 
-// ---------------------------------------------------------------- filterByKind（mod-home-entries 分段过滤）
+// ---------------------------------------------------------------- filterBySegment（mod-home-entries 分段过滤）
 
-describe('filterByKind', () => {
+describe('filterBySegment', () => {
+  // kind 是 index.jsonl 复制来的第二来源，故意与投影 preset 相反：
+  // 只有「投影胜出」时下面按 preset 的分组断言才成立（旧 filterByKind 会立刻分组错）。
   const MIXED = [
-    { id: 'c1', title: '云一', updatedAt: '', messageCount: 0, sha256: '', kind: 'cloud' },
-    { id: 'd1', title: '点一', updatedAt: '', messageCount: 0, sha256: '', kind: 'dots' },
-    { id: 'c2', title: '云二', updatedAt: '', messageCount: 0, sha256: '', kind: 'cloud' }
+    { id: 'c1', title: '云一', updatedAt: '', messageCount: 0, sha256: '', kind: 'dots', preset: 'chat' },
+    { id: 'd1', title: '点一', updatedAt: '', messageCount: 0, sha256: '', kind: 'cloud', preset: 'dots' },
+    { id: 'c2', title: '云二', updatedAt: '', messageCount: 0, sha256: '', kind: 'cloud', preset: 'chat' }
   ];
 
   test('cloud 段只留 cloud 行，dots 段只留 dots 行（顺序不变）', () => {
-    assert.deepEqual(filterByKind(MIXED, 'cloud').map((e) => e.id), ['c1', 'c2']);
-    assert.deepEqual(filterByKind(MIXED, 'dots').map((e) => e.id), ['d1']);
+    assert.equal(MIXED[0].kind, 'dots', '先证明索引 kind 确实与 preset 矛盾');
+    assert.equal(MIXED[1].kind, 'cloud', '先证明索引 kind 确实与 preset 矛盾');
+    assert.deepEqual(filterBySegment(MIXED, 'cloud').map((e) => e.id), ['c1', 'c2']);
+    assert.deepEqual(filterBySegment(MIXED, 'dots').map((e) => e.id), ['d1']);
   });
 
   test('返回副本：改结果不影响入参；两段计数相加 = 全部会话', () => {
-    const copy = filterByKind(MIXED, 'cloud');
+    const snapshot = MIXED.map((e) => ({ ...e }));
+    const copy = filterBySegment(MIXED, 'cloud');
     copy.pop();
     assert.equal(MIXED.length, 3);
-    assert.equal(filterByKind(MIXED, 'cloud').length + filterByKind(MIXED, 'dots').length, MIXED.length);
+    assert.deepEqual(MIXED, snapshot, '不改入参数组，也不就地改条目');
+    assert.equal(filterBySegment(MIXED, 'cloud').length + filterBySegment(MIXED, 'dots').length, MIXED.length);
   });
 
   test('无命中返回空数组；坏输入不抛', () => {
-    assert.deepEqual(filterByKind(MIXED, 'cloud').filter((e) => e.kind === 'dots'), []);
-    assert.doesNotThrow(() => filterByKind(undefined, 'cloud'));
-    assert.doesNotThrow(() => filterByKind(null, 'dots'));
-    assert.equal(filterByKind(undefined, 'cloud').length, 0);
-    assert.equal(filterByKind(null, 'dots').length, 0);
+    assert.deepEqual(filterBySegment(MIXED, 'cloud').filter((e) => e.preset !== 'chat'), []);
+    assert.deepEqual(filterBySegment(MIXED, 'dots').filter((e) => e.preset !== 'dots'), []);
+    assert.doesNotThrow(() => filterBySegment(undefined, 'cloud'));
+    assert.doesNotThrow(() => filterBySegment(null, 'dots'));
+    assert.equal(filterBySegment(undefined, 'cloud').length, 0);
+    assert.equal(filterBySegment(null, 'dots').length, 0);
+    assert.deepEqual(filterBySegment([undefined, null, MIXED[0]], 'cloud').map((e) => e.id), ['c1'],
+      '数组里的空行也跳过（比旧 API 更严）');
   });
 });
 
