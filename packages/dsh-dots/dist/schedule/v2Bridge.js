@@ -23,6 +23,7 @@ import { NodeTimelineFs } from '../timeline/write.js';
 import { canonicalRecordLine, decideFreshStart, parseLedger, parseTimelineDay, visibleRecords, } from '../timeline/records.js';
 import { SCHEMA_MARKER_PATH, timelineDeletedPath, timelineRecordsPath, timelineRestorePath, } from '../timeline/paths.js';
 import { V2_ERROR, enqueueIntent, gateOfFacts, makeIntentId, runV2Cycle, } from '../sync/cycle.js';
+import { createDefaultMarkSynced, stampIfSynced } from '../sync/bootstrap.js';
 import { GitRepoV2Port } from '../sync/gitPort.js';
 import { NodeOutboxPort } from '../sync/outbox.js';
 import { ensureRepoRoot, resolveV2RepoDirDetailed } from '../sync/repoPath.js';
@@ -98,12 +99,18 @@ export class V2ScheduleBridge {
     ports;
     now;
     ai;
+    markSynced;
     constructor(options) {
         this.ports = options.ports;
         this.repoDir = options.ports.repoDir;
         this.deviceId = options.deviceId;
         this.now = options.now ?? (() => new Date());
         this.ai = options.ai != null && options.ai.apiKey !== '' ? options.ai : null;
+        // 缺省落戳器来自 bootstrap 的具名工厂，绝不在此重写「何时算同步」。
+        // 没有 paths 的内存夹具没有 state.json：落戳器为空操作，保持既有测试语义。
+        this.markSynced = options.markSynced ?? (options.paths !== undefined
+            ? createDefaultMarkSynced(options.paths, this.now)
+            : () => { });
     }
     /** 今天的日期键（本机时区）。 */
     today() {
@@ -252,7 +259,17 @@ export class V2ScheduleBridge {
         });
         if (!cycle.ok) {
             // push 失败 / 门禁失败：意图已由 cycle 停放（attempts+1），绝不把本地提交报成成功。
+            // 失败分支在这里直接抛 SyncError、不返回：没有东西到达远端，state.json 必须保持原样，
+            // 因此下面唯一的落戳调用只在 cycle.ok 的成功分支上，失败路径无处可戳。
             throw new SyncError(cycle.code, cycle.message, { writtenPaths: cycle.writtenPaths, cycle });
+        }
+        // 与 V2SyncRuntime.runCycle 共用同一判据/落戳对：成功周期恰好一戳。
+        // no-op（writtenPaths 为空 ⇒ attempts 保持 0）被 shouldMarkSynced 拒绝，绝不「没写入也宣称同步」。
+        try {
+            stampIfSynced(cycle, this.markSynced);
+        }
+        catch {
+            /* 落戳失败只影响 UI 展示，绝不改变工具返回值 */
         }
         const commit = cycle.writtenPaths.length > 0 ? await this.ports.git.headSha() : '';
         return {
@@ -324,6 +341,8 @@ export async function withV2ScheduleBridge(options, task) {
             ports: options.ports,
             deviceId: options.settings.deviceId,
             ...(options.now !== undefined ? { now: options.now } : {}),
+            // 生产装配的 paths 透传给默认落戳器（与 buildV2Ports 用的是同一份 paths）。
+            paths: options.paths,
             ai: options.ai ?? aiOptionsFromEnv(options.env ?? process.env),
         }));
     }
@@ -338,6 +357,8 @@ export async function withV2ScheduleBridge(options, task) {
             ports: built.ports,
             deviceId: options.settings.deviceId,
             ...(options.now !== undefined ? { now: options.now } : {}),
+            // 生产装配的 paths 透传给默认落戳器（与 buildV2Ports 用的是同一份 paths）。
+            paths: options.paths,
             ai: options.ai ?? aiOptionsFromEnv(options.env ?? process.env),
         }));
     }

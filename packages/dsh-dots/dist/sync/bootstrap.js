@@ -62,6 +62,23 @@ export function stampIfSynced(result, mark) {
     mark(result);
     return true;
 }
+/**
+ * mod-plugin-v2-marksynced：默认落戳器工厂（唯一实现）。
+ * V2SyncRuntime 与 schedule v2 工具桥共用它，绝不出现第二份「何时算同步」的判定。
+ * 与 rpc.ts 的 markSynced() 共用同一 ISO 形状：Date.toISOString()。
+ * state.json 写失败只影响展示，绝不让已成功的同步变成失败（与 v1 markSynced 同口径）。
+ */
+export function createDefaultMarkSynced(paths, now = () => new Date()) {
+    const stateStore = new LocalStateStore(paths);
+    return () => {
+        try {
+            stateStore.writeLastSyncAt(now().toISOString());
+        }
+        catch {
+            /* state.json 只是 UI 展示用的运行事实 */
+        }
+    };
+}
 /** 唯一生产装配处：真实端口与路径都在这里 new 出来，不存在「库函数无人调用」。 */
 export class V2SyncRuntime {
     repoDir;
@@ -71,7 +88,6 @@ export class V2SyncRuntime {
     homeDir;
     appFilesDir;
     settings;
-    stateStore;
     allowLocalRepo;
     now;
     markSynced;
@@ -86,19 +102,12 @@ export class V2SyncRuntime {
         this.now = options.now ?? new Date();
         const paths = statePaths(this.homeDir);
         this.settings = new SettingsStore(paths, { allowLocalRepo: this.allowLocalRepo });
-        this.stateStore = new LocalStateStore(paths);
         // 保留字面的 `await runV2Cycle(...)`（WIR02 生产装配点守卫逐字钉住），注入只作测试覆盖。
         this.cycleRunner = options.cycleRunner;
         // 缺省落戳器与 rpc.ts 的 markSynced() 共用同一 ISO 形状：Date.toISOString()。
         // state.json 写失败只影响展示，绝不让已成功的同步变成失败（与 v1 markSynced 同口径）。
-        this.markSynced = options.markSynced ?? (() => {
-            try {
-                this.stateStore.writeLastSyncAt(this.now.toISOString());
-            }
-            catch {
-                /* state.json 只是 UI 展示用的运行事实 */
-            }
-        });
+        // 这里把原内联工厂抽成具名导出，行为不变：仍是注入时钟的固定 Date + 同一写入隔离。
+        this.markSynced = options.markSynced ?? createDefaultMarkSynced(paths, () => this.now);
         // 单一仓库目录决策点：env 优先级 + 默认 ~/.dsh/dots/repos/<repoHash>/git-repo。
         const resolved = resolveV2RepoDirDetailed({
             appFilesDir: this.appFilesDir,
