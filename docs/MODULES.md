@@ -18,6 +18,23 @@
 10. **门闸输出必须当次留存（捕获纪律）**：每一次门禁运行都要保留完整输出（例如 `node --test ... 2>&1 | Tee-Object -FilePath .tmp/gates-<wave>.out`），使任何失败事后能点名到具体用例；没有留存日志的门闸结果不算证据，点不出名的失败不能分诊，也不许写成「已排除」。任何由设计师或评审执行的 gate 运行**必须** `Tee-Object` 到 `.tmp/gates-<lane>.out`；**没有留存日志的运行不构成证据**，不得作为 PASS 依据；评审若未留存，其结论按「未捕获」记录。**已记录的不明项（2026-11-21 Wave B）**：全量 app 套件 `node --test "apps/arkui-schedule/tools/test/*.test.mjs"` 共 2721 例，出现过**一次性 1 fail**，随后 14 次连续全绿（均 2721/2721/0/0）；因当次输出未留存，无法点名失败用例。套件内唯一显式超时是 `apps/arkui-schedule/tools/test/deviceAccept.test.mjs:465`（`timeout: 60000`），疑似负载敏感用例，**未证实**。处置：不据此盲改超时、不宣称已修复，只强制留存输出（本条规则）+ 本条记录；复现时按留存输出点名并单独修复。抖动台账见 `docs/FLAKES.md`。**陈旧性判定只看会进产物的输入**（`.ets` / `resources/**` / `AppScope/**` / 桥 JS / `main_pages.json` 等）；测试、文档、README 的 mtime 晚于构建**不影响**产物证据，评审不得据此判「产物过期」——本轮就出现过一次把 `docs/*.md` 的 mtime 当编译输入的误判。
 11. **凭据卫生：输出先打码，报告只报形态**：凡可能含凭据的命令输出（设备偏好快照 / 配置导出 / 请求响应体 / git 输出 / 构建日志等），在贴进 transcript、日志或报告之前必须经 `tools/redact.mjs`（`node tools/redact.mjs` 走 stdin→stdout，或 import 其 `redact(text)`）按模式遮罩；**只遮 URL 的写法不算打码**，因为 query、userinfo 与裸值仍会完整保留。报告只写「存在/不存在 + 长度类别」，**绝不写凭据值或任何可还原的片段**；打码工具自身对 hex 一律输出 `<redacted-hex>`、对其它密钥输出 `<redacted>`，不携带长度类别。伤疤：`1000007` 验证期间一次设备偏好快照检查只遮了 URL，把一个 32 位十六进制访问令牌原样打进了会话 transcript；该值仅存在于 6 个未跟踪的 `.tmp` 快照中，已就地清理且 XML 保持合法，仓库历史与源码未发现。此条为安全卫生规则而非功能特性。
 
+### 0.1 五种失败模式 → 五条方法（2026-11-27/28 夜间沉淀，写方法不写史）
+
+以下五条**不是事故记录，是操作纪律**。每条给出「现象 → 必须做的动作」，下一次遇到同类情形直接照做。
+
+1. **车道交付后静默**（现象：lane 写完了文件、captures 齐全，却不发汇报就转 inactive；一晚出现四次）。
+   **动作**：不相信「没有汇报=没做完」，也不等待——**以树和 captures 为准**：`git status`、`.tmp/gates-*` 的字节数与 mtime、以及被测文件本身的 mtime，三样一起读，能直接判定「做完了/卡住了/在跑」。判定为完成后，由设计师代为汇总结论；判定为卡住后，用**有界指令**（具体命令 + 具体 capture 名 + 停止条件）续跑同一条 lane，不新开 lane。
+2. **park 早于后续提交**（现象：某 lane 为让路把工作存到 `.tmp/<lane>-park/`，另两条 lane 随后改了同一文件并提交；还原 park 会**静默回退已提交的模块**）。
+   **动作**：还原前必须做**三方比对**——park 副本 vs `git show <park时的基线>:<path>` vs 当前 HEAD；只有「park 相对基线新增的 hunk」可以重新套用，其余以 HEAD 为准。还原后必须**自证**：被让路模块的特征串仍在（例：purge 的 10 个标记）、本 lane 的特征串已进、且 `git diff HEAD -- <path>` 里**没有**任何被让路模块的删除行。任一不成立即停止，不构建、不提交。
+3. **测试与 park 竞速**（现象：套件运行的一刻恰好落在 park 还原的中间态，于是出现一条「外来模块加载失败」的红，看起来像本模块坏了）。
+   **动作**：红先归因再修——用**文件 mtime 与运行时刻比对**（例：套件 08:11:17 的红 vs `cycle.ts` 08:12 的还原）判定时序，而不是改断言。处置是**重跑**到干净（新 capture 名，如 `-suite-2b`），并且**保留那份红**连同归因一句，红与绿都在案。
+4. **0 字节捕获冒充证据**（现象：`tsc --noEmit` 成功时**不打印任何东西**，`Tee-Object` 得到 0 字节文件，看起来「跑过了」）。
+   **动作**：0 字节一律按「未捕获」处理，等于没跑。凡静默型命令，**必须在 capture 里追加退出码行**（如 `TSC_NOEMIT_EXIT=0`），使其非零字节；报「绿」时必须同时给 capture 路径与字节数。同类：0 字节的构建日志不算构建（hvigor 的日志在进程结束时才落盘，运行中读到的 0 字节是「还在跑」）。
+5. **测试绿、生活里半对**（现象：一个模块的测试全绿、评审也放行，真机/真仓库一跑就露——本轮出现两次：`lastSyncAt` 只接了启动周期没接工具保存路径；实例删除只把授权标成吊销而留了悬空 `instanceId`）。
+   **动作**：收尾前必须回答一句**「这条路径在生产里由谁调用？」**，答不出来或答出「没有生产调用者」的，必须在登记里写清（例：`syncNow()` 至今无生产调用者）；凡「只在测试夹具里成立」的结论，一律标 `unverified` 并写出**要怎样才能验证**（具体命令 + 观察点），不得用测试绿代替。
+
+引入这五条的代价是每批多花几分钟；不引入的代价是模块被提交后仍然半对、且没人知道。
+
 > **版本号缺口（2026-11-22 登记一次）**：实际发布的序号是 `…1000007 → 1000008（构建了、bump 未提交）→ 1000009 → 1000011 → 1000012…`；**`1000008` 与 `1000010` 从未作为提交存在**。
 >
 > **树级产物边界（一句话索引，规则 9 已有完整门槛、此处不重复）**：模块证据 = 留存构建日志 + 源码 diff；HAP/abc 哈希与控制台尾巴是树级事实，覆盖即「未捕获」，冻结须把日志复制成 `.tmp/build-<module>.out`——详见上面第 9 条。
@@ -781,4 +798,76 @@ c41eb（v2 唯一路径；删除激活闸与双存储兼容；评审 P1-1/P1-2 �
 | --- | --- | --- | --- | --- | --- | --- |
 | `mod-app-remote-glyph-rail-polish` | `‹`/`↻`/`ⓘ` 浮轨压住了 DSH 页面正文（真机截图上可见）。修法**模型先行**：新增纯模型 `model/glyphRailLayout.ts`（输入视口 + 安全区 + 字形尺寸/间距/数量 ⇒ `railRect` / `contentRect` / `gutter` / `railVisible`），**预留左侧沟槽**：轨道占 `[safeLeft+gap, +glyphSize]`，页面从再右一个 gap 开始，**DSH 页面自己的布局整体右移**——所以页面任何部分都不可能落在轨道下面；窄视口阈值 **480vp**（低于此：字形压到 44、gap 压到 4 ⇒ 沟槽 52vp）；六类退化一律 typed（`E_VIEWPORT_INVALID` / `E_SAFE_AREA_INVALID` / `E_CONTENT_TOO_NARROW` / `E_CONTENT_TOO_SHORT` / `E_RAIL_TOO_TALL`，`ok=false` + `railVisible=false`），**"静默重叠"不可表达**。`.ets` 只做适配：`RemoteControl.ets` 的轨道尺寸/位置/间距、Web 盒子的宽高与 `position` 全部取自模型，`onAreaChange → applyArea` 送视口，`railVisible` 门控轨道；页面表面（page/error/empty/loading）、错误块、`bindSheet` 诊断、字形常量一字未改 | **待 Lead 提交**（本行哈希待填） | 提交前回滚 = 删除 `model/glyphRailLayout.ts` 与 `tools/test/glyphRailLayout.test.mjs`、把 `RemoteControl.ets` 恢复为 `100%×100%` Web + 硬编码轨道（不删任何既有断言）；提交后 `git revert <hash>` | `tools/test/glyphRailLayout.test.mjs` **38 例**（23 行真机/边界表 + 密集扫描 + `rectsIntersect` 真值表 + 源码守卫 F1–F5）；app 套件 **3369/3369/0/0** 两次（473,846 / 473,802 B）；`validate-app` 8/8（402 B）；**源码守卫对修复前的页面实测为红**：`.tmp\gates-gr-prefix-fail.out` 60,492 B，F1 未 import 模型 / F2 写死数字 / F3 Web 用 `100%` / F4 无 `onAreaChange` 四条红，改后 38/38 绿；构建 `build-20261127-001406.log`（`CompileArkTS` EXECUTED 6 s 272 ms、**0** 条 UP-TO-DATE CompileArkTS、`BUILD SUCCESSFUL in 22 s 292 ms`，控制台 `✓ 产物验收通过` + `applied=false`），副本 101,904 B | 每一行表值的几何不相交、轨道 ⊆ 安全区、字形 ≥ 44vp、页面 ≥ 240×160vp 或返回 typed 退化、页面右移一个 gap、全部尺寸来自模型（无硬编码）、未新增 chrome、ArkTS 真编译 | **真机观感全部 `unverified`**：(a) 轨道落在页面背景的左侧条内、任何会话文字都不在轨道下；(b) DSH 页面变窄后是否正常重排（自身响应式、滚动条、弹层、软键盘）；(c) 进入页面首帧轨道必须出现（不能一直隐藏）、横竖屏切换后轨道重新居中且 Web 重新量；(d) ArkUI 是否真的把页面放进安全区（本模块按 insets=0 传，若实际是贴边就要把 inset 传进去，`railLayout()` 一行改动）；(e) 44–48vp 字形是否仍好点、`↻` 长按是否仍能开诊断浮层 |
 
+> **2026-11-27 记账订正 · 执行子代理路由偏差（Lead 要求入账，不擦除）**：本会话内**全部 27 次执行子代理派生都继承了总设计师自己的模型**（`dsh-opencode-go/deepseek-v4.1-flash` + `reasoning_effort: high`），而规则要求执行子代理一律为 **`dsh-opencode-go/hy4-flash-free` 且不带 `reasoning_effort`**。**成因**：派生时只传了 `name`/`description`/`prompt`，**省略了 `provider` 与 `model`**，于是继承父模型——不是工具限制，是我漏传。**处置**：① 此后每次派生显式写 `provider: "dsh-opencode-go"`、`model: "hy4-flash-free"`、**完全不传** `reasoning_effort`（不传 `undefined`、不传 `"default"`）；② 当时仍在飞的两条车道（`impl-desktop-viewport`、`impl-ff-behind`）允许跑完，但**标记为"可疑层级"**，其证据在交给 Lead 之前由总设计师**逐项复核**，两份汇报各写一行说明，不重跑已完成的工作去"赎罪"；③ **成本口径**：这些派生跑在更贵的模型上，**不声称任何节省**，也不为此偷偷调整别的参数。总设计师自身路由全程为 `dsh-opencode-go/deepseek-v4.1-flash` + `high`，未发现反向漂移。日期 2026-11-27。
+
+### 7.6 2026-11-27 夜间续批：落后即快进（用户阻塞级）
+
+| 模块 id | 一句话目的 | 状态 / 提交 | 回滚 | 依赖 / 证据 | 测试能证明的 | 只有真机能确认的（`unverified`） |
+| --- | --- | --- | --- | --- | --- | --- |
+| `mod-plugin-behind-fastforward` | 「保存令牌后提示同步失败」的真因：`cycle.ts` 的 `gateOfFacts()` 用 **`head === origin` 严格相等**做闸门，于是本地**只落后**（`ahead=0, behind=3`）也被判 `E_NOT_SYNCED`；M3 恢复要求 `behind===0 && ahead>0`，也拒绝 ⇒ **整条链路没有任何快进尝试**，而"只落后"是最干净、无需改写历史的情形（每次平板先同步都会触发，用户读成"插件保存坏了"）。修法：新增**纯函数** `decideSyncGate({ahead,behind,ours}) → {action: 'proceed'\|'fast-forward'\|'recover'\|'refuse', reason}`（非法输入一律 `refuse` 失败关闭）；`fetchMain()` 之后、任何本地写入/union 之前，`behind>0 && ahead===0` ⇒ **一次** `merge --ff-only refs/remotes/origin/main`（固定 argv 构造器 + `isFastForwardArgs` 形状白名单；`GIT_SUBCOMMANDS` 仍不含 `merge`/`pull`；`--no-ff`/`--ff-only=…`/`--ff`/`--squash`/`--hard` 等进禁止表），成功后**同一周期续跑**；**脏工作区**不丢数据：FF 报 `blocked-by-local-changes` ⇒ 不改写、继续走完整性/union/提交，把本地改动折进安全的 `[v2]` 提交，再按既有分叉规则处理；非脏失败的 FF 失败给独立 typed 文案（**不**复用分叉那句话，分叉句子逐字不变） | **待 Lead 提交**（本行哈希待填） | 提交前回滚 = 删除 `src/sync/syncGate.ts` 与 `test/sync-gate-ff.test.mjs`、撤销 `gitPort.ts`/`cycle.ts` 的 FF 增量与 `test/plugin-v2-cycle.test.mjs` 的 retarget、还原 3 份 dist；提交后 `git revert <hash>` | 新增 `test/sync-gate-ff.test.mjs` **17 例**（矩阵 + 临时仓库见证 + 脏工作区两种 + 敌对 argv 表）；插件套件 **1083 / 1081 / 0 / 2** 两次（145,292 / 145,304 B）；`dist` 77 文件 0 mismatch；app 套件 3395/3395 | 矩阵全格（含 NaN/负数/小数/null 一律 refuse）；**临时仓库见证**：3 次对端提交后本地干净且落后 ⇒ FF 后本地 head **等于**远端 head（`merge-base --is-ancestor` 成立、0 个合并提交）、写入 `ok`、危险 argv 计数 **0**、第二周期 no-op；**脏工作区**：改不同路径 ⇒ 本地记录保留且推上去；改同一日文件 ⇒ FF 被阻断一次、本地+远端+意图合成一个本地 `[v2]` 提交后按既有规则收尾、**该夹具内**零 force 且本地记录保留（**覆盖面有限**：G-D4 只覆盖一种 blocked-FF 形状、以 `E_LOCAL_PENDING` 收尾——独立评审 P2-4 已据此收敛措辞，不宣称"所有分支都无损"）；分叉夹具仍逐字拒绝 | 真实 Gitee/HTTPS 上「3 提交落后 + 干净」是否静默保存成功（FF 本身纯本地，网络/鉴权风险仍只在既有 fetch 上）；真机上用户不再看到那条中文错误 |
+| `mod-plugin-behind-fastforward`（**已知缺口，需后续模块**） | `state.json` 的 `lastSyncAt` **仍会是 null**：v2 路径（`schedule_add → runV2Cycle`）**从不调用** `markSynced()`（`rpc.ts` 里那处只有 v1 的 `push()`/`apply()` 可达）——所以快进修好后，"同步成功"的时间戳仍不落盘，用户可能仍读到"从没同步过" | **未修，登记为缺口**（G-D2 已把该事实钉成测试） | 后续模块改动 `src/rpc.ts` / `src/sync/bootstrap.ts` 时一并接上 | 现有测试已断言"v2 成功但 lastSyncAt 仍 null"这一事实 | 事实已钉住（避免以后被当成回归） | 修好后真机上设置页"上次同步"是否显示正确时间 |
+
+### 7.7 2026-11-27 **前提被用户撤回**：`mod-app-remote-desktop-viewport` 未提交、工作树已回退（只保留分析）
+
+| 项目 | 事实 |
+| --- | --- |
+| 模块状态 | **未提交、未打 tag、不进入历史**。用户 2026-11-27 原话（译文）：「我先前搞错了，平板上的远程控制页没有问题——我看到的是因为我在 DSH 页面里从对话页切到了轨迹页。」 |
+| 工作树处置 | `apps/arkui-schedule/entry/src/main/ets/pages/RemoteControl.ets` **已按 HEAD 逐字节还原**（还原前后 SHA-256 与 `git show HEAD:` 一致）；`model/viewportScale.ts` 与 `tools/test/viewportScale.test.mjs` **已删除**；`git status` 无该车道残留（无 `.platform-overlay/` 残留）。 |
+| 为什么「平板和电脑不一样」不是正确的框架（**保留的分析**） | ① 折叠状态是**组件内部**的，且**两端初始都是展开**：`dsh-client-ui-trajectory/src/client/TrajectoryView.tsx:141-144`（`useState(EMPTY_TURN_IDS/EMPTY_RECORD_IDS)`，只被工具栏按钮 `:476-536` 改）；② 工具正文在**任何宽度**都默认折叠：`dsh-client-ui-tool/.../ToolRow.tsx:258,474`。所以"工具调用/思考没收纳"不是平板渲染差异，宽度缩放也修不了它。 |
+| 仍然成立的宽度事实（供将来若真需要时复用） | 「长回答→点开弹窗」确实是**宽度驱动**：`TrajectoryTable.module.css:2069` 的 `@media (max-width:760px)` 把详情面板改成 `position:absolute` 浮层，≥761px 才是内联侧栏；「多出工具栏一行」是 `TrajectoryToolbar.module.css:19/:27` 的 `flex-wrap:wrap`（**无媒体查询**，桌面也渲染同样的按钮），真机触发点未证实。 |
+| 评审结论如何处置 | 独立评审 `docs/REVIEW-b11-ff-vp.md` 的 P2-1/P2-2/P2-3/P2-6 均针对已删除的 `viewportScale.ts` 与其文档，**随模块撤回而失效**（在该文件末尾已加注）；P2-5（把「没找到开关」写成「宽度修不了」）已在本节按原文收敛。 |
+| 若将来重启这个方向 | 需要的不是"缩放猜测"，而是**真机截图 + 在页面内注入诊断读 `window.innerWidth`** 来确认触发点；`WebviewController.zoom()` 是否改变布局视口在 ArkWeb 上仍未验证。 |
+
+
+
+> **保留的分析证据（DSH 自带前端，逐条 file:line）——模块已撤回，仅作将来参考，不是任何模块的登记**：前提（平板渲染与桌面不同）已由用户撤回；下列事实仍可用于回答"哪一部分确实与宽度有关"。
+> - **长回答→点开弹窗：宽度驱动，已证实。** `dsh-client-ui-trajectory/src/client/TrajectoryTable.module.css:2069` 的 `@media (max-width:760px)` 把详情面板变成 `position:absolute` 的右侧浮层；≥761px 时是正常内联侧栏。另有 `:12` 的 `container-type:inline-size` + `:523` 的 `@container trajectory-table (max-width:620px)`。
+> - **多出『时长/轮次/调用/子调用』一行：宽度敏感但真机触发原因未证实。** 该行是 `TrajectoryToolbar.module.css:19` 的 `.inner{flex-wrap:wrap}` + `:27` 的 `.actions{flex-wrap:wrap}`，**没有媒体查询**；轨迹标签页在桌面也渲染同样的按钮（`TrajectoryView.tsx:546`），只是桌面排得下。按算术（≈4 按钮 243px + 搜索最小 84px ≈ 415px）~748px 应该仍能排一行，所以仅靠 flex-wrap 未必是平板触发点——**没有真机截图无法定论**。
+> - **工具调用/思考"没收纳"：没找到任何开关。** 折叠状态是组件内部的，**两端初始都是展开**（`TrajectoryView.tsx:141-144` 的 `useState(EMPTY_TURN_IDS/EMPTY_RECORD_IDS)`，只被工具栏按钮 `:476-536` 改），工具正文在**任何宽度**都默认折叠（`dsh-client-ui-tool/.../ToolRow.tsx:258,474`）；`@media (hover:none)` 那几条只改一个查看按钮的 `opacity`。**源码证据只支持"没找到开关"，不支持"宽度修不了"这一更强的因果断言**（该措辞已按独立评审 P2-5 收敛）。
+> - 另有 JS 宽度阈值，只驱动外壳：`dsh-client-ui-layout/src/client/columns.ts:21,25`（`SIDEBAR_DRAWER_BREAKPOINT=768`、`SIDEBAR_AUTO_COLLAPSE=1024`），源是 `client/stores.ts:84` 的 `viewportWidth: window.innerWidth`；`pointer:coarse` 全仓只出现在 `InputBar.module.css:88`（输入框尺寸），与三个症状都无关。
+
 > **真机验收断言（尚未通过；重装前保持 `unverified`）**：① 平板打开已配对地址的 `/` 应看到**电脑自己的 DSH 页面**（品牌、侧栏、设置页都在），且能发一条消息收到回复（证明 `/api` 不被 403、WS 隧道通）；② 电脑上**没在跑 DSH**（或插件没拿到上游身份）时，平板应看到**中文错误页**并写明下一步，不得是 401 英文页或空白页；③ 断开电脑侧后重连，不需要在平板上加任何新字段、新按钮或重配对；④ 在电脑上把 DSH 页面关掉再打开，平板刷新一次即可继续用（无需重启插件）。以上是**验收标准**，不是已观察结果。
+
+---
+
+---
+
+## 7.8 2026-11-27/28 夜间提交批：七个模块（哈希已回填）
+
+| # | 模块 id | 一句话 | 提交 | 标签 | 测试能证明的 | 只有真机/真仓库能确认的（`unverified`） |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | `mod-plugin-behind-fastforward` | 只落后时先 `merge --ff-only` 再继续，修「保存后同步失败」 | `8c82402` | `module/mod-plugin-behind-fastforward` | 插件套件 1083/1081/0/2 ×2；临时仓库见证：3 提交落后 → FF 后 head==远端、0 合并提交、危险 argv 0；脏工作区两分支 | **Lead 已在真 Gitee 上验过 FF**：reflog `merge refs/remotes/origin/main: Fast-forward`、`rev-list --left-right --count` = `0 0`、`git log --merges` 空。**但脏工作区与分叉拒绝两支只在临时仓库见证过** |
+| 2 | `mod-plugin-remote-live-connections` | 面板显示「此刻在连」而非历史 | `e1690fe` | `module/mod-plugin-remote-live-connections` | tsc 0；build 0；distcheck 78/0；套件 1102/1100/0/2 ×2；修复轮 L2 先红后绿（幽灵行消失）；评审 scoped 复验四项 no finding | **平板上的面板从未被看过**：5 s 轮询观感、耗电、中文换行、隧道关闭瞬间帧序，全部未验证 |
+| 3 | `mod-plugin-v2-marksynced` | v2 周期成功后回写「上次同步」时间 | `484b44f` | `module/mod-plugin-v2-marksynced` | 谓词全函数（`Infinity` 拒绝、抛异常拒绝、`attempts` 缺失拒绝）；v1 语义恢复（`pushed:false` 仍盖）；套件 1106/1104/0/2 ×2 | **只接了启动周期**；生产里是否真被走到，直到第 4 个模块才补上工具路径 |
+| 4 | `mod-plugin-v2-marksynced-toolpath` | 工具保存路径也回写「上次同步」 | `0eef966` | `module/mod-plugin-v2-marksynced-toolpath` | 真工具路径（`v2Bridge.add()`）驱动：成功后 `state.json.lastSyncAt` 前进；失败不盖；no-op（`attempts:0`）不盖并写明理由；套件 1110/1108/0/2 | **`lastSyncAt` 前进这一条尚未在重启后的真实保存上验过**（重启后跑一次 `schedule_add`） |
+| 5 | `mod-plugin-outbox-purge-failed` | 清理陈旧失败意图（只清 `failed` 且 >7 天） | `8dc939c` | `module/mod-plugin-outbox-purge-failed` | 谓词严格 `>`、非正/缺失时间戳 fail-closed、边界用例、日志只拼计数、`dequeueIntents` 唯一出队路径、result 不变；套件 1119/1117/0/2 ×2 | **三条真实碎片今天不清**（`enqueuedAt` 2026-11-22 19:12–22:03，今 2026-11-28 只有 5.44–5.56 天，**在窗口内**）；最早 **2026-11-29 19:12+08** 起逐条可清。生产时钟是 `V2Runtime` 构造时的 `new Date()`（`bootstrap.ts:156`），**下一次真实周期何时触发未验证**；`bootstrap.ts:190-192` 未把 `logger` 传进 `runV2Cycle`，**生产日志是静默的**（不是泄漏，是不可观测） |
+| 6 | `mod-app-instance-delete` | 设置页删除实例（含授权行与播种镜像） | `5e01aa9` | `module/mod-app-instance-delete` | 复活用例驱动真实 `ensureSeeded()`；授权行**删除**（被删实例 0 行、他实例行不动）；chat 面路径集+逐文件 sha256 不变；Home 保活面板刷新链；Rule-9 r2 `102,645 B`（CompileArkTS ×1 / UP-TO-DATE ×0 / `BUILD SUCCESSFUL` / 0 ERROR）；套件 3392/3392 ×2；台账 4 严 / 7 等 / 1 新 / **0 放宽** | **无真机**：确认弹层观感、删除后 Home 的实际刷新、重新扫码流程，均未在设备上看过。P2-2 仅部分修复（标题已改，注释里的「四行」仍在） |
+| 7 | `mod-plugin-chat-hide-infrastructure` | **插件侧基础设施；app 侧未交付（评审 Block，P1-1）**：隐藏折叠 + 导出器抑制 + 门禁白名单 | `b8af53c` | `module/mod-plugin-chat-hide-infrastructure` | 折叠全函数（普通行永不解除隐藏、只有 `op:"unarchive"` 能，且本模块不产生）；导出器两层抑制（选中前过滤 + `appendIndexLine` 前复读）；门禁精确到 `chats/index.jsonl`；merge 自证（purge 10 标记存活、0 删除行）；套件 1136/1134/0/2 ×2；distcheck 79/0 window 5；定向 29/29；emit 5/5 | **两条行为路径都未验证**（仓库无 `chats\`）；**用户入口不存在**：`chatHide.ts` 的文案与 typed 原因无导入方，平板逐条删除入口与窄写入通道属 `mod-app-chat-hide`，未交付 |
+
+> 哈希与标签以 `origin/main` 为准；`HEAD == origin/main` 于每次提交后核对过。
+
+## 7.9 「尚未验证」清单（**读到这里不要以为是绿的**）
+
+| 项 | 为什么没验 | 需要什么才能验 |
+| --- | --- | --- |
+| `mod-app-instance-delete` 的**任何界面行为** | 设备已不可用（无线调试坏） | 装机后：设置 → 实例 → 删除 → 二次确认 → 返回 Home 行消失 → 重新扫码 |
+| `mod-plugin-remote-live-connections` 的**面板** | 同上；且无平板接入 | 平板连一次，看「当前连接」出现/消失、5 s 内刷新、无幽灵行 |
+| `mod-chat-hide` 的**两条行为路径** | 两个仓库都**没有 `chats\`**：`chats\index.jsonl` 不存在、0 个会话目录；电脑有 2,225 个会话日志但**从未发布** | 用户同意后：在电脑上 `chatExportOne`/`chatExportAll`（`rpc.ts:1360`/`:1358`）发布一条 →（i）仓库出现 `chats/index.jsonl` 一行与 `chats/<id>/`；（ii）平板列表出现该会话；（iii）删除后列表消失且**再导出一次仍消失** |
+| FF 的**脏工作区**与**分叉拒绝**两支 | 真 Gitee 上只跑过干净落后这一支 | 在真实仓库里制造「同日文件被本地改动」与「历史分叉」两种局面各一次 |
+| `mod-plugin-v2-marksynced-toolpath` 的**真实保存** | 需要重启 DSH 载入新 `dist` | 重启后跑一次 `schedule_add`，看 `state.json.lastSyncAt` 是否前进 |
+| outbox 三条碎片的**清除** | 它们在 7 天窗口内 | 等 2026-11-29 19:12+08 后跑一次成功周期；并注意生产日志静默（见 §7.8 第 5 行） |
+| 会话**列表在有数据时的渲染** | `chatStore` 只读过空/缺失目录 | 同 chat-hide 的前置条件 |
+| **chat-hide 的用户可见入口** | 评审 P1-1：`chatHide.ts` 的文案与 typed 原因**没有任何导入方**——没有逐条删除入口、没有写入通道、没有 hide RPC | 见「明日队列」第 2 条；在入口接通之前，不得把该模块描述为「可用的删除」 |
+
+## 7.10 明日队列（会话结束也不丢）
+
+1. `mod-plugin-chat-export-auto`：设计已定 **A + mutex**，六条开工前提在 `docs\CHAT-EXPORT-AUTO-DESIGN.md` §10；**必须先等 `mod-chat-hide` 落地**（两者都动 `syncGate.ts` / `cycle.ts`）。
+2. **chat-hide 的用户入口与写入通道**（评审 P1-1）：逐条删除入口 + 把隐藏行写进 `chats/index.jsonl` 并提交推送的窄通道；这是把「模型层」变成「用户能用的删除」的缺口。
+3. chat-hide 的真机/真仓库验证（需用户同意导出至少一条会话）。
+4. 三个 app 侧模块的真机走查（实例删除、以及需要设备的历史项）。
+
+## 7.11 文档指针
+
+- `docs\CHAT-DELETE-DESIGN.md`：隐藏式删除（12 节，含 DSH 自带归档的实测机制、折叠全函数、空仓库事实、恢复模块的范围界定）。
+- `docs\CHAT-EXPORT-AUTO-DESIGN.md`：自动无感导出（10 节，含变更门控、首次有界、提交归属 A+mutex 的批准与六条条件）。
+- `docs\NOTE-chat-export-trigger.md`：最初「要不要按钮」的注记；决定已改为自动，此文件仅作演变记录。
