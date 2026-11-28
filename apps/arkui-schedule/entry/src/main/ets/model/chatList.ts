@@ -36,6 +36,16 @@
  */
 export type ChatKind = 'cloud' | 'dots';
 
+/**
+ * 会话 preset（**不是**上面的 `ChatKind` 分段）：事实来自 workspace 根
+ * `docs/RESEARCH-chat-preset.md` §5.1 的 `agentPreset` 投影。
+ * - `chat` = 云端对话模式，**唯一**允许进平板列表 / 被隐藏的会话；
+ * - `other` = standard（工作会话）/ 缺字段 / 未知 id / 读不到 —— 一律不可见、不可隐藏（fail-closed）。
+ *
+ * 不从标题、工作区、index 的 `kind` 猜测；没有可证明的 `agentPreset === 'chat'` 就当不是。
+ */
+export type ChatSessionPreset = 'chat' | 'other';
+
 /** `chats/index.jsonl` 的一行（读侧已归一：缺字段用安全默认值补上）。 */
 export interface ChatIndexEntry {
   /** 会话 id（= 目录名 = DSH header 的 `id`），空串绝不会出现在返回值里。 */
@@ -55,7 +65,29 @@ export interface ChatIndexEntry {
 /** `parseChatIndex` 的结果：坏行只计数，不抛。 */
 export interface ChatIndexParse {
   entries: ChatIndexEntry[];
-  /** 坏行数（JSON 解析失败 / 不是对象 / 缺 `id`）。 */
+  /** 坏行数（JSON 解析失败 / 不是对象 / 缺 `id` / op 行时间非法）。 */
+  errors: number;
+}
+
+/**
+ * mod-chat-hide：op 行的决胜标记。`(ts, seq)` 字典序比较；seq = 行号（1 起），同毫秒时定胜负。
+ */
+export interface ChatFoldMarker {
+  ts: number;
+  seq: number;
+}
+
+/** 每个 id 的隐藏状态；普通行**永不**触碰它（迟到的重导出行不能解除隐藏）。 */
+export interface ChatFoldState {
+  hidden: boolean;
+  at: ChatFoldMarker;
+}
+
+/** `foldChatIndex` 的结果：正常列表只取 `entries`（已排除隐藏 id）。 */
+export interface ChatIndexFold {
+  entries: ChatIndexEntry[];
+  /** 当前隐藏的 id（含只有隐藏行的 id）；本模块不提供任何恢复入口。 */
+  hiddenIds: string[];
   errors: number;
 }
 
@@ -104,7 +136,14 @@ interface RawIndexLine {
   sha256?: string;
   /** additive 字段：存储侧可能写 `chat`（§3），读侧归一为 `cloud`。 */
   kind?: string;
+  /** mod-chat-hide：隐藏 / 恢复行；本模块只产生 archive，unarchive 只读兼容。 */
+  op?: string;
+  deletedAt?: number;
+  ts?: number;
 }
+
+/** 隐藏行的 id 白名单（与 `chatStore.isSafeChatId` 同口径），坏 id 只让该行失效。 */
+const HIDE_ID_PATTERN: RegExp = /^[A-Za-z0-9._-]+$/;
 
 /** 消息内容数组里的一段（只有 `text` 段会被读，图片等其它段直接跳过）。 */
 interface ChatPart {
@@ -288,17 +327,21 @@ function messageText(data: ChatEventData | null): string {
 // ---------------------------------------------------------------- 列表：解析 / 排序 / 过滤
 
 /**
- * 解析 `chats/index.jsonl`。
+ * 折叠 `chats/index.jsonl`（mod-chat-hide，`docs/CHAT-DELETE-DESIGN.md` §11.3 / §12）。
  *
- * - **只追加语义**：同一个 `id` 出现多次时**取最后一行**（行序即追加序，最后一行最新）；
- * - 坏行（JSON 失败 / 不是对象 / 缺 `id`）只 `errors++`，不影响其它行；
- * - 返回顺序 = id **首次出现**的顺序（排序交给 `sortChats`，两层职责分开）。
+ * 全函数：任意行序列都有确定结果，坏行只计数、绝不抛。
+ * 1. 普通行：同 id 取最后一行（行序即追加序），**只更新内容投影、永不改变 hidden**；
+ * 2. `op:"archive"`（带 `deletedAt` 毫秒）：`(ts,seq)` 严格新于当前标记才隐藏；
+ * 3. `op:"unarchive"`（带 `ts`，格式兼容、本模块不产生）：严格更新才恢复可见；
+ * 4. 坏行 / 未知 op 只 `errors++`；返回顺序 = id 首次出现顺序（排序交给 `sortChats`）。
  */
-export function parseChatIndex(jsonlText: string): ChatIndexParse {
+export function foldChatIndex(jsonlText: unknown): ChatIndexFold {
+  const text: string = typeof jsonlText === 'string' ? jsonlText : '';
   const byId: Map<string, ChatIndexEntry> = new Map<string, ChatIndexEntry>();
+  const states: Map<string, ChatFoldState> = new Map<string, ChatFoldState>();
   const order: string[] = [];
   let errors: number = 0;
-  const lines: string[] = splitJsonl(jsonlText);
+  const lines: string[] = splitJsonl(text);
   for (let index = 0; index < lines.length; index++) {
     const line: string = lines[index].trim();
     if (line.length === 0) {
@@ -320,6 +363,26 @@ export function parseChatIndex(jsonlText: string): ChatIndexParse {
       errors++;
       continue;
     }
+    if (raw.op !== undefined) {
+      const op: string = raw.op === 'archive' || raw.op === 'unarchive' ? raw.op : '';
+      const rawMillis: number | undefined = op === 'archive'
+        ? raw.deletedAt
+        : (raw.ts !== undefined ? raw.ts : raw.deletedAt);
+      const ts: number = typeof rawMillis === 'number' && Number.isFinite(rawMillis) &&
+        Number.isInteger(rawMillis) && rawMillis >= 0 ? rawMillis : -1;
+      const safeId: boolean = id.length <= 200 && id !== '.' && id !== '..' && HIDE_ID_PATTERN.test(id);
+      if (op.length === 0 || !safeId || ts < 0) {
+        errors++;
+        continue;
+      }
+      const seq: number = index + 1;
+      const current: ChatFoldState | undefined = states.get(id);
+      const at: ChatFoldMarker = current === undefined ? { ts: -1, seq: -1 } : current.at;
+      if (ts > at.ts || (ts === at.ts && seq > at.seq)) {
+        states.set(id, { hidden: op === 'archive', at: { ts: ts, seq: seq } });
+      }
+      continue;
+    }
     if (!byId.has(id)) {
       order.push(id);
     }
@@ -331,18 +394,33 @@ export function parseChatIndex(jsonlText: string): ChatIndexParse {
       sha256: typeof raw.sha256 === 'string' ? raw.sha256.trim() : '',
       kind: normalizeChatKind(raw.kind)
     };
-    // 后写覆盖：只追加文件里「最后一行」才是该 id 的最新投影
+    // 后写覆盖：只追加文件里「最后一行」才是该 id 的最新内容投影；这里刻意不碰 states。
     byId.set(id, entry);
   }
   const entries: ChatIndexEntry[] = [];
   for (let index = 0; index < order.length; index++) {
-    const entry: ChatIndexEntry | null = byId.has(order[index]) ? (byId.get(order[index]) as ChatIndexEntry) : null;
-    if (entry === null) {
+    const state: ChatFoldState | undefined = states.get(order[index]);
+    if (state !== undefined && state.hidden) {
       continue;
     }
-    entries.push(entry);
+    const entry: ChatIndexEntry | undefined = byId.get(order[index]);
+    if (entry !== undefined) {
+      entries.push(entry);
+    }
   }
-  return { entries: entries, errors: errors };
+  const hiddenIds: string[] = [];
+  states.forEach((state: ChatFoldState, id: string): void => {
+    if (state.hidden) {
+      hiddenIds.push(id);
+    }
+  });
+  return { entries: entries, hiddenIds: hiddenIds, errors: errors };
+}
+
+/** 解析索引：只把可见条目交给列表页；隐藏判定收口在 `foldChatIndex`。 */
+export function parseChatIndex(jsonlText: string): ChatIndexParse {
+  const folded: ChatIndexFold = foldChatIndex(jsonlText);
+  return { entries: folded.entries, errors: folded.errors };
 }
 
 /**
@@ -433,6 +511,84 @@ export function filterByKind(entries: ChatIndexEntry[], kind: ChatKind): ChatInd
     }
   }
   return matched;
+}
+
+// ---------------------------------------------------------------- 会话 preset（云端对话准入）
+
+/** session.jsonl 里只声明 preset 投影要用的键；其它行内容一概不读。 */
+interface SessionPresetLine {
+  type?: string;
+  agentPreset?: string;
+  data?: { agentPreset?: string } | null;
+}
+
+/** 只有字面量 `'chat'` 算 chat：大小写 / 空白 / 别名都不放宽。 */
+function presetOf(value: unknown): ChatSessionPreset {
+  return value === 'chat' ? 'chat' : 'other';
+}
+
+/**
+ * 从 `chats/<id>/session.jsonl` **原文**投影最终 agentPreset（纯函数、坏行跳过、不抛）。
+ *
+ * 与 DSH 的 `agentPreset` 投影同口径：header 首行的 `agentPreset` 给初值，
+ * 后续 `agent-preset/selected` 事件按顺序覆盖；缺 header / 值非法 / 空输入 → `other`。
+ * 这是判定「是不是云端对话」的**唯一**来源；`chats/index.jsonl` 与 `meta.json` 都没有这个字段。
+ */
+export function sessionPresetOf(sessionJsonl: string): ChatSessionPreset {
+  const text: string = typeof sessionJsonl === 'string' ? sessionJsonl : '';
+  let current: ChatSessionPreset = 'other';
+  let sawHeader: boolean = false;
+  const lines: string[] = splitJsonl(text);
+  for (let index = 0; index < lines.length; index++) {
+    const line: string = lines[index].trim();
+    if (line.length === 0) {
+      continue;
+    }
+    let raw: SessionPresetLine | null = null;
+    try {
+      raw = JSON.parse(line) as SessionPresetLine | null;
+    } catch {
+      continue;
+    }
+    if (raw === null || typeof raw !== 'object') {
+      continue;
+    }
+    if (raw.type === 'session') {
+      sawHeader = true;
+      current = presetOf(raw.agentPreset);
+      continue;
+    }
+    if (raw.type === 'agent-preset/selected') {
+      const data: { agentPreset?: string } | null =
+        raw.data === undefined ? null : raw.data;
+      current = presetOf(data === null ? undefined : data.agentPreset);
+    }
+  }
+  return sawHeader ? current : 'other';
+}
+
+/**
+ * allow-list：只保留 preset 恰好为 `chat` 的条目；缺映射 / `other` / 未知 id 一律丢弃。
+ * 工作会话即使被误写进索引也不会渲染，因此没有可点的行、也就没有可隐藏的目标。
+ */
+export function filterChatPreset(
+  entries: ChatIndexEntry[],
+  presetById: Record<string, ChatSessionPreset>
+): ChatIndexEntry[] {
+  const list: ChatIndexEntry[] = Array.isArray(entries) ? entries : [];
+  const presets: Record<string, ChatSessionPreset> =
+    presetById === null || presetById === undefined ? {} : presetById;
+  const kept: ChatIndexEntry[] = [];
+  for (let index = 0; index < list.length; index++) {
+    const entry: ChatIndexEntry | null = list[index];
+    if (entry === null || entry === undefined) {
+      continue;
+    }
+    if (presets[entry.id] === 'chat') {
+      kept.push(entry);
+    }
+  }
+  return kept;
 }
 
 // ---------------------------------------------------------------- 详情：事件流 → 消息

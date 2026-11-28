@@ -1,9 +1,15 @@
 /**
- * 云端对话 · 会话列表（P1 只读）。
+ * 云端对话 · 会话列表（内容只读；每条会话可单条删除）。
  *
  * 数据源：同步仓库工作副本里的 `chats/index.jsonl`（见 `services/chatStore.ets` 与
- * `docs/CHAT-SYNC.md` §2.4）。页面只做四件事：按 `kind` 分段（`filterByKind`）、
- * 搜索（`filterChats`）、按更新时间排序（`sortChats`）、点行跳只读详情。
+ * `docs/CHAT-SYNC.md` §2.4）。页面做五件事：按 `kind` 分段（`filterByKind`）、
+ * 搜索（`filterChats`）、按更新时间排序（`sortChats`）、点行跳只读详情、
+ * **逐行**「删除」打开确认 sheet（mod-app-chat-hide）。
+ *
+ * 删除入口的形状是刻意的：`ChatRow` 内一行一个 `ActionButton`，`askHide(id)` 只接这一行的
+ * 单个 id 字符串并写进单个 `@State pendingId`；没有长按、没有滑动、没有多选 / 批量 API，
+ * 所以一次确认永远只隐藏一条会话。sheet 文案逐字来自 `chatHidePlanOf()`；确认失败时
+ * `confirmHide()` 无条件重读索引，不保留本地乐观隐藏（索引是唯一真相）。
  *
  * 顶部「纯云端对话 | dots 对话」两段共用同一份列表、搜索、三态与下拉刷新：切换只重算
  * `visibleChats`，不重读磁盘也不丢数据（`docs/CLOUD-CHAT-AND-DOTS.md` §2）。首页两个入口
@@ -32,10 +38,12 @@ import { loadingText } from '../common/copy';
 import { APP_VERSION } from '../common/version';
 import { chatSummaryLine, filterByKind, filterChats, sortChats } from '../model/chatList';
 import type { ChatIndexEntry, ChatKind } from '../model/chatList';
+import { chatHidePlanOf, hideReasonOf } from '../model/chatHide';
+import type { ChatHidePlan } from '../model/chatHide';
 import { formatDiagnostics } from '../model/stateView';
 import type { DiagnosticsInput } from '../model/stateView';
 import { chatStore } from '../services/chatStore';
-import type { ChatListResult } from '../services/chatStore';
+import type { ChatListResult, HideOutcome } from '../services/chatStore';
 import { describeError } from '../services/scheduleStore';
 import { syncController } from '../services/syncController';
 import type { SyncOutcome } from '../services/syncController';
@@ -83,6 +91,18 @@ struct Chats {
   @State loading: boolean = true;
   /** 下拉刷新状态（`Refresh` 组件 `$$` 双向绑定）。 */
   @State refreshing: boolean = false;
+
+  // ---- mod-app-chat-hide：逐行删除（单 id，无批量状态） ----
+  /** 正在确认的**单条**会话 id（空串 = 没有待确认项）；不存在 id 数组 / 多选集合。 */
+  @State pendingId: string = '';
+  /** 确认 sheet 文案（纯模型唯一来源，页面不拼规则）。 */
+  @State hidePlan: ChatHidePlan = chatHidePlanOf();
+  /** 确认 sheet 开关（`bindSheet` 唯一入口）。 */
+  @State showHideSheet: boolean = false;
+  /** 删除进行中：重复点击不产生第二次写。 */
+  @State hiding: boolean = false;
+  /** 失败说明（空串 = 不显示）；成功只 toast，不在这里声称跨设备已一致。 */
+  @State hideHint: string = '';
 
   /** 页面是否已销毁（异步回调回来时不再 setState）。 */
   private disposed: boolean = false;
@@ -205,6 +225,59 @@ struct Chats {
     });
   }
 
+  // ---------------------------------------------------------- 逐行删除（mod-app-chat-hide）
+
+  /**
+   * 第一步：某一行的「删除」按钮只把**那一行**的 id 交给 sheet，不写任何数据。
+   * 入参是单个 `string`，没有数组 / 批量入口；`hiding` 时忽略重复点击。
+   */
+  private askHide(id: string): void {
+    if (this.hiding || id.length === 0) {
+      return;
+    }
+    this.pendingId = id;
+    this.hidePlan = chatHidePlanOf();
+    this.hideHint = '';
+    this.showHideSheet = true;
+  }
+
+  /** 取消：sheet 关闭、待确认项清空，不写任何数据。 */
+  private cancelHide(): void {
+    this.showHideSheet = false;
+    this.pendingId = '';
+    this.hidePlan = chatHidePlanOf();
+  }
+
+  /**
+   * 第二步：一次确认只删 `pendingId` 这一条。失败原因取写者的四句 typed 中文文案，
+   * 逐字展示（不泄漏原始错误、不冒称成功）；无论成败都重读索引，绝不留乐观隐藏。
+   */
+  private async confirmHide(): Promise<void> {
+    const id: string = this.pendingId;
+    if (this.hiding || id.length === 0) {
+      return;
+    }
+    this.hiding = true;
+    try {
+      const outcome: HideOutcome = await chatStore.hideChat(id);
+      if (outcome.ok) {
+        this.showHideSheet = false;
+        this.pendingId = '';
+        this.hideHint = '';
+        promptAction.showToast({ message: '已删除；会话不再显示在本机列表' });
+      } else {
+        this.hideHint = outcome.reason;
+        promptAction.showToast({ message: outcome.reason, duration: 4000 });
+      }
+    } catch (error) {
+      // 写者对页面永不抛；兜底也只用模型的 typed 文案，不把原始错误带进界面。
+      this.hideHint = hideReasonOf('prepare');
+    } finally {
+      this.hiding = false;
+      await this.reload();
+    }
+  }
+
   /** 标题栏副标题：一句统计 / 一句状态（空态不写「0 个会话」，避免和列表空态重复）。 */
   private subtitleText(): string {
     if (this.errorText.length > 0) {
@@ -216,12 +289,12 @@ struct Chats {
     // 计数按当前分段：切到 dots 段时不该显示云端段的会话总数。
     const segmentCount: number = filterByKind(this.chats, this.kind).length;
     if (segmentCount === 0) {
-      return '只读';
+      return '可逐条删除';
     }
     if (this.queryText.trim().length > 0) {
-      return `只读 · 共 ${segmentCount} 个会话 · 筛选出 ${this.visibleChats.length} 个`;
+      return `可逐条删除 · 共 ${segmentCount} 个会话 · 筛选出 ${this.visibleChats.length} 个`;
     }
-    return `只读 · 共 ${segmentCount} 个会话`;
+    return `可逐条删除 · 共 ${segmentCount} 个会话`;
   }
 
   // ------------------------------------------------------------------ UI
@@ -312,53 +385,78 @@ struct Chats {
    * 一行会话：标题 + `chat`/`dots` 徽章 + 摘要行（`2026-11-18 14:03 · 42 条消息`）。
    *
    * 徽章替代原来固定的「只读」（`docs/CLOUD-CHAT-AND-DOTS.md` §2）：两段共用一行渲染，
-   * 只读性由本页没有输入框 + 详情页的「在电脑上继续」保证，不再用「只读」占位。
+   * 会话内容不可编辑（没有输入框、详情页只给「在电脑上继续」），但行尾有一个逐条删除按钮。
    * 参数只收**基础类型**（id / 标题 / 摘要 / 徽章）：`@Builder` 传对象属于按值快照，
    * 列表刷新时容易被旧快照粘住；传字符串既便宜又不会踩这个坑。
    */
   @Builder
   ChatRow(id: string, title: string, summary: string, badge: string) {
-    Column({ space: SPACING.xs }) {
-      Row({ space: SPACING.sm }) {
-        Text(title)
-          .fontSize(FONT.body)
-          .lineHeight(LINE_HEIGHT.body)
-          .fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.text_primary'))
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-          .textAlign(TextAlign.Start)
-        // 种类徽章：非交互元素，不占独立触控区（整行都可点）
-        Text(badge)
+    Row({ space: SPACING.sm }) {
+      // 只有这块「标题 + 徽章 + 摘要」区域进详情；删除按钮是兄弟节点，
+      // 所以按钮的点击不会冒泡到 openDetail（不靠手势拦截，避免误触整行）。
+      Column({ space: SPACING.xs }) {
+        Row({ space: SPACING.sm }) {
+          Text(title)
+            .fontSize(FONT.body)
+            .lineHeight(LINE_HEIGHT.body)
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.text_primary'))
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
+            .textAlign(TextAlign.Start)
+          // 种类徽章：非交互元素，不占独立触控区（详情区都可点）
+          Text(badge)
+            .fontSize(FONT.caption)
+            .lineHeight(LINE_HEIGHT.caption)
+            .fontColor($r('app.color.text_secondary'))
+            .backgroundColor($r('app.color.control_fill'))
+            .borderRadius(RADIUS.sm)
+            .padding({ left: SPACING.sm, right: SPACING.sm })
+            .flexShrink(0)
+            .maxLines(1)
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+
+        Text(summary)
           .fontSize(FONT.caption)
           .lineHeight(LINE_HEIGHT.caption)
           .fontColor($r('app.color.text_secondary'))
-          .backgroundColor($r('app.color.control_fill'))
-          .borderRadius(RADIUS.sm)
-          .padding({ left: SPACING.sm, right: SPACING.sm })
-          .flexShrink(0)
           .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+          .textAlign(TextAlign.Start)
       }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+      .constraintSize({ minHeight: TOUCH_MIN })
+      .onClick(() => {
+        this.openDetail(id);
+      })
 
-      Text(summary)
-        .fontSize(FONT.caption)
-        .lineHeight(LINE_HEIGHT.caption)
-        .fontColor($r('app.color.text_secondary'))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .width('100%')
-        .textAlign(TextAlign.Start)
+      // 每行恰好一个删除按钮：只携带本行的 id，不长按、不滑动、不多选。
+      Column() {
+        ActionButton({
+          label: this.hidePlan.confirmLabel,
+          actionEnabled: true,
+          disabledReason: '',
+          busy: this.hiding && this.pendingId === id,
+          variant: 'danger',
+          block: false,
+          onTap: (): void => {
+            this.askHide(id);
+          },
+          onBlockedTap: null
+        })
+      }
+      .flexShrink(0)
+      .alignItems(HorizontalAlign.Center)
     }
     .width('100%')
     .constraintSize({ minHeight: TOUCH_MIN })
     .padding({ top: SPACING.md, bottom: SPACING.md })
-    .alignItems(HorizontalAlign.Start)
-    .onClick(() => {
-      this.openDetail(id);
-    })
+    .alignItems(VerticalAlign.Center)
   }
 
   /** 会话列表（行间 1vp 细线，与全站列表一致）。 */
@@ -508,12 +606,83 @@ struct Chats {
     .alignItems(HorizontalAlign.Start)
   }
 
-  /** 列表区：分段（常驻）→ 错误 → 搜索框 + 下拉刷新（空态/列表/无匹配三选一）。 */
+  /**
+   * 删除确认 sheet（mod-app-chat-hide）：标题 / 两行正文 / 「删除」「取消」全部逐字来自
+   * `chatHidePlanOf()`；没有恢复入口、没有「归档」第二个名词，也没有任何可逆承诺。
+   */
+  @Builder
+  HideConfirmSheet() {
+    Column({ space: SPACING.md }) {
+      Text(this.hidePlan.title)
+        .fontSize(FONT.title)
+        .lineHeight(LINE_HEIGHT.title)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Start)
+      ForEach(this.hidePlan.lines, (line: string) => {
+        Text(line)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+      }, (line: string) => line)
+      Row({ space: SPACING.sm }) {
+        Column() {
+          ActionButton({
+            label: this.hidePlan.cancelLabel,
+            actionEnabled: true,
+            disabledReason: '',
+            busy: false,
+            variant: 'secondary',
+            block: true,
+            onTap: (): void => {
+              this.cancelHide();
+            },
+            onBlockedTap: null
+          })
+        }
+        .layoutWeight(1)
+        Column() {
+          ActionButton({
+            label: this.hidePlan.confirmLabel,
+            actionEnabled: true,
+            disabledReason: '',
+            busy: this.hiding,
+            variant: 'danger',
+            block: true,
+            onTap: (): void => {
+              this.confirmHide();
+            },
+            onBlockedTap: null
+          })
+        }
+        .layoutWeight(1)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+    }
+    .width('100%')
+    .padding(SPACING.lg)
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  /** 列表区：分段（常驻）→ 失败说明 → 错误 → 搜索框 + 下拉刷新（空态/列表/无匹配三选一）。 */
   @Builder
   Body() {
     Column({ space: SPACING.md }) {
       // 分段常驻：错误态下也能切段看另一段（错误来自本地读文件，与 kind 无关）
       this.KindSegment()
+      // 删除失败说明：逐字取写者的 typed 文案；成功后清空，不伪造「已同步到其它设备」。
+      if (this.hideHint.length > 0) {
+        Text(this.hideHint)
+          .fontSize(FONT.caption)
+          .lineHeight(LINE_HEIGHT.caption)
+          .fontColor($r('app.color.danger'))
+          .width('100%')
+          .textAlign(TextAlign.Start)
+      }
       if (this.errorText.length > 0) {
         this.ErrorBlock()
       } else {
@@ -571,5 +740,13 @@ struct Chats {
     }
     .width('100%')
     .height('100%')
+    .bindSheet(this.showHideSheet, this.HideConfirmSheet(), {
+      height: SheetSize.MEDIUM,
+      dragBar: true,
+      showClose: true,
+      onDisappear: (): void => {
+        this.showHideSheet = false;
+      }
+    })
   }
 }

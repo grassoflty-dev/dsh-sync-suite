@@ -9,20 +9,37 @@
  *   chats/<id>/session.jsonl      ← 明文事件流
  * ```
  *
- * 三条约定（P1 只读，**一个字节都不写**）：
+ * 三条约定（读取路径仍是只读；唯一写口见 `hideChat`）：
  * 1. **空态不是错误**：`chats/index.jsonl` 不存在 → `{ok:true, entries: []}`，
  *    页面据此显示「还没有云端会话」+ 操作指引（§2.4：允许缺省，插件还没导出过就是这样）；
  * 2. 所有 IO 都 `try/catch`，**绝不把异常抛给页面**：最坏情况返回 `{ok:false, reason}`；
- * 3. 只读复用 `GitSyncService` 的目录约定（`<filesDir>/git-repo`），**不修改它**：
+ * 3. 复用 `GitSyncService` 的目录约定（`<filesDir>/git-repo`），**不修改它**：
  *    这里不调 `getRepoRoot()`（那个方法会 `mkdirp`，属于写副作用），只拼路径 + 读文件。
+ *
+ * mod-app-chat-hide 的**唯一**写口是 `hideChat(id)`：只向 `chats/index.jsonl` 追加一条墓碑行，
+ * 经窄写通道 commit/push；`chats/<id>/**` 全层只读，无恢复 / 无批量 / 无载荷删除。
+ * 隐藏状态不缓存在本层，列表永远以索引折叠结果为真相（失败不留乐观隐藏）。
+ *
+ * 云端对话准入：`listChats` 只返回 `agentPreset === 'chat'` 的会话（读 `chats/<id>/session.jsonl`
+ * 的 preset 投影，缺字段 / 读不到 / standard 一律 fail-closed 不渲染）；`hideChat` 在写前复核
+ * 同一判据，工作会话既没有可点的行也无法被隐藏。平板只读取与隐藏，没有创建会话的入口。
  *
  * 为什么不用 `router` 参数直接传会话内容：参数是字符串表，长会话会被截断/超限；
  * 详情页只接 `id`，每次重新读文件（旋转、返回都靠 `@State` 保内容，见页面注释）。
  */
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
-import { parseChatIndex, toMessages } from '../model/chatList';
-import type { ChatIndexEntry, ChatIndexParse, ChatMessage, ChatMessageParse, ChatMeta } from '../model/chatList';
+import { filterChatPreset, parseChatIndex, sessionPresetOf, toMessages } from '../model/chatList';
+import type {
+  ChatIndexEntry, ChatIndexParse, ChatMessage, ChatMessageParse, ChatMeta, ChatSessionPreset
+} from '../model/chatList';
+// mod-app-chat-hide：写侧只复用 chatHide 的纯逻辑（确认文案 / 行形状 / 只追加 / 四阶段原因），
+// 不在此处重写折叠，也不产生任何 unarchive 行。
+import {
+  appendHideLine, hideCommitMessageOf, hideLineOf, hideReasonOf, isHideId, HIDE_INDEX_PATH
+} from '../model/chatHide';
+import type { HideStage } from '../model/chatHide';
+import { bridgeGitRunner } from './gitRunner';
 
 const REPO_DIR_NAME: string = 'git-repo';
 const CHATS_DIR_NAME: string = 'chats';
@@ -61,6 +78,16 @@ export interface ChatDetailResult {
   meta?: ChatMeta;
   messages?: ChatMessage[];
   reason?: string;
+}
+
+/**
+ * `hideChat` 的结果：`stage` 记停在哪个阶段（`done` = 四步全过）；
+ * `reason` 成功为空串，失败时是 `chatHide.ts` 四句 typed 中文原因之一（不夹带原始错误）。
+ */
+export interface HideOutcome {
+  ok: boolean;
+  stage: string;
+  reason: string;
 }
 
 /** 会话 id 是否可用作目录名（纯字符串判定，不碰磁盘）。 */
@@ -138,6 +165,30 @@ export class ChatStore {
   }
 
   /**
+   * 会话是不是「云端对话模式」：只读 `chats/<id>/session.jsonl` 的 `agentPreset` 投影
+   * （纯逻辑在 `model/chatList.sessionPresetOf`）。读不到 / 缺 header / standard / 未知 → `other`，
+   * fail-closed：绝不按标题 / 工作区 / index 的 kind 猜。
+   */
+  private readSessionPreset(id: string): ChatSessionPreset {
+    if (!isSafeChatId(id)) {
+      return 'other';
+    }
+    const dir: string = this.chatsDir();
+    if (dir.length === 0) {
+      return 'other';
+    }
+    const path: string = `${dir}/${id}/${SESSION_FILE_NAME}`;
+    if (!this.fileExists(path)) {
+      return 'other';
+    }
+    try {
+      return sessionPresetOf(fs.readTextSync(path));
+    } catch (error) {
+      return 'other';
+    }
+  }
+
+  /**
    * 列出云端会话（只读 `chats/index.jsonl`）。
    *
    * - 文件不存在 → `{ok:true, entries: []}`（**空态**，页面给操作指引）；
@@ -165,7 +216,13 @@ export class ChatStore {
         return failed;
       }
       const parsed: ChatIndexParse = parseChatIndex(text);
-      const result: ChatListResult = { ok: true, entries: parsed.entries };
+      // 云端对话准入：只渲染 agentPreset === 'chat' 的会话；工作会话即使在索引里也不可见。
+      const presets: Record<string, ChatSessionPreset> = {};
+      for (let index = 0; index < parsed.entries.length; index++) {
+        const entry: ChatIndexEntry = parsed.entries[index];
+        presets[entry.id] = this.readSessionPreset(entry.id);
+      }
+      const result: ChatListResult = { ok: true, entries: filterChatPreset(parsed.entries, presets) };
       return result;
     } catch (error) {
       const failed: ChatListResult = { ok: false, entries: [], reason: REASON_INDEX };
@@ -224,6 +281,105 @@ export class ChatStore {
     } catch (error) {
       const failed: ChatDetailResult = { ok: false, reason: REASON_INCOMPLETE };
       return failed;
+    }
+  }
+
+  // ------------------------------------------------------------ mod-app-chat-hide 窄写通道
+
+  /** 四阶段失败结果：只返回 typed 中文原因，绝不把桥的原始错误 / 路径 / 令牌带到界面。 */
+  private hideFailure(stage: HideStage): HideOutcome {
+    return { ok: false, stage: stage, reason: hideReasonOf(stage) };
+  }
+
+  /**
+   * tmp 写 + 回读 + rename：写失败时**旧索引字节原样保留**，不会出现半行 / 乐观隐藏。
+   * tmp 落在 `chats/` 根且不在上传白名单里（只认 `chats/index.jsonl`），不会被误提交。
+   */
+  private writeHideText(path: string, text: string): void {
+    const tmp: string = `${path}.tmp-hide-${Date.now()}`;
+    let file: fs.File | null = null;
+    try {
+      file = fs.openSync(tmp, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      fs.writeSync(file.fd, text);
+    } catch (error) {
+      throw new Error('E_HIDE_WRITE: 隐藏行临时文件写入失败');
+    } finally {
+      if (file !== null) {
+        fs.closeSync(file);
+      }
+    }
+    if (fs.readTextSync(tmp) !== text) {
+      throw new Error('E_HIDE_WRITE: 隐藏行临时文件回读不一致，现场保留');
+    }
+    fs.renameSync(tmp, path);
+  }
+
+  /**
+   * 隐藏**一条**会话（id 是单个字符串，没有批量 / 多 id 入口）：
+   * ① prepare：id 合法 + 仓库目录可定位 + `chats/index.jsonl` 存在且可读；
+   * ② write：`hideLineOf` 生成一行 → `appendHideLine` 只追加 → tmp 写 / 回读 / rename；
+   * ③ commit：`chats: delete <id>` + v2 尾注，仅提交 `chats/index.jsonl` 一个路径；
+   * ④ push：`pushMain()`，不 force、不 reset。
+   * 任何阶段失败即停并给出对应中文原因；本方法**不缓存隐藏状态**，页面每次从索引重读。
+   * 不写 `chats/<id>/**`，不产出 `unarchive`，不删除载荷，不改写历史。
+   */
+  async hideChat(id: string): Promise<HideOutcome> {
+    try {
+      const safeId: string = typeof id === 'string' ? id.trim() : '';
+      if (!isHideId(safeId)) {
+        return this.hideFailure('prepare');
+      }
+      // 工作会话（agentPreset !== 'chat'）没有行可点；写口再守一次，程序化调用也隐藏不了它。
+      if (this.readSessionPreset(safeId) !== 'chat') {
+        return this.hideFailure('prepare');
+      }
+      const dir: string = this.chatsDir();
+      if (dir.length === 0) {
+        return this.hideFailure('prepare');
+      }
+      const path: string = `${dir}/${INDEX_FILE_NAME}`;
+      if (!this.fileExists(path)) {
+        return this.hideFailure('prepare');
+      }
+      let oldText: string = '';
+      try {
+        oldText = fs.readTextSync(path);
+      } catch (error) {
+        return this.hideFailure('prepare');
+      }
+      const line: string = hideLineOf(safeId, Date.now());
+      if (line.length === 0) {
+        return this.hideFailure('prepare');
+      }
+      const nextText: string = appendHideLine(oldText, line);
+      if (!nextText.startsWith(oldText) || nextText.length <= oldText.length) {
+        return this.hideFailure('write');
+      }
+      try {
+        this.writeHideText(path, nextText);
+      } catch (error) {
+        return this.hideFailure('write');
+      }
+      const message: string = hideCommitMessageOf(safeId);
+      if (message.length === 0) {
+        return this.hideFailure('commit');
+      }
+      try {
+        await bridgeGitRunner.addPaths([HIDE_INDEX_PATH]);
+        await bridgeGitRunner.commit(message);
+      } catch (error) {
+        return this.hideFailure('commit');
+      }
+      try {
+        await bridgeGitRunner.pushMain();
+      } catch (error) {
+        return this.hideFailure('push');
+      }
+      const done: HideOutcome = { ok: true, stage: 'done', reason: '' };
+      return done;
+    } catch (error) {
+      // 兜底：服务层对页面永不抛；意外异常按 prepare 处理（未推进任何阶段）。
+      return this.hideFailure('prepare');
     }
   }
 }

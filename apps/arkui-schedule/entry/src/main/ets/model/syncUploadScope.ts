@@ -14,9 +14,12 @@
  * 计数与提交集合因此来自**同一份事实**（同一次 `status` 的 changed 行 + 同一份可上传口径），
  * 不会出现「行里说 N 处待上传、周期却一处也不提交」的两套口径。
  *
- * 判定口径（与 `docs/DATA-CONTRACT-v2.md` §1/§11、桥侧 `addCommit` 的 `timeline/**` 白名单一致）：
+ * 判定口径（与 `docs/DATA-CONTRACT-v2.md` §1/§11、桥侧 `addCommit` 白名单一致）：
  * - 可上传：`timeline/schema.json` 与 `timeline/<YYYY-MM-DD>/<…>` 下的普通文件（含 media/、summary.json）；
- * - 不可上传：`devices/**`（v2 零写入）、仓库根下的其它文件、非法路径（绝对路径 / `..` 穿越）、
+ * - **mod-app-chat-hide 的唯一例外**：字面量恰好 `chats/index.jsonl`（一条隐藏行追加），
+ *   与 `docs/CHAT-DELETE-DESIGN.md` §5 的精确白名单同口径，**不是 `chats/` 前缀放宽**；
+ * - 不可上传：`chats/<id>/meta.json`、`chats/<id>/session.jsonl`、裸 `chats/`、`devices/**`（v2 零写入）、
+ *   仓库根下的其它文件、非法路径（绝对路径 / `..` 穿越 / `chats//index.jsonl` / `.bak`），
  *   以及 `timeline/**` 里的写入残留（`.tmp-` / `.bak-` 中间件）——残留不推给共享仓库，
  *   也不假装它会「待上传」。
  */
@@ -34,6 +37,12 @@ export const TEMP_INFIX: string = '.tmp-';
 
 /** 旧文件备份后缀（原子替换失败时的留档）。 */
 export const BAK_INFIX: string = '.bak-';
+
+/**
+ * mod-app-chat-hide：平板唯一可写的 chats 路径，字面量精确相等（不归一化、不做前缀匹配）。
+ * 与 `model/chatHide.ts` 的 `HIDE_INDEX_PATH` 同值；这里的副本让上传范围层不反向依赖隐藏模型。
+ */
+export const CHAT_HIDE_INDEX_PATH: string = 'chats/index.jsonl';
 
 /** 日目录名必须是日历日：`YYYY-MM-DD`（与时间线目录约定一致）。 */
 const DAY_DIR_RE: RegExp = /^\d{4}-\d{2}-\d{2}$/;
@@ -92,8 +101,17 @@ function timelineParts(path: string): string[] | null {
   return parts;
 }
 
-/** 该路径本设备应当上传吗（口径见文件头；残留不算）。 */
+/**
+ * 该路径本设备应当上传吗（口径见文件头；残留不算）。
+ *
+ * mod-app-chat-hide：先按**原始字符串**做一次精确相等判定，只有 `chats/index.jsonl` 这一个
+ * chats 路径能过；`chats//index.jsonl`、`chats/index.jsonl.bak`、`chats/<id>/**` 全走下面的
+ * 时间线判定并失败（时间线分支只认 `timeline/` 根）。
+ */
 export function isUploadableTimelinePath(path: string): boolean {
+  if (path === CHAT_HIDE_INDEX_PATH) {
+    return true;
+  }
   const parts: string[] | null = timelineParts(path);
   if (parts === null) {
     return false;
@@ -124,10 +142,28 @@ export function partitionDirtyPaths(paths: string[]): DirtyPartition {
   if (!Array.isArray(paths)) {
     return { uploadable: uploadable, notUploadable: notUploadable };
   }
+  // mod-app-chat-hide：归一化同形路径（如 chats//index.jsonl）与精确字面量同键，
+  // 不能让先到的别名占住去重键、压制后到的合法隐藏行。先确认全量里是否真有字面量：
+  // 有 → 别名直接跳过且不占 seen 键（两种到达顺序都优先字面量）；
+  // 没有 → 别名仍按原口径进 notUploadable，并在别名之间照旧去重（计数不丢失）。
+  const hasHideLiteral: boolean = paths.some(
+    (raw: string): boolean => typeof raw === 'string' && raw === CHAT_HIDE_INDEX_PATH
+  );
   for (let index = 0; index < paths.length; index++) {
     const raw: string = typeof paths[index] === 'string' ? paths[index] : '';
     const normalized: string | null = normalizeRepoPath(raw);
     const key: string = normalized === null ? `invalid:${raw}` : normalized;
+    // 隐藏行只认原始字面量：归一化后的同形路径（如 chats//index.jsonl）不算可上传。
+    const hideLiteral: boolean = normalized === CHAT_HIDE_INDEX_PATH && raw === CHAT_HIDE_INDEX_PATH;
+    if (normalized === CHAT_HIDE_INDEX_PATH && !hideLiteral) {
+      if (!hasHideLiteral) {
+        if (seen[key] !== true) {
+          seen[key] = true;
+          notUploadable.push(raw);
+        }
+      }
+      continue;
+    }
     if (seen[key] === true) {
       continue;
     }
@@ -172,8 +208,17 @@ export function stagePathsForCycle(
   const seen: Record<string, boolean> = {};
   const changed: string[] = Array.isArray(changedPaths) ? changedPaths : [];
   for (let index = 0; index < changed.length; index++) {
-    const normalized: string | null = normalizeRepoPath(changed[index]);
+    const rawChanged: string = typeof changed[index] === 'string' ? changed[index] : '';
+    const normalized: string | null = normalizeRepoPath(rawChanged);
     if (normalized === null || seen[normalized] === true) {
+      continue;
+    }
+    // 与下面脏路径循环同一口径：先挡归一化同形路径，再过上传范围谓词。
+    // 本函数对任意调用方都要自身满足「只有 chats/index.jsonl 这一个 chats 例外」。
+    if (normalized === CHAT_HIDE_INDEX_PATH && rawChanged !== CHAT_HIDE_INDEX_PATH) {
+      continue;
+    }
+    if (!isUploadableTimelinePath(normalized)) {
       continue;
     }
     seen[normalized] = true;
@@ -190,11 +235,22 @@ export function stagePathsForCycle(
     }
   }
   for (let index = 0; index < dirtyPaths.length; index++) {
-    const normalized: string | null = normalizeRepoPath(dirtyPaths[index]);
+    const rawDirty: string = typeof dirtyPaths[index] === 'string' ? dirtyPaths[index] : '';
+    const normalized: string | null = normalizeRepoPath(rawDirty);
     if (normalized === null || seen[normalized] === true) {
       continue;
     }
+    if (normalized === CHAT_HIDE_INDEX_PATH && rawDirty !== CHAT_HIDE_INDEX_PATH) {
+      continue; // 只认原始字面量，不把归一化同形路径当隐藏行
+    }
     if (!isUploadableTimelinePath(normalized)) {
+      continue;
+    }
+    // mod-app-chat-hide：隐藏行不属任何日，与 schema.json 同口径「总是随周期走」；
+    // 这样工作副本里已落盘的墓碑不会因为 days 范围之外而被长期遗漏。
+    if (normalized === CHAT_HIDE_INDEX_PATH) {
+      seen[normalized] = true;
+      ordered.push(normalized);
       continue;
     }
     const day: string | null = timelineDayOfPath(normalized);

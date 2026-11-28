@@ -2613,10 +2613,14 @@
     }
     if (op === 'addCommit') {
       var paths = pathsFromJson(args.paths);
-      // 只接受 timeline/** 路径：任何 devices/** 或仓库外路径都被拒（契约：devices/ 零写入）。
+      // 只接受 timeline/** 或**字面量恰好** chats/index.jsonl（mod-app-chat-hide 窄写通道，
+      // docs/CHAT-DELETE-DESIGN.md §5）：chats/<id>/**、devices/**、仓库外路径、归一化同形
+      // 路径与 .. 穿越一律被拒（契约：devices/ 零写入、载荷不可写）。
       for (var i = 0; i < paths.length; i++) {
-        if (typeof paths[i] !== 'string' || paths[i].indexOf('timeline/') !== 0 ||
-            paths[i].indexOf('..') >= 0) {
+        var isHideIndex = paths[i] === 'chats/index.jsonl';
+        var isTimeline = typeof paths[i] === 'string' && paths[i].indexOf('timeline/') === 0 &&
+          paths[i].indexOf('..') < 0;
+        if (!isHideIndex && !isTimeline) {
           throw bridgeError('E_GIT', 'v2 提交路径越界：' + String(paths[i]));
         }
         await git.add({ fs: session.fs, dir: root, filepath: paths[i] });
