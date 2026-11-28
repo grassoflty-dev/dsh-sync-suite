@@ -1,7 +1,7 @@
 /**
  * 模型侧工具的 v2 时间线桥（`mod-plugin-tools-v2`）。
  *
- * 本文件把 `schedule_list` / `schedule_add` / `schedule_summary` / `dsh_dots` 从 v1
+ * 本文件把 `timeline_list` / `timeline_add` / `timeline_summary` / `dsh_dots` 从 v1
  * `devices/<deviceId>/schedules/<date>.jsonl` 迁到 v2 单时间线：
  * `timeline/<date>/records.json` + 三本账本 + `timeline/schema.json`。
  *

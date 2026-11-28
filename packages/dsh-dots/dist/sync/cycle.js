@@ -56,6 +56,81 @@ export const PURGE_FAILED_AFTER_MS = 7 * 24 * 3600 * 1000;
 export const MAX_CYCLE_RETRIES = 2;
 /** 有界恢复耗尽后的 typed 终态文案：点名 operator 必须做什么，绝不静默。 */
 export const LOCAL_PENDING_MESSAGE = 'E_LOCAL_PENDING: 本地存在尚未推送的 v2 提交，已按有界重试仍未能推送；下一步：请核对远端是否被其他设备推进（查看远端日志与本地 git status），确认后手工协调并重新运行同步；本层绝不改写历史、绝不强制推送。';
+/**
+ * 导出阶段**通用** typed 失败的前缀（mod-plugin-chat-export-auto，设计 §5 / §8）。
+ * 只由 `chatExportFailureLineOf()` 使用；仓库缺失 / schema 拒绝 / push 失败各有自己的常量，
+ * 因此同一失败不会同时出现「自动发布暂停：<typed 码>」和常量文案两种写法。
+ * 只要走到这里，周期一律不返回「已同步」式成功文案；原因只取 typed 安全短句，
+ * 不带正文、路径、URL 或令牌，也没有任何进程内重试 / 退避。
+ */
+export const CHAT_EXPORT_PAUSED_PREFIX = '自动发布暂停：';
+/** 超时披露子句：部分发布行与零写入行共用一份措辞，杜绝两处漂移（评审 F3）。 */
+export function chatExportTimeoutClause(remaining) {
+    return remaining > 0
+        ? `本轮超时，剩余 ${remaining} 个下次同步继续`
+        : '本轮超时，未处理的会话下次同步继续';
+}
+/** 阶段时间上限触顶：只报数量；已识别的 chat 会话数为 0 时不编造「剩余 N 个」。 */
+export function chatExportPartialMessage(exported, remaining) {
+    return `部分发布：${exported} 个；${chatExportTimeoutClause(remaining)}`;
+}
+/**
+ * 四类失败的唯一面板文案（设计 §8）。共同纪律：
+ *   - 没有进程内重试、没有退避、没有定时器；每轮最多尝试一次；
+ *   - push 失败沿用周期既有 outbox 停放（attempts 跨会话累计），导出进入暂停态，
+ *     已写入的提交保留；只有下一次成功 push 才清除暂停文案；
+ *   - 仓库缺失 / schema 拒绝 / 截断会话都不伪装成「已同步」。
+ */
+export const CHAT_EXPORT_PUSH_FAILED_LINE = '自动发布暂停：推送失败，已写入的提交保留；本轮不自动重试';
+export const CHAT_EXPORT_REPO_MISSING_LINE = '未配置同步仓库，自动发布暂停';
+export const CHAT_EXPORT_SCHEMA_REJECTED_LINE = '自动发布暂停：索引格式被拒（typed 原因），未写半行';
+/**
+ * 已提交但还没推送：内容只落在本机仓库里，远端并没有这份会话载荷（评审 F1）。
+ * 与推送被拒那条分开——这里 push 根本没发生，不能借用「推送失败」的措辞。
+ */
+export const CHAT_EXPORT_COMMITTED_NOT_PUSHED_LINE = '自动发布暂停：会话文件已提交但未推送，内容尚未离开本机';
+/** 导出前的记录/意图形状被拒：本轮一个都没发布、连半行都没写（评审 F4）。 */
+export const CHAT_EXPORT_RECORD_REJECTED_LINE = '自动发布暂停：记录格式被拒（typed 原因），本轮未发布、未写半行';
+export function chatExportTruncatedLine(count) {
+    return `本轮跳过 ${count} 个不完整会话`;
+}
+/** 空投影：导出阶段抛错、还没拿到 outcome 时也要标明「这轮涉及 chat 自动发布」。 */
+export const CHAT_EXPORT_EMPTY_VIEW = Object.freeze({
+    exported: 0, remaining: 0, truncated: 0, timedOut: false, wrote: false,
+});
+function chatExportTruncatedSuffix(count) {
+    return count > 0 ? `；${chatExportTruncatedLine(count)}` : '';
+}
+/**
+ * 成功 / 部分发布行的唯一生成处：周期 message 与面板 status.chatExportLine 共用它，
+ * 所以「本轮跳过 N 个不完整会话」用的是上面那条测试钉住的常量，不再各拼一份。
+ */
+export function chatExportSuccessLineOf(view) {
+    const skipped = chatExportTruncatedSuffix(view.truncated);
+    if (view.wrote === false) {
+        // F3：零写入也要先说完「没提交没推送」，再把触顶这件事说出来；超时子句与部分发布共用。
+        const base = `本轮无变更，未提交未推送（自动发布 ${view.exported} 个）${skipped}`;
+        return view.timedOut ? `${base}；${chatExportTimeoutClause(view.remaining)}` : base;
+    }
+    return view.timedOut
+        ? `${chatExportPartialMessage(view.exported, view.remaining)}${skipped}`
+        : `已同步（自动发布 ${view.exported} 个${skipped}）`;
+}
+/**
+ * 导出阶段 typed 失败行的唯一生成处：仓库缺失 / schema 拒绝用上面两条常量逐字，
+ * 其余 typed 安全短句只挂 `CHAT_EXPORT_PAUSED_PREFIX`，绝不让同一失败出现两种前缀。
+ */
+export function chatExportFailureLineOf(reason) {
+    const text = typeof reason === 'string' ? reason : '';
+    if (text.includes('index-schema-rejected'))
+        return `${CHAT_EXPORT_SCHEMA_REJECTED_LINE}（${text}）`;
+    // F4：记录/意图形状被拒走「本轮未发布」，不再把裸 E_CORRUPT: 当完整面板文案。
+    if (text.startsWith('E_CORRUPT:'))
+        return `${CHAT_EXPORT_RECORD_REJECTED_LINE}（${text}）`;
+    if (/未配置同步仓库|E_UNCONFIGURED|repo-missing/i.test(text))
+        return CHAT_EXPORT_REPO_MISSING_LINE;
+    return `${CHAT_EXPORT_PAUSED_PREFIX}${text}`;
+}
 /*
  * 门禁文案（`mod-plugin-behind-fastforward`）：四种结局各有**自己的**一句话，
  * 不许互相借用——用户看到的必须是「这次到底卡在哪」。
@@ -96,6 +171,28 @@ export function hasV2Trailer(body, instanceId = DEFAULT_V2_INSTANCE_ID) {
     const line = v2TrailerLine(instanceId);
     return body.split(/\r?\n/).some((row) => row.trim() === line);
 }
+/*
+ * mod-plugin-chat-export-auto：提交类尾注（设计 §6 / §10，Lead 批准 A + mutex）。
+ *
+ * `dsh-dots-v2:` 仍是归属尾注；导出类**额外**带这一条，路径门禁据此才放行
+ * `chats/<id>/{meta.json,session.jsonl}`。平板隐藏提交只带 v2 尾注，因此永远写不进载荷。
+ *
+ * 残余风险（§10 条件 3，照实写、不暗示有防御）：这是**归属分类，不是安全边界**。
+ * 进程内写者若能调用 git 提交，就可自行伪造这条尾注并推送；没有结构性防护，
+ * 因为尾注与载荷写入同处一个信任边界。彻底关闭需要签名提交或服务端路径保护，本模块不实现。
+ */
+export const CHAT_EXPORT_TRAILER_PREFIX = 'dsh-dots-chat-sync:';
+/** 同步类尾注整行，例：`dsh-dots-chat-sync: plugin-git-store`。 */
+export function chatExportTrailerLine(instanceId = DEFAULT_V2_INSTANCE_ID) {
+    return `${CHAT_EXPORT_TRAILER_PREFIX} ${instanceId}`;
+}
+/** body 是否带导出类尾注（逐行全等，与 hasV2Trailer 同口径）。 */
+export function hasChatExportTrailer(body, instanceId = DEFAULT_V2_INSTANCE_ID) {
+    if (typeof body !== 'string')
+        return false;
+    const line = chatExportTrailerLine(instanceId);
+    return body.split(/\r?\n/).some((row) => row.trim() === line);
+}
 /**
  * 隐藏行的 subject（`mod-chat-hide`，设计 §5）：`chats: delete <id>`。
  * 只允许与会话 id 白名单同款的字符；这是**精确多一种形状**，不是放宽成任意文本。
@@ -133,12 +230,60 @@ export function isConfinedTimelinePath(p) {
 export function isConfinedSyncPath(p) {
     return p === 'chats/index.jsonl' || isConfinedTimelinePath(p);
 }
+/**
+ * 导出类精确白名单（§10 条件 1）：**不是前缀判定**。只放行
+ * `chats/index.jsonl`，以及 `chats/<safe-id>/{meta.json,session.jsonl}` 两个字面量文件名。
+ * `<id>` 沿用 `assertSafeSessionId` 的字符集与长度，并排除 `.` / `..` 两个纯点段。
+ * 裸 `chats/`、裸 `chats/<id>/`、其它文件名、绝对路径、任意位置的穿越、
+ * `devices/**` 与配置载荷全部拒绝。
+ */
+export function isConfinedChatExportPath(p) {
+    if (typeof p !== 'string' || p.length === 0)
+        return false;
+    if (p.includes('\\') || p.startsWith('/') || /^[A-Za-z]:/.test(p))
+        return false;
+    const parts = p.split('/');
+    if (parts.some((segment) => segment === '' || segment === '.' || segment === '..'))
+        return false;
+    if (parts.length === 2 && parts[0] === 'chats' && parts[1] === 'index.jsonl')
+        return true;
+    if (parts.length !== 3 || parts[0] !== 'chats')
+        return false;
+    const id = parts[1];
+    if (id.length === 0 || id.length > 200)
+        return false;
+    if (!/^[A-Za-z0-9._-]+$/.test(id) || id === '.' || id === '..')
+        return false;
+    // 保留名不能冒充会话目录：`chats/index.jsonl/meta.json` 是「索引文件当目录」的混淆形态。
+    if (id === 'index.jsonl')
+        return false;
+    return parts[2] === 'meta.json' || parts[2] === 'session.jsonl';
+}
+/** 仅载荷两件套（不含索引）；用于钉住「无导出尾注不得碰 chats/<id>/**」。 */
+export function isChatExportPayloadPath(p) {
+    return isConfinedChatExportPath(p) && p !== 'chats/index.jsonl';
+}
+/**
+ * isOursCommit / describePendingOwnership **共用**的谓词对（§6）。
+ * 有导出尾注才在普通白名单之外多放行导出类路径；没有尾注时载荷路径一律越界。
+ */
+function pathPredicateOf(commit, instanceId) {
+    const exportTrailer = hasChatExportTrailer(commit.body, instanceId);
+    return (p) => isConfinedSyncPath(p) || (exportTrailer && isConfinedChatExportPath(p));
+}
 /** 三条件同时成立才算「本模块产生」：subject 形状 + 尾注 + diff 严格收容在白名单路径。 */
 export function isOursCommit(commit, instanceId = DEFAULT_V2_INSTANCE_ID) {
-    return isV2CommitSubject(commit.subject) &&
-        hasV2Trailer(commit.body, instanceId) &&
-        commit.paths.length > 0 &&
-        commit.paths.every(isConfinedSyncPath);
+    if (!Array.isArray(commit.paths) || commit.paths.length === 0)
+        return false;
+    if (!isV2CommitSubject(commit.subject))
+        return false;
+    if (!hasV2Trailer(commit.body, instanceId))
+        return false;
+    // 条件 2：载荷路径必须带导出尾注；平板隐藏提交即使改了载荷也绝不算 ours。
+    if (commit.paths.some(isChatExportPayloadPath) && !hasChatExportTrailer(commit.body, instanceId))
+        return false;
+    const allowed = pathPredicateOf(commit, instanceId);
+    return commit.paths.every(allowed);
 }
 /** 尾注存在但实例标识不是本模块（与「整条尾注缺失」区分）。 */
 function hasOtherV2Trailer(body, instanceId) {
@@ -157,7 +302,8 @@ export function describePendingOwnership(commits, instanceId = DEFAULT_V2_INSTAN
     const verdicts = commits.map((commit, i) => {
         const subjectShape = isV2CommitSubject(commit.subject) ? 'v2' : 'other';
         const trailer = hasV2Trailer(commit.body, instanceId);
-        const outsideScopePaths = commit.paths.filter((p) => !isConfinedSyncPath(p)).length;
+        const allowed = pathPredicateOf(commit, instanceId);
+        const outsideScopePaths = commit.paths.filter((p) => !allowed(p)).length;
         const reasons = [];
         if (subjectShape !== 'v2')
             reasons.push('subject 不是 [v2] 形状');
@@ -167,6 +313,9 @@ export function describePendingOwnership(commits, instanceId = DEFAULT_V2_INSTAN
             reasons.push('尾注缺失');
         if (outsideScopePaths > 0)
             reasons.push(`diff 越界 ${outsideScopePaths} 条`);
+        if (commit.paths.some(isChatExportPayloadPath) && !hasChatExportTrailer(commit.body, instanceId)) {
+            reasons.push('载荷缺少导出尾注');
+        }
         if (commit.paths.length === 0)
             reasons.push('无 timeline 改动');
         const ours = isOursCommit(commit, instanceId);
@@ -905,12 +1054,21 @@ async function recoverPendingLocalCommit(ctx) {
     return failure(V2_ERROR.LOCAL_PENDING, `${LOCAL_PENDING_MESSAGE}（${parts.join('；')}）`, all, attempts);
 }
 // ---------------------------------------------------------------- 周期
-function failure(code, message, all, attempts) {
+function failure(code, message, all, attempts, chatExport) {
     return {
         ok: false, code, message, days: [], applied: 0, dropped: 0,
         failed: countFailed(all), pending: replayable(all).length, attempts,
         conflicts: 0, writtenPaths: [], outbox: all.slice(),
+        ...(chatExport !== undefined ? { chatExport } : {}),
     };
+}
+/**
+ * 导出阶段之前的 typed E_CORRUPT（完整性 / 意图形状）：有导出端口时按唯一文案生成器
+ * 给出「本轮未发布」并带空投影，面板才不会把这次失败渲染成空行；没有导出端口时
+ * 逐字保持原来的 `E_CORRUPT: …`，不影响不涉及会话自动发布的周期（评审 F4）。
+ */
+function preExportCorruptFailure(reason, all, hasChatExport) {
+    return failure(V2_ERROR.CORRUPT, hasChatExport ? chatExportFailureLineOf(reason) : reason, all, 0, hasChatExport ? { ...CHAT_EXPORT_EMPTY_VIEW } : undefined);
 }
 function typedError(error) {
     return error instanceof Error ? error.message : String(error);
@@ -1238,7 +1396,7 @@ async function runV2CycleCore(options) {
         };
         const corrupt = dayIntegrityError(date, remote.records, local.records);
         if (corrupt !== '')
-            return failure(V2_ERROR.CORRUPT, `E_CORRUPT: ${corrupt}`, all, 0);
+            return preExportCorruptFailure(`E_CORRUPT: ${corrupt}`, all, options.chatExport !== undefined);
         reads.push({ date, remote, local });
     }
     // ── B1：在任何写句柄之前计算并校验所有 union；非法意图 / 空串哨兵在这里 typed 失败。
@@ -1249,10 +1407,39 @@ async function runV2CycleCore(options) {
     }
     catch (error) {
         const reason = typedError(error);
-        return failure(V2_ERROR.CORRUPT, `E_CORRUPT: ${reason}`, all, 0);
+        return preExportCorruptFailure(`E_CORRUPT: ${reason}`, all, options.chatExport !== undefined);
+    }
+    /*
+     * ── 阶段 1.5（写句柄）：会话自动导出（mod-plugin-chat-export-auto）。
+     *
+     * 位置是硬约束：pull / 至多一次快进之后，周期唯一的 commitAll + pushMain 之前（§10）。
+     * 绝不给导出器第二条 commit / push 路径——push 失败留下本地 ahead 提交会让下一轮
+     * 变成本地提交与远端分叉、需要手工处理（exportChats.ts 旧 uploadChats 路径的陷阱）。
+     *
+     * 失败 / 触顶都只调用一次：失败即 typed 终态、零提交零推送；触顶保留已写文件，
+     * 继续走下面唯一的提交与推送，且文案明说「部分发布」而不是「已同步」。
+     */
+    let exportOutcome;
+    if (options.chatExport !== undefined) {
+        try {
+            exportOutcome = await options.chatExport.run();
+        }
+        catch (error) {
+            // P1-1：四类失败文案在这里**真正被生产代码使用**，不再只是测试里的孤儿常量。
+            return failure('E_CHAT_EXPORT', chatExportFailureLineOf(typedError(error)), all, 0, { ...CHAT_EXPORT_EMPTY_VIEW });
+        }
+        if (exportOutcome.reason !== '') {
+            return failure('E_CHAT_EXPORT', chatExportFailureLineOf(exportOutcome.reason), all, 0, { ...CHAT_EXPORT_EMPTY_VIEW });
+        }
     }
     // ── 门禁通过、完整性/形状校验通过后的第一个写：缺标记则幂等创建规范 schema（④）。
     const writtenPaths = [];
+    if (exportOutcome !== undefined) {
+        for (const rel of exportOutcome.paths) {
+            if (!writtenPaths.includes(rel))
+                writtenPaths.push(rel);
+        }
+    }
     if (gate.needSchema) {
         const latest = (await fs.read(SCHEMA_MARKER_PATH)) ?? '';
         if (decideFreshStart(latest).needSchema) {
@@ -1331,7 +1518,13 @@ async function runV2CycleCore(options) {
         await outbox.save(all);
         await git.addPaths(writtenPaths.slice());
         // F2：尾注写进 body（第二个 -m），App 的 `-m subject` 不会产生它。
-        await git.commit(syncCommitMessage(touchedDays), v2TrailerLine(instanceId));
+        // 同步类提交**额外**带 dsh-dots-chat-sync:，路径门禁据此才放行 chats/<id>/**；
+        // 没有这笔载荷写入时 body 逐字节保持原来的 v2 尾注。
+        const hasExportPaths = exportOutcome !== undefined && exportOutcome.paths.some(isChatExportPayloadPath);
+        const commitBody = hasExportPaths
+            ? `${v2TrailerLine(instanceId)}\n${chatExportTrailerLine(instanceId)}`
+            : v2TrailerLine(instanceId);
+        await git.commit(syncCommitMessage(touchedDays), commitBody);
         // per-intent：提交成功后回填认领 sha；下次有界恢复据此逐意图核对，不再全量 union 比 HEAD。
         const committedSha = await git.headSha();
         all = all.map((entry) => replayable([entry]).length > 0
@@ -1350,10 +1543,21 @@ async function runV2CycleCore(options) {
                 if (after.consistent && after.decision.action === 'recover') {
                     return await recoverPendingLocalCommit({ git, fs, outbox, days, now, all, instanceId });
                 }
-                const message = after.decision.action === 'fast-forward'
+                const gateMessage = after.decision.action === 'fast-forward'
                     ? FF_BLOCKED_PENDING_MESSAGE
                     : refuseMessageOf(after.decision);
-                return failure(V2_ERROR.NOT_SYNCED, message, all, attempts);
+                /*
+                 * F1：到这里 chat 载荷已经随上面那笔提交落在**本地**，但这一轮一次 push 都没有。
+                 * 有导出阶段时必须点名「已提交但未推送」，并带视图让 bootstrap 投影出非空行；
+                 * 括号里的门禁原因原样保留。没有导出阶段时逐字保持原来的门禁文案。
+                 */
+                const message = exportOutcome === undefined
+                    ? gateMessage
+                    : `${CHAT_EXPORT_COMMITTED_NOT_PUSHED_LINE}（${gateMessage}）`;
+                return failure(V2_ERROR.NOT_SYNCED, message, all, attempts, exportOutcome === undefined ? undefined : {
+                    exported: exportOutcome.exported, remaining: exportOutcome.remaining,
+                    truncated: exportOutcome.truncated, timedOut: exportOutcome.timedOut, wrote: true,
+                });
             }
         }
         try {
@@ -1366,11 +1570,18 @@ async function runV2CycleCore(options) {
                 code: V2_ERROR.PUSH_REJECTED,
                 message: `E_PUSH_REJECTED: ${typedError(error)}${DEFAULT_GIT_NEXT_STEP}`,
             });
-            const reason = decided.message;
+            // P1-1：有导出阶段时用四条常量里的 push 那条作唯一前缀，typed 原因 / 下一步附在括号里；
+            // 已写入的提交保留，但绝不出现成功文案，也不再出现第二套「自动发布暂停：<typed 码>」措辞。
+            const reason = exportOutcome !== undefined
+                ? `${CHAT_EXPORT_PUSH_FAILED_LINE}（${decided.message}）`
+                : decided.message;
             // 失败只停放意图（预算跨会话累计），绝不把未推送的本地提交报成成功。
             all = all.map((entry) => replayable([entry]).length > 0 ? markAttempt(entry, reason) : entry);
             await outbox.save(all);
-            return failure(decided.code, reason, all, attempts);
+            return failure(decided.code, reason, all, attempts, exportOutcome === undefined ? undefined : {
+                exported: exportOutcome.exported, remaining: exportOutcome.remaining,
+                truncated: exportOutcome.truncated, timedOut: exportOutcome.timedOut, wrote: true,
+            });
         }
     }
     // 本地改动挡住了快进、本周期又没写出任何时间线文件：既不能推送、也绝不报成功。
@@ -1381,10 +1592,24 @@ async function runV2CycleCore(options) {
     }
     all = dequeueIntents(all, applied);
     await outbox.save(all);
+    // 只在真的走过一次 push（writtenPaths 非空）之后才谈「已同步」；导出阶段触顶时
+    // 明说部分发布，绝不把「本轮超时」伪装成成功。
+    let successMessage = '已同步';
+    let chatExportView;
+    if (exportOutcome !== undefined) {
+        chatExportView = {
+            exported: exportOutcome.exported, remaining: exportOutcome.remaining,
+            truncated: exportOutcome.truncated, timedOut: exportOutcome.timedOut,
+            wrote: writtenPaths.length > 0,
+        };
+        // P1-1：面板状态行与周期 message 共用同一生成函数和同一条截断常量。
+        successMessage = chatExportSuccessLineOf(chatExportView);
+    }
     return {
-        ok: true, code: V2_ERROR.OK, message: '已同步', days: days.slice(),
+        ok: true, code: V2_ERROR.OK, message: successMessage, days: days.slice(),
         applied: applied.length, dropped: dropped.length, failed: countFailed(all),
         pending: replayable(all).length, attempts, conflicts, writtenPaths: writtenPaths.slice(), outbox: all.slice(),
+        ...(chatExportView !== undefined ? { chatExport: chatExportView } : {}),
     };
 }
 /** 供调用方枚举仓库内已有的日程日（只读，路径来自共享 timeline/paths.ts）。 */

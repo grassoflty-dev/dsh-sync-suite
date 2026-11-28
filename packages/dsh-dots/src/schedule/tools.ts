@@ -1,5 +1,5 @@
 /**
- * 模型侧工具：`schedule_list` / `schedule_add` / `schedule_summary` / `dsh_dots`。
+ * 模型侧工具：`timeline_list` / `timeline_add` / `timeline_summary` / `dsh_dots`。
  *
  * 注册方式：宿主 `ctx.tools.register(definition)`（Cordis `tools` 服务）。
  * 这里**直接给注册表要求的原始定义**（`{name, description, parameters, output:{schema,render}, execute}`），
@@ -155,10 +155,10 @@ function sealToolDefinition(definition: ScheduleToolDefinition): ScheduleToolDef
   }
 }
 
-/** `schedule_list` 的定义。 */
+/** `timeline_list` 的定义。 */
 function scheduleListTool(options: ScheduleToolOptions): ScheduleToolDefinition {
   return {
-    name: 'schedule_list',
+    name: 'timeline_list',
     description:
       '列出某天的日程（读共享 v2 时间线 timeline/<date>/records.json；同 id 按较晚 ts、同 ts 按规范字节序折叠，' +
       '删除/撤销按账本优先级过滤，未完成只看 closed_at）。默认今天；deviceId 入参保留兼容但 v2 只有一份共享时间线，' +
@@ -214,10 +214,10 @@ function scheduleListTool(options: ScheduleToolOptions): ScheduleToolDefinition 
   }
 }
 
-/** `schedule_add` 的定义。 */
+/** `timeline_add` 的定义。 */
 function scheduleAddTool(options: ScheduleToolOptions): ScheduleToolDefinition {
   return {
-    name: 'schedule_add',
+    name: 'timeline_add',
     description:
       '在共享 v2 时间线新建一条日程：规范行进入仓库外 outbox，经同步周期做 schema 门禁（缺标记幂等创建 schemaVersion:2、' +
       '未知版本 typed 拒绝且零写入）、固定 main、无 rebase / 无 force、union 后提交并推送；' +
@@ -270,10 +270,10 @@ function scheduleAddTool(options: ScheduleToolOptions): ScheduleToolDefinition {
   }
 }
 
-/** `schedule_summary` 的定义。 */
+/** `timeline_summary` 的定义。 */
 function scheduleSummaryTool(options: ScheduleToolOptions): ScheduleToolDefinition {
   return {
-    name: 'schedule_summary',
+    name: 'timeline_summary',
     description:
       '把某天共享 v2 时间线的记录拼成 AI 载荷与提示词（只取当天 records.json 的可见记录、' +
       'text 优先取 body、为空退回 ocr_text）。deviceId 入参保留兼容但只读同一份时间线。' +

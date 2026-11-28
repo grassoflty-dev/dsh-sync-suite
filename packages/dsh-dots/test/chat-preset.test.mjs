@@ -114,7 +114,7 @@ async function rejectsWithSyncError(promise) {
 test('白名单：恰好 ask_user_question + todo_write，且没有文件/命令类工具', () => {
   assert.deepEqual([...CHAT_ALLOW_TOOLS], ['ask_user_question', 'todo_write'])
   assert.equal(CHAT_ALLOW_TOOLS.length, 2)
-  for (const forbidden of ['read', 'write', 'edit', 'bash', 'pwsh', 'glob', 'grep', 'job_output', 'schedule_add']) {
+  for (const forbidden of ['read', 'write', 'edit', 'bash', 'pwsh', 'glob', 'grep', 'job_output', 'timeline_add']) {
     assert.ok(!CHAT_ALLOW_TOOLS.includes(forbidden), `白名单不该有 ${forbidden}`)
   }
 })
@@ -389,7 +389,7 @@ test('describeDenyFailure：解析不出名字时给兜底文案（仍非空且�
 
 test('unknownToolNamesFromRestrictError：只认本次传入的 deny 名字，不吃 known 清单', () => {
   const error = new Error(
-    'tools.restrict() names unknown global tools "bcdp_page_info", "read"; known global tools: schedule_add, dsh_dots',
+    'tools.restrict() names unknown global tools "bcdp_page_info", "read"; known global tools: timeline_add, dsh_dots',
   )
   assert.deepEqual(unknownToolNamesFromRestrictError(error, ['bcdp_page_info', 'read']), [
     'bcdp_page_info',

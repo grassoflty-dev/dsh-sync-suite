@@ -407,7 +407,7 @@ test('token 不出现在任何返回值、错误消息、仓库文件与 AI 请�
   await repo.dispose()
 })
 
-test('工具层：schedule_add / schedule_list / schedule_summary 经设置读写同一份共享 v2 时间线', async (t) => {
+test('工具层：timeline_add / timeline_list / timeline_summary 经设置读写同一份共享 v2 时间线', async (t) => {
   const { root, bare, workDir } = await setupV2(t)
   const homeDir = path.join(root, 'home')
   const paths = statePaths(homeDir)
@@ -448,16 +448,16 @@ test('工具层：schedule_add / schedule_list / schedule_summary 经设置读�
     },
   }
   const names = registerScheduleTools(ctx, { paths, allowLocalRepo: true, now: NOW, v2Ports: ports })
-  assert.deepEqual(names, ['schedule_list', 'schedule_add', 'schedule_summary', 'dsh_dots'])
+  assert.deepEqual(names, ['timeline_list', 'timeline_add', 'timeline_summary', 'dsh_dots'])
   assert.deepEqual(
     registered.map((tool) => tool.name),
     names,
   )
   assert.equal(ctx.effects.length, 4, '每个工具注册都要挂在 ctx.effect 上')
 
-  const addTool = registered.find((tool) => tool.name === 'schedule_add')
-  const listTool = registered.find((tool) => tool.name === 'schedule_list')
-  const summaryTool = registered.find((tool) => tool.name === 'schedule_summary')
+  const addTool = registered.find((tool) => tool.name === 'timeline_add')
+  const listTool = registered.find((tool) => tool.name === 'timeline_list')
+  const summaryTool = registered.find((tool) => tool.name === 'timeline_summary')
   for (const tool of registered) {
     assert.equal(typeof tool.execute, 'function')
     assert.equal(typeof tool.output.render, 'function')
@@ -469,7 +469,7 @@ test('工具层：schedule_add / schedule_list / schedule_summary 经设置读�
   assert.deepEqual(addTool.parameters.required, ['title'], 'title 是必填参数')
 
   // 省略 date → 用注入的"今天"（2026-11-15），写入 timeline/<date>/records.json
-  const added = await addTool.execute({ title: '工具新建', body: '来自 schedule_add' })
+  const added = await addTool.execute({ title: '工具新建', body: '来自 timeline_add' })
   assert.equal(added.path, `timeline/${DATE}/records.json`, 'v2 不再写 devices/**')
   assert.equal(added.pushed, true)
   assert.match(added.commit, /^[0-9a-f]{40}$/)
@@ -479,7 +479,7 @@ test('工具层：schedule_add / schedule_list / schedule_summary 经设置读�
   const parsed = parseTimelineDay(text, DATE)
   const mine = parsed.day.allRecords.find((r) => r.id === added.id)
   assert.deepEqual(mine, {
-    id: added.id, ts: added.ts, title: '工具新建', body: '来自 schedule_add', author: '我',
+    id: added.id, ts: added.ts, title: '工具新建', body: '来自 timeline_add', author: '我',
     done: false, media: [], ai_processed: false, opened_at: added.ts,
   })
   assert.ok(text.includes(canonicalRecordLine(mine)), '写入行逐字节等于 canonicalRecordLine')
@@ -506,6 +506,27 @@ test('工具层：schedule_add / schedule_list / schedule_summary 经设置读�
   // 未配置仓库地址时要给出可操作的中文错误
   store.writeSettings({ ...store.readSettings(), repoUrl: '' })
   await assert.rejects(() => listTool.execute({}), /尚未配置仓库地址/)
+})
+
+test('工具名护栏：注册名不得带 schedule_ 前缀，且恰好是 timeline_list/timeline_add/timeline_summary/dsh_dots', () => {
+  const registered = []
+  const ctx = {
+    tools: {
+      register(definition) {
+        registered.push(definition)
+        return () => undefined
+      },
+    },
+  }
+  // 只构造定义、不执行：options 为空即可，绝不碰仓库/网络。
+  const names = registerScheduleTools(ctx, {})
+  assert.deepEqual(
+    names.filter((name) => name.startsWith('schedule_')),
+    [],
+    '插件工具不许再用 schedule_ 前缀（与宿主设备本地定时任务同名）',
+  )
+  assert.deepEqual(names, ['timeline_list', 'timeline_add', 'timeline_summary', 'dsh_dots'])
+  assert.deepEqual(registered.map((tool) => tool.name), names, '注册到宿主的名字必须与返回值一致')
 })
 
 test('index.apply：有 tools 服务时注册三个日程工具，没有时只注册 RPC（不影响配置同步）', async (t) => {
@@ -548,7 +569,7 @@ test('index.apply：有 tools 服务时注册三个日程工具，没有时只�
   assert.deepEqual(withTools.state.injectDeps, ['tools'], '用 ctx.inject 延迟注入可选依赖')
   assert.deepEqual(
     withTools.state.registered.map((tool) => tool.name),
-    ['schedule_list', 'schedule_add', 'schedule_summary', 'dsh_dots'],
+    ['timeline_list', 'timeline_add', 'timeline_summary', 'dsh_dots'],
   )
   assert.equal(withTools.state.effects.length, 9, '3 个 RPC 相关 effect（新路由/旧兼容路由/dispose）+ 2 个远程访问 effect + 4 个工具 effect')
 

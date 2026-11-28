@@ -260,7 +260,7 @@ test('R08 E_NO_APP_FILES_DIR 从源码与 dist 中消失；装配点使用默认
 
 // ================================================================ 首次使用端到端（本地 bare 远端）
 
-test('R09 首次 schedule_add：默认根缺失 → clone → 写 schema/records → commit → push（空远端与已有 main 都可）', async () => {
+test('R09 首次 timeline_add：默认根缺失 → clone → 写 schema/records → commit → push（空远端与已有 main 都可）', async () => {
   for (const seedMain of [false, true]) {
     const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-repo-root-e2e-'))
     try {

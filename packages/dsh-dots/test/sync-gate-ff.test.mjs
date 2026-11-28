@@ -665,7 +665,7 @@ test('G-D2 state.json：v2 周期成功不写 lastSyncAt（现状钉住；接线
   await stage(A, makeIntent({ id: 'own-2', ts: T2, title: 'a-own-2' }))
   const result = await runCycle(A)
   assert.equal(result.ok, true, result.message)
-  // 事实：v2 写作路径（schedule_add → runV2Cycle）不经过 rpc.ts 的 markSynced()，
+  // 事实：v2 写作路径（timeline_add → runV2Cycle）不经过 rpc.ts 的 markSynced()，
   // 因此 state.json 的 lastSyncAt 仍为 null —— 这是**既有事实**，不是本模块引入的。
   // 要让 state.json 反映 v2 同步，需要改 src/rpc.ts 或 src/sync/bootstrap.ts（不在本模块文件范围）。
   assert.equal(store.readLastSyncAt(), null)

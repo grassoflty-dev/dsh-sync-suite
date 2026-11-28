@@ -462,7 +462,7 @@ test('工具层：dsh_dots 注册、days 夹取、共享 v2 时间线快照字�
   const { registered, ctx, store } = registerTools(paths, 'pc-a', ports)
   assert.deepEqual(
     registered.map((tool) => tool.name),
-    ['schedule_list', 'schedule_add', 'schedule_summary', 'dsh_dots'],
+    ['timeline_list', 'timeline_add', 'timeline_summary', 'dsh_dots'],
   )
   assert.equal(ctx.effects.length, 4, '每个工具注册都要挂在 ctx.effect 上')
 

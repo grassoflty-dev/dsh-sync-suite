@@ -149,10 +149,10 @@ function makeTools(toolPorts, now = NOW) {
 /* ================================================================ 写路径 */
 
 // v1：bridge.add → appendFile(`devices/pc-a/schedules/<date>.jsonl`) + pull --rebase。
-test('T01 schedule_add 写 timeline/<date>/records.json，不写 devices/**；字节 = buildRecordsText', async () => {
+test('T01 timeline_add 写 timeline/<date>/records.json，不写 devices/**；字节 = buildRecordsText', async () => {
   const { ports: p, fs, git } = ports()
   const bridge = new V2ScheduleBridge({ ports: p, deviceId: 'pc-a', now: NOW })
-  const added = await bridge.add('pc-a', DAY, { title: '工具新建', body: '来自 schedule_add' })
+  const added = await bridge.add('pc-a', DAY, { title: '工具新建', body: '来自 timeline_add' })
 
   assert.equal(added.path, `timeline/${DAY}/records.json`)
   assert.equal(added.path.includes('devices/'), false)
@@ -166,7 +166,7 @@ test('T01 schedule_add 写 timeline/<date>/records.json，不写 devices/**；�
   const parsed = parseTimelineDay(text, DAY)
   assert.equal(parsed.errors.length, 0)
   const record = parsed.day.allRecords.find((r) => r.id === added.id)
-  assert.deepEqual(record, newTimelineRecord(added.id, added.ts, { title: '工具新建', body: '来自 schedule_add' }))
+  assert.deepEqual(record, newTimelineRecord(added.id, added.ts, { title: '工具新建', body: '来自 timeline_add' }))
   assert.equal(text, buildRecordsText(DAY, parsed.day.allRecords), '整份文件逐字节 = buildRecordsText')
   assert.ok(text.includes(canonicalRecordLine(record)), '写入行逐字节 = canonicalRecordLine')
   assert.equal(git.writes().some((c) => c[0] === 'push'), true)
@@ -188,7 +188,7 @@ test('T02 字节对拍：复用 App 测试 fixture，工具走的规范序列化
 /* ================================================================ 读路径 */
 
 // v1：devices/** 的 JSONL 会被读进来；v1 按 done 分未完成。
-test('T03 schedule_list 只读 v2：closed_at 定未完成，v1 devices/** 不再被读', async () => {
+test('T03 timeline_list 只读 v2：closed_at 定未完成，v1 devices/** 不再被读', async () => {
   const appB = JSON.parse(APP_EXAMPLE_B)
   const seed = {
     [`timeline/${DAY}/records.json`]: buildRecordsText(DAY, [
@@ -200,7 +200,7 @@ test('T03 schedule_list 只读 v2：closed_at 定未完成，v1 devices/** 不�
   }
   const { ports: p } = ports(seed)
   const { byName } = makeTools(p)
-  const listed = await byName('schedule_list').execute({ deviceId: 'all', date: DAY })
+  const listed = await byName('timeline_list').execute({ deviceId: 'all', date: DAY })
   assert.deepEqual(listed.records.map((r) => r.id), ['m9x2k1-3fk', 'n0y3l2-8ab'])
   assert.equal(listed.records.some((r) => r.id === 'v1-decoy'), false)
   assert.deepEqual(listed.records.map((r) => r.done), [false, true], '不信 done，只看 closed_at')
@@ -243,7 +243,7 @@ test('T05 schema 门禁：缺标记幂等创建 schemaVersion:2；未知版本 t
   const unknown = ports({ 'timeline/schema.json': '{"schemaVersion":99}' })
   const unknownTool = makeTools(unknown.ports)
   await assert.rejects(
-    () => unknownTool.byName('schedule_add').execute({ title: '应被拒绝', date: DAY }),
+    () => unknownTool.byName('timeline_add').execute({ title: '应被拒绝', date: DAY }),
     (error) => { assert.equal(error.code, V2_ERROR.SCHEMA_UNKNOWN); return true },
   )
   assert.deepEqual(unknown.fs.writeCalls(), [], '零写入：连 schema/records 都没有写句柄')
@@ -319,26 +319,26 @@ test('T08 dsh_dots 读共享 v2 timeline：v1 devices/** 忽略，未完成只�
 })
 function appFixtureB() { return JSON.parse(APP_EXAMPLE_B) }
 
-// v1：工具名/入参/返回键形状；本模块必须保持这些键不变。
+// v1：入参/返回键形状；本模块必须保持这些键不变，工具名按 timeline_* 改名。
 // 期望值内联自提交前的 v1 定义 `git show HEAD:packages/dsh-dots/src/schedule/tools.ts`
 // （list 147-205 / add 207-260 / summary 261-323 / dots 325-411）；键消失或改名即红。
-test('T09 四个工具的名字 / 入参键 / 返回键逐项与 v1 相同（含嵌套键与 timeoutMs）', () => {
+test('T09 四个工具的 timeline_* 名字 / 入参键 / 返回键逐项与 v1 相同（含嵌套键与 timeoutMs）', () => {
   const V1 = {
-    schedule_list: {
+    timeline_list: {
       params: ['date', 'deviceId'],
       returns: ['date', 'deviceIds', 'refreshed', 'note', 'errors', 'records'],
       nested: [['records[]', (t) => t.output.schema.properties.records.items.properties,
         ['id', 'ts', 'date', 'deviceId', 'title', 'author', 'done', 'bodyPreview', 'bodyLength', 'hasAttachments', 'aiProcessed']]],
       timeoutMs: 60_000,
     },
-    schedule_add: {
+    timeline_add: {
       params: ['date', 'title', 'body', 'author'],
       required: ['title'],
       returns: ['id', 'ts', 'date', 'deviceId', 'path', 'commit', 'pushed', 'rebased', 'files'],
       nested: [],
       timeoutMs: 60_000,
     },
-    schedule_summary: {
+    timeline_summary: {
       params: ['date', 'deviceId'],
       returns: ['date', 'deviceIds', 'count', 'refreshed', 'note', 'aiNote', 'summary', 'prompt', 'payload'],
       nested: [
@@ -362,7 +362,7 @@ test('T09 四个工具的名字 / 入参键 / 返回键逐项与 v1 相同（含
   // sealToolSchema 会给每个 object 节点补 additionalProperties；比较键时剔除这个宿主要求字段。
   const keys = (node) => Object.keys(node).filter((key) => key !== 'additionalProperties').sort()
   const { registered } = makeTools(ports().ports)
-  assert.deepEqual(registered.map((tool) => tool.name), Object.keys(V1), '工具名与注册顺序不变')
+  assert.deepEqual(registered.map((tool) => tool.name), Object.keys(V1), '工具名为 timeline_*，注册顺序不变')
   for (const [name, v1] of Object.entries(V1)) {
     const tool = registered.find((candidate) => candidate.name === name)
     assert.ok(tool !== undefined, `${name} 必须仍然注册`)
@@ -466,12 +466,12 @@ test('T11 工具写出的 outbox 意图 payload 稳定（date/id/ts/op 与规范
 test('T12 工具读侧查询不再有 v1 设备选择语义（入参保留但同结果）', async () => {
   const seed = { [`timeline/${DAY}/records.json`]: buildRecordsText(DAY, [rec()]) }
   const { byName } = makeTools(ports(seed).ports)
-  const own = await byName('schedule_list').execute({ deviceId: 'pc-a', date: DAY })
-  const all = await byName('schedule_list').execute({ deviceId: 'all', date: DAY })
+  const own = await byName('timeline_list').execute({ deviceId: 'pc-a', date: DAY })
+  const all = await byName('timeline_list').execute({ deviceId: 'all', date: DAY })
   assert.deepEqual(own.records, all.records, 'v2 只有一份共享时间线，deviceId 不影响结果')
   assert.deepEqual(own.deviceIds, ['pc-a'])
-  const summaryOwn = await byName('schedule_summary').execute({ deviceId: 'pc-a', date: DAY })
-  const summaryAll = await byName('schedule_summary').execute({ deviceId: 'all', date: DAY })
+  const summaryOwn = await byName('timeline_summary').execute({ deviceId: 'pc-a', date: DAY })
+  const summaryAll = await byName('timeline_summary').execute({ deviceId: 'all', date: DAY })
   assert.equal(summaryOwn.count, summaryAll.count)
 })
 

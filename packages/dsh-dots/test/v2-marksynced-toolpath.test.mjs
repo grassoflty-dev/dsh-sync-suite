@@ -1,5 +1,5 @@
 /**
- * mod-plugin-v2-marksynced-toolpath：schedule_add 真工具路径上的 lastSyncAt 落戳验收。
+ * mod-plugin-v2-marksynced-toolpath：timeline_add 真工具路径上的 lastSyncAt 落戳验收。
  *
  * 前置：cd packages/dsh-dots; node scripts/build.mjs
  * 被测对象（只读 import）：
@@ -137,7 +137,7 @@ test('T1 成功 add：state.json.lastSyncAt 前进，记录进 timeline/<day>/re
   const before = store.readLastSyncAt()
   assert.equal(before, OLD_ISO, '调用前旧戳就位')
 
-  const added = await addViaTool(ep, { title: '真工具路径新建', body: '来自 schedule_add' })
+  const added = await addViaTool(ep, { title: '真工具路径新建', body: '来自 timeline_add' })
   assert.equal(added.pushed, true, '工具返回值契约不变')
   assert.equal(added.path, timelineRecordsPath(DAY))
 

@@ -240,6 +240,7 @@ export function createRpcService(options = {}) {
      * - `reachable`：状态文件里最近一次 testConnection/push/preview 的探测结果（三态）；
      * - `lastSyncAt`：状态文件里的最近一次成功同步时间；
      * - `error`：只填本地读取错误（工作副本损坏等）。网络不可达**不是**错误。
+     * - `chatExportLine`：只从注入的 V2SyncRuntime 投影取得，空串 = 本轮无 chat 发布结果。
      */
     async function getState() {
         const settings = store.readSettings();
@@ -254,6 +255,8 @@ export function createRpcService(options = {}) {
             conflict: false,
             lastSyncAt: stateStore.readLastSyncAt(),
             repoBlockCode: stateStore.readRepoError(),
+            // P1-1：面板那一行在这里拿到唯一生产者的文本；没有注入 = 空串 = 不渲染。
+            chatExportLine: asString(options.chatExportStatusLine?.()),
         };
         const snapshotList = snapshots.list();
         if (settings.repoUrl === '') {

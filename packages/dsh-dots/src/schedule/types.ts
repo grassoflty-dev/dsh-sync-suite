@@ -49,7 +49,7 @@ export interface AiPayload {
   records: Array<{ id: string; ocr_time: string; text: string }>
 }
 
-/** 正文摘要在列表里的截断长度（`schedule_list` 只给前 80 字，完整正文用 `schedule_summary`）。 */
+/** 正文摘要在列表里的截断长度（`timeline_list` 只给前 80 字，完整正文用 `timeline_summary`）。 */
 export const BODY_PREVIEW_LIMIT = 80
 
 /** 列表里的一条摘要。 */
@@ -106,7 +106,7 @@ export interface ReadSchedulesResult {
   errors: string[]
 }
 
-/** `schedule_summary` 的结果：载荷 + 提示词 + 可选 AI 输出。 */
+/** `timeline_summary` 的结果：载荷 + 提示词 + 可选 AI 输出。 */
 export interface SummaryResult {
   date: string
   deviceIds: string[]

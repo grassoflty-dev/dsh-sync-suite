@@ -34,7 +34,7 @@
  * **不列** `dsh-tool-fs`/`-fs-search`/`-bash`/`-pwsh`/`-jobs` 就已经结构性缺席。
  *
  * 但**第三方 Host 插件注册的全局工具摘不掉**：`dsh-browser-cdp`、`dsh-codex-subscription`、
- * 本插件的 `schedule_*`/`dsh_dots` 都在 Host 层 `ctx.tools.register(...)`，进入全局层，
+ * 本插件的 `timeline_*`/`dsh_dots` 都在 Host 层 `ctx.tools.register(...)`，进入全局层，
  * 任何 preset 的 agent 都继承可见（`docs/RESEARCH-chat-preset.md` §3.2）。唯一手段是
  * agent 作用域 `ctx.tools.restrict({ deny })`（`<ASAR>/dsh-tools/src/index.ts:162-189`）。
  *
@@ -76,10 +76,10 @@ export interface ToolNameSource {
  * `mountScheduleTools` 在 Host 层 `ctx.inject(['tools'], …)` 里注册 → 全局层。
  */
 export const PLUGIN_TOOL_SOURCES: readonly ToolNameSource[] = [
-  { name: 'schedule_list', source: 'src/schedule/tools.ts:149', why: '读本机/跨设备日程库（含平板手写 OCR 记录）' },
-  { name: 'schedule_add', source: 'src/schedule/tools.ts:209', why: '写本机日程并 commit/push 到 Git 仓库' },
-  { name: 'schedule_summary', source: 'src/schedule/tools.ts:264', why: '读日程并调用外部 AI 密钥做汇总' },
-  { name: 'dsh_dots', source: 'src/schedule/tools.ts:326', why: '聚合跨设备日程 + 本机 DSH 运行状态' },
+  { name: 'timeline_list', source: 'src/schedule/tools.ts:161', why: '读本机/跨设备日程库（含平板手写 OCR 记录）' },
+  { name: 'timeline_add', source: 'src/schedule/tools.ts:220', why: '写本机日程并 commit/push 到 Git 仓库' },
+  { name: 'timeline_summary', source: 'src/schedule/tools.ts:276', why: '读日程并调用外部 AI 密钥做汇总' },
+  { name: 'dsh_dots', source: 'src/schedule/tools.ts:338', why: '聚合跨设备日程 + 本机 DSH 运行状态' },
 ]
 
 /* -------------------------------------------------------------------------- */

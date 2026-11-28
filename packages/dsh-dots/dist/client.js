@@ -107,6 +107,12 @@ window.__ModuleLoader__.load({
       "lean.status.unconfigured": "未配置：缺少{missing}",
       "lean.status.blocked": "已配置（可见性阻断，禁止推送）",
       "lean.status.never": "尚未同步",
+      // mod-plugin-chat-export-auto：常驻静态声明（无按钮、无确认、不可关闭），逐字照设计 §4。
+      "lean.chatExport.honesty": "会话正文会像日程一样自动同步到云端仓库，以明文 JSONL 保存并进入 Git 历史，无法抹除。",
+      "lean.chatExport.scope": "平板/云端显示的是你在 chat / dots 模式下创建的会话；本机已有的 888 个会话都是 work 模式，因此不会被同步，平板的会话列表在你新建 chat / dots 会话之前本来就是空的。",
+      "lean.chatExport.paused": "自动发布暂停：{reason}（已写入的提交保留；本轮不自动重试）",
+      "lean.chatExport.partial": "部分发布：{n} 个；本轮超时，剩余 {m} 个下次同步继续",
+      "lean.chatExport.skipped": "本轮跳过 {n} 个不完整会话",
       "lean.remote.mode": "访问方式",
       "lean.remote.port": "端口",
       "lean.remote.token": "访问令牌",
@@ -225,6 +231,12 @@ window.__ModuleLoader__.load({
       "lean.status.unconfigured": "Not configured: missing {missing}",
       "lean.status.blocked": "Configured (visibility blocked, push forbidden)",
       "lean.status.never": "Never synced",
+      // mod-plugin-chat-export-auto: permanent static notice (no button, no dialog, not dismissible).
+      "lean.chatExport.honesty": "Conversation content is automatically synced to the cloud repository just like schedule entries, stored as plaintext JSONL, and committed to Git history; it cannot be erased.",
+      "lean.chatExport.scope": "The tablet/cloud shows sessions you created in chat or dots mode; all 888 sessions already on this machine are work mode and will not be synced, so the tablet's session list is empty until you create a chat or dots session.",
+      "lean.chatExport.paused": "Auto-publish paused: {reason} (committed bytes are kept; no automatic retry this round)",
+      "lean.chatExport.partial": "Partially published: {n}; stopped at the time limit, {m} left for the next sync",
+      "lean.chatExport.skipped": "Skipped {n} incomplete session(s) this round",
       "lean.remote.mode": "Access mode",
       "lean.remote.port": "Port",
       "lean.remote.token": "Access token",
@@ -1130,6 +1142,11 @@ window.__ModuleLoader__.load({
             )
           : null,
         h('div', { role: 'status', 'data-lean': 'sync-status', style: S.hint }, line),
+        // mod-plugin-chat-export-auto：失败 / 部分发布状态行。只透传引擎给的 typed 安全文案；
+        // 没有这一行时不渲染，绝不自己拼「已同步」式成功文案（§8）。
+        view && view.status && typeof view.status.chatExportLine === 'string' && view.status.chatExportLine !== ''
+          ? h('div', { 'data-lean': 'chat-export-status', style: S.hint }, view.status.chatExportLine)
+          : null,
         h(
           'div',
           { style: S.row },
@@ -1644,6 +1661,9 @@ window.__ModuleLoader__.load({
               })
         ),
         h('div', { role: 'status', 'data-lean': 'remote-status', style: S.hint }, statusLine),
+        // mod-plugin-chat-export-auto：常驻诚实声明。它是声明，不是按钮、不是确认弹层、不可关闭。
+        h('div', { 'data-lean': 'chat-export-honesty', style: S.hint }, tr('lean.chatExport.honesty')),
+        h('div', { 'data-lean': 'chat-export-scope', style: S.hint }, tr('lean.chatExport.scope')),
         h('div', { 'data-lean': 'remote-announce', style: S.hint }, announceLine),
         h('div', { 'data-lean': 'remote-audit', style: S.hint },
           h('div', { style: S.groupSummary }, tr('lean.remote.audit.title')),

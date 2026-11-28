@@ -8,11 +8,11 @@
  *     并保证**任何失败都不抛到 RPC 之外**（逐会话记原因，push 失败只降级整体 ok）。
  */
 import path from 'node:path';
-import { ChatExportError, readChatIndex, readHiddenChatIds, sanitizeChatReason, uploadChats } from './exportChats.js';
+import { AUTO_EXPORT_PHASE_TIMEOUT_MS, CHAT_EXPORT_PER_RUN_CAP, ChatExportError, chatPayloadExists, indexEntryOf, isPublishablePresetHeader, readChatIndex, readHiddenChatIds, sanitizeChatReason, shouldExportChat, uploadChats, } from './exportChats.js';
 import { buildChatExport } from './exportChats.js';
 import { listLocalSessions, readSessionEvents } from './readSessions.js';
 export * from './types.js';
-export { CHATS_DIR, CHAT_SCHEMA_VERSION, ChatExportError, INDEX_FILE_NAME, META_JSON_NAME, REDACTED_PATH, SESSION_JSONL_NAME, buildChatExport, readChatIndex, readHiddenChatIds, redactSecrets, sanitizeChatReason, scanForLeaks, scrubAbsolutePaths, scrubAbsolutePathsDeep, uploadChats, workspaceNameOf, } from './exportChats.js';
+export { AUTO_EXPORT_PHASE_TIMEOUT_MS, CHATS_DIR, CHAT_EXPORT_PER_RUN_CAP, CHAT_SCHEMA_VERSION, ChatExportError, INDEX_FILE_NAME, META_JSON_NAME, PUBLISHABLE_PRESET_IDS, REDACTED_PATH, SESSION_JSONL_NAME, buildChatExport, chatPayloadExists, indexEntryOf, isPublishablePresetHeader, isValidChatIndexLine, readChatIndex, readHiddenChatIds, recordedSha256Of, redactSecrets, sanitizeChatReason, scanForLeaks, scrubAbsolutePaths, scrubAbsolutePathsDeep, shouldExportChat, uploadChats, workspaceNameOf, writeChatExportPayloads, } from './exportChats.js';
 export { foldChatIndex } from './foldChatIndex.js';
 export { SESSION_FILE_NAME, classifyEvents, countMessages, eventText, firstUserTextOf, frameByteLength, latestTitleOf, listLocalSessions, modelOf, readSessionEvents, resolveSessionsRoot, splitZstdFrames, } from './readSessions.js';
 /** `chatExportAll` 的默认上限：一次推爆远端仓库没有意义（每会话最多几 MB 明文）。 */
@@ -151,4 +151,76 @@ export async function exportChatsToRepo(options) {
 /** 供 RPC 层拼工作副本路径（`work/<repoHash>/chats`）时复用。 */
 export function chatsDirOf(workDir) {
     return path.join(workDir, 'chats');
+}
+/**
+ * 白名单选择（产品裁决）：**不按时间、不按数量挑会话，也不按轮次挑**。
+ * `header.agentPreset` 命中 `{'chat','dots'}` 才进入 sha256 门控；`standard` / null / 缺失 /
+ * 非字符串 / 未知 id 一律是 work、永不发布（本机 888 个规范会话全是 work ⇒ 今天发布 0 个）。
+ * 零轮的 chat / dots 会话**照常发布**：用户刚建好就应出现在平板；残余风险是它尚未被
+ * `agentPresets.select` 锁定（只有产生过一轮的会话才锁定），本模块只读 header、从不改 preset。
+ * `CHAT_EXPORT_PER_RUN_CAP = 50` 只是安全天花板，不是候选窗口，今天不可达。
+ *
+ * 时间上限 `AUTO_EXPORT_PHASE_TIMEOUT_MS` 只在会话边界检查：触顶时保留已构建的会话，
+ * 剩余交给下一轮门控自然接上；本函数绝不起定时器、绝不重试。
+ */
+export async function selectAutoExportCandidates(options) {
+    const requested = typeof options.limit === 'number' && Number.isFinite(options.limit)
+        ? Math.floor(options.limit)
+        : CHAT_EXPORT_PER_RUN_CAP;
+    const cap = Math.max(0, Math.min(requested, CHAT_EXPORT_PER_RUN_CAP));
+    const clock = typeof options.nowMs === 'function' ? options.nowMs : Date.now;
+    const startedAt = clock();
+    const selection = {
+        exports: [], decisions: new Map(), considered: 0, skippedWork: 0,
+        eligible: 0, skippedUnchanged: 0, skippedHidden: 0, truncated: 0, failures: 0,
+        timedOut: false, remaining: 0,
+    };
+    const buildOptions = {
+        deviceId: options.deviceId,
+        ...(options.now !== undefined ? { now: options.now } : {}),
+    };
+    for (const info of options.local) {
+        if (selection.exports.length >= cap)
+            break;
+        // 时间上限：只在会话边界停，绝不写到一半。
+        if (clock() - startedAt >= AUTO_EXPORT_PHASE_TIMEOUT_MS) {
+            selection.timedOut = true;
+            break;
+        }
+        selection.considered += 1;
+        if (options.hiddenIds.has(info.sessionId)) {
+            selection.skippedHidden += 1;
+            continue;
+        }
+        try {
+            const events = await (options.readEvents ?? readSessionEvents)(info.file);
+            // 第一道 allow-list：只在会话首行 header 上做 preset 全等，不猜路径/标题。
+            // work 会话连 buildChatExport 都不调用；零轮的 chat / dots 会话照常进入门控。
+            if (!isPublishablePresetHeader(events.header)) {
+                selection.skippedWork += 1;
+                continue;
+            }
+            selection.eligible += 1;
+            const built = buildChatExport(info, events, buildOptions);
+            const entry = indexEntryOf(options.index, built.id);
+            const exists = await chatPayloadExists(options.workDir, built.id);
+            // 第二道 allow-list：变更门控在 exportChats.ts 里用同一个谓词再验一次这份 header。
+            const decision = shouldExportChat(built, entry, exists, events.header);
+            if (decision.action === 'skip') {
+                selection.skippedUnchanged += 1;
+                continue;
+            }
+            selection.exports.push(built);
+            selection.decisions.set(built.id, decision);
+        }
+        catch (error) {
+            // 截断会话 fail-closed 跳过（truncated-session 已在 exportChats.ts 定义），其余继续。
+            if (error instanceof ChatExportError && error.code === 'truncated-session')
+                selection.truncated += 1;
+            else
+                selection.failures += 1;
+        }
+    }
+    selection.remaining = Math.max(0, selection.eligible - selection.exports.length);
+    return selection;
 }

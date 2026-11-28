@@ -3,7 +3,7 @@ import { createRemoteModule } from './remote/index.js';
 import { createPairingService } from './remote/pairingProvision.js';
 import { createHttpHandler, createRpcService } from './rpc.js';
 import { registerScheduleTools } from './schedule/tools.js';
-// v2 写半侧：首跑迁移门禁 + 同步周期接线；与 v1 日程工具完全平行，不重连 schedule_*。
+// v2 写半侧：首跑迁移门禁 + 同步周期接线；与 v1 日程工具完全平行，不重连 timeline_*。
 import { mountV2Sync } from './sync/bootstrap.js';
 export const inject = ['webServer', 'connection'];
 export const RPC_PATH = '/dsh-dots/rpc';
@@ -46,6 +46,9 @@ export function apply(ctx, config = {}) {
     // 配对服务先建：远程监听的入站连接要记进它的脱敏审计环；
     // provisioning 新生成的令牌经 onTokenChanged 同步给远程门（全程进程内，token 不进 RPC / DOM / 日志）。
     let remote = null;
+    // P1-1：v2 运行时晚于 RPC 服务装配，用惰性闭包把最近一次 chat 发布结果交给 getState，
+    // 不新增 ctx.effect（既有 5/9 effect 数量契约不变），也不新增任何可点控件。
+    let v2Runtime = null;
     const pairing = createPairingService({
         homeDir: config.homeDir,
         // mod-pairing-listener-truth：show() 只认运行监听的事实。这里从 remote.service 投影
@@ -107,6 +110,7 @@ export function apply(ctx, config = {}) {
         ...(remote === null ? {} : { remote: remote.service }),
         // 每次调用都从 ctx 现取：服务晚到 / 未挂载都不影响插件启动，缺席 ⇒ E_SESSION_UNAVAILABLE。
         promptSessionController: () => ctx.sessionController ?? null,
+        chatExportStatusLine: () => v2Runtime?.status?.chatExportLine ?? '',
     });
     const handler = createHttpHandler(service, ctx.connection);
     ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: RPC_PATH, handler }), 'dsh-dots: /dsh-dots/rpc');
@@ -157,7 +161,7 @@ export function apply(ctx, config = {}) {
     }
     // v2 写半侧：迁移门禁与同步周期只在这里挂一次；装配/启动失败不冒泡，v1 面不受影响。
     // 运行时不持有可卸载句柄，故不新增 ctx.effect（保持既有 effect 数量契约）。
-    mountV2Sync(ctx, {
+    v2Runtime = mountV2Sync(ctx, {
         homeDir: config.homeDir,
         allowLocalRepo: config.allowLocalRepo === true,
     }, false);

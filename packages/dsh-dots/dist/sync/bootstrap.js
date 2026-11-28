@@ -2,7 +2,7 @@
  * v2 写半侧的**生产接线点**（M1）：把迁移门禁、仓库外 outbox、真实 git 端口和
  * 同步周期组装成一个运行时，并从插件真实启动路径 `src/index.ts:apply()` 挂载。
  *
- * 这里刻意**不重连** v1 的 `schedule_*` 工具（`src/schedule/**` 原样保留）；
+ * 这里刻意**不重连** v1 的 `timeline_*` 工具（`src/schedule/**` 原样保留）；
  * 本模块只负责 v2 timeline 的首跑迁移与周期，失败一律 typed、零静默。
  *
  * 工作根由 `src/sync/repoRoot.ts` 按 `DSH_DOTS_REPO_ROOT` → `DSH_DOTS_APP_FILES_DIR`
@@ -18,7 +18,9 @@ import { NodeTimelineFs } from '../timeline/write.js';
 import { NodeMigrationIo, ensureRepoRoot, legacyWorkDir, migrateIfNeeded, resolveV2RepoDirDetailed, } from './repoPath.js';
 import { NodeOutboxPort } from './outbox.js';
 import { GitRepoV2Port } from './gitPort.js';
-import { runV2Cycle } from './cycle.js';
+import { runV2Cycle, chatExportSuccessLineOf } from './cycle.js';
+import { CHAT_EXPORT_REPO_MISSING_LINE } from './cycle.js';
+import { listLocalSessions, readChatIndex, readHiddenChatIds, selectAutoExportCandidates, writeChatExportPayloads, } from '../chats/index.js';
 /**
  * mod-plugin-v2-marksynced：唯一成功判据（**总函数**，任何输入都返回 boolean，绝不抛）。
  *
@@ -79,6 +81,19 @@ export function createDefaultMarkSynced(paths, now = () => new Date()) {
         }
     };
 }
+/**
+ * P1-1：把最近一次周期投影成面板的安静状态行——没有按钮、没有 toast，也不拼成功假象。
+ * 失败时周期 message 本身就是四点常量生成的唯一文案（`cycle.ts::chatExportFailureLineOf` /
+ * `chatExportSuccessLineOf`），这里原样带出，绝不在运行时再写第二份措辞。
+ */
+export function chatExportLineFromCycle(cycle) {
+    if (cycle === null || typeof cycle !== 'object' || Array.isArray(cycle))
+        return '';
+    const view = cycle.chatExport;
+    if (view === undefined)
+        return '';
+    return cycle.ok ? chatExportSuccessLineOf(view) : cycle.message;
+}
 /** 唯一生产装配处：真实端口与路径都在这里 new 出来，不存在「库函数无人调用」。 */
 export class V2SyncRuntime {
     repoDir;
@@ -126,6 +141,42 @@ export class V2SyncRuntime {
         });
     }
     /**
+     * mod-plugin-chat-export-auto：把 chats/ 现成导出函数适配成周期端口。
+     * 只做编排与结果投影：选择 / 门控 / 写盘全部复用已有导出，绝不在本文件写第二份实现；
+     * 只写盘，不 commit / push——唯一提交与推送仍由 v2 周期拿走（设计 §10）。
+     */
+    createChatExportPhase() {
+        return {
+            run: async () => {
+                const deviceId = this.settings.readSettings().deviceId;
+                const local = await listLocalSessions(this.homeDir === undefined ? {} : { homeDir: this.homeDir });
+                const hiddenIds = await readHiddenChatIds(this.repoDir);
+                const index = await readChatIndex(this.repoDir);
+                const selection = await selectAutoExportCandidates({
+                    local, hiddenIds, index, workDir: this.repoDir, deviceId,
+                });
+                const written = await writeChatExportPayloads(this.repoDir, selection.exports, selection.decisions);
+                return {
+                    paths: written.paths,
+                    exported: written.writtenIds.length,
+                    remaining: selection.remaining + (selection.exports.length - written.writtenIds.length),
+                    truncated: selection.truncated,
+                    timedOut: selection.timedOut,
+                    reason: written.ok ? '' : (written.reason ?? 'write-failed'),
+                };
+            },
+        };
+    }
+    /** 状态基线：未配置时点名「未配置同步仓库，自动发布暂停」，绝不伪装成已同步。 */
+    statusBase() {
+        return {
+            ok: false, code: 'E_UNCONFIGURED', message: '尚未配置仓库地址，v2 同步未启动',
+            repoDir: this.repoDir, repoRootSource: this.repoRootSource, repoRootLogLine: this.repoRootLogLine,
+            outboxFile: this.outbox.filePath, migrated: false, synced: false,
+            chatExportLine: CHAT_EXPORT_REPO_MISSING_LINE,
+        };
+    }
+    /**
      * 唯一周期 + 唯一落戳点：start() 与 syncNow() 两个调用点都经这里。
      * 每个成功周期恰好盖一次；失败路径零写入、结果原样上报。
      * 诚实边界：`syncNow()` 目前**没有生产调用者**，这条接缝在生产中只经 start() 跑；
@@ -134,6 +185,7 @@ export class V2SyncRuntime {
     async runCycle(days, git) {
         const options = {
             days, git, fs: new NodeTimelineFs(this.repoDir), outbox: this.outbox, now: this.now,
+            chatExport: this.createChatExportPhase(),
         };
         const cycle = this.cycleRunner !== undefined
             ? await this.cycleRunner(options)
@@ -154,11 +206,7 @@ export class V2SyncRuntime {
     /** 首跑迁移 + 有待同步意图时跑一次周期；任何 typed 中止都原样上报，绝不吞。 */
     async start() {
         const config = this.settings.readSettings();
-        const base = {
-            ok: false, code: 'E_UNCONFIGURED', message: '尚未配置仓库地址，v2 同步未启动',
-            repoDir: this.repoDir, repoRootSource: this.repoRootSource, repoRootLogLine: this.repoRootLogLine,
-            outboxFile: this.outbox.filePath, migrated: false, synced: false,
-        };
+        const base = this.statusBase();
         if (config.repoUrl.trim() === '') {
             this.lastStatus = base;
             return base;
@@ -185,6 +233,7 @@ export class V2SyncRuntime {
             const status = {
                 ...base, ok: false, code,
                 message: error instanceof Error ? error.message : String(error), migrated: false,
+                chatExportLine: '',
             };
             this.lastStatus = status;
             return status; // E_LEGACY_UNPUSHED / E_REPO_ROOT_UNAVAILABLE 原样可见，零写入
@@ -205,6 +254,7 @@ export class V2SyncRuntime {
         if (days.length === 0) {
             const status = {
                 ...base, ok: true, code: 'ok', message: '迁移门禁通过，暂无待同步意图', migrated: true, synced: true,
+                chatExportLine: '',
             };
             this.lastStatus = status;
             return status;
@@ -213,6 +263,7 @@ export class V2SyncRuntime {
         const status = {
             ...base, ok: cycle.ok, code: cycle.code, message: cycle.message,
             migrated: true, synced: cycle.ok, cycle,
+            chatExportLine: chatExportLineFromCycle(cycle),
         };
         this.lastStatus = status;
         return status;
@@ -227,7 +278,12 @@ export class V2SyncRuntime {
             token: this.settings.readToken(), platform: config.platform, username: config.username,
             allowLocalRepo: this.allowLocalRepo,
         });
-        return await this.runCycle(days, git);
+        const cycle = await this.runCycle(days, git);
+        this.lastStatus = {
+            ...this.statusBase(), ok: cycle.ok, code: cycle.code, message: cycle.message,
+            synced: cycle.ok, cycle, chatExportLine: chatExportLineFromCycle(cycle),
+        };
+        return cycle;
     }
     get status() {
         return this.lastStatus;

@@ -3,7 +3,7 @@
  *
  * 【为什么改】原共享 clone 模型假设 App 的 `<filesDir>/git-repo` 是唯一工作副本；
  * 但用户规则是「平板不跑原生 DSH」，PC 上的插件永远看不到平板的 filesDir，
- * 所以 `schedule_add` 在没有 `DSH_DOTS_APP_FILES_DIR` 时必然失败。本模块把默认根
+ * 所以 `timeline_add` 在没有 `DSH_DOTS_APP_FILES_DIR` 时必然失败。本模块把默认根
  * 改为 PC 自己持有的 `~/.dsh/dots/repos/<repoHash>`，与遗留 `~/.dsh/dots/work/<repoHash>`
  * 明确分开（**绝不复用 work/**）。仓库在工作根内部仍以 `git-repo` 这个目录名落地，
  * 目录名的最终决策点只有 `resolveV2RepoDir`（见 `repoPath.ts`）。

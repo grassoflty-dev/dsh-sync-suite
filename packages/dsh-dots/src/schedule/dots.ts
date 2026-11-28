@@ -6,7 +6,7 @@
  * <repo>/devices/<deviceId>/schedules/<YYYY-MM-DD>.jsonl
  * ```
  * 聚合口读取**所有**设备目录（跨设备），只扫最近 N 天的文件名，再按 `ts` 的本地日期归属过滤——
- * 与 `schedule_list` 一样不信文件名：记录属于哪一天由 `ts` 决定。
+ * 与 `timeline_list` 一样不信文件名：记录属于哪一天由 `ts` 决定。
  *
  * 纪律：
  *   1. 只读：不写仓库、不 commit、不 push（拉取失败只降级成 `note`）；
@@ -301,7 +301,7 @@ export async function aggregateDots(options: DotsScanOptions): Promise<DotsAggre
         }
       }
       for (const record of parsed.records) {
-        // 与 `schedule_list` 同一规则：记录属于哪一天由 ts 决定，不信文件名。
+        // 与 `timeline_list` 同一规则：记录属于哪一天由 ts 决定，不信文件名。
         if (recordDateKey(record.ts) !== dateKey) continue
         records.push(record)
       }
