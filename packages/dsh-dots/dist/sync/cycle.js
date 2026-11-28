@@ -42,6 +42,13 @@ export const V2_ERROR = {
 /** 每意图全生命周期的尝试预算（跨会话累计，只有用户点重试才归零）。 */
 export const MAX_ATTEMPTS = 4;
 /**
+ * 陈旧失败意图的清理阈值，不参与任何同步判定。
+ *
+ * 只用于仓库外 outbox 的维护：failed 终态且 enqueuedAt 年龄严格大于 7 天才清理。
+ * replayable() / retryIntent() / MAX_ATTEMPTS 的语义完全不读这个常量。
+ */
+export const PURGE_FAILED_AFTER_MS = 7 * 24 * 3600 * 1000;
+/**
  * 推被拒后的有界恢复预算：每个恢复周期最多 2 次额外推送尝试（连同首次共 3 次）。
  * 取 2 是为了吸收「另一设备刚快进了一步」这类单次竞态，同时不让真正分叉的仓库空转；
  * 仍低于意图的 maxAttempts=4，预算口径不与契约 §9 P1-1 冲突。
@@ -199,6 +206,80 @@ export function retryIntent(entry) {
 export function dequeueIntents(entries, ids) {
     const done = new Set(ids);
     return entries.filter((item) => !done.has(item.intentId));
+}
+/** enqueuedAt → 毫秒；现行写入是 ISO 串，历史/外部数据也可能是数值毫秒。取不到可信数值返回 NaN。 */
+function enqueuedAtMs(entry) {
+    const raw = entry.enqueuedAt;
+    let ms;
+    if (typeof raw === 'number') {
+        ms = raw;
+    }
+    else if (typeof raw === 'string' && raw.trim() !== '') {
+        // 纯数字串按毫秒解释；其余交给与 App 同口径的 tsMillis（非法 → NaN）。
+        const digits = raw.trim();
+        ms = /^\d+$/.test(digits) ? Number(digits) : tsMillis(raw);
+    }
+    else {
+        ms = Number.NaN;
+    }
+    // 非正时间戳（0 / 负数 / 1970 前）视为年龄不可信：fail-closed，
+    // 绝不因为「这个时间看起来很老」就清理——那等于拿异常值当删除理由。
+    if (!Number.isFinite(ms) || ms <= 0)
+        return Number.NaN;
+    return ms;
+}
+/**
+ * 陈旧失败意图判定：state 必须是 failed 终态，且 enqueuedAt 年龄严格大于阈值。
+ * pending / syncing 一律不碰；判定只读取年龄，完全不参与任何同步决策。
+ */
+export function isPurgeableFailedIntent(entry, nowMs, maxAgeMs = PURGE_FAILED_AFTER_MS) {
+    if (entry.state !== 'failed')
+        return false;
+    if (!Number.isFinite(nowMs) || !Number.isFinite(maxAgeMs) || maxAgeMs < 0)
+        return false;
+    const at = enqueuedAtMs(entry);
+    // enqueuedAt 缺失 / 不可解析 / 非有限数值时一律不清理（fail-closed）：
+    // 年龄不明的失败意图宁可永久留在 outbox，也不能靠猜测把它删掉。
+    if (!Number.isFinite(at))
+        return false;
+    return nowMs - at > maxAgeMs;
+}
+/** 选出可清理意图的 id（保持原顺序），交给 dequeueIntents 统一出队。 */
+export function selectPurgeableIntents(entries, nowMs, maxAgeMs = PURGE_FAILED_AFTER_MS) {
+    return entries.filter((entry) => isPurgeableFailedIntent(entry, nowMs, maxAgeMs))
+        .map((entry) => entry.intentId);
+}
+/** 唯一日志格式：只拼接数量与阈值天数，绝不拼入任何意图字段。 */
+export function outboxPurgeLogLine(count, maxAgeMs = PURGE_FAILED_AFTER_MS) {
+    return `outbox: 已清理 ${count} 条陈旧失败意图（>${Math.round(maxAgeMs / 86400000)} 天）`;
+}
+function emitOutboxPurgeLog(logger, line) {
+    if (logger === undefined)
+        return;
+    try {
+        if (typeof logger.info === 'function')
+            logger.info(line);
+        else if (typeof logger.warn === 'function')
+            logger.warn(line);
+    }
+    catch {
+        // 宿主日志失败不能影响清理（沿用 repoRoot.ts 的纪律）。
+    }
+}
+/**
+ * 仓库外 outbox 的陈旧失败意图清理：只在集合真的变化时落盘，且只打一行纯计数日志。
+ * 清理由 runV2Cycle 在成功周期之后调用，与周期判定完全解耦。
+ * 机制已上线；三条碎片今天不清；最早 2026-11-29 19:12+08 起清除。
+ */
+export async function purgeStaleFailedIntents(outbox, nowMs, maxAgeMs = PURGE_FAILED_AFTER_MS, logger) {
+    const entries = await outbox.load();
+    const ids = selectPurgeableIntents(entries, nowMs, maxAgeMs);
+    if (ids.length === 0)
+        return []; // 集合未变：零落盘、零日志。
+    // 唯一出队路径：复用上面的 dequeueIntents，绝不写第二套删除逻辑。
+    await outbox.save(dequeueIntents(entries, ids));
+    emitOutboxPurgeLog(logger, outboxPurgeLogLine(ids.length, maxAgeMs));
+    return ids;
 }
 function countFailed(entries) {
     return entries.filter((item) => item.state === 'failed').length;
@@ -984,10 +1065,28 @@ async function describeAheadOwnership(git, instanceId) {
     }
 }
 /**
+ * 周期外壳：核心周期先完整算出 CycleResult，之后才做仓库外 outbox 的陈旧失败意图清理。
+ * 清理结果不回写 result，异常也吞掉，因此 ok / code / attempts 与任何结果字段逐字不变。
+ * 这是唯一新增的装配点，核心周期内部语义一字未动。
+ */
+export async function runV2Cycle(options) {
+    const result = await runV2CycleCore(options);
+    if (result.ok) {
+        try {
+            // 成功周期落盘之后才清理；now 来自注入时钟，清理本身不参与任何同步判定。
+            await purgeStaleFailedIntents(options.outbox, options.now.getTime(), PURGE_FAILED_AFTER_MS, options.logger);
+        }
+        catch {
+            // best-effort 维护：outbox / 日志故障绝不能把一个已成功的周期翻成失败。
+        }
+    }
+    return result;
+}
+/**
  * 单一 v2 同步周期。零写入的失败路径全部在第一个写句柄之前返回。
  * 成功路径才会出队并把 outbox 原子落盘；失败路径只会把意图 attempts+1 后停放。
  */
-export async function runV2Cycle(options) {
+async function runV2CycleCore(options) {
     const { days, git, fs, outbox, now } = options;
     const instanceId = options.instanceId ?? DEFAULT_V2_INSTANCE_ID;
     let all = await outbox.load();
