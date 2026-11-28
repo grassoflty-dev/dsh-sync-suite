@@ -155,7 +155,7 @@
 | `mod-plugin-remote-hints-mode-keyed` | 插件精简远程组的提示改为**按选项查表**：`LEAN_MODE_HINTS`（`auto` / `tailscale` / `lan` / `ipv6` + `none` + `fallback`）一条一个模式，`none` 只点名推荐的下一步（Tailscale），未知模式走中性 fallback；渲染器只查一行，不再把多个模式的要求拼成一句 | 已写完（待 Lead 提交，状态 / 哈希（Lead 填））；**已编译（插件 `node scripts/build.mjs` exit 0 + `dist/` 与新鲜 `tsc` 逐字节一致）/ 未装机 / unverified** | （Lead 填） | 提交前回滚 = 撤销 `src/client.js` 的 `LEAN_MODE_HINTS` / `leanModeHint` / 查表渲染、`locale/{zh,en}.json` 五键与 `dist/client.js`，还原 `tools/test/{client-remote-render,pairing-client-wiring,client-lean-inventory,locale}.test.mjs` 的 retarget 并删除 `tools/test/remote-hints-mode-keyed.test.mjs`，撤销本文 §1/§2/§6 登记；提交后 `git revert <hash>`（独立叶子；`pairingShow`-only 取密、挂载零剪贴板、无端口 / 令牌输入框均不变） | 依赖 `mod-plugin-pairing-client`（`LeanRemoteGroup` 与 `lean.*` 字典）、`mod-plugin-lean-panel`；与所有插件包模块共用 `scripts/build.mjs` 与提交的 `dist/` 树（单构建窗口 ⇒ 构建串行）；无下游 | `packages/dsh-dots/test/remote-hints-mode-keyed.test.mjs`（一模式一句 / 异模式不出现 / 未知模式中性） |
 | `mod-plugin-askpass-node-resolution` | askpass 解释器解析：显式 `DSH_GIT_SYNC_NODE` → PATH `node(.exe)` → DSH 应用二进制**仅配** `ELECTRON_RUN_AS_NODE=1` → typed `E_ASKPASS_NODE_MISSING`；每个候选先过 `-e` 标记探针（2 s、进程内缓存）；`gitPort.pushFailure()` 不再把这类失败捏造成 `auth-prompt`，`cycle.ts` 保留 typed 码并给出对应下一步 | 已写完（待 Lead 提交，状态 / 哈希（Lead 填））；**已编译（插件 build exit 0 + `dist/` 逐字节一致）/ 未装机 / 真机推送 unverified** | （Lead 填） | 提交前回滚 = 删除 `src/engine/nodePath.ts`、`test/askpass-node-resolution.test.mjs` 与 `dist/engine/nodePath.js`，撤销 `src/engine/git.ts` / `src/sync/gitPort.ts` / `src/sync/cycle.ts` 三处增量与其 dist 产物，撤销本文 §1/§2/§6 登记；提交后 `git revert <hash>`（独立叶子；`gitAuthEnv()` 其余字节、真 `auth-prompt` 分类与 `E_PUSH_REJECTED` 原文案均不变） | 承接 `mod-plugin-git-auth-env`（`gitAuthEnv()` 单一构造点）与 `mod-plugin-pairing-client`；改共享 `src/sync/cycle.ts` / `src/sync/gitPort.ts`（见 §2）；无下游 | `packages/dsh-dots/test/askpass-node-resolution.test.mjs`（9 例）；诊断文案 `找不到可用的 node 解释器：…`；测试 17 例 |
 | `mod-tablet-git-bridge-diagnostics` | 修真机「Git 操作失败：Cannot read properties of undefined (reading 'length')」：`opV2Git('fastForward')` 误用 `git.merge({oid})`（isomorphic-git 1.25.3 期望 `theirs`，内部 `ref` 为 `undefined`，`GitRefManager.expand` 读 `ref.length`）→ 改为 `theirs` 后「落后远端 + 本地改动」能快进；每个桥命令收敛到 `E_BRIDGE` 边界（原始 JS 消息只进诊断行，主状态行换成固定中文），并给 7 个跨边界助手加数组 / 字符串守卫 | 已写完（待 Lead 提交，状态 / 哈希（Lead 填））；**已编译（`build-20261123-210334.log`）/ 未装机 / unverified** | （Lead 填） | 提交前回滚 = 撤销 `git-bridge.js` 的 `theirs` 修复 / `E_BRIDGE` 边界 / 七个守卫与测试导出，撤销 `services/GitSyncService.ets` 的 `E_BRIDGE` 映射与 `bridgeDiagnostic` 增量，删除 `tools/test/gitBridgeDiagnostics.test.mjs`，撤销本文 §1/§2/§6 与 `docs/ROADMAP.md` 登记；提交后 `git revert <hash>`（独立叶子；快进 / union / 门禁语义除该 bug 外不变） | 依赖 `mod-v2-sync-wiring`（`v2Git` 八 op）、`mod-sync-single-flight` / `mod-v2-sync-protocol`（周期调用点）；改共享 `git-bridge.js`（多模块共用，见 §2）；无下游 | `docs/REVIEW-app-qr-scan-and-bridge.md` §B；`tools/test/gitBridgeDiagnostics.test.mjs`（16 例，含真 repo 对复现旧 V8 报错） |
-| `mod-plugin-timeline-tool-rename` | 插件日历工具改名，与 DSH 设备本地调度器的 `schedule_*` 区分：实际只有三个工具——`schedule_list`/`schedule_add`/`schedule_summary` → `timeline_list`/`timeline_add`/`timeline_summary`；`create`/`view`/`edit` 三个动词插件尚未注册，已从本计划删除，等真有再加 | 计划中（**实现已完成、独立评审 PASS**；`src` 已改名，因 `dist` 冻结，插件套件按设计出现 8 条「改名断言」红——见 §0.1 第 8 条；等一次 `build.mjs`） | （待重启后填） | 未提交前回滚 = 删除本行；提交后 `git revert <hash>` | 阻塞于 Lead 的 DSH 重启验证 **+ 一次插件构建**（`dist` 必须重新生成，套件才会真绿） | `docs/PLUGIN-GAPS.md` §1.1（`schedule_*` 命名守卫全文；交叉引用 `docs/DATA-CONTRACT-v2.md` §11 写路径表后一行） |
+| `mod-plugin-timeline-tool-rename` | 插件日历工具改名，与 DSH 设备本地调度器的 `schedule_*` 区分：实际只有三个工具——`schedule_list`/`schedule_add`/`schedule_summary` → `timeline_list`/`timeline_add`/`timeline_summary`；`create`/`view`/`edit` 三个动词插件尚未注册，已从本计划删除，等真有再加 | 已提交 `e0d68b9`（实现已完成、独立评审 PASS；`dist` 已重建，插件套件转绿；**6 条基线失败是相对「当时的脏工作树」而不是 HEAD**） | `e0d68b9` | 未提交前回滚 = 删除本行；提交后 `git revert <hash>` | 已解除：重启验证已完成，`dist` 已按 `src` 重建并随该提交入库 | `docs/PLUGIN-GAPS.md` §1.1（`schedule_*` 命名守卫全文；交叉引用 `docs/DATA-CONTRACT-v2.md` §11 写路径表后一行） |
 
 `mod-v2-dual-read` 已被 `mod-v2-dual-write-off` 取代，见契约 §13。
 
@@ -856,6 +856,32 @@ c41eb（v2 唯一路径；删除激活闸与双存储兼容；评审 P1-1/P1-2 �
 | 7 | `mod-plugin-chat-hide-infrastructure` | **插件侧基础设施；app 侧未交付（评审 Block，P1-1）**：隐藏折叠 + 导出器抑制 + 门禁白名单 | `b8af53c` | `module/mod-plugin-chat-hide-infrastructure` | 折叠全函数（普通行永不解除隐藏、只有 `op:"unarchive"` 能，且本模块不产生）；导出器两层抑制（选中前过滤 + `appendIndexLine` 前复读）；门禁精确到 `chats/index.jsonl`；merge 自证（purge 10 标记存活、0 删除行）；套件 1136/1134/0/2 ×2；distcheck 79/0 window 5；定向 29/29；emit 5/5 | **两条行为路径都未验证**（仓库无 `chats\`）；**用户入口不存在**：`chatHide.ts` 的文案与 typed 原因无导入方，平板逐条删除入口与窄写入通道属 `mod-app-chat-hide`，未交付 |
 
 > 哈希与标签以 `origin/main` 为准；`HEAD == origin/main` 于每次提交后核对过。
+
+## 7.8c 2026-11-28 重启后提交批：两个插件模块 + 一个 app 模块
+
+**这一批最重要的不是功能，而是「只有重建 `dist` 才能看见的四个缺陷」。** 插件套件在 `dist` 冻结期是**按设计**红的，
+所以 chat-sync 自己的 27 条定向测试全绿、评审也放了行，但全量套件从未跑在**新鲜 `dist`** 上。解除冻结后：
+
+| 阶段 | 结果 | 说明 |
+| --- | --- | --- |
+| 第一次 `build.mjs` **之前**（旧 `dist`） | 1157 例 / 1141 通过 / **14 失败** / 2 跳过 | 8 条来自改名、6 条来自 `dist` 漂移 |
+| 第一次 `build.mjs` **之后** | 1157 / 1151 / **4 失败** | 改名与漂移都消失了，**剩下 4 条全是本批自己引入的** |
+| 修正性 `build.mjs` **之后** | 1157 / **1155** / **0 失败** / 2 跳过 | 这才是"绿" |
+
+那 4 条分别是：**C15/C16**（`sync/cycle.ts` 的一条**注释**里写了被禁的词 `rebase`，而守卫按字面扫源码与 `dist`）、
+**B01**（`E_CHAT_EXPORT` 抛出但未在 `REPO_BANNER_RULES` 登记）、**PO-07**（chat-sync 合法扩展了白名单谓词，
+旧断言仍钉老形状）。三条修法都**没有削弱守卫**：注释改写、把该码登记为**带中文理由的豁免**、
+把断言改成钉住**组合谓词的每一半**并补两条行为用例（无尾注拒绝 / 有尾注放行 / 加 `devices/**` 仍拒绝）。
+
+| # | 模块 id | 一句话 | 提交 | 标签 | 测试能证明的 | 只有真机/真仓库能确认的（`unverified`） |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | `mod-plugin-chat-sync` | 会话正文自动随周期导出，并给面板一条**真实**的导出状态行（含"已提交但未推送"） | `5c7ebf0` | `module/mod-plugin-chat-sync` | 全套件 **1157 / 1155 / 0 / 2**；先红后绿（F1/F4/F3 三条新断言在修前全红：`gates-cea-r8-tests-red-before.out` 4,803 B 24 通过/3 失败）；7 条负控由评审在 `%TEMP%` 副本自行复现；`dist` 重建后 C15 禁用词正则 0 命中 | **从未真实发布过**：一次真实 v2 周期、一次真实 push、一次平板往返都未发生；`recover` 分支的同类空白**已知未修**，记录在案 |
+| 2 | `mod-plugin-timeline-tool-rename` | 工具改名 `schedule_*` → `timeline_*`，与宿主设备本地的 `schedule_*` 区分 | `e0d68b9` | `module/mod-plugin-timeline-tool-rename` | 注册集恰好 `timeline_list`/`timeline_add`/`timeline_summary`/`dsh_dots`；`src` 内 `schedule_` 0 命中；新守卫对重注入变红；评审独立重编译得到**逐字节相同**的 `tools.js`；顺带修正 `deny.ts` 的 `source:` 行号（`:149/:209/:264/:326` → `:161/:220/:276/:338`） | 无真机；改名后工具在真实会话里的调用未验（重启后才有运行中的插件） |
+| 3 | `mod-app-drop-filter-by-kind` | 删掉"按 `index.kind` 分段"的死导出，把守卫改钉投影 | `977627f` | `module/mod-app-drop-filter-by-kind` | `entry/src` 内 `filterByKind` **0 命中**；六条既有属性**逐条改钉**到 `filterBySegment`（多条更强，含 fixture 里 `kind` 故意与 `preset` 矛盾）；对抗性证明保留（旧语义会把 `work-a` 泄进 dots 段，真实 API 不会）；新 **WS-09** 守卫六类绕法各有红探针（12/12 注入变红） | 无真机；WS-09 仍是**文本探针**，不是证明——深层别名经第三方助手仍可能逃逸，已在注释里写明口径 |
+
+> 这一批的教训已进 §0.1 第 8 条：**冻结的 `dist` 会把正确的改动判成红**；而"重建后才暴露的四个缺陷"是它的反面——
+> **冻结也会把真实的缺陷藏起来**，因为套件按设计红着，没人看得到新增的红。
+
 
 ## 7.8b 2026-11-28 午后提交批：三个模块（哈希已回填）
 
